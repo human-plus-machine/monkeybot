@@ -436,6 +436,16 @@ def test_mcp_file_env_refs(tmp_path: Path) -> None:
     assert mcp_file_env_refs(tmp_path / "missing.json") == frozenset()
 
 
+def test_set_env_overlay_stores_a_copy() -> None:
+    client = MCPClient(hooks=_CrashHooks())
+    overlay = {"MODEL_NAME": "from-snapshot"}
+    client.set_env_overlay(overlay)
+    overlay["MODEL_NAME"] = "mutated"
+    assert client._env_overlay == {"MODEL_NAME": "from-snapshot"}
+    client.set_env_overlay(None)
+    assert client._env_overlay is None
+
+
 @pytest.mark.asyncio
 async def test_mcp_auth_client_credentials_fetches_token() -> None:
     from unittest.mock import patch
@@ -1060,7 +1070,8 @@ async def test_apply_catalog_diff_keeps_untouched_server_record(tmp_path: Path) 
     assert "keep" in result.kept
     assert "new" in result.added
     assert "drop" in result.removed
-    assert "new" in result.reconnected
+    assert "new" not in result.reconnected
+    assert result.failed == ()
     assert client._servers["keep"] is kept_rec
     assert "drop" not in client._servers
     assert "new" in client._servers
@@ -1119,3 +1130,175 @@ async def test_apply_catalog_diff_invalid_json_leaves_connections(tmp_path: Path
     result = await client.apply_catalog_diff(cfg)
     assert result.kept == ("keep",)
     assert client._servers["keep"] is rec
+
+
+@pytest.mark.asyncio
+async def test_apply_catalog_diff_missing_file_leaves_connections(tmp_path: Path) -> None:
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "keep": {"command": "python", "args": ["keep.py"], "autoConnect": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = MCPClient(hooks=_stub_hooks(_connected_session()))
+    await client.load_from_config(cfg)
+    rec = client._servers["keep"]
+    catalog = dict(client._catalog)
+    cfg.unlink()
+    result = await client.apply_catalog_diff(cfg)
+    assert result.kept == ("keep",)
+    assert result.removed == ()
+    assert result.failed == ()
+    assert client._servers["keep"] is rec
+    assert client._catalog == catalog
+
+
+@pytest.mark.asyncio
+async def test_apply_catalog_diff_unreadable_file_leaves_connections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "keep": {"command": "python", "args": ["keep.py"], "autoConnect": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = MCPClient(hooks=_stub_hooks(_connected_session()))
+    await client.load_from_config(cfg)
+    rec = client._servers["keep"]
+    orig = Path.read_text
+
+    def _deny(self: Path, *args: object, **kwargs: object) -> str:
+        if self == cfg:
+            raise PermissionError("denied")
+        return orig(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _deny)
+    result = await client.apply_catalog_diff(cfg)
+    assert result.kept == ("keep",)
+    assert result.removed == ()
+    assert client._servers["keep"] is rec
+
+
+@pytest.mark.asyncio
+async def test_apply_catalog_diff_does_not_report_stable_disabled(tmp_path: Path) -> None:
+    payload = {
+        "mcpServers": {
+            "live": {"command": "python", "args": ["live.py"], "autoConnect": True},
+            "off": {"command": "python", "args": ["off.py"], "enabled": False},
+        }
+    }
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(json.dumps(payload), encoding="utf-8")
+    client = MCPClient(hooks=_stub_hooks(_connected_session()))
+    await client.load_from_config(cfg)
+    first = await client.apply_catalog_diff(cfg)
+    second = await client.apply_catalog_diff(cfg)
+    assert first.removed == ()
+    assert second.removed == ()
+    assert first.added == ()
+    assert second.reconnected == ()
+
+
+@pytest.mark.asyncio
+async def test_apply_catalog_diff_reports_newly_disabled_once(tmp_path: Path) -> None:
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "live": {"command": "python", "args": ["live.py"], "autoConnect": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = MCPClient(hooks=_stub_hooks(_connected_session()))
+    await client.load_from_config(cfg)
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "live": {
+                        "command": "python",
+                        "args": ["live.py"],
+                        "enabled": False,
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    first = await client.apply_catalog_diff(cfg)
+    assert first.removed == ("live",)
+    assert "live" not in client._servers
+    assert client.status("live")["status"] == "disabled"
+    second = await client.apply_catalog_diff(cfg)
+    assert second.removed == ()
+
+
+@pytest.mark.asyncio
+async def test_apply_catalog_diff_failed_reconnect_is_visible(tmp_path: Path) -> None:
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "srv": {"command": "python", "args": ["old.py"], "autoConnect": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = MCPClient(hooks=_stub_hooks(_connected_session()))
+    await client.load_from_config(cfg)
+    assert "srv" in client._servers
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "srv": {"args": ["new.py"], "autoConnect": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = await client.apply_catalog_diff(cfg)
+    assert result.failed == ("srv",)
+    assert result.reconnected == ()
+    assert result.kept == ()
+    assert result.removed == ()
+    assert "srv" not in client._servers
+    status = client.status("srv")
+    assert status["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_apply_catalog_diff_empty_servers_object_disconnects(tmp_path: Path) -> None:
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "keep": {"command": "python", "args": ["keep.py"], "autoConnect": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = MCPClient(hooks=_stub_hooks(_connected_session()))
+    await client.load_from_config(cfg)
+    cfg.write_text(json.dumps({"mcpServers": {}}), encoding="utf-8")
+    result = await client.apply_catalog_diff(cfg)
+    assert result.removed == ("keep",)
+    assert client._servers == {}
