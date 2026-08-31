@@ -38,14 +38,12 @@ from monkeybot.core.config.settings import (
 from monkeybot.core.config.snapshot import (
     ConfigDiff,
     RuntimeConfig,
+    context_window_tokens,
     current_env,
     current_env_or_none,
     env_flag,
     env_value,
     get_config_store,
-)
-from monkeybot.core.config.snapshot import (
-    context_window_tokens as snapshot_context_window_tokens,
 )
 from monkeybot.core.context import LoopsToolRegistry, build_context
 from monkeybot.core.hooks import HookManager
@@ -66,7 +64,8 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.llm.usage import Usage as UsageRecord
 from monkeybot.core.llm.usage import UsageGranularity
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.mcp.mcp_client import MCPCatalogApplyResult, MCPClient, mcp_file_env_refs
+from monkeybot.core.mcp.mcp_client import MCPClient, mcp_file_env_refs
+from monkeybot.core.mcp.ports_mcp import MCPCatalogApplyResult
 from monkeybot.core.memory.config import memory_enabled_from_config
 from monkeybot.core.memory.subsystem import MemoryConfigurationError, MemorySubsystem
 from monkeybot.core.persistence.backends import (
@@ -191,7 +190,10 @@ def _resolved_cfg_path(
 
 @dataclass
 class GatewayRuntime:
-    """Process-level deps populated on startup; ``apply()`` rebuilds hot slices."""
+    """Process-level deps populated on startup; ``apply()`` rebuilds hot slices.
+
+    The live instance is the module singleton ``gateway_runtime``.
+    """
 
     mcp: MCPClient | None = None
     inspectors: list[ToolInspector] = field(default_factory=list)
@@ -208,7 +210,7 @@ class GatewayRuntime:
     computer_approvals_persist: Callable[[str, str], bool] | None = None
 
     def build_inspectors(
-        self, layout: AgentLayout, cfg: RuntimeConfig | None, *, fail_closed: bool = False
+        self, layout: AgentLayout, cfg: RuntimeConfig | None = None, *, fail_closed: bool = False
     ) -> None:
         """Rebuild command-tier, rules, permission, and computer-tool inspectors.
 
@@ -264,20 +266,14 @@ class GatewayRuntime:
         inspectors.append(LoopStartInspector())
         self.inspectors = inspectors
 
-    def build_provider(self, cfg: RuntimeConfig | None) -> None:
+    def build_provider(self, cfg: RuntimeConfig | None = None) -> None:
         self.provider = _resolve_provider(cfg)
 
-    def build_web_search(self, cfg: RuntimeConfig | None) -> None:
+    def build_web_search(self, cfg: RuntimeConfig | None = None) -> None:
         try:
-            backend_name = env_value(cfg, "WEB_SEARCH_BACKEND", "") or None
-            backend_ws = _build_web_search_backend(backend_name)
+            backend_ws = _build_web_search_backend(cfg)
             if backend_ws is not None:
-                raw_max = env_value(cfg, "WEB_SEARCH_MAX_RESULTS", "5").strip() or "5"
-                try:
-                    default_max = int(raw_max)
-                except ValueError:
-                    default_max = 5
-                self.web_search_tool = WebSearchTool(backend_ws, default_max_results=default_max)
+                self.web_search_tool = WebSearchTool(backend_ws)
                 logger.info("web search enabled: backend=%s", backend_ws.name)
             else:
                 self.web_search_tool = None
@@ -479,23 +475,26 @@ class GatewayRuntime:
         return RuntimeApplyResult(applied=applied, mcp=mcp_result)
 
 
-_deps = GatewayRuntime()
+gateway_runtime = GatewayRuntime()
 
 
 def _env_context_window_tokens() -> int:
-    return snapshot_context_window_tokens(get_config_store().current_or_none())
+    return context_window_tokens()
 
 
-def _resolved_workspace_paths() -> tuple[Path, Path, Path | None]:
+def _resolved_workspace_paths(
+    cfg: RuntimeConfig | None = None,
+) -> tuple[Path, Path, Path | None]:
     """Resolve writable workspace, read-only skills, and artifacts mount.
 
-    ``SKILLS_PATH`` is HOT: prefer the pinned snapshot over process env so YAML
-    path changes apply on the next turn without overwriting spawn pins.
+    ``SKILLS_PATH`` is HOT: prefer the turn-pinned snapshot (or the process
+    snapshot when called outside a turn) over process env so YAML path changes
+    apply on the next turn without overwriting spawn pins.
     """
     layout = AgentLayout.from_environment()
     skills = layout.skills_path
-    cfg = get_config_store().current_or_none()
-    raw = env_value(cfg, "SKILLS_PATH", "").strip()
+    snap = cfg if cfg is not None else get_config_store().current_or_none()
+    raw = env_value(snap, "SKILLS_PATH", "").strip()
     if raw:
         skills = resolve_agent_path(raw, layout.agent_root)
     return layout.workspace_root, skills, layout.artifacts_path
@@ -703,9 +702,9 @@ class GatewayLoopPort:
         if bus is None:
             return
 
-        mcp = _deps.mcp
-        inspectors = _deps.inspectors
-        provider = bus.provider or _deps.provider
+        mcp = gateway_runtime.mcp
+        inspectors = gateway_runtime.inspectors
+        provider = bus.provider or gateway_runtime.provider
         cfg = get_config_store().current_or_none()
 
         if mcp is None or provider is None:
@@ -745,7 +744,7 @@ class GatewayLoopPort:
             )
             agent_path = _default_agent_path(bus)
 
-            workspace_root, skills_resolved, artifacts_resolved = _resolved_workspace_paths()
+            workspace_root, skills_resolved, artifacts_resolved = _resolved_workspace_paths(cfg)
 
             transcript_writer: TranscriptWriter | None = None
             if env_flag(cfg, "MONKEYBOT_TRANSCRIPT_ENABLED", default=False):
@@ -769,9 +768,11 @@ class GatewayLoopPort:
                 bus.attachment_catalog.rebuild_from_history(rows)
 
             extra_tools: list[Any] = (
-                [_deps.web_search_tool] if _deps.web_search_tool is not None else []
+                [gateway_runtime.web_search_tool]
+                if gateway_runtime.web_search_tool is not None
+                else []
             )
-            extra_tools.extend(_deps.computer_tools)
+            extra_tools.extend(gateway_runtime.computer_tools)
             todo_store = None
             if env_flag(cfg, "MONKEYBOT_TODO_LIST_ENABLED", default=True):
                 if bus.todo_store is None:
@@ -782,7 +783,7 @@ class GatewayLoopPort:
 
             storage_backend = getattr(serving.state, "storage", None)
             loops_available = storage_backend is not None
-            loops_advertised = loops_available and _deps.loops_registry.advertised
+            loops_advertised = loops_available and gateway_runtime.loops_registry.advertised
             summarization_model = env_value(cfg, "CONTEXT_SUMMARIZATION_MODEL", "").strip() or None
 
             try:
@@ -796,16 +797,16 @@ class GatewayLoopPort:
                     model=model_name,
                     summarization_model=summarization_model,
                     cancelled=cancel_event,
-                    context_window_tokens=snapshot_context_window_tokens(cfg),
+                    context_window_tokens=context_window_tokens(cfg),
                     workspace_root=workspace_root,
                     sse_bus=bus,
                     event_publisher=_SessionBusEventPublisher(bus),
                     extra_tools=extra_tools,
-                    subagent_registry=_deps.subagent_registry,
+                    subagent_registry=gateway_runtime.subagent_registry,
                     scheduled_loops_available=loops_available,
                     loops_advertised=loops_advertised,
                     todo_store=todo_store,
-                    approvals_persist=_deps.computer_approvals_persist,
+                    approvals_persist=gateway_runtime.computer_approvals_persist,
                     config=cfg,
                     enable_context_curation=env_flag(cfg, "CONTEXT_CURATION_ENABLED", default=True),
                 )
@@ -827,15 +828,15 @@ class GatewayLoopPort:
                 artifacts_path=artifacts_resolved,
                 mcp=mcp,
                 extra_tools=extra_tools,
-                run_command_allowed_commands=_deps.run_command_allowed_commands,
-                run_command_allowed_path_prefixes=_deps.run_command_allowed_path_prefixes,
+                run_command_allowed_commands=gateway_runtime.run_command_allowed_commands,
+                run_command_allowed_path_prefixes=gateway_runtime.run_command_allowed_path_prefixes,
                 attachment_store=attachment_store,
                 run_store=storage_backend.runs() if storage_backend is not None else None,
                 scheduled_loop_store=(
                     storage_backend.scheduled_loops() if storage_backend is not None else None
                 ),
-                subagent_registry=_deps.subagent_registry,
-                loops_registry=_deps.loops_registry,
+                subagent_registry=gateway_runtime.subagent_registry,
+                loops_registry=gateway_runtime.loops_registry,
                 config=cfg,
             )
             if transcript_writer is not None:
@@ -851,7 +852,7 @@ class GatewayLoopPort:
                 inspectors=inspectors,
                 tool_executor=executor,
                 cancelled=cancel_event,
-                hook_manager=_deps.hook_manager,
+                hook_manager=gateway_runtime.hook_manager,
                 attachment_store=attachment_store,
                 attachment_catalog=bus.attachment_catalog,
                 transcript_writer=transcript_writer,
@@ -949,7 +950,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
     fastapi_app.state.usage = _UsageStoreAdapter(backend.usage())
 
     mcp = MCPClient()
-    _deps.mcp = mcp
+    gateway_runtime.mcp = mcp
     mcp_config = layout.mcp_config_path
     cfg = get_config_store().current_or_none()
     if cfg is not None:
@@ -960,21 +961,21 @@ async def _startup(fastapi_app: FastAPI) -> None:
     except OSError as exc:
         logger.info("MCP config skipped (%s): %s", mcp_config, exc)
 
-    _deps.build_inspectors(layout, cfg)
-    _deps.build_provider(cfg)
-    _deps.build_web_search(cfg)
+    gateway_runtime.build_inspectors(layout, cfg)
+    gateway_runtime.build_provider(cfg)
+    gateway_runtime.build_web_search(cfg)
 
     vertex_gs = vertex_google_search_enabled_from_config()
     if vertex_gs:
         logger.info("vertex google_search grounding enabled")
-    if _deps.web_search_tool is None and not vertex_gs:
+    if gateway_runtime.web_search_tool is None and not vertex_gs:
         logger.info("web search disabled (WEB_SEARCH_BACKEND=none)")
 
     try:
         if not memory_enabled_from_config():
             logger.info("memory disabled (memory.enabled=false)")
-            _deps.hook_manager = None
-            _deps.memory = None
+            gateway_runtime.hook_manager = None
+            gateway_runtime.memory = None
             fastapi_app.state.memory = None
             fastapi_app.state.memory_status = "disabled"
             fastapi_app.state.memory_detail = "memory.enabled=false"
@@ -991,8 +992,8 @@ async def _startup(fastapi_app: FastAPI) -> None:
             )
             await memory.ensure_ready()
             memory.register_hooks(mgr)
-            _deps.hook_manager = mgr
-            _deps.memory = memory
+            gateway_runtime.hook_manager = mgr
+            gateway_runtime.memory = memory
             fastapi_app.state.memory = memory
             fastapi_app.state.memory_status = "enabled"
             fastapi_app.state.memory_detail = None
@@ -1001,8 +1002,8 @@ async def _startup(fastapi_app: FastAPI) -> None:
         raise
     except Exception as exc:
         logger.warning("memory setup failed; continuing without: %r", exc)
-        _deps.hook_manager = None
-        _deps.memory = None
+        gateway_runtime.hook_manager = None
+        gateway_runtime.memory = None
         fastapi_app.state.memory = None
         fastapi_app.state.memory_status = "unavailable"
         fastapi_app.state.memory_detail = str(exc)
@@ -1026,12 +1027,12 @@ async def _startup(fastapi_app: FastAPI) -> None:
                 index_path=Path(settings.index_path),
                 read_only=False,
             )
-            hook_mgr = _deps.hook_manager
+            hook_mgr = gateway_runtime.hook_manager
             if hook_mgr is None:
                 hook_mgr = HookManager()
-                _deps.hook_manager = hook_mgr
+                gateway_runtime.hook_manager = hook_mgr
             knowledge.register_hooks(hook_mgr)
-            _deps.knowledge = knowledge
+            gateway_runtime.knowledge = knowledge
             fastapi_app.state.knowledge = knowledge
 
             async def _knowledge_startup_scan() -> None:
@@ -1045,7 +1046,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
             logger.info("knowledge layer enabled (index=%s)", settings.index_path)
         except Exception as exc:
             logger.warning("knowledge layer setup failed; continuing without: %r", exc)
-            _deps.knowledge = None
+            gateway_runtime.knowledge = None
             fastapi_app.state.knowledge = None
     else:
         logger.info("knowledge layer disabled via knowledge.enabled")
@@ -1065,12 +1066,10 @@ async def _startup(fastapi_app: FastAPI) -> None:
         logger.info("attachments disabled via ATTACHMENTS_ENABLED")
 
     try:
-        _deps.build_subagents()
+        gateway_runtime.build_subagents()
     except ConfigError as exc:
         logger.error("invalid subagents config: %s", exc)
         raise
-
-    fastapi_app.state.gateway_runtime = _deps
 
     if otel_enabled:
         from monkeybot.observability.instrumentation import instrument_fastapi_app
@@ -1114,7 +1113,6 @@ async def _startup(fastapi_app: FastAPI) -> None:
 
 async def _shutdown(fastapi_app: FastAPI) -> None:
     """Tear down MCP sessions and storage backend."""
-    fastapi_app.state.gateway_runtime = None
     from monkeybot.observability import shutdown_observability
 
     try:
@@ -1128,30 +1126,30 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
     except Exception:
         logger.warning("transcript analysis on shutdown failed", exc_info=True)
 
-    mcp = _deps.mcp
+    mcp = gateway_runtime.mcp
     if mcp is not None:
         for name in list(getattr(mcp, "_servers", {}).keys()):
             await mcp.disconnect(name)
 
-    knowledge = _deps.knowledge or getattr(fastapi_app.state, "knowledge", None)
+    knowledge = gateway_runtime.knowledge or getattr(fastapi_app.state, "knowledge", None)
     if knowledge is not None:
         try:
             await knowledge.close()
         except Exception as exc:
             logger.warning("knowledge close failed: %s", exc)
-        _deps.knowledge = None
+        gateway_runtime.knowledge = None
         try:
             fastapi_app.state.knowledge = None
         except Exception as exc:
             logger.warning("knowledge state clear failed: %s", exc)
 
-    memory = _deps.memory or getattr(fastapi_app.state, "memory", None)
+    memory = gateway_runtime.memory or getattr(fastapi_app.state, "memory", None)
     if memory is not None:
         try:
             await memory.close()
         except Exception as exc:
             logger.warning("memory close failed: %s", exc)
-        _deps.memory = None
+        gateway_runtime.memory = None
         try:
             fastapi_app.state.memory = None
         except Exception as exc:

@@ -1,10 +1,22 @@
 """MCP client port — structural contract for Story 5 implementation."""
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from monkeybot.core.types.types_tools import ToolDef
+
+
+@dataclass(frozen=True)
+class MCPCatalogApplyResult:
+    """Outcome of a live catalog diff (untouched children stay up)."""
+
+    reconnected: tuple[str, ...] = ()
+    kept: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+    added: tuple[str, ...] = ()
+    failed: tuple[str, ...] = ()
 
 
 class MCPClientPort(Protocol):
@@ -100,4 +112,17 @@ class MCPClientPort(Protocol):
         self, path: Path, *, raise_on_error: bool = False
     ) -> None:
         """Load mcp.json if present; no-op when path is missing (Story 5 semantics)."""
+        ...
+
+    def set_env_overlay(self, env: Mapping[str, str] | None) -> None:
+        """Use a copied snapshot of env values when interpolating ``mcp.json`` ``${VAR}`` refs."""
+        ...
+
+    async def apply_catalog_diff(
+        self,
+        mcp_json_path: Path,
+        *,
+        raise_on_error: bool = False,
+    ) -> MCPCatalogApplyResult:
+        """Reconnect only added/changed/removed servers; leave untouched children running."""
         ...

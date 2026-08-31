@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
 from typing import Any, cast
 
-from monkeybot.core.config.snapshot import current_env
+from monkeybot.core.config.snapshot import current_env, env_value
 from monkeybot.core.context import TurnContext
 from monkeybot.core.context.epoch import ContextEpochTracker
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta
@@ -237,7 +237,7 @@ def _summarization_model_id(ctx: TurnContext) -> str:
         ctx_sm = (ctx.summarization_model or "").strip()
         if ctx_sm:
             return ctx_sm
-        from_cfg = (ctx.config.model.summarization_model or "").strip()
+        from_cfg = env_value(ctx.config, "CONTEXT_SUMMARIZATION_MODEL", "").strip()
         if from_cfg:
             return from_cfg
         return ctx.model

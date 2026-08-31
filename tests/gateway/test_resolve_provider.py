@@ -9,7 +9,10 @@ from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.gateway.sse import app as gateway_app
 from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.providers.huggingface import HuggingFaceProvider
-from monkeybot.providers.ollama import OllamaProvider
+from monkeybot.providers.ollama import (
+    _DUMMY_API_KEY,
+    OllamaProvider,
+)
 from monkeybot.providers.openrouter import OpenRouterProvider
 
 
@@ -18,6 +21,8 @@ def test_normalize_model_provider_aliases() -> None:
     assert normalize_model_provider("vertex") == "google_vertexai"
     assert normalize_model_provider("vertex-claude") == "vertex_anthropic"
     assert normalize_model_provider("huggingface") == "huggingface"
+    assert normalize_model_provider("ollama_cloud") == "ollama-cloud"
+    assert normalize_model_provider("ollama-local") == "ollama-local"
 
 
 def test_resolve_provider_fake(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -33,11 +38,34 @@ def test_resolve_provider_huggingface(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(provider, HuggingFaceProvider)
 
 
-def test_resolve_provider_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_provider_ollama_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MODEL_PROVIDER", "ollama")
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    provider = gateway_app._resolve_provider()
+    assert isinstance(provider, OllamaProvider)
+    assert provider.name == "ollama"
+
+
+def test_resolve_provider_ollama_cloud(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODEL_PROVIDER", "ollama-cloud")
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+    provider = gateway_app._resolve_provider()
+    assert isinstance(provider, OllamaProvider)
+    assert provider.name == "ollama-cloud"
+    assert provider._resolve_base_url("glm-5.3-flash") == "https://ollama.com/v1"
+
+
+def test_resolve_provider_ollama_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODEL_PROVIDER", "ollama-local")
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")
     monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
     provider = gateway_app._resolve_provider()
     assert isinstance(provider, OllamaProvider)
+    assert provider.name == "ollama-local"
+    assert provider._api_key == _DUMMY_API_KEY
+    assert provider._resolve_base_url("llama3.1") == "http://localhost:11434/v1"
 
 
 def test_resolve_provider_gemini_alias(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -6,7 +6,6 @@ import base64
 import binascii
 import json
 import logging
-import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -87,15 +86,15 @@ def _vertex_project_and_location(model_param: str) -> tuple[str, str]:
     from monkeybot.core.config.snapshot import current_env
 
     project = (
-        os.environ.get("GCP_PROJECT_ID")
+        current_env("GCP_PROJECT_ID")
         or current_env("VERTEX_AI_PROJECT_ID")
-        or os.environ.get("GOOGLE_CLOUD_PROJECT")
+        or current_env("GOOGLE_CLOUD_PROJECT")
     )
     if not project or not str(project).strip():
         raise LLMError(
             "Set VERTEX_AI_PROJECT_ID, GCP_PROJECT_ID, or GOOGLE_CLOUD_PROJECT for Vertex Gemini."
         )
-    explicit = current_env("VERTEX_AI_LOCATION") or os.environ.get("GOOGLE_CLOUD_LOCATION")
+    explicit = current_env("VERTEX_AI_LOCATION") or current_env("GOOGLE_CLOUD_LOCATION")
     if explicit and str(explicit).strip():
         return str(project).strip(), str(explicit).strip()
 

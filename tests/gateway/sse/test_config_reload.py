@@ -16,7 +16,8 @@ from monkeybot.core.config import (
 )
 from monkeybot.core.config.runtime_env import ENV_MAP
 from monkeybot.core.layout import AgentLayout
-from monkeybot.core.mcp.mcp_client import MCPCatalogApplyResult, MCPClient
+from monkeybot.core.mcp.mcp_client import MCPClient
+from monkeybot.core.mcp.ports_mcp import MCPCatalogApplyResult
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.inspector import CommandTierInspector
 from monkeybot.gateway.sse.app import (
@@ -78,7 +79,7 @@ async def _apply_reload(
         return cfg, diff, RuntimeApplyResult()
     result = await runtime.apply(cfg, diff, fastapi_app=fastapi_app, registry=SessionRegistry())
     if result.error is None:
-        store.commit(cfg)
+        cfg = store.commit(cfg)
     return cfg, diff, result
 
 

@@ -37,7 +37,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from monkeybot.core.config.snapshot import RuntimeConfig, current_env, env_value
+from monkeybot.core.config.snapshot import RuntimeConfig, env_value_or_current
 from monkeybot.core.tools.terminal import (
     ALLOWED_COMMANDS,
     ALLOWED_PATHS,
@@ -70,13 +70,7 @@ class SandboxConfig:
     @classmethod
     def from_env(cls, config: RuntimeConfig | None = None) -> SandboxConfig:
         """Build from a pinned snapshot, else the process-wide current snapshot."""
-
-        def _get(key: str, default: str) -> str:
-            if config is not None:
-                return env_value(config, key, default)
-            return current_env(key, default)
-
-        raw_ttl = _get("SANDBOX_TTL_SECONDS", "1800")
+        raw_ttl = env_value_or_current(config, "SANDBOX_TTL_SECONDS", "1800")
         try:
             ttl = int(raw_ttl)
         except ValueError:
@@ -84,13 +78,15 @@ class SandboxConfig:
         api_key = os.getenv("SANDBOX_API_KEY") or os.getenv("SANDBOX_AUTH_TOKEN") or None
         proxy_raw = os.getenv("SANDBOX_USE_SERVER_PROXY", "true").strip().lower()
         use_server_proxy = proxy_raw not in ("0", "false", "no", "off")
-        shared_raw = _get("SANDBOX_SHARED_FILESYSTEM", "true").strip().lower()
+        shared_raw = (
+            env_value_or_current(config, "SANDBOX_SHARED_FILESYSTEM", "true").strip().lower()
+        )
         shared_filesystem = shared_raw not in ("0", "false", "no", "off")
         return cls(
-            enabled=_get("SANDBOX_ENABLED", "false").lower() == "true",
-            server_url=_get("SANDBOX_SERVER_URL", "http://localhost:8080"),
+            enabled=env_value_or_current(config, "SANDBOX_ENABLED", "false").lower() == "true",
+            server_url=env_value_or_current(config, "SANDBOX_SERVER_URL", "http://localhost:8080"),
             api_key=api_key,
-            image=_get("SANDBOX_IMAGE", "python:3.12"),
+            image=env_value_or_current(config, "SANDBOX_IMAGE", "python:3.12"),
             ttl_seconds=ttl,
             use_server_proxy=use_server_proxy,
             shared_filesystem=shared_filesystem,

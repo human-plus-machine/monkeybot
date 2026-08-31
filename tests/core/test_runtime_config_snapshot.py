@@ -3,32 +3,44 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from monkeybot.core.config import (
+    ConfigError,
     ConfigTier,
     apply_monkeybot_runtime_env,
     get_config_store,
     reset_runtime_env_state_for_tests,
 )
-from monkeybot.core.config.runtime_env import ENV_FIELD_PATHS, ENV_MAP, ENV_TIERS
+from monkeybot.core.config.runtime_env import ENV_MAP, ENV_SPEC, ENV_TIERS
+from monkeybot.core.config.settings import SubagentSettings
 from monkeybot.core.config.snapshot import build_runtime_config, env_field_value
 
 
 @pytest.fixture(autouse=True)
-def _reset_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _reset_runtime_env() -> Iterator[None]:
+    keys = (
+        *ENV_MAP.values(),
+        "MONKEYBOT_CONFIG",
+        "GOOGLE_CLOUD_PROJECT",
+        "GOOGLE_CLOUD_LOCATION",
+        "GCP_PROJECT_ID",
+        "WORKSPACE_ROOT",
+    )
+    before = {key: os.environ.get(key) for key in keys}
+    for key in keys:
+        os.environ.pop(key, None)
     reset_runtime_env_state_for_tests()
-    monkeypatch.delenv("MONKEYBOT_CONFIG", raising=False)
-    env_before = {k: os.environ.get(k) for k in ENV_MAP.values()}
     yield
     reset_runtime_env_state_for_tests()
-    for key, before_val in env_before.items():
-        if before_val is None:
+    for key, val in before.items():
+        if val is None:
             os.environ.pop(key, None)
         else:
-            os.environ[key] = before_val
+            os.environ[key] = val
 
 
 def _write_yaml(tmp_path: Path, body: str) -> Path:
@@ -43,11 +55,13 @@ def test_env_map_three_way_exhaustiveness(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.chdir(tmp_path)
     env_names = set(ENV_MAP.values())
     assert len(ENV_MAP) == len(env_names)
+    assert set(ENV_SPEC) == env_names
     assert set(ENV_TIERS) == env_names
-    assert set(ENV_FIELD_PATHS) == env_names
     cfg = build_runtime_config(agent_root=tmp_path)
     for env_name in sorted(env_names):
-        assert ENV_TIERS[env_name] in ConfigTier
+        tier, _path = ENV_SPEC[env_name]
+        assert tier in ConfigTier
+        assert ENV_TIERS[env_name] is tier
         env_field_value(cfg, env_name)
 
 
@@ -65,6 +79,8 @@ def test_pinned_env_beats_yaml_on_build_and_reload(
     first = store.current()
     assert first.model.name == "from-env"
     assert first.gateway.port == "1111"
+    assert first.env_values.get("MODEL_NAME") == "from-env"
+    assert first.env_values.get("PORT") == "1111"
     assert os.environ.get("MODEL_NAME") == "from-env"
     assert os.environ.get("PORT") == "1111"
     first_revision = first.revision
@@ -142,16 +158,23 @@ def test_editing_agent_md_content_bumps_revision(
 
 
 def test_apply_second_call_is_digest_noop_returns_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.chdir(tmp_path)
     yaml_path = _write_yaml(tmp_path, "runtime:\n  port: 3333\n")
     monkeypatch.delenv("PORT", raising=False)
     first = apply_monkeybot_runtime_env()
     assert first == yaml_path.resolve()
-    assert apply_monkeybot_runtime_env() == yaml_path.resolve()
+    with caplog.at_level("INFO"):
+        assert apply_monkeybot_runtime_env() == yaml_path.resolve()
     assert os.environ.get("PORT") == "3333"
     assert get_config_store().current().revision == 1
+    applied_lines = [
+        r.message for r in caplog.records if "Applied runtime config from" in r.message
+    ]
+    assert applied_lines
+    assert "(0 keys)" not in applied_lines[-1]
+    assert "(1 keys)" in applied_lines[-1]
 
 
 def test_apply_sets_same_env_keys_as_today(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -210,6 +233,8 @@ def test_apply_sets_same_env_keys_as_today(tmp_path: Path, monkeypatch: pytest.M
     cfg = get_config_store().current()
     assert cfg.gateway.port == "2222"
     assert cfg.model.name == "test-model-x"
+    assert cfg.env_values.get("PORT") == "2222"
+    assert cfg.env_values.get("MODEL_NAME") == "test-model-x"
     assert cfg.realtime.websocket.port == 9090
     assert cfg.realtime.enabled is True
 
@@ -224,6 +249,7 @@ def test_workspace_root_legacy_env_blocks_yaml_workspace(
     apply_monkeybot_runtime_env()
     assert "MONKEYBOT_WORKSPACE_ROOT" not in os.environ
     assert get_config_store().current().paths.workspace_root is None
+    assert "MONKEYBOT_WORKSPACE_ROOT" not in get_config_store().current().env_values
 
 
 def test_current_raises_before_apply() -> None:
@@ -396,3 +422,269 @@ def test_effective_max_turns_uses_pinned_snapshot(
     get_config_store().reload()
     assert _effective_max_turns(None, pinned) == 7
     assert _effective_max_turns(None, get_config_store().current()) == 99
+
+
+def test_env_value_or_current_uses_store_when_unpinned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.snapshot import env_value, env_value_or_current
+
+    monkeypatch.chdir(tmp_path)
+    path = _write_yaml(tmp_path, "model:\n  name: snap-name\n")
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+    apply_monkeybot_runtime_env(config_path=path, agent_root=tmp_path)
+    monkeypatch.setenv("MODEL_NAME", "env-later")
+    assert env_value(None, "MODEL_NAME") == "env-later"
+    assert env_value_or_current(None, "MODEL_NAME") == "snap-name"
+    cfg = get_config_store().current()
+    assert env_value_or_current(cfg, "MODEL_NAME") == "snap-name"
+
+
+def test_legacy_subagents_list_does_not_abort_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(
+        tmp_path,
+        "runtime:\n  port: 4444\nsubagents:\n  - name: legacy\n    description: Old shape.\n",
+    )
+    monkeypatch.delenv("PORT", raising=False)
+    with caplog.at_level("WARNING"):
+        applied = apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    assert applied == yaml_path
+    assert os.environ.get("PORT") == "4444"
+    cfg = get_config_store().current()
+    assert cfg.subagents == {}
+    assert cfg.subagent_settings == SubagentSettings()
+    assert "Ignoring invalid subagents section" in caplog.text
+    assert "bare list is no longer supported" in caplog.text
+
+
+def test_second_apply_warns_on_ignored_config_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    first = _write_yaml(tmp_path, "runtime:\n  port: 5555\n")
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    other = other_dir / "monkeybot.yaml"
+    other.write_text("runtime:\n  port: 6666\n", encoding="utf-8")
+    monkeypatch.delenv("PORT", raising=False)
+    apply_monkeybot_runtime_env(config_path=first, agent_root=tmp_path)
+    with caplog.at_level("WARNING"):
+        returned = apply_monkeybot_runtime_env(config_path=other, agent_root=other_dir)
+    assert returned == first.resolve()
+    assert os.environ.get("PORT") == "5555"
+    assert "already loaded from" in caplog.text
+    assert str(other.resolve()) in caplog.text
+
+
+def test_env_overlay_invalid_harness_mode_raises() -> None:
+    from monkeybot.core.config.realtime_config import realtime_config_from_doc
+
+    with pytest.raises(ConfigError, match="not supported"):
+        realtime_config_from_doc({}, {"MONKEYBOT_HARNESS_MODE": "both"})
+
+
+def test_env_overlay_invalid_audio_format_raises() -> None:
+    from monkeybot.core.config.realtime_config import realtime_config_from_doc
+
+    with pytest.raises(ConfigError, match="not supported"):
+        realtime_config_from_doc({}, {"MONKEYBOT_REALTIME_AUDIO_INPUT_FORMAT": "mp3"})
+
+
+def test_context_window_tokens_none_cfg_reads_store_not_os_environ(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.snapshot import (
+        context_window_tokens,
+        current_env,
+        overlay_env_values,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    _write_yaml(tmp_path, "model:\n  context_window: 55555\n")
+    apply_monkeybot_runtime_env()
+    assert os.environ.get("MODEL_CONTEXT_WINDOW") == "55555"
+    overlay_env_values({"MODEL_CONTEXT_WINDOW": "99999"})
+    assert os.environ.get("MODEL_CONTEXT_WINDOW") == "55555"
+    assert current_env("MODEL_CONTEXT_WINDOW") == "99999"
+    assert get_config_store().current().model.context_window == "99999"
+    assert context_window_tokens() == 99999
+
+
+def test_current_env_flag_opt_in_and_opt_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.snapshot import current_env_flag
+
+    monkeypatch.chdir(tmp_path)
+    _write_yaml(tmp_path, "computer:\n  enabled: true\ntodo_list:\n  enabled: false\n")
+    apply_monkeybot_runtime_env()
+    assert current_env_flag("MONKEYBOT_COMPUTER_TOOLS", default=False) is True
+    assert current_env_flag("MONKEYBOT_TODO_LIST_ENABLED", default=True) is False
+
+
+def test_layout_export_overlays_resolved_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.snapshot import current_env
+    from monkeybot.core.layout import bootstrap_agent_layout
+
+    monkeypatch.chdir(tmp_path)
+    _write_yaml(tmp_path, "runtime:\n  port: 1\n")
+    layout = bootstrap_agent_layout(cwd=tmp_path)
+    cfg = get_config_store().current()
+    assert current_env("SKILLS_PATH") == str(layout.skills_path)
+    assert current_env("AGENT_MD") == str(layout.agent_md_path)
+    assert current_env("DB_URL") == layout.db_url
+    assert current_env("SKILLS_PATH") == os.environ["SKILLS_PATH"]
+    assert cfg.paths.skills_path == str(layout.skills_path)
+    assert cfg.paths.agent_md == str(layout.agent_md_path)
+    assert cfg.paths.db_url == layout.db_url
+    assert cfg.paths.mcp_config == str(layout.mcp_config_path)
+    assert cfg.paths.command_allowlist_config == str(layout.command_allowlist_path)
+    assert cfg.paths.permission_config == str(layout.permission_config_path)
+    assert cfg.paths.approvals_config == str(layout.approvals_path)
+    assert cfg.paths.memory_storage_uri == layout.memory_storage_uri
+    assert cfg.revision == 1
+
+
+def test_overlay_env_values_updates_digest_keeps_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.snapshot import current_env, overlay_env_values
+
+    monkeypatch.chdir(tmp_path)
+    _write_yaml(tmp_path, "runtime:\n  port: 1\n")
+    apply_monkeybot_runtime_env()
+    before = get_config_store().current()
+    overlay_env_values({"SKILLS_PATH": "/tmp/skills-overlay", "DB_URL": "sqlite:///overlaid"})
+    after = get_config_store().current()
+    assert after.revision == before.revision == 1
+    assert after.digest != before.digest
+    assert current_env("SKILLS_PATH") == "/tmp/skills-overlay"
+    assert after.paths.skills_path == "/tmp/skills-overlay"
+    assert after.paths.db_url == "sqlite:///overlaid"
+    assert before.paths.db_url is None
+
+
+def test_reload_preserves_overlays_and_does_not_flag_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.snapshot import overlay_env_values
+
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(tmp_path, "model:\n  name: before\n")
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+    apply_monkeybot_runtime_env()
+    overlay_env_values({"DB_URL": "sqlite:///overlaid"})
+    store = get_config_store()
+    yaml_path.write_text("model:\n  name: after\n", encoding="utf-8")
+    reloaded, diff = store.reload()
+    assert not diff.noop
+    assert reloaded.model.name == "after"
+    assert reloaded.env_values["DB_URL"] == "sqlite:///overlaid"
+    assert reloaded.paths.db_url == "sqlite:///overlaid"
+    assert "DB_URL" not in diff.changed_env_keys
+    assert ConfigTier.RESTART not in diff.tiers
+
+
+def test_commit_mints_revision_under_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(tmp_path, "model:\n  name: first\n")
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+    apply_monkeybot_runtime_env()
+    store = get_config_store()
+    first = store.current()
+    yaml_path.write_text("model:\n  name: second\n", encoding="utf-8")
+    prepared_a, diff_a = store.prepare_reload()
+    prepared_b, diff_b = store.prepare_reload()
+    assert not diff_a.noop and not diff_b.noop
+    published_a = store.commit(prepared_a)
+    published_b = store.commit(prepared_b)
+    assert published_a.revision == first.revision + 1
+    assert published_b.revision == first.revision + 2
+    assert store.current() is published_b
+
+
+def test_concurrent_commits_mint_distinct_revisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(tmp_path, "model:\n  name: first\n")
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+    apply_monkeybot_runtime_env()
+    store = get_config_store()
+    first = store.current()
+    yaml_path.write_text("model:\n  name: second\n", encoding="utf-8")
+    barrier = threading.Barrier(2)
+    revisions: list[int] = []
+
+    def worker() -> None:
+        cfg, diff = store.prepare_reload()
+        assert not diff.noop
+        barrier.wait()
+        revisions.append(store.commit(cfg).revision)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(revisions) == [first.revision + 1, first.revision + 2]
+
+
+def test_skills_tree_hash_detects_edits_without_reading_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (skills / "SKILL.md").write_text("v1\n", encoding="utf-8")
+    _write_yaml(tmp_path, "runtime:\n  log_level: INFO\n")
+    apply_monkeybot_runtime_env()
+    store = get_config_store()
+    first = store.current()
+    assert first.paths.skills_digest is not None
+
+    (skills / "SKILL.md").write_text("v2\n", encoding="utf-8")
+    reloaded, diff = store.reload()
+    assert not diff.noop
+    assert "skills" in diff.changed_content
+    assert reloaded.paths.skills_digest != first.paths.skills_digest
+
+
+def test_skills_tree_hash_caps_file_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from monkeybot.core.config import snapshot as snapshot_mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(snapshot_mod, "_SKILLS_HASH_MAX_FILES", 3)
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    for i in range(10):
+        (skills / f"f{i}.md").write_text(f"{i}\n", encoding="utf-8")
+    _write_yaml(tmp_path, "runtime:\n  log_level: INFO\n")
+    apply_monkeybot_runtime_env()
+    assert get_config_store().current().paths.skills_digest is not None
+
+
+def test_extra_gcp_pins_are_visible_to_current_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.snapshot import current_env
+
+    monkeypatch.chdir(tmp_path)
+    _write_yaml(tmp_path, "runtime:\n  port: 1\n")
+    monkeypatch.setenv("GCP_PROJECT_ID", "gcp-pin")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "gcloud-pin")
+    monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-east1")
+    apply_monkeybot_runtime_env()
+    cfg = get_config_store().current()
+    assert cfg.env_values["GCP_PROJECT_ID"] == "gcp-pin"
+    assert cfg.env_values["GOOGLE_CLOUD_PROJECT"] == "gcloud-pin"
+    assert cfg.env_values["GOOGLE_CLOUD_LOCATION"] == "us-east1"
+    monkeypatch.setenv("GCP_PROJECT_ID", "later")
+    assert current_env("GCP_PROJECT_ID") == "gcp-pin"
