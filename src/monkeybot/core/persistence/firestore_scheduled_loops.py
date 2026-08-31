@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -24,6 +25,8 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 _LOOP_STATUSES = frozenset({"active", "paused", "completed", "failed"})
+_STALE_RELEASE_MAX_PER_PASS = 400
+_STALE_RELEASE_CONCURRENCY = 25
 
 
 def _collection_name(prefix: str, base: str) -> str:
@@ -121,7 +124,7 @@ class FirestoreScheduledLoopStore:
         snapshot = await self._doc(loop_id).get()
         if not snapshot.exists:
             return None
-        return doc_to_scheduled_loop_row(snapshot.id, snapshot.to_dict() or {})
+        return self._try_doc_to_row(snapshot.id, snapshot.to_dict() or {})
 
     async def list_all(self) -> list[ScheduledLoopRow]:
         rows: list[ScheduledLoopRow] = []
@@ -224,10 +227,15 @@ class FirestoreScheduledLoopStore:
             if data.get("claimed_at_ms") is None:
                 continue
             stale_loop_ids.append(doc.id)
+            if len(stale_loop_ids) >= _STALE_RELEASE_MAX_PER_PASS:
+                break
         reset = 0
-        for loop_id in stale_loop_ids:
-            if await self._release_one_stale_claim(loop_id, cutoff):
-                reset += 1
+        for i in range(0, len(stale_loop_ids), _STALE_RELEASE_CONCURRENCY):
+            chunk = stale_loop_ids[i : i + _STALE_RELEASE_CONCURRENCY]
+            results = await asyncio.gather(
+                *(self._release_one_stale_claim(loop_id, cutoff) for loop_id in chunk)
+            )
+            reset += sum(1 for ok in results if ok)
         return reset
 
     async def complete_tick(
@@ -253,7 +261,7 @@ class FirestoreScheduledLoopStore:
             try:
                 row = doc_to_scheduled_loop_row(snapshot.id, data)
             except ValueError as exc:
-                logger.error("%s", exc)
+                logger.error("complete_tick skipped loop_id=%s: %s", loop_id, exc)
                 return False
             tick_index = row.tick_index + 1
             status = row.status
@@ -322,7 +330,12 @@ class FirestoreScheduledLoopStore:
             try:
                 row = doc_to_scheduled_loop_row(snapshot.id, data)
             except ValueError as exc:
-                logger.error("%s", exc)
+                logger.error(
+                    "defer_tick skipped loop_id=%s worker_id=%s: %s",
+                    loop_id,
+                    worker_id,
+                    exc,
+                )
                 return False
             now_ms = int(time.time() * 1000)
             txn.update(

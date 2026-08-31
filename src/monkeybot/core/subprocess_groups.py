@@ -118,10 +118,10 @@ def kill_process_group(
 def _signal_group_and_tree(root_pid: int | None, pgid: int | None, sig: int) -> None:
     """Signal the known ``pgid`` directly, plus walk the live tree from ``root_pid``.
 
-    ``root_pid`` staying set after the leader has already exited (or the tree
-    walk finding nothing new) must not skip the ``pgid``-based kill: it is the
-    only signal captured at spawn time that still reaches descendants once the
-    leader itself is gone.
+    ``root_pid`` must be a still-live leader. Once asyncio has reaped the child,
+    that PID is freed and walking it can ``killpg`` an unrelated recycled
+    process. The spawn-time ``pgid`` is then the only safe signal that still
+    reaches descendants.
     """
     if root_pid is not None:
         signal_process_tree(root_pid, sig)
@@ -138,7 +138,7 @@ async def stop_subagent_process(
     """SIGTERM/SIGKILL the subagent tree (or direct child) on timeout/cancel."""
     if proc is None and pgid is None:
         return
-    root_pid = proc.pid if proc is not None else None
+    root_pid = proc.pid if proc is not None and proc.returncode is None else None
     if SUPPORTS_PROCESS_GROUPS:
         _signal_group_and_tree(root_pid, pgid, signal.SIGTERM)
     elif proc is not None and proc.returncode is None:

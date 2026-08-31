@@ -41,7 +41,8 @@ from monkeybot.core.persistence.scheduled_loops import (
     ScheduledLoopCreate,
     ScheduledLoopRow,
     _loop_id_from_create,
-    _row_from_tuple,
+    _map_loop_tuples,
+    _try_row_from_tuple,
     validate_loop_guards,
 )
 from monkeybot.core.persistence.thread_summary import (
@@ -927,6 +928,14 @@ class PostgresRunStore:
         return _tuple_to_run_row(tuple(row))
 
 
+def _asyncpg_affected_rows(status: object) -> int:
+    """Parse affected-row count from an asyncpg command tag (``UPDATE 1``)."""
+    try:
+        return int(str(status).split()[-1])
+    except (IndexError, ValueError):
+        return 0
+
+
 class PostgresScheduledLoopStore:
     """Postgres persistence for scheduled agent loops."""
 
@@ -976,7 +985,7 @@ class PostgresScheduledLoopStore:
             )
         if row is None:
             return None
-        return _row_from_tuple(tuple(row))
+        return _try_row_from_tuple(tuple(row))
 
     async def list_all(self) -> list[ScheduledLoopRow]:
         columns = ", ".join(_SCHEDULED_LOOP_COLUMNS)
@@ -984,7 +993,7 @@ class PostgresScheduledLoopStore:
             rows = await conn.fetch(
                 f"SELECT {columns} FROM scheduled_loops ORDER BY started_at_ms DESC"
             )
-        return [_row_from_tuple(tuple(r)) for r in rows]
+        return _map_loop_tuples(rows)
 
     async def list_due(self, now_ms: int) -> list[ScheduledLoopRow]:
         columns = ", ".join(_SCHEDULED_LOOP_COLUMNS)
@@ -999,7 +1008,7 @@ class PostgresScheduledLoopStore:
                 """,
                 now_ms,
             )
-        return [_row_from_tuple(tuple(r)) for r in rows]
+        return _map_loop_tuples(rows)
 
     async def claim_tick(self, loop_id: str, worker_id: str) -> ScheduledLoopRow | None:
         now_ms = int(time.time() * 1000)
@@ -1017,7 +1026,7 @@ class PostgresScheduledLoopStore:
                 now_ms,
                 loop_id,
             )
-        if status.split()[-1] != "1":
+        if _asyncpg_affected_rows(status) != 1:
             return None
         return await self.get(loop_id)
 
@@ -1035,7 +1044,7 @@ class PostgresScheduledLoopStore:
                 """,
                 cutoff,
             )
-        return int(status.split()[-1])
+        return _asyncpg_affected_rows(status)
 
     async def complete_tick(
         self,
@@ -1099,7 +1108,7 @@ class PostgresScheduledLoopStore:
                 loop_id,
                 worker_id,
             )
-        return str(status).endswith(" 1")
+        return _asyncpg_affected_rows(status) == 1
 
     async def renew_tick_claim(self, loop_id: str, worker_id: str) -> bool:
         now_ms = int(time.time() * 1000)
@@ -1116,7 +1125,7 @@ class PostgresScheduledLoopStore:
                 loop_id,
                 worker_id,
             )
-        return bool(status.split()[-1] == "1")
+        return _asyncpg_affected_rows(status) == 1
 
     async def pause(self, loop_id: str) -> bool:
         async with self._pool.acquire() as conn:
@@ -1128,7 +1137,7 @@ class PostgresScheduledLoopStore:
                 """,
                 loop_id,
             )
-        return bool(status.split()[-1] == "1")
+        return _asyncpg_affected_rows(status) == 1
 
     async def resume(self, loop_id: str) -> bool:
         now_ms = int(time.time() * 1000)
@@ -1143,7 +1152,7 @@ class PostgresScheduledLoopStore:
                 now_ms,
                 loop_id,
             )
-        return bool(status.split()[-1] == "1")
+        return _asyncpg_affected_rows(status) == 1
 
     async def stop(self, loop_id: str, *, stop_reason: str = "manual") -> bool:
         async with self._pool.acquire() as conn:
@@ -1157,7 +1166,7 @@ class PostgresScheduledLoopStore:
                 stop_reason,
                 loop_id,
             )
-        return bool(status.split()[-1] == "1")
+        return _asyncpg_affected_rows(status) == 1
 
 
 class PostgresSessionTurnLockStore:

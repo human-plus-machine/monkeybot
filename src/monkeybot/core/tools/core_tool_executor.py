@@ -494,8 +494,9 @@ async def _run_inline_subagent_with_progress(
         env = dict(os.environ)
         env.update(child_env)
         env["PYTHONUNBUFFERED"] = "1"
-        # start_new_session so timeout/cancel can kill the whole process group
-        # (descendants from shells / nested tools), matching the worker-pool path.
+        # Detach from the parent process group so timeout/cancel can killpg
+        # descendants. A parent SIGKILL/crash will not reap this tree — inline
+        # task has no subagent.pid reap path; those orphans are accepted.
         p = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,

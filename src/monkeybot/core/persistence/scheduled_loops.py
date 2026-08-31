@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import cast
 
@@ -33,6 +35,8 @@ _SCHEDULED_LOOP_COLUMNS: tuple[str, ...] = (
 )
 
 _LOOP_STATUSES = frozenset({"active", "paused", "completed", "failed"})
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -85,11 +89,17 @@ def _bool_field(raw: object, *, default: bool = False) -> bool:
     return default
 
 
-def doc_to_scheduled_loop_row(loop_id: str, data: dict[str, object]) -> ScheduledLoopRow:
-    """Map a Firestore document (or JSON blob) to :class:`ScheduledLoopRow`."""
-    interval_ms = int(cast(int, data.get("interval_ms", 0)))
+def _require_positive_interval_ms(loop_id: str, interval_ms: int) -> int:
     if interval_ms <= 0:
         raise ValueError(f"scheduled loop {loop_id} has invalid interval_ms: {interval_ms}")
+    return interval_ms
+
+
+def doc_to_scheduled_loop_row(loop_id: str, data: dict[str, object]) -> ScheduledLoopRow:
+    """Map a Firestore document (or JSON blob) to :class:`ScheduledLoopRow`."""
+    interval_ms = _require_positive_interval_ms(
+        loop_id, int(cast(int, data.get("interval_ms", 0)))
+    )
     return ScheduledLoopRow(
         loop_id=loop_id,
         session_id=str(data.get("session_id", "")),
@@ -140,12 +150,13 @@ def validate_loop_guards(
 
 def _row_from_tuple(row: tuple[object, ...]) -> ScheduledLoopRow:
     d = dict(zip(_SCHEDULED_LOOP_COLUMNS, row, strict=True))
+    loop_id = str(d["loop_id"])
     return ScheduledLoopRow(
-        loop_id=str(d["loop_id"]),
+        loop_id=loop_id,
         session_id=str(d["session_id"]),
         status=str(d["status"]),
         prompt=str(d["prompt"]),
-        interval_ms=int(cast(int, d["interval_ms"])),
+        interval_ms=_require_positive_interval_ms(loop_id, int(cast(int, d["interval_ms"]))),
         max_ticks=int(cast(int, d["max_ticks"])) if d["max_ticks"] is not None else None,
         max_runtime_ms=(
             int(cast(int, d["max_runtime_ms"])) if d["max_runtime_ms"] is not None else None
@@ -165,6 +176,24 @@ def _row_from_tuple(row: tuple[object, ...]) -> ScheduledLoopRow:
             int(cast(int, d["claimed_at_ms"])) if d["claimed_at_ms"] is not None else None
         ),
     )
+
+
+def _try_row_from_tuple(row: tuple[object, ...]) -> ScheduledLoopRow | None:
+    """Map a SQL row, skipping (and logging) malformed records."""
+    try:
+        return _row_from_tuple(row)
+    except ValueError as exc:
+        logger.error("skipping malformed scheduled loop: %s", exc)
+        return None
+
+
+def _map_loop_tuples(rows: Iterable[Sequence[object]]) -> list[ScheduledLoopRow]:
+    mapped_rows: list[ScheduledLoopRow] = []
+    for raw in rows:
+        mapped = _try_row_from_tuple(tuple(raw))
+        if mapped is not None:
+            mapped_rows.append(mapped)
+    return mapped_rows
 
 
 def _loop_id_from_create(spec: ScheduledLoopCreate) -> str:
@@ -246,7 +275,7 @@ class SQLiteScheduledLoopStore:
         await cursor.close()
         if row is None:
             return None
-        return _row_from_tuple(tuple(row))
+        return _try_row_from_tuple(tuple(row))
 
     @with_conn_lock
     async def list_all(self) -> list[ScheduledLoopRow]:
@@ -256,7 +285,7 @@ class SQLiteScheduledLoopStore:
         )
         rows = await cursor.fetchall()
         await cursor.close()
-        return [_row_from_tuple(tuple(r)) for r in rows]
+        return _map_loop_tuples(rows)
 
     @with_conn_lock
     async def list_due(self, now_ms: int) -> list[ScheduledLoopRow]:
@@ -273,7 +302,7 @@ class SQLiteScheduledLoopStore:
         )
         rows = await cursor.fetchall()
         await cursor.close()
-        return [_row_from_tuple(tuple(r)) for r in rows]
+        return _map_loop_tuples(rows)
 
     @with_conn_lock
     async def claim_tick(self, loop_id: str, worker_id: str) -> ScheduledLoopRow | None:

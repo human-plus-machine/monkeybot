@@ -10,41 +10,6 @@ import pytest
 pytest.importorskip("google.cloud.firestore")
 
 from monkeybot.core.persistence.firestore_scheduled_loops import FirestoreScheduledLoopStore  # noqa: E402
-from monkeybot.core.persistence.scheduled_loops import doc_to_scheduled_loop_row  # noqa: E402
-
-
-def test_doc_to_scheduled_loop_row_roundtrip_fields() -> None:
-    row = doc_to_scheduled_loop_row(
-        "demo",
-        {
-            "session_id": "loop-main",
-            "status": "active",
-            "prompt": "tick plan",
-            "interval_ms": 5000,
-            "max_ticks": 3,
-            "max_runtime_ms": 3600000,
-            "skip_if_busy": 1,
-            "tick_index": 2,
-            "next_tick_at_ms": 100,
-            "started_at_ms": 50,
-            "last_tick_at_ms": 90,
-            "last_error": None,
-            "stop_reason": None,
-            "tick_in_flight": 0,
-            "worker_id": None,
-            "claimed_at_ms": None,
-        },
-    )
-    assert row.loop_id == "demo"
-    assert row.session_id == "loop-main"
-    assert row.max_ticks == 3
-    assert row.skip_if_busy is True
-    assert row.tick_index == 2
-
-
-def test_doc_to_scheduled_loop_row_rejects_invalid_interval() -> None:
-    with pytest.raises(ValueError, match="invalid interval_ms"):
-        doc_to_scheduled_loop_row("bad", {"interval_ms": 0})
 
 
 class _FakeSnapshot:
@@ -354,6 +319,15 @@ async def test_firestore_list_all_skips_malformed_doc() -> None:
     rows = await store.list_all()
 
     assert [row.loop_id for row in rows] == ["loop-good"]
+
+
+@pytest.mark.asyncio
+async def test_firestore_get_returns_none_for_malformed_doc() -> None:
+    client = _FakeClient()
+    _seed_due(client, "loop-bad", interval_ms=0)
+    store = FirestoreScheduledLoopStore(client, prefix="t")  # type: ignore[arg-type]
+
+    assert await store.get("loop-bad") is None
 
 
 @pytest.mark.asyncio

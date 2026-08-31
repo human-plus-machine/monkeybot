@@ -162,9 +162,10 @@ async def test_stop_subagent_process_kills_group_after_leader_exits(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pgid known at spawn time must still be killpg'd even once the leader
-    is already reaped, i.e. ``getpgid`` on the dead root pid raises and the
-    tree walk finds nothing new: the captured ``pgid`` is the only reliable
-    signal left that still reaches orphaned descendants."""
+    is already reaped. The tree walk must not run against the freed PID — that
+    can ``killpg`` an unrelated recycled process — so the captured ``pgid`` is
+    the only signal used.
+    """
     signals: list[tuple[str, int, int]] = []
 
     class _FakeProc:
@@ -180,15 +181,14 @@ async def test_stop_subagent_process_kills_group_after_leader_exits(
         async def wait(self) -> int:
             return 0
 
-    def _fake_getpgid(pid: int) -> int:
-        raise ProcessLookupError()  # root_pid is dead; only pgid stays valid
+    def _iter_must_not_run(root: int) -> list[int]:
+        raise AssertionError(f"must not walk reaped leader pid {root}")
 
     def _fake_killpg(pgid: int, sig: int) -> None:
         signals.append(("killpg", pgid, int(sig)))
 
     monkeypatch.setattr(subprocess_groups, "SUPPORTS_PROCESS_GROUPS", True)
-    monkeypatch.setattr(subprocess_groups, "iter_process_tree", lambda root: [root])
-    monkeypatch.setattr(subprocess_groups.os, "getpgid", _fake_getpgid)
+    monkeypatch.setattr(subprocess_groups, "iter_process_tree", _iter_must_not_run)
     monkeypatch.setattr(subprocess_groups.os, "killpg", _fake_killpg)
     monkeypatch.setattr(subprocess_groups.asyncio, "sleep", AsyncMock())
 
