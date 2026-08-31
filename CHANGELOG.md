@@ -10,6 +10,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 - Subagent timeout/cancel now walks and kills the full process tree (including nested `run_command` sessions that use their own `start_new_session` process groups), not only the subagent leader's session. `process_group_id` returns `None` when the PID is gone instead of treating a recycled PID as a process group. The tree walk's non-`/proc` fallback (macOS) now uses `pgrep -P` instead of an invalid BSD `ps -P` invocation that silently returned no children. `stop_subagent_process` also `killpg`s the spawn-time `pgid` directly (in addition to the tree walk) so a leader that has already been reaped no longer leaves descendants orphaned.
 - Firestore scheduled loops: `list_all`/`list_due` skip (and log) a single malformed document — e.g. `interval_ms <= 0` from legacy/hand-edited data — instead of raising out of the mapper and stalling the scheduler poll loop for every other loop.
+- Progressive MCP: harness catalog + `enable_mcp` schema no longer mention `mcp.json`, which sent models to `read_file` a control-plane file outside the workspace. Catalog names are now an `enable_mcp` enum; the tool is omitted when the catalog is empty.
 
 ## [browser v0.4.0] - 2026-08-29
 

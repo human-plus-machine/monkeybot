@@ -1,11 +1,16 @@
 """MCP client port — structural contract for Story 5 implementation."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from monkeybot.core.types.types_tools import ToolDef
+
+
+def normalize_catalog_mcp_names(names: Sequence[str] | None) -> tuple[str, ...]:
+    """Strip, drop empties, sort, and dedupe catalogued MCP server names."""
+    return tuple(sorted({n.strip() for n in (names or ()) if n and str(n).strip()}))
 
 
 @dataclass(frozen=True)

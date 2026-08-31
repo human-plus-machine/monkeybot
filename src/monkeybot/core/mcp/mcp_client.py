@@ -1045,7 +1045,9 @@ class MCPClient:
             raise MCPDiagnosticError(
                 name,
                 f"Unknown MCP server {name!r}. Known configured servers: {known_msg}",
-                remedy=("Use a name from mcp.json (after load_from_config), then call enable_mcp."),
+                remedy=(
+                    "Call enable_mcp with a name from the harness MCP catalog, not a config file."
+                ),
             )
         defs = await self._connect_from_spec(
             name, spec, mcp_json_path=self._config_path, raise_on_error=True
