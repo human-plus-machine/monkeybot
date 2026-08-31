@@ -19,17 +19,19 @@ from monkeybot.core.config.settings import SubagentSettings
 
 
 @pytest.fixture(autouse=True)
-def _reset_runtime_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def _reset_runtime_env() -> Iterator[None]:
+    keys = (*ENV_MAP.values(), "MONKEYBOT_CONFIG", "GOOGLE_CLOUD_PROJECT", "WORKSPACE_ROOT")
+    before = {key: os.environ.get(key) for key in keys}
+    for key in keys:
+        os.environ.pop(key, None)
     reset_runtime_env_state_for_tests()
-    monkeypatch.delenv("MONKEYBOT_CONFIG", raising=False)
-    env_before = {k: os.environ.get(k) for k in ENV_MAP.values()}
     yield
     reset_runtime_env_state_for_tests()
-    for key, before_val in env_before.items():
-        if before_val is None:
+    for key, val in before.items():
+        if val is None:
             os.environ.pop(key, None)
         else:
-            os.environ[key] = before_val
+            os.environ[key] = val
 
 
 def _write_yaml(tmp_path: Path, body: str) -> Path:
