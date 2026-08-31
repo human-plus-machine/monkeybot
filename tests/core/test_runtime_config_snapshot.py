@@ -273,3 +273,46 @@ def test_env_overlay_invalid_audio_format_raises() -> None:
 
     with pytest.raises(ConfigError, match="not supported"):
         realtime_config_from_doc({}, {"MONKEYBOT_REALTIME_AUDIO_INPUT_FORMAT": "mp3"})
+
+
+def test_context_window_tokens_warns_on_invalid_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from monkeybot.core.config.snapshot import context_window_tokens
+
+    monkeypatch.chdir(tmp_path)
+    path = _write_yaml(tmp_path, "model:\n  context_window: not-a-number\n")
+    monkeypatch.delenv("MODEL_CONTEXT_WINDOW", raising=False)
+    apply_monkeybot_runtime_env(config_path=path, agent_root=tmp_path)
+    cfg = get_config_store().current()
+    with caplog.at_level("WARNING"):
+        assert context_window_tokens(cfg) == 200_000
+    assert "invalid MODEL_CONTEXT_WINDOW" in caplog.text
+
+
+def test_current_env_flag_opt_in_and_opt_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.snapshot import current_env_flag
+
+    monkeypatch.chdir(tmp_path)
+    _write_yaml(tmp_path, "computer:\n  enabled: true\ntodo_list:\n  enabled: false\n")
+    apply_monkeybot_runtime_env()
+    assert current_env_flag("MONKEYBOT_COMPUTER_TOOLS", default=False) is True
+    assert current_env_flag("MONKEYBOT_TODO_LIST_ENABLED", default=True) is False
+
+
+def test_layout_export_overlays_resolved_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.snapshot import current_env
+    from monkeybot.core.layout import bootstrap_agent_layout
+
+    monkeypatch.chdir(tmp_path)
+    _write_yaml(tmp_path, "runtime:\n  port: 1\n")
+    layout = bootstrap_agent_layout(cwd=tmp_path)
+    assert current_env("SKILLS_PATH") == str(layout.skills_path)
+    assert current_env("AGENT_MD") == str(layout.agent_md_path)
+    assert current_env("DB_URL") == layout.db_url
+    assert current_env("SKILLS_PATH") == os.environ["SKILLS_PATH"]
+    assert get_config_store().current().revision == 1

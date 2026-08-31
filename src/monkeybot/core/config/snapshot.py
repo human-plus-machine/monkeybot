@@ -6,7 +6,9 @@ unset ``os.environ`` keys for subprocess transport. In-process readers use
 import time: code defaults, merged YAML, then pinned process env.
 
 Section dataclasses (``ModelConfig``, ``PathsConfig``, …) and content-file
-digests land in later PRs that have in-process readers / reload tiers.
+digests land with reload tiers. In-process readers use ``current_env`` /
+``env_flag`` against ``env_values``. Layout-resolved paths are folded into
+the snapshot from ``AgentLayout.export_environment``.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ import logging
 import os
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -135,10 +137,8 @@ def env_value(cfg: RuntimeConfig | None, key: str, default: str = "") -> str:
 
     When ``cfg`` is set, missing snapshot keys return ``default`` and do not
     fall through to process env. An empty store (``cfg is None``) reads
-    ``os.environ``. Layout-resolved paths (``SKILLS_PATH``, ``AGENT_MD``, …)
-    are exported to ``os.environ`` *after* apply, so they are not in the
-    snapshot unless they were also in YAML or pinned env — read those from
-    process env or ``AgentLayout``, not from a snapshot key.
+    ``os.environ``. After ``AgentLayout.export_environment``, layout-resolved
+    paths are in ``env_values`` as well as process env.
     """
     if cfg is not None:
         val = cfg.env_values.get(key)
@@ -146,9 +146,22 @@ def env_value(cfg: RuntimeConfig | None, key: str, default: str = "") -> str:
     return os.environ.get(key, default)
 
 
+def env_flag(cfg: RuntimeConfig | None, key: str, *, default: bool) -> bool:
+    """Boolean env flag. Opt-out keys use ``default=True``; opt-in use ``default=False``."""
+    raw = env_value(cfg, key, "true" if default else "false").strip().lower()
+    if default:
+        return raw not in {"0", "false", "no", "off"}
+    return raw in {"1", "true", "yes", "on"}
+
+
 def current_env(key: str, default: str = "") -> str:
     """Read an ENV_MAP key from the process snapshot, else ``os.environ``."""
     return env_value(get_config_store().current_or_none(), key, default)
+
+
+def current_env_flag(key: str, *, default: bool) -> bool:
+    """Boolean ENV_MAP flag from the process snapshot, else ``os.environ``."""
+    return env_flag(get_config_store().current_or_none(), key, default=default)
 
 
 def current_env_or_none(key: str) -> str | None:
@@ -157,6 +170,42 @@ def current_env_or_none(key: str) -> str | None:
     if cfg is not None:
         return cfg.env_values.get(key)
     return os.environ.get(key)
+
+
+def context_window_tokens(cfg: RuntimeConfig | None = None, default: int = 200_000) -> int:
+    """Effective ``MODEL_CONTEXT_WINDOW`` from a pinned snapshot or process env."""
+    raw = env_value(cfg, "MODEL_CONTEXT_WINDOW", str(default)).strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("invalid MODEL_CONTEXT_WINDOW %s", raw)
+        return default
+
+
+def overlay_env_values(updates: Mapping[str, str]) -> None:
+    """Merge ``updates`` into the current snapshot without bumping revision.
+
+    Used by ``AgentLayout.export_environment`` so layout-resolved paths
+    (``SKILLS_PATH``, ``AGENT_MD``, ``DB_URL``, …) are visible to
+    ``current_env`` after bootstrap. No-op when the store is empty.
+    """
+    store = get_config_store()
+    cfg = store.current_or_none()
+    if cfg is None:
+        return
+    merged = dict(cfg.env_values)
+    changed = False
+    for key, value in updates.items():
+        if merged.get(key) != value:
+            merged[key] = value
+            changed = True
+    if not changed:
+        return
+    store._set(
+        replace(cfg, env_values=merged),
+        config_path=store._config_path,
+        agent_root=store._agent_root,
+    )
 
 
 def pinned_env_names() -> frozenset[str]:
@@ -304,10 +353,14 @@ __all__ = [
     "RuntimeConfig",
     "build_runtime_config",
     "current_env",
+    "current_env_flag",
     "current_env_or_none",
+    "context_window_tokens",
+    "env_flag",
     "env_value",
     "get_config_store",
     "load_into_store",
+    "overlay_env_values",
     "pinned_env_names",
     "reset_snapshot_state_for_tests",
 ]
