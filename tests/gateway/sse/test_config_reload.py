@@ -23,6 +23,7 @@ from monkeybot.core.layout import AgentLayout
 from monkeybot.core.mcp.mcp_client import MCPCatalogApplyResult, MCPClient
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.inspector import CommandTierConfigError, CommandTierInspector
+from monkeybot.gateway.realtime.deps import RealtimeDependencies
 from monkeybot.gateway.sse.app import (
     _LIVE_SLICE_ATTRS,
     _RESTART_ONLY_ATTRS,
@@ -218,6 +219,83 @@ async def test_provider_rebuild_without_restart(
     assert report.error is None
     assert runtime.provider is not old
     assert isinstance(runtime.provider, ScriptedFakeProvider)
+
+
+@pytest.mark.asyncio
+async def test_reload_syncs_realtime_live_slices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    yaml_path = _boot_fake(
+        tmp_path,
+        monkeypatch,
+        "model:\n  provider: fake\n  temperature: 0.1\n",
+    )
+    runtime = GatewayRuntime()
+    runtime.build_provider(get_config_store().current())
+    runtime.inspectors = ["fresh-inspector"]  # type: ignore[list-item]
+    runtime.hook_manager = "fresh-hooks"  # type: ignore[assignment]
+
+    deps = RealtimeDependencies()
+    sentinel_storage = object()
+    deps.storage = sentinel_storage  # type: ignore[assignment]
+    deps.realtime_provider = object()  # type: ignore[assignment]
+    deps.inspectors = ["stale"]
+    deps.freeze()
+
+    rebuilt = object()
+    monkeypatch.setattr(
+        "monkeybot.gateway.realtime.deps.GeminiLiveProvider",
+        lambda *args, **kwargs: rebuilt,
+    )
+
+    app = _app_with_runtime(runtime)
+    app.state.realtime_deps = deps
+
+    yaml_path.write_text(
+        "model:\n  provider: fake\n  temperature: 0.9\n",
+        encoding="utf-8",
+    )
+    report = await run_config_reload(registry=SessionRegistry(), fastapi_app=app)
+    assert report.error is None
+    assert deps.inspectors == ["fresh-inspector"]
+    assert deps.hook_manager == "fresh-hooks"
+    assert deps.realtime_provider is rebuilt
+    assert deps.storage is sentinel_storage
+
+
+@pytest.mark.asyncio
+async def test_failed_apply_does_not_sync_realtime_deps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    allow = tmp_path / "monkeybot_config" / "command_allowlist.yaml"
+    _write_allowlist(allow)
+    yaml_path = _boot_fake(
+        tmp_path,
+        monkeypatch,
+        "model:\n  provider: fake\n  temperature: 0.1\n",
+    )
+    runtime = GatewayRuntime()
+    runtime.build_provider(get_config_store().current())
+    runtime.build_inspectors(AgentLayout.from_environment(), get_config_store().current())
+
+    deps = RealtimeDependencies()
+    old_provider = object()
+    deps.realtime_provider = old_provider  # type: ignore[assignment]
+    deps.inspectors = ["stale"]
+    deps.freeze()
+
+    app = _app_with_runtime(runtime)
+    app.state.realtime_deps = deps
+
+    allow.write_text("not: [valid: yaml", encoding="utf-8")
+    yaml_path.write_text(
+        "model:\n  provider: fake\n  temperature: 0.9\n",
+        encoding="utf-8",
+    )
+    report = await run_config_reload(registry=SessionRegistry(), fastapi_app=app)
+    assert report.error is not None
+    assert deps.inspectors == ["stale"]
+    assert deps.realtime_provider is old_provider
 
 
 @pytest.mark.asyncio

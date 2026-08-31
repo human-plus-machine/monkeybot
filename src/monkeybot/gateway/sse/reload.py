@@ -233,6 +233,22 @@ def _gateway_runtime(fastapi_app: Any | None) -> Any | None:
     return getattr(getattr(fastapi_app, "state", None), "gateway_runtime", None)
 
 
+def _sync_realtime_live_slices(fastapi_app: Any | None, runtime: Any) -> None:
+    """Copy SSE live slices into RealtimeDependencies after a successful reload.
+
+    SSE-only processes have no ``realtime_deps`` and are skipped. In-flight
+    WebSocket sessions keep the provider they opened with; the next connect
+    rebuilds from the committed snapshot.
+    """
+    if fastapi_app is None:
+        return
+    deps = getattr(getattr(fastapi_app, "state", None), "realtime_deps", None)
+    sync = getattr(deps, "sync_live_slices", None)
+    if not callable(sync):
+        return
+    sync(runtime)
+
+
 def _export_hot_paths(cfg: RuntimeConfig) -> None:
     """Push unpinned HOT path values into process env for subprocess transport."""
     pins = pinned_env_names()
@@ -296,6 +312,8 @@ async def run_config_reload(
         store = get_config_store()
         prev_pins: dict[str, tuple[str | None, str | None]] | None = None
         pins_committed = False
+        runtime: Any | None = None
+        needs_apply = False
         try:
             if store.current_or_none() is None:
                 load_into_store()
@@ -363,6 +381,8 @@ async def run_config_reload(
             if prev_pins is not None and not pins_committed:
                 restore_reload_pins(prev_pins)
         _export_hot_paths(cfg)
+        if runtime is not None and needs_apply:
+            _sync_realtime_live_slices(fastapi_app, runtime)
         report = _response_from_diff(cfg, diff, applied=applied, mcp=mcp_result, error=error)
         await _publish_reloaded(registry, report)
         _log_reload(report, noop=False)
