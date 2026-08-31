@@ -231,12 +231,15 @@ def get_provider_config(
         )
     ollama_mode = _OLLAMA_MODES.get(provider_key)
     if ollama_mode is not None:
+        keep_alive, num_ctx = ollama_options_from_config()
         return ProviderConfig(
             OllamaProvider(
                 mode=ollama_mode,
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
                 thinking_budget=thinking_budget,
+                keep_alive=keep_alive,
+                num_ctx=num_ctx,
             ),
             resolved_model,
         )
@@ -441,6 +444,42 @@ def _bool_config_flag(
     if isinstance(raw, bool):
         return raw
     raise ConfigError(f"{label} must be true or false, got {raw!r}")
+
+
+def ollama_options_from_config(config_path: str | None = None) -> tuple[str | None, int | None]:
+    """``model.keep_alive`` and ``model.num_ctx`` from monkeybot.yaml only (not env).
+
+    ``keep_alive`` is ``None`` when absent (provider default ``24h``). Present
+    values are stripped strings (including ``"0"`` or empty to omit the request
+    field). ``num_ctx`` is ``None`` when absent and must be a positive int when
+    set. Never mapped from ``model.context_window``.
+    """
+    _, doc = load_monkeybot_yaml_dict(config_path)
+    model = doc.get("model")
+    if not isinstance(model, dict):
+        return None, None
+
+    raw_keep_alive = model.get("keep_alive")
+    keep_alive: str | None
+    if raw_keep_alive is None:
+        keep_alive = None
+    elif isinstance(raw_keep_alive, bool):
+        raise ConfigError(f"model.keep_alive must be a duration string, got {raw_keep_alive!r}")
+    else:
+        keep_alive = str(raw_keep_alive).strip()
+
+    raw_num_ctx = model.get("num_ctx")
+    num_ctx: int | None
+    if raw_num_ctx is None:
+        num_ctx = None
+    elif isinstance(raw_num_ctx, bool) or not isinstance(raw_num_ctx, int):
+        raise ConfigError(f"model.num_ctx must be a positive integer, got {raw_num_ctx!r}")
+    elif raw_num_ctx < 1:
+        raise ConfigError(f"model.num_ctx must be a positive integer, got {raw_num_ctx!r}")
+    else:
+        num_ctx = raw_num_ctx
+
+    return keep_alive, num_ctx
 
 
 def auto_schema_enabled_from_config(config_path: str | None = None) -> bool:

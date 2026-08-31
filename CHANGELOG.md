@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Local Ollama prefix-cache knobs: `ollama-local` sends `keep_alive` (default 24h, `model.keep_alive`) and optional pinned `num_ctx` (`model.num_ctx`) via OpenAI-compat `extra_body`. YAML-only — not mapped from the runtime env. `model.context_window` is never mapped to `num_ctx`. `doctor` warns on `*-mlx` tags, default thinking on known reasoning tags, and huge `num_ctx`, and fails on unparseable/`<1` `num_ctx`. See `docs/ollama-local.md` and `examples/ollama/PrefixStable.Modelfile`.
+
 ### Fixed
 
 - Subagent timeout/cancel now walks and kills the full process tree (including nested `run_command` sessions that use their own `start_new_session` process groups), not only the subagent leader's session. `process_group_id` returns `None` when the PID is gone instead of treating a recycled PID as a process group. The tree walk's non-`/proc` fallback (macOS) now uses `pgrep -P` instead of an invalid BSD `ps -P` invocation that silently returned no children. `stop_subagent_process` `killpg`s the spawn-time `pgid` even after the leader has been reaped, and skips the tree walk in that case so a recycled leader PID cannot be used as a `killpg` target.

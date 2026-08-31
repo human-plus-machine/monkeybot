@@ -33,12 +33,15 @@ from monkeybot.core.config.runtime_env import (
     warn_retired_curation_keys,
     warn_retired_tools_keys,
 )
+from monkeybot.core.config.settings import ollama_options_from_config
 from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES
 
 
 class TestEnvMap:
     def test_model_provider_maps(self) -> None:
         assert ENV_MAP[("model", "provider")] == "MODEL_PROVIDER"
+        assert ("model", "keep_alive") not in ENV_MAP
+        assert ("model", "num_ctx") not in ENV_MAP
 
     def test_sandbox_keys_in_env_map(self) -> None:
         assert ENV_MAP[("sandbox", "enabled")] == "SANDBOX_ENABLED"
@@ -458,6 +461,64 @@ class TestAutoSchemaConfig:
 
     def test_not_mapped_to_env(self) -> None:
         assert ("paths", "auto_schema") not in ENV_MAP
+
+
+class TestOllamaOptionsConfig:
+    def test_defaults_none_when_missing(self) -> None:
+        assert ollama_options_from_config("/nonexistent/monkeybot.yaml") == (None, None)
+
+    def test_reads_keep_alive_from_yaml(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("model:\n  keep_alive: 60m\n", encoding="utf-8")
+        assert ollama_options_from_config(str(config_path)) == ("60m", None)
+
+    def test_keep_alive_zero_omits(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text('model:\n  keep_alive: "0"\n', encoding="utf-8")
+        assert ollama_options_from_config(str(config_path)) == ("0", None)
+
+    def test_keep_alive_empty_is_not_normalized_to_zero(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text('model:\n  keep_alive: ""\n', encoding="utf-8")
+        assert ollama_options_from_config(str(config_path)) == ("", None)
+
+    def test_keep_alive_rejects_bool(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("model:\n  keep_alive: false\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="duration string"):
+            ollama_options_from_config(str(config_path))
+
+    def test_reads_num_ctx_from_yaml(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("model:\n  num_ctx: 8192\n", encoding="utf-8")
+        assert ollama_options_from_config(str(config_path)) == (None, 8192)
+
+    def test_reads_both_from_yaml(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("model:\n  keep_alive: 24h\n  num_ctx: 8192\n", encoding="utf-8")
+        assert ollama_options_from_config(str(config_path)) == ("24h", 8192)
+
+    def test_num_ctx_rejects_non_positive(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("model:\n  num_ctx: 0\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="positive integer"):
+            ollama_options_from_config(str(config_path))
+
+    def test_num_ctx_rejects_non_integer(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("model:\n  num_ctx: nope\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="positive integer"):
+            ollama_options_from_config(str(config_path))
+
+    def test_num_ctx_rejects_float(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("model:\n  num_ctx: 8192.7\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="positive integer"):
+            ollama_options_from_config(str(config_path))
+
+    def test_not_mapped_to_env(self) -> None:
+        assert ("model", "keep_alive") not in ENV_MAP
+        assert ("model", "num_ctx") not in ENV_MAP
 
 
 class TestReadDefaultLinesFixed:

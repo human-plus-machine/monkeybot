@@ -41,7 +41,9 @@ Validate check ids: `paths.agent_md.exists`, `paths.skills_path.exists`, `paths.
 | `temperature` | `0.7` | Lower for deterministic output, higher for creative |
 | `max_tokens` | `60000` | Cap per-response length |
 | `thinking_budget` | `-1` | Gemini: `-1` model default, `0` off, `N` token budget. Ollama reasoning models: `-1` server default, `0` off (`reasoning_effort: none`) |
-| `context_window` | `1000000` | Summarization trigger (tokens); also drives soft-spill / `read_file` char budgets |
+| `context_window` | `1000000` | Summarization trigger (tokens); also drives soft-spill / `read_file` char budgets. **Not** Ollama `num_ctx` |
+| `keep_alive` | `24h` (ollama-local only) | How long local Ollama keeps the model (and KV prefix cache) loaded. YAML only. Set `"0"` to omit. See `docs/ollama-local.md` |
+| `num_ctx` | (unset) | Optional pinned Ollama `num_ctx`. YAML only. Omit = server default. Do not copy `context_window` |
 | `max_turns` | `1000` | Hard cap on turns per run |
 | `summarization_model` | (main model) | Cheaper model for history summarization (env `CONTEXT_SUMMARIZATION_MODEL`) |
 
