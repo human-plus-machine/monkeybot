@@ -194,12 +194,18 @@ def _add_layout_checks(report: CommandReport, layout: AgentLayout) -> None:
 
 _OLLAMA_LOCAL_DOCS = "docs/ollama-local.md"
 _OLLAMA_NUM_CTX_LARGE = 32_768
+_OLLAMA_REASONING_TAGS = ("qwen3", "gemma4", "gemma-4", "deepseek-r1", "qwq", "magistral")
 
 
 def _is_local_ollama_provider(provider: str) -> bool:
     """True for ollama-local and legacy ``ollama`` (not ollama-cloud)."""
     key = provider.strip().lower().replace("_", "-")
     return key in {"ollama-local", "ollama"}
+
+
+def _looks_like_reasoning_model(model_name: str) -> bool:
+    name = model_name.lower()
+    return any(tag in name for tag in _OLLAMA_REASONING_TAGS)
 
 
 def _parse_int(raw: object) -> int | None:
@@ -211,6 +217,17 @@ def _parse_int(raw: object) -> int | None:
         return None
 
 
+def _strict_positive_int(raw: object) -> tuple[int | None, bool]:
+    """Return ``(value, invalid)``. Unset is ``(None, False)``; garbage or ``<1`` is invalid."""
+    if raw is None or raw == "":
+        return None, False
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None, True
+    if raw < 1:
+        return None, True
+    return raw, False
+
+
 def _add_ollama_local_checks(
     report: CommandReport,
     *,
@@ -219,7 +236,7 @@ def _add_ollama_local_checks(
     thinking_budget: object,
     num_ctx: object,
 ) -> None:
-    """Warn on local-Ollama prefix-cache traps. Always emit the three check ids."""
+    """Warn on local-Ollama prefix-cache traps. Always emit the four check ids."""
     local = _is_local_ollama_provider(provider)
     mlx = "-mlx" in model_name.lower()
     check(
@@ -245,6 +262,7 @@ def _add_ollama_local_checks(
     budget = _parse_int(thinking_budget)
     if budget is None:
         budget = -1
+    reasoning = _looks_like_reasoning_model(model_name)
     thinking_on_default = budget == -1
     check(
         report,
@@ -252,7 +270,7 @@ def _add_ollama_local_checks(
         category="provider",
         severity="warning",
         passed=not thinking_on_default,
-        skip=not local,
+        skip=not local or not reasoning,
         message=(
             "thinking_budget is -1 (server default); reasoning models generate "
             "thinking tokens before the first visible reply"
@@ -268,7 +286,28 @@ def _add_ollama_local_checks(
         ),
         docs=_OLLAMA_LOCAL_DOCS,
     )
-    ctx = _parse_int(num_ctx)
+    ctx, ctx_invalid = _strict_positive_int(num_ctx)
+    check(
+        report,
+        id="ollama.local.num_ctx_invalid",
+        category="provider",
+        severity="error",
+        passed=not ctx_invalid,
+        skip=not local or (ctx is None and not ctx_invalid),
+        message=(
+            f"num_ctx must be a positive integer, got {num_ctx!r}"
+            if ctx_invalid
+            else (f"num_ctx is {ctx}" if ctx is not None else "num_ctx is unset")
+        ),
+        field="model.num_ctx",
+        value=num_ctx,
+        remediation=(
+            f"Set a positive integer num_ctx (e.g. 8192), or omit it. See {_OLLAMA_LOCAL_DOCS}."
+            if ctx_invalid
+            else None
+        ),
+        docs=_OLLAMA_LOCAL_DOCS,
+    )
     large = ctx is not None and ctx > _OLLAMA_NUM_CTX_LARGE
     check(
         report,
@@ -276,7 +315,7 @@ def _add_ollama_local_checks(
         category="provider",
         severity="warning",
         passed=not large,
-        skip=not local or ctx is None,
+        skip=not local or ctx is None or ctx_invalid,
         message=(
             f"num_ctx {ctx} is large for a local runner; prefill will be slow"
             if large

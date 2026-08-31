@@ -15,9 +15,9 @@ For `model.provider: ollama-local` (and legacy `ollama` when the host is local):
 
 Cloud mode (`ollama-cloud`) sends neither. These keys are YAML-only — they are not mapped from the runtime env.
 
-`keep_alive: "0"` (or `"false"` / `"off"` / `"none"`) omits the field.
+`keep_alive: "0"` (or empty) omits the field.
 
-These go out as OpenAI-compat `extra_body`: top-level `keep_alive` for native-compat proxies, and `options.keep_alive` / `options.num_ctx` for current Ollama `/v1`. If an older Ollama build ignores `/v1` `keep_alive`, set the **server** env `OLLAMA_KEEP_ALIVE=24h` on `ollama serve` as well. That is an Ollama daemon setting, not a monkeybot runtime env.
+These go out as OpenAI-compat `extra_body`: top-level `keep_alive`, and `options.num_ctx` when pinned. If an older Ollama build ignores `/v1` `keep_alive`, set the **server** env `OLLAMA_KEEP_ALIVE=24h` on `ollama serve` as well. That is an Ollama daemon setting, not a monkeybot runtime env.
 
 ## `context_window` is not `num_ctx`
 
@@ -42,8 +42,8 @@ The llama.cpp runner reuses prefixes between agent steps. MLX packs (`*-mlx` tag
 
 ## Thinking delay
 
-`thinking_budget: -1` (default) leaves Ollama thinking on for models that support it (Gemma 4, Qwen3, …). That generates reasoning tokens **after** prefill and **before** the first visible reply. Set `thinking_budget: 0` to send `reasoning_effort: none`.
+`thinking_budget: -1` (default) leaves Ollama thinking on for models that support it (Gemma 4, Qwen3, …). That generates reasoning tokens **after** prefill and **before** the first visible reply. Set `thinking_budget: 0` to send `reasoning_effort: none`. `monkeybot doctor` only warns about the default on known reasoning tags.
 
 ## Expected cache misses
 
-`enable_mcp` adding tools changes the tools array; that is a new prefix. Compaction / a new context epoch also starts a fresh prefix. `doctor` check ids: `ollama.local.mlx_runner`, `ollama.local.thinking_default`, `ollama.local.num_ctx_large`.
+`enable_mcp` adding tools changes the tools array; that is a new prefix. Compaction / a new context epoch also starts a fresh prefix. `doctor` check ids: `ollama.local.mlx_runner`, `ollama.local.thinking_default`, `ollama.local.num_ctx_invalid`, `ollama.local.num_ctx_large`.

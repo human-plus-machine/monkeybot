@@ -257,8 +257,7 @@ async def test_local_stream_sends_keep_alive_24h(monkeypatch: pytest.MonkeyPatch
     _ = [ev async for ev in provider.stream([], [], model="llama3.1")]
     extra = captured[0]["extra_body"]
     assert extra["keep_alive"] == "24h"
-    assert extra["options"]["keep_alive"] == "24h"
-    assert "num_ctx" not in extra["options"]
+    assert "options" not in extra
 
 
 @pytest.mark.asyncio
@@ -268,7 +267,7 @@ async def test_local_stream_keep_alive_override(monkeypatch: pytest.MonkeyPatch)
     _ = [ev async for ev in provider.stream([], [], model="llama3.1")]
     extra = captured[0]["extra_body"]
     assert extra["keep_alive"] == "60m"
-    assert extra["options"]["keep_alive"] == "60m"
+    assert "options" not in extra
 
 
 @pytest.mark.asyncio
@@ -277,6 +276,16 @@ async def test_local_stream_omits_keep_alive_when_disabled(
 ) -> None:
     captured = _capture_stream(monkeypatch)
     provider = OllamaProvider(mode="local", keep_alive="0")
+    _ = [ev async for ev in provider.stream([], [], model="llama3.1")]
+    assert not captured[0].get("extra_body")
+
+
+@pytest.mark.asyncio
+async def test_local_stream_omits_keep_alive_when_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _capture_stream(monkeypatch)
+    provider = OllamaProvider(mode="local", keep_alive="")
     _ = [ev async for ev in provider.stream([], [], model="llama3.1")]
     assert not captured[0].get("extra_body")
 
@@ -309,12 +318,10 @@ async def test_local_stream_pins_num_ctx_stably(monkeypatch: pytest.MonkeyPatch)
     _ = [ev async for ev in provider.stream([], [], model="llama3.1")]
     _ = [ev async for ev in provider.stream([], [], model="llama3.1")]
     assert len(captured) == 2
-    assert captured[0]["extra_body"]["options"]["num_ctx"] == 8192
+    extra = captured[0]["extra_body"]
+    assert extra["keep_alive"] == "24h"
+    assert extra["options"] == {"num_ctx": 8192}
     assert captured[1]["extra_body"]["options"]["num_ctx"] == 8192
-    assert (
-        captured[0]["extra_body"]["options"]["num_ctx"]
-        == captured[1]["extra_body"]["options"]["num_ctx"]
-    )
 
 
 @pytest.mark.asyncio
@@ -326,4 +333,4 @@ async def test_local_stream_ignores_env_knobs(monkeypatch: pytest.MonkeyPatch) -
     _ = [ev async for ev in provider.stream([], [], model="llama3.1")]
     extra = captured[0]["extra_body"]
     assert extra["keep_alive"] == "24h"
-    assert "num_ctx" not in extra["options"]
+    assert "options" not in extra

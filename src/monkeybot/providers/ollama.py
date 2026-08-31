@@ -31,8 +31,8 @@ Configuration (environment variables or ``monkeybot.yaml``):
   ``reasoning_effort: none``, ``N > 0`` = on (no token budget on Ollama).
 - ``model.keep_alive`` (YAML only) — local only. How long Ollama keeps the model
   (and its KV prefix cache) loaded after a request. Default ``24h``. Set ``"0"``
-  to omit the field. Cloud mode never sends it. Distinct from the *server*
-  env ``OLLAMA_KEEP_ALIVE``.
+  (or empty) to omit the field. Cloud mode never sends it. Distinct from the
+  *server* env ``OLLAMA_KEEP_ALIVE``.
 - ``model.num_ctx`` (YAML only) — local only. Optional pinned ``num_ctx``.
   Omitted = Ollama Modelfile / server default. **Not** ``model.context_window``
   (that drives summarization/spill). Changing this between requests reloads
@@ -70,7 +70,7 @@ _DEFAULT_LOCAL_URL = "http://localhost:11434"
 _DEFAULT_CLOUD_URL = "https://ollama.com"
 _DUMMY_API_KEY = "ollama"
 _DEFAULT_LOCAL_KEEP_ALIVE = "24h"
-_DISABLE_KEEP_ALIVE = frozenset({"", "0", "false", "off", "none"})
+_DISABLE_KEEP_ALIVE = frozenset({"", "0"})
 _log = logging.getLogger(__name__)
 
 
@@ -284,14 +284,10 @@ class OllamaProvider:
         extra_body: dict[str, Any] | None = None
         if self._keep_alive is not None or self._num_ctx is not None:
             extra_body = {}
-            options: dict[str, Any] = {}
             if self._keep_alive is not None:
                 extra_body["keep_alive"] = self._keep_alive
-                options["keep_alive"] = self._keep_alive
             if self._num_ctx is not None:
-                options["num_ctx"] = self._num_ctx
-            if options:
-                extra_body["options"] = options
+                extra_body["options"] = {"num_ctx": self._num_ctx}
         async for event in stream_chat_completions_with_tool_fallback(
             base_url=self._resolve_base_url(model),
             api_key=self._api_key,

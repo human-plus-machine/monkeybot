@@ -477,6 +477,11 @@ class TestOllamaOptionsConfig:
         config_path.write_text('model:\n  keep_alive: "0"\n', encoding="utf-8")
         assert ollama_options_from_config(str(config_path)) == ("0", None)
 
+    def test_keep_alive_empty_is_not_normalized_to_zero(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text('model:\n  keep_alive: ""\n', encoding="utf-8")
+        assert ollama_options_from_config(str(config_path)) == ("", None)
+
     def test_keep_alive_rejects_bool(self, tmp_path: Path) -> None:
         config_path = tmp_path / "monkeybot.yaml"
         config_path.write_text("model:\n  keep_alive: false\n", encoding="utf-8")
@@ -502,6 +507,12 @@ class TestOllamaOptionsConfig:
     def test_num_ctx_rejects_non_integer(self, tmp_path: Path) -> None:
         config_path = tmp_path / "monkeybot.yaml"
         config_path.write_text("model:\n  num_ctx: nope\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="positive integer"):
+            ollama_options_from_config(str(config_path))
+
+    def test_num_ctx_rejects_float(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("model:\n  num_ctx: 8192.7\n", encoding="utf-8")
         with pytest.raises(ConfigError, match="positive integer"):
             ollama_options_from_config(str(config_path))
 

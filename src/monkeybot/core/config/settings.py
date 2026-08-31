@@ -450,9 +450,9 @@ def ollama_options_from_config(config_path: str | None = None) -> tuple[str | No
     """``model.keep_alive`` and ``model.num_ctx`` from monkeybot.yaml only (not env).
 
     ``keep_alive`` is ``None`` when absent (provider default ``24h``). Present
-    values are stripped strings (including ``"0"`` to omit the request field).
-    ``num_ctx`` is ``None`` when absent and must be a positive int when set.
-    Never mapped from ``model.context_window``.
+    values are stripped strings (including ``"0"`` or empty to omit the request
+    field). ``num_ctx`` is ``None`` when absent and must be a positive int when
+    set. Never mapped from ``model.context_window``.
     """
     _, doc = load_monkeybot_yaml_dict(config_path)
     model = doc.get("model")
@@ -466,27 +466,18 @@ def ollama_options_from_config(config_path: str | None = None) -> tuple[str | No
     elif isinstance(raw_keep_alive, bool):
         raise ConfigError(f"model.keep_alive must be a duration string, got {raw_keep_alive!r}")
     else:
-        s = str(raw_keep_alive).strip()
-        keep_alive = s if s else "0"
+        keep_alive = str(raw_keep_alive).strip()
 
     raw_num_ctx = model.get("num_ctx")
     num_ctx: int | None
     if raw_num_ctx is None:
         num_ctx = None
-    elif isinstance(raw_num_ctx, bool) or (
-        isinstance(raw_num_ctx, str) and not raw_num_ctx.strip()
-    ):
+    elif isinstance(raw_num_ctx, bool) or not isinstance(raw_num_ctx, int):
+        raise ConfigError(f"model.num_ctx must be a positive integer, got {raw_num_ctx!r}")
+    elif raw_num_ctx < 1:
         raise ConfigError(f"model.num_ctx must be a positive integer, got {raw_num_ctx!r}")
     else:
-        try:
-            n = int(raw_num_ctx)
-        except (TypeError, ValueError) as exc:
-            raise ConfigError(
-                f"model.num_ctx must be a positive integer, got {raw_num_ctx!r}"
-            ) from exc
-        if n < 1:
-            raise ConfigError(f"model.num_ctx must be a positive integer, got {raw_num_ctx!r}")
-        num_ctx = n
+        num_ctx = raw_num_ctx
 
     return keep_alive, num_ctx
 
