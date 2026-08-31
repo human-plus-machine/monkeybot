@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Sequence
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.store import AttachmentStore
+from monkeybot.core.config.snapshot import current_env
 from monkeybot.core.context import TurnContext
 from monkeybot.core.context.epoch import ContextEpochTracker, fingerprint_text
 from monkeybot.core.llm.provider import (
@@ -37,7 +37,7 @@ from .loop_messages import (
 def _effective_max_turns(max_turns: int | None) -> int:
     if max_turns is not None:
         return max_turns
-    return int(os.getenv("MAX_TURNS", "1000"))
+    return int(current_env("MAX_TURNS", "1000"))
 
 
 def _usage_to_totals(u: Usage) -> UsageTotals:
@@ -73,7 +73,7 @@ def _stream_thinking_budget(
     """Per-call thinking budget override; None keeps the provider default."""
     if provider.name not in _THINKING_BUDGET_PROVIDERS:
         return None
-    raw = os.environ.get("MONKEYBOT_RESUME_THINKING_BUDGET", "").strip()
+    raw = current_env("MONKEYBOT_RESUME_THINKING_BUDGET", "").strip()
     if not raw:
         return None
     try:

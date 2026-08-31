@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
-import os
 from collections.abc import AsyncIterator, Callable, Sequence
 from typing import cast
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.store import AttachmentStore
+from monkeybot.core.config.snapshot import current_env
 from monkeybot.core.context import (
     TurnContext,
     refresh_tools_after_loops_change,
@@ -284,7 +284,7 @@ async def _resolve_inspector_decision(
                 if payload.get("_timeout"):
                     outcome.allowed = False
                     to = int(
-                        float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
+                        float(current_env("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
                     )
                     outcome.denial_message = f"user did not respond within {to}s"
                     return

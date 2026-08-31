@@ -5,8 +5,16 @@ unset ``os.environ`` keys for subprocess transport. In-process readers use
 :func:`current_env` / :func:`env_value`. Layering happens at build time, never
 import time: code defaults, merged YAML, then pinned process env.
 
+Once a snapshot is loaded (the gateway always has one), ``env_value`` does
+**not** fall through to ``os.environ``. ``_effective_env`` only contains keys
+present in YAML or pinned at first build, plus layout paths overlaid by
+``AgentLayout.export_environment``. An ENV_MAP key exported into process env
+*after* bootstrap is invisible to in-process readers. Empty store (tests /
+pre-apply) still reads ``os.environ``.
+
 Section dataclasses (``ModelConfig``, ``PathsConfig``, …) and content-file
-digests land in later PRs that have in-process readers / reload tiers.
+digests land with reload tiers. In-process readers use ``current_env`` /
+``env_flag`` against ``env_values``.
 """
 
 from __future__ import annotations
@@ -15,9 +23,10 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -50,6 +59,11 @@ from monkeybot.core.layout import (
     resolve_sqlite_url,
 )
 
+# This module imports settings + layout at load time. Those modules (and
+# settings' provider imports: gemini, ollama, sampling, vertex_claude,
+# llm.provider) plus layout → memory → sqlite must import current_env /
+# overlay_env_values lazily.
+
 logger = logging.getLogger(__name__)
 
 _PATH_KEYS = frozenset(
@@ -64,7 +78,12 @@ _PATH_KEYS = frozenset(
     }
 )
 
-_PINNED_EXTRA_KEYS = ("GOOGLE_CLOUD_PROJECT", "WORKSPACE_ROOT")
+_PINNED_EXTRA_KEYS = (
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
+    "GCP_PROJECT_ID",
+    "WORKSPACE_ROOT",
+)
 
 _PINNED_ENV: dict[str, str] | None = None
 
@@ -72,7 +91,7 @@ _PINNED_ENV: dict[str, str] | None = None
 @dataclass(frozen=True, slots=True)
 class RuntimeConfig:
     revision: int
-    digest: str
+    digest: str  # yaml + pins + overlaid env_values (not yaml+pins alone)
     source_path: Path | None
     loaded_at: float
     realtime: RealtimeConfig
@@ -88,22 +107,25 @@ class RuntimeConfig:
 class ConfigStore:
     """Process-wide holder of the current ``RuntimeConfig`` pointer."""
 
-    __slots__ = ("_current", "_config_path", "_agent_root")
+    __slots__ = ("_current", "_config_path", "_agent_root", "_lock")
 
     def __init__(self) -> None:
         self._current: RuntimeConfig | None = None
         self._config_path: Path | None = None
         self._agent_root: Path | None = None
+        self._lock = threading.Lock()
 
     def current(self) -> RuntimeConfig:
-        cfg = self._current
+        with self._lock:
+            cfg = self._current
         if cfg is None:
             raise RuntimeError("RuntimeConfig has not been loaded")
         return cfg
 
     def current_or_none(self) -> RuntimeConfig | None:
         """Return the current snapshot, or ``None`` when apply has not run."""
-        return self._current
+        with self._lock:
+            return self._current
 
     def _set(
         self,
@@ -112,14 +134,38 @@ class ConfigStore:
         config_path: Path | None,
         agent_root: Path | None,
     ) -> None:
-        self._current = cfg
-        self._config_path = config_path
-        self._agent_root = agent_root
+        with self._lock:
+            self._current = cfg
+            self._config_path = config_path
+            self._agent_root = agent_root
+
+    def _overlay_env(self, updates: Mapping[str, str]) -> None:
+        """Merge ``updates`` into ``_current.env_values`` without bumping revision.
+
+        Recomputes digest under the same lock as ``_set``. No-op when the store
+        is empty or when ``updates`` would not change any value.
+        """
+        with self._lock:
+            cfg = self._current
+            if cfg is None:
+                return
+            merged = dict(cfg.env_values)
+            changed = False
+            for key, value in updates.items():
+                if merged.get(key) != value:
+                    merged[key] = value
+                    changed = True
+            if not changed:
+                return
+            self._current = replace(
+                cfg, env_values=merged, digest=_digest_with_env(cfg.digest, merged)
+            )
 
     def _reset(self) -> None:
-        self._current = None
-        self._config_path = None
-        self._agent_root = None
+        with self._lock:
+            self._current = None
+            self._config_path = None
+            self._agent_root = None
 
 
 _PROCESS_STORE = ConfigStore()
@@ -134,11 +180,9 @@ def env_value(cfg: RuntimeConfig | None, key: str, default: str = "") -> str:
     """Read one ENV_MAP key from a pinned snapshot, else ``os.environ``.
 
     When ``cfg`` is set, missing snapshot keys return ``default`` and do not
-    fall through to process env. An empty store (``cfg is None``) reads
-    ``os.environ``. Layout-resolved paths (``SKILLS_PATH``, ``AGENT_MD``, …)
-    are exported to ``os.environ`` *after* apply, so they are not in the
-    snapshot unless they were also in YAML or pinned env — read those from
-    process env or ``AgentLayout``, not from a snapshot key.
+    fall through to process env — including keys exported into ``os.environ``
+    after bootstrap. An empty store (``cfg is None``) reads ``os.environ``.
+    Layout-resolved paths land in ``env_values`` via ``overlay_env_values``.
     """
     if cfg is not None:
         val = cfg.env_values.get(key)
@@ -146,9 +190,22 @@ def env_value(cfg: RuntimeConfig | None, key: str, default: str = "") -> str:
     return os.environ.get(key, default)
 
 
+def env_flag(cfg: RuntimeConfig | None, key: str, *, default: bool) -> bool:
+    """Boolean env flag. Opt-out keys use ``default=True``; opt-in use ``default=False``."""
+    raw = env_value(cfg, key, "true" if default else "false").strip().lower()
+    if default:
+        return raw not in {"0", "false", "no", "off"}
+    return raw in {"1", "true", "yes", "on"}
+
+
 def current_env(key: str, default: str = "") -> str:
     """Read an ENV_MAP key from the process snapshot, else ``os.environ``."""
     return env_value(get_config_store().current_or_none(), key, default)
+
+
+def current_env_flag(key: str, *, default: bool) -> bool:
+    """Boolean ENV_MAP flag from the process snapshot, else ``os.environ``."""
+    return env_flag(get_config_store().current_or_none(), key, default=default)
 
 
 def current_env_or_none(key: str) -> str | None:
@@ -157,6 +214,36 @@ def current_env_or_none(key: str) -> str | None:
     if cfg is not None:
         return cfg.env_values.get(key)
     return os.environ.get(key)
+
+
+def context_window_tokens(cfg: RuntimeConfig | None = None, default: int = 200_000) -> int:
+    """Effective ``MODEL_CONTEXT_WINDOW`` from a pinned snapshot or process env.
+
+    ``cfg is None`` consults the process store (same as :func:`current_env`),
+    unlike :func:`env_value` where ``None`` means empty store / ``os.environ``.
+    """
+    if cfg is None:
+        cfg = get_config_store().current_or_none()
+    raw = env_value(cfg, "MODEL_CONTEXT_WINDOW", str(default)).strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("invalid MODEL_CONTEXT_WINDOW %s", raw)
+        return default
+
+
+def overlay_env_values(updates: Mapping[str, str]) -> None:
+    """Merge ``updates`` into the current snapshot without bumping revision.
+
+    Used by ``AgentLayout.export_environment`` so layout-resolved paths
+    (``SKILLS_PATH``, ``AGENT_MD``, ``DB_URL``, …) are visible to
+    ``current_env`` after bootstrap. No-op when the store is empty.
+
+    This completes the same revision rather than a YAML reload. Digest is
+    recomputed over the new ``env_values`` so a cache keyed on digest cannot
+    serve stale layout paths. Serialized under the store lock against ``_set``.
+    """
+    get_config_store()._overlay_env(updates)
 
 
 def pinned_env_names() -> frozenset[str]:
@@ -265,6 +352,9 @@ def _effective_env(
     for env_key in ENV_MAP.values():
         if env_key in pinned:
             out[env_key] = pinned[env_key]
+    for extra in _PINNED_EXTRA_KEYS:
+        if extra in pinned:
+            out[extra] = pinned[extra]
     return out
 
 
@@ -274,6 +364,13 @@ def _compute_digest(*, merged: Mapping[str, Any], pinned: Mapping[str, str]) -> 
         "pinned": {k: pinned[k] for k in sorted(pinned)},
     }
     blob = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _digest_with_env(base_digest: str, env_values: Mapping[str, str]) -> str:
+    """Fold ``env_values`` into a YAML+pins digest so overlay invalidates caches."""
+    payload = {"base": base_digest, "env": {k: env_values[k] for k in sorted(env_values)}}
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()
 
 
@@ -304,10 +401,14 @@ __all__ = [
     "RuntimeConfig",
     "build_runtime_config",
     "current_env",
+    "current_env_flag",
     "current_env_or_none",
+    "context_window_tokens",
+    "env_flag",
     "env_value",
     "get_config_store",
     "load_into_store",
+    "overlay_env_values",
     "pinned_env_names",
     "reset_snapshot_state_for_tests",
 ]

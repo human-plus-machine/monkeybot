@@ -28,6 +28,7 @@ from monkeybot.core.attachments.store import (
     AttachmentTooLargeError,
     UnsupportedAttachmentTypeError,
 )
+from monkeybot.core.config.snapshot import context_window_tokens
 from monkeybot.core.llm.usage import UsageGranularity
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.usage_buckets import coerce_granularity, validate_hour_bucket_window
@@ -386,11 +387,7 @@ class _StaticUsagePort:
         since: str | None,
     ) -> dict[str, Any]:
         _ = since
-        cap_raw = os.environ.get("MODEL_CONTEXT_WINDOW", "200000").strip()
-        try:
-            cw = max(1, int(cap_raw))
-        except ValueError:
-            cw = 200_000
+        cw = context_window_tokens()
         st = max(1, int(cw * SUMMARY_TRIGGER_RATIO))
         return {
             "session_id": session_id,

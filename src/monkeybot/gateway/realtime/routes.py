@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.config.realtime_config import RealtimeConfig
+from monkeybot.core.config.snapshot import context_window_tokens, current_env
 from monkeybot.core.context import TurnContext, build_context
 from monkeybot.core.layout import AgentLayout
 from monkeybot.core.llm.realtime_provider import (
@@ -93,16 +94,12 @@ logger = logging.getLogger("monkeybot.gateway.realtime.routes")
 
 
 def _env_context_window_tokens() -> int:
-    cap_raw = os.environ.get("MODEL_CONTEXT_WINDOW", "200000").strip()
-    try:
-        return max(1, int(cap_raw))
-    except ValueError:
-        return 200_000
+    return context_window_tokens()
 
 
 def _pending_response_timeout_sec() -> float:
     try:
-        return max(1.0, float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300")))
+        return max(1.0, float(current_env("PENDING_RESPONSE_TIMEOUT_SEC", "300")))
     except ValueError:
         return 300.0
 
@@ -145,7 +142,7 @@ async def _build_realtime_context(
         raise RuntimeError("MCP client is not initialized")
     workspace_root, skills_path = _resolved_workspace_paths()
     agent_path = AgentLayout.from_environment().agent_md_path
-    model = os.environ.get("MODEL_NAME", "gemini-2.5-flash")
+    model = current_env("MODEL_NAME", "gemini-2.5-flash")
     loops_available = deps.storage is not None
     loops_advertised = loops_available and deps.loops_registry.advertised
     return await build_context(
@@ -200,10 +197,8 @@ def _make_realtime_session_config(
     ctx: TurnContext,
     realtime_config: RealtimeConfig,
 ) -> RealtimeSessionConfig:
-    input_fmt_str = os.environ.get("MONKEYBOT_REALTIME_AUDIO_INPUT_FORMAT", "pcm_s16le_24khz_mono")
-    output_fmt_str = os.environ.get(
-        "MONKEYBOT_REALTIME_AUDIO_OUTPUT_FORMAT", "pcm_s16le_24khz_mono"
-    )
+    input_fmt_str = current_env("MONKEYBOT_REALTIME_AUDIO_INPUT_FORMAT", "pcm_s16le_24khz_mono")
+    output_fmt_str = current_env("MONKEYBOT_REALTIME_AUDIO_OUTPUT_FORMAT", "pcm_s16le_24khz_mono")
 
     def _parse(fmt: str) -> AudioFormat:
         parts = fmt.lower().split("_")

@@ -34,8 +34,11 @@ from monkeybot.core.config.settings import (
 from monkeybot.core.config.snapshot import (
     ConfigStore,
     RuntimeConfig,
+    context_window_tokens,
     current_env,
+    current_env_flag,
     current_env_or_none,
+    env_flag,
     env_value,
     get_config_store,
 )
@@ -64,8 +67,11 @@ __all__ = [
     "apply_monkeybot_runtime_env",
     "auto_schema_enabled_from_config",
     "get_config_store",
+    "context_window_tokens",
     "current_env",
+    "current_env_flag",
     "current_env_or_none",
+    "env_flag",
     "env_value",
     "get_provider_config",
     "get_subagent_configs",

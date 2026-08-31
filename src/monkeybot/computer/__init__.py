@@ -16,7 +16,6 @@ into that ruleset.
 
 from __future__ import annotations
 
-import os
 import sys
 
 from monkeybot.computer.approvals import Scope as AlwaysScope
@@ -31,6 +30,7 @@ from monkeybot.computer.tools import (
     ComputerOpenURLTool,
     ComputerTrashTool,
 )
+from monkeybot.core.config.snapshot import current_env_flag
 from monkeybot.core.context import CustomTool
 
 __all__ = [
@@ -87,8 +87,7 @@ def computer_tools_enabled_from_env() -> bool:
     Reads ``MONKEYBOT_COMPUTER_TOOLS`` (mapped from ``computer.enabled`` in
     monkeybot.yaml). Recognized on values: ``1``, ``true``, ``yes``, ``on``.
     """
-    raw = os.environ.get("MONKEYBOT_COMPUTER_TOOLS", "false").strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+    return current_env_flag("MONKEYBOT_COMPUTER_TOOLS", default=False)
 
 
 def should_enable_computer_tools() -> bool:

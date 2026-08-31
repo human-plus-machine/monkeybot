@@ -37,6 +37,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+from monkeybot.core.config.snapshot import current_env
 from monkeybot.core.tools.terminal import (
     ALLOWED_COMMANDS,
     ALLOWED_PATHS,
@@ -68,7 +69,7 @@ class SandboxConfig:
 
     @classmethod
     def from_env(cls) -> SandboxConfig:
-        raw_ttl = os.getenv("SANDBOX_TTL_SECONDS", "1800")
+        raw_ttl = current_env("SANDBOX_TTL_SECONDS", "1800")
         try:
             ttl = int(raw_ttl)
         except ValueError:
@@ -78,13 +79,13 @@ class SandboxConfig:
         api_key = os.getenv("SANDBOX_API_KEY") or os.getenv("SANDBOX_AUTH_TOKEN") or None
         proxy_raw = os.getenv("SANDBOX_USE_SERVER_PROXY", "true").strip().lower()
         use_server_proxy = proxy_raw not in ("0", "false", "no", "off")
-        shared_raw = os.getenv("SANDBOX_SHARED_FILESYSTEM", "true").strip().lower()
+        shared_raw = current_env("SANDBOX_SHARED_FILESYSTEM", "true").strip().lower()
         shared_filesystem = shared_raw not in ("0", "false", "no", "off")
         return cls(
-            enabled=os.getenv("SANDBOX_ENABLED", "false").lower() == "true",
-            server_url=os.getenv("SANDBOX_SERVER_URL", "http://localhost:8080"),
+            enabled=current_env("SANDBOX_ENABLED", "false").lower() == "true",
+            server_url=current_env("SANDBOX_SERVER_URL", "http://localhost:8080"),
             api_key=api_key,
-            image=os.getenv(
+            image=current_env(
                 "SANDBOX_IMAGE", "python:3.12"
             ),
             ttl_seconds=ttl,

@@ -6,7 +6,6 @@ import base64
 import binascii
 import json
 import logging
-import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -84,16 +83,18 @@ def _vertex_project_and_location(model_param: str) -> tuple[str, str]:
     endpoints like ``us-central1``; Vertex serves them from ``global`` unless you override
     ``VERTEX_AI_LOCATION`` / ``GOOGLE_CLOUD_LOCATION``.
     """
+    from monkeybot.core.config.snapshot import current_env
+
     project = (
-        os.environ.get("GCP_PROJECT_ID")
-        or os.environ.get("VERTEX_AI_PROJECT_ID")
-        or os.environ.get("GOOGLE_CLOUD_PROJECT")
+        current_env("GCP_PROJECT_ID")
+        or current_env("VERTEX_AI_PROJECT_ID")
+        or current_env("GOOGLE_CLOUD_PROJECT")
     )
     if not project or not str(project).strip():
         raise LLMError(
             "Set VERTEX_AI_PROJECT_ID, GCP_PROJECT_ID, or GOOGLE_CLOUD_PROJECT for Vertex Gemini."
         )
-    explicit = os.environ.get("VERTEX_AI_LOCATION") or os.environ.get("GOOGLE_CLOUD_LOCATION")
+    explicit = current_env("VERTEX_AI_LOCATION") or current_env("GOOGLE_CLOUD_LOCATION")
     if explicit and str(explicit).strip():
         return str(project).strip(), str(explicit).strip()
 
@@ -151,7 +152,9 @@ def _resolve_thinking_budget(
     elif configured is not None:
         thinking_budget = int(configured)
     else:
-        thinking_budget = int(os.environ.get("MODEL_THINKING_BUDGET", "-1"))
+        from monkeybot.core.config.snapshot import current_env
+
+        thinking_budget = int(current_env("MODEL_THINKING_BUDGET", "-1"))
     if _suppress_thinking_for_auxiliary_call(messages, tools):
         return _THINKING_DISABLED
     return thinking_budget

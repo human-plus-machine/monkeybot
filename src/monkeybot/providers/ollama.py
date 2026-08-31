@@ -156,7 +156,9 @@ def _resolve_thinking_budget(
         return override
     if configured is not None:
         return configured
-    return int(os.environ.get("MODEL_THINKING_BUDGET", "-1"))
+    from monkeybot.core.config.snapshot import current_env
+
+    return int(current_env("MODEL_THINKING_BUDGET", "-1"))
 
 
 class OllamaProvider:
@@ -193,11 +195,12 @@ class OllamaProvider:
         sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
-        self._thinking_budget = (
-            thinking_budget
-            if thinking_budget is not None
-            else int(os.environ.get("MODEL_THINKING_BUDGET", "-1"))
-        )
+        if thinking_budget is not None:
+            self._thinking_budget = thinking_budget
+        else:
+            from monkeybot.core.config.snapshot import current_env
+
+            self._thinking_budget = int(current_env("MODEL_THINKING_BUDGET", "-1"))
 
     def _resolve_base_url(self, model: str) -> str:
         """Return the OpenAI-compat base URL for ``model``.
