@@ -310,6 +310,16 @@ def _parse_subagent_entries(raw_entries: Any) -> list[SubagentConfig]:
     return configs
 
 
+def _persona_registry(entries: list[SubagentConfig]) -> dict[str, SubagentConfig]:
+    """Key personas by ``name``; raise :class:`ConfigError` on duplicates."""
+    registry: dict[str, SubagentConfig] = {}
+    for cfg in entries:
+        if cfg.name in registry:
+            raise ConfigError(f"Duplicate subagent name in monkeybot.yaml: {cfg.name!r}")
+        registry[cfg.name] = cfg
+    return registry
+
+
 def _subagents_section(doc: dict[str, Any]) -> dict[str, Any]:
     """Return the ``subagents:`` mapping, or empty dict when absent."""
     section = doc.get("subagents")
@@ -397,14 +407,21 @@ def get_subagent_configs(config_path: str | None = None) -> list[SubagentConfig]
     return _parse_subagent_entries(section.get("personas"))
 
 
-def get_subagent_registry(config_path: str | None = None) -> dict[str, SubagentConfig]:
-    """Named subagent personas keyed by ``name``; raises :class:`ConfigError` on duplicates."""
-    registry: dict[str, SubagentConfig] = {}
-    for cfg in get_subagent_configs(config_path):
-        if cfg.name in registry:
-            raise ConfigError(f"Duplicate subagent name in monkeybot.yaml: {cfg.name!r}")
-        registry[cfg.name] = cfg
-    return registry
+def get_subagent_registry(
+    config_path: str | None = None,
+    *,
+    config: RuntimeConfig | None = None,
+) -> dict[str, SubagentConfig]:
+    """Named subagent personas keyed by ``name``; raises :class:`ConfigError` on duplicates.
+
+    When ``config`` (a pinned ``RuntimeConfig`` snapshot) is given, its
+    ``subagents`` field is returned instead of re-reading the YAML file, so
+    ``GatewayRuntime.apply`` cannot pick up a third disk state written between
+    ``prepare_reload`` and ``apply``.
+    """
+    if config is not None:
+        return dict(config.subagents)
+    return _persona_registry(get_subagent_configs(config_path))
 
 
 def _bool_config_flag(

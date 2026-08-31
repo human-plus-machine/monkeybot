@@ -108,14 +108,15 @@ class MCPClientPort(Protocol):
         """Fetch a named MCP prompt (optional string arguments)."""
         ...
 
-    async def load_from_config(
-        self, path: Path, *, raise_on_error: bool = False
-    ) -> None:
+    async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         """Load mcp.json if present; no-op when path is missing (Story 5 semantics)."""
         ...
 
-    def set_env_overlay(self, env: Mapping[str, str] | None) -> None:
-        """Use a copied snapshot of env values when interpolating ``mcp.json`` ``${VAR}`` refs."""
+    def set_env_overlay(self, env: Mapping[str, str] | None) -> dict[str, str] | None:
+        """Use a copied snapshot of env values when interpolating ``mcp.json`` ``${VAR}`` refs.
+
+        Returns the previous overlay so callers can restore on failure.
+        """
         ...
 
     async def apply_catalog_diff(

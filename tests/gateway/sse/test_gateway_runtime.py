@@ -40,7 +40,7 @@ def _build(
     denied: str | None = None,
 ) -> GatewayRuntime:
     monkeypatch.setattr(
-        "monkeybot.gateway.sse.app.should_enable_computer_tools", lambda: False
+        "monkeybot.gateway.sse.app.should_enable_computer_tools", lambda _cfg=None: False
     )
     if denied is None:
         monkeypatch.delenv("MONKEYBOT_TOOL_DENIED_PATTERNS", raising=False)
