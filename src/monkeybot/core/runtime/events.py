@@ -57,6 +57,9 @@ class ToolCallStarted:
     args: dict[str, object] = field(default_factory=dict)
     parse_error: str | None = None
     call_id: str = ""
+    inspector_decision: str | None = None
+    resource: str | None = None
+    resolved_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +70,9 @@ class ToolCallResult:
     result: str = ""
     error: str | None = None
     call_id: str = ""
+    error_kind: str | None = None
+    ok: bool | None = None
+    duration_ms: int | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +115,7 @@ class ContextUsage:
     estimated_tokens: int = 0
     """Current preflight / post-tool / post-compaction prompt size for UI meters."""
     context_window_tokens: int = 0
+    inner_turn: int = 0
 
 
 @dataclass(frozen=True)
@@ -259,6 +266,7 @@ class SystemContextUpdated:
     request_id: str = ""
     epoch_id: int = 0
     changed_sources: list[str] = field(default_factory=list)
+    text: str = ""
 
 
 @dataclass(frozen=True)
@@ -624,6 +632,7 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             **base,
             "epoch_id": event.epoch_id,
             "changed_sources": list(event.changed_sources),
+            **({"text": event.text} if event.text else {}),
         }
     if isinstance(event, AssistantTextEnded):
         out = dict(base)
@@ -655,10 +664,22 @@ def event_to_json(event: AgentEvent) -> str:
             payload["parse_error"] = event.parse_error
         if event.call_id:
             payload["call_id"] = event.call_id
+        if event.inspector_decision:
+            payload["inspector_decision"] = event.inspector_decision
+        if event.resource:
+            payload["resource"] = event.resource
+        if event.resolved_path:
+            payload["resolved_path"] = event.resolved_path
     elif isinstance(event, ToolCallResult):
         payload = {**base, "tool": event.tool, "result": event.result, "error": event.error}
         if event.call_id:
             payload["call_id"] = event.call_id
+        if event.error_kind:
+            payload["error_kind"] = event.error_kind
+        if event.ok is not None:
+            payload["ok"] = event.ok
+        if event.duration_ms is not None:
+            payload["duration_ms"] = event.duration_ms
     elif isinstance(event, TurnComplete):
         u = event.usage
         payload = {
@@ -684,6 +705,8 @@ def event_to_json(event: AgentEvent) -> str:
             "estimated_tokens": event.estimated_tokens,
             "context_window_tokens": event.context_window_tokens,
         }
+        if isinstance(event, ContextUsage) and event.inner_turn:
+            payload["inner_turn"] = event.inner_turn
     elif isinstance(event, ContextSummarized):
         payload = {**base, "turns_summarized": event.turns_summarized}
     elif isinstance(event, SystemPromptSnapshot):
@@ -786,6 +809,17 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
             args=args,
             parse_error=parse_error,
             call_id=call_id,
+            inspector_decision=(
+                payload.get("inspector_decision")
+                if isinstance(payload.get("inspector_decision"), str)
+                else None
+            ),
+            resource=payload.get("resource") if isinstance(payload.get("resource"), str) else None,
+            resolved_path=(
+                payload.get("resolved_path")
+                if isinstance(payload.get("resolved_path"), str)
+                else None
+            ),
         )
     if t == "ToolCallResult":
         tool_raw = payload.get("tool", "")
@@ -802,7 +836,22 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
             raise EventDecodeError("ToolCallResult error must be a string or null")
         call_id_raw = payload.get("call_id", "")
         call_id = call_id_raw if isinstance(call_id_raw, str) else ""
-        return ToolCallResult(request_id=rid, tool=tool, result=result, error=err, call_id=call_id)
+        kind_raw = payload.get("error_kind")
+        error_kind = kind_raw if isinstance(kind_raw, str) else None
+        ok_raw = payload.get("ok")
+        ok = ok_raw if isinstance(ok_raw, bool) else None
+        dur_raw = payload.get("duration_ms")
+        duration_ms = int(dur_raw) if isinstance(dur_raw, (int, float)) and not isinstance(dur_raw, bool) else None
+        return ToolCallResult(
+            request_id=rid,
+            tool=tool,
+            result=result,
+            error=err,
+            call_id=call_id,
+            error_kind=error_kind,
+            ok=ok,
+            duration_ms=duration_ms,
+        )
     if t == "TurnComplete":
         usage = _usage_from_obj(payload.get("usage"))
         trace_id_raw = payload.get("trace_id")
@@ -827,7 +876,14 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         return ContextSummarized(request_id=rid, turns_summarized=ts)
     if t == "ContextUsage":
         et, cwt = _context_token_fields(payload)
-        return ContextUsage(request_id=rid, estimated_tokens=et, context_window_tokens=cwt)
+        it_raw = payload.get("inner_turn", 0)
+        inner_turn = int(it_raw) if isinstance(it_raw, (int, float)) else 0
+        return ContextUsage(
+            request_id=rid,
+            estimated_tokens=et,
+            context_window_tokens=cwt,
+            inner_turn=inner_turn,
+        )
     if t == "SystemPromptSnapshot":
         it_raw = payload.get("inner_turn", 0)
         inner_turn = int(it_raw) if isinstance(it_raw, (int, float)) else 0
@@ -988,7 +1044,14 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         eid = int(eid_raw) if isinstance(eid_raw, (int, float)) else 0
         src_raw = payload.get("changed_sources")
         changed = [str(s) for s in src_raw] if isinstance(src_raw, list) else []
-        return SystemContextUpdated(request_id=rid, epoch_id=eid, changed_sources=changed)
+        text_raw = payload.get("text", "")
+        text = text_raw if isinstance(text_raw, str) else ""
+        return SystemContextUpdated(
+            request_id=rid,
+            epoch_id=eid,
+            changed_sources=changed,
+            text=text,
+        )
     if t == "AssistantTextStarted":
         return AssistantTextStarted(request_id=rid)
     if t == "AssistantTextEnded":

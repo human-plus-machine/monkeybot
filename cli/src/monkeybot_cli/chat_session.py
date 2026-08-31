@@ -229,7 +229,7 @@ class ChatSessionController:
         self.usage = UsageStore()
         self.session_id: str | None = None
         self.stream_error = False
-        self.transcript_report_dir: str | None = None
+        self.transcript_dir: str | None = None
         self._client: httpx.AsyncClient | None = None
         self._event_queue: asyncio.Queue[str | None] = asyncio.Queue()
         self._stream_task: asyncio.Task[None] | None = None
@@ -924,9 +924,9 @@ class ChatSessionController:
                 resp = await self._client.delete(f"{self.base}/sessions/{self.session_id}")
                 if resp.status_code == 200:
                     data = resp.json()
-                    report = data.get("transcript_report_dir") if isinstance(data, dict) else None
+                    report = data.get("transcript_dir") if isinstance(data, dict) else None
                     if isinstance(report, str) and report.strip():
-                        self.transcript_report_dir = report.strip()
+                        self.transcript_dir = report.strip()
             except Exception:
                 logger.warning(
                     "session DELETE on close failed session_id=%s",

@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from collections.abc import AsyncIterator, Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -582,3 +583,74 @@ async def test_after_provider_response_fires_with_usage() -> None:
     assert seen[0].usage is not None
     assert "input_tokens" in seen[0].usage
     assert seen[0].tool_requests == []
+
+
+@pytest.mark.asyncio
+async def test_identical_tool_definition_list_does_not_set_tools_dirty(tmp_path: Path) -> None:
+    from monkeybot.core.persistence.transcript import TranscriptWriter
+
+    mgr = HookManager()
+
+    async def echo_tools(p: HookPayload) -> None:
+        assert p.tools is not None
+        p.tools = list(p.tools)
+
+    mgr.register(HookEvent.TOOL_DEFINITION, echo_tools)
+    writer = TranscriptWriter("sess-hook", workspace_root=tmp_path)
+    prov = CapturingProvider(
+        [
+            [ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}), Done()],
+            [TextDelta(text="ok"), Done()],
+        ]
+    )
+    async for _ in run(
+        "hi",
+        _ctx(),
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=5,
+        hook_manager=mgr,
+        transcript_writer=writer,
+    ):
+        pass
+
+    import json
+
+    lines = [json.loads(line) for line in writer.path.read_text(encoding="utf-8").splitlines()]
+    requests = [line for line in lines if line["type"] == "ProviderRequest"]
+    assert len(requests) == 2
+    assert "tools" in requests[0]
+    assert "tools" not in requests[1]
+
+
+def test_tools_dirty_reason_keeps_the_first_cause() -> None:
+    """A hook re-marking MCP-dirtied tools must not relabel the change as its own."""
+    from monkeybot.core.runtime.doom_loop import _DoomLoopTracker
+    from monkeybot.core.runtime.tool_dispatch import ToolBatchState
+    from monkeybot.core.runtime.turn_loop import _mark_tools_dirty, _TurnState
+
+    batch = ToolBatchState(ctx=_ctx(), tools_dirty=False, pre_tool_extra_next=None)
+    batch.mark_tools_dirty_reason("mcp")
+    batch.mark_tools_dirty_reason("loops")
+    assert batch.tools_dirty_reason == "mcp"
+
+    state = _TurnState(
+        ctx=_ctx(),
+        user_text="hi",
+        effective_max=5,
+        doom_tracker=_DoomLoopTracker(threshold=3),
+        tools_dirty_reason=batch.tools_dirty_reason,
+    )
+    _mark_tools_dirty(state, "hook", [ToolDef("run_command", "Run shell", {})])
+    assert state.tools_dirty is True
+    assert state.tools_dirty_reason == "mcp"
+
+    state.tools_dirty_reason = None
+    _mark_tools_dirty(
+        state,
+        "hook",
+        [ToolDef("run_command", "Run shell", {}), ToolDef("read_file", "Read a file", {})],
+    )
+    assert state.tools_dirty_reason == "hook", "an unattributed change still records a cause"

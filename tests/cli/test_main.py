@@ -54,7 +54,7 @@ def test_talk_auto_start_gateway_fails_without_workspace(
     assert "Could not find monkeybot_config/monkeybot.yaml" in result.output
 
 
-def test_talk_spawned_gateway_enables_transcript_capture(
+def test_talk_spawned_gateway_does_not_set_transcript_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict[str, object] = {}
@@ -74,7 +74,7 @@ def test_talk_spawned_gateway_enables_transcript_capture(
     try:
         env = captured["env"]
         assert isinstance(env, dict)
-        assert env["MONKEYBOT_TRANSCRIPT_ENABLED"] == "1"
+        assert "MONKEYBOT_TRANSCRIPT_ENABLED" not in env
     finally:
         spawned.log_file.close()
         spawned.log_path.unlink()

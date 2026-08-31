@@ -3112,3 +3112,43 @@ async def test_run_refreshes_tools_after_enable_mcp_same_turn() -> None:
     assert "browser__goto" not in prov.tools_seen[0]
     assert "browser__goto" in prov.tools_seen[1]
     assert any(c.name == "enable_mcp" for c in exe.calls)
+
+
+@pytest.mark.asyncio
+async def test_tool_call_started_carries_inspector_and_resolved_path(tmp_path: Path) -> None:
+    ctx = dataclasses.replace(
+        _ctx(workspace_root=tmp_path),
+        tools=[
+            ToolDef(
+                "read_file",
+                "Read a file",
+                {"type": "object", "properties": {"path": {"type": "string"}}},
+            )
+        ],
+    )
+    prov = FakeProvider(
+        [
+            [ToolCall(call_id="c1", name="read_file", args={"path": "notes.md"}), Done()],
+            [TextDelta(text="done"), Done()],
+        ]
+    )
+    events = []
+    async for e in run(
+        "read it",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=5,
+    ):
+        events.append(e)
+
+    started = next(e for e in events if isinstance(e, ToolCallStarted))
+    assert started.inspector_decision == "allow"
+    assert started.resource == "notes.md"
+    assert started.resolved_path == "notes.md"
+    result = next(e for e in events if isinstance(e, ToolCallResult))
+    assert result.ok is True
+    assert result.duration_ms is not None
+    assert result.duration_ms >= 0

@@ -29,7 +29,7 @@ runtime:
   # Internal debugging only (not agent-visible): write every AgentEvent and raw
   # provider request/response for each session to
   # {workspace_root}/.monkeybot/transcripts/{UTC}_{session_id}/transcript.ndjson.
-  # (env: MONKEYBOT_TRANSCRIPT_ENABLED)
+  # YAML-only (not overridable via environment).
   transcript_enabled: true
 
 # Required: choose the conversational harness for this deployment.

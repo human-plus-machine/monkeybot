@@ -74,7 +74,7 @@ def test_assistant_text_ended_roundtrip_with_text() -> None:
 
 @pytest.mark.asyncio
 async def test_transcript_skips_live_by_default(tmp_path: Path) -> None:
-    writer = TranscriptWriter("sess", workspace_root=tmp_path, include_live=False)
+    writer = TranscriptWriter("sess", workspace_root=tmp_path)
     await writer.ensure_manifest()
     await writer.write_event(AssistantDelta(request_id="r", delta="x"))
     await writer.write_event(
@@ -86,18 +86,6 @@ async def test_transcript_skips_live_by_default(tmp_path: Path) -> None:
     ]
     types = [line["type"] for line in lines]
     assert types[0] == "SessionManifest"
-    assert lines[0]["durable_only"] is True
+    assert "durable_only" not in lines[0]
     assert "AssistantDelta" not in types
     assert "ToolCallResult" in types
-
-
-@pytest.mark.asyncio
-async def test_transcript_include_live(tmp_path: Path) -> None:
-    writer = TranscriptWriter("sess", workspace_root=tmp_path, include_live=True)
-    await writer.ensure_manifest()
-    await writer.write_event(AssistantDelta(request_id="r", delta="x"))
-    lines = [
-        json.loads(line)
-        for line in writer.path.read_text(encoding="utf-8").splitlines()
-    ]
-    assert any(line.get("type") == "AssistantDelta" for line in lines)

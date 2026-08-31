@@ -620,13 +620,13 @@ def create_app(
 
         Idempotent — deleting an unknown or already-deleted session_id returns
         ``deleted=false`` rather than a 404, since the end state (no session) is
-        identical. When transcripts were enabled for the session, runs offline
-        analysis and returns ``transcript_report_dir``.
+        identical. When transcripts were enabled for the session, returns
+        ``transcript_dir`` (the folder containing ``transcript.ndjson``).
         """
         result = await reg_dep.remove_async(session_id)
         return DeleteSessionResponse(
             deleted=result.deleted,
-            transcript_report_dir=result.transcript_report_dir,
+            transcript_dir=result.transcript_dir,
         )
 
     @api.post("/sessions/{session_id}/reply", response_model=ReplyResponse)

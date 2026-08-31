@@ -430,7 +430,7 @@ def test_close_deletes_session_and_captures_report_dir() -> None:
                 200,
                 json={
                     "deleted": True,
-                    "transcript_report_dir": "/tmp/ws/.monkeybot/transcripts/20260714T150000Z_sess-close",
+                    "transcript_dir": "/tmp/ws/.monkeybot/transcripts/20260714T150000Z_sess-close",
                 },
                 request=request,
             )
@@ -441,7 +441,7 @@ def test_close_deletes_session_and_captures_report_dir() -> None:
         await controller.close()
         client.delete.assert_awaited_once_with("http://localhost:8080/sessions/sess-close")
         assert (
-            controller.transcript_report_dir
+            controller.transcript_dir
             == "/tmp/ws/.monkeybot/transcripts/20260714T150000Z_sess-close"
         )
         client.aclose.assert_awaited_once()

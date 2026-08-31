@@ -57,7 +57,9 @@ def _wire_start_turn_deps(
         lambda: (tmp_path, tmp_path / "skills", tmp_path / "artifacts"),
     )
 
-    gateway_app._deps.mcp = MagicMock()
+    mcp = MagicMock()
+    mcp.catalog_names.return_value = []
+    gateway_app._deps.mcp = mcp
     gateway_app._deps.provider = provider
     gateway_app._deps.inspectors = []
     gateway_app._deps.hook_manager = None
@@ -77,7 +79,7 @@ async def test_start_turn_writes_transcript_when_enabled(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("MONKEYBOT_TRANSCRIPT_ENABLED", "true")
+    monkeypatch.setattr(gateway_app, "transcript_enabled_from_config", lambda: True)
     registry = SessionRegistry()
     registry.create("s1", agent_md=None, created_at_ms=0)
     provider = _NamedProvider("fake")
@@ -99,7 +101,8 @@ async def test_start_turn_writes_transcript_when_enabled(
     lines = _read_lines(transcript_path)
     types = [line["type"] for line in lines]
     assert types[0] == "SessionManifest"
-    assert lines[0].get("durable_only") is True
+    assert "durable_only" not in lines[0]
+    assert "harness_version" in lines[0]
     assert "UserMessage" in types
     assert "AssistantDelta" not in types  # live-only skipped by default
     assert "TurnComplete" in types
@@ -110,7 +113,7 @@ async def test_start_turn_no_transcript_when_disabled(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.delenv("MONKEYBOT_TRANSCRIPT_ENABLED", raising=False)
+    monkeypatch.setattr(gateway_app, "transcript_enabled_from_config", lambda: False)
     registry = SessionRegistry()
     registry.create("s2", agent_md=None, created_at_ms=0)
     provider = _NamedProvider("fake")
@@ -130,7 +133,7 @@ async def test_start_turn_reuses_transcript_writer_across_turns(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setenv("MONKEYBOT_TRANSCRIPT_ENABLED", "true")
+    monkeypatch.setattr(gateway_app, "transcript_enabled_from_config", lambda: True)
     registry = SessionRegistry()
     bus = registry.create("s3", agent_md=None, created_at_ms=0)
     provider = _NamedProvider("fake")

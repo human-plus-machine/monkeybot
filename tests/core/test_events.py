@@ -70,7 +70,32 @@ def test_agent_event_roundtrip_tool_call_result_with_error() -> None:
     assert event_from_json(event_to_json(ev)) == ev
 
 
-def test_tool_call_started_without_call_id_defaults_empty() -> None:
+def test_agent_event_roundtrip_tool_call_started_inspector_fields() -> None:
+    ev = ToolCallStarted(
+        request_id="r1",
+        tool="read_file",
+        label="read_file",
+        args={"path": "notes.md"},
+        call_id="c1",
+        inspector_decision="allow",
+        resource="notes.md",
+        resolved_path="notes.md",
+    )
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_agent_event_roundtrip_tool_call_result_outcome_fields() -> None:
+    ev = ToolCallResult(
+        request_id="r1",
+        tool="read_file",
+        result="ok",
+        error=None,
+        call_id="c1",
+        error_kind=None,
+        ok=True,
+        duration_ms=12,
+    )
+    assert event_from_json(event_to_json(ev)) == ev
     payload = '{"type":"ToolCallStarted","request_id":"r1","tool":"x","label":"L","args":{}}'
     out = event_from_json(payload)
     assert isinstance(out, ToolCallStarted)

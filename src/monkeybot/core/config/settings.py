@@ -20,6 +20,7 @@ from monkeybot.providers.sampling import resolve_model_sampling
 from monkeybot.providers.vertex_claude import VertexClaudeProvider
 
 logger = logging.getLogger(__name__)
+_warned_legacy_transcript_env = False
 
 _MODEL_PROVIDER_ALIASES: dict[str, str] = {
     "gemini": "google_vertexai",
@@ -391,6 +392,29 @@ def _bool_config_flag(
     if isinstance(raw, bool):
         return raw
     raise ConfigError(f"{label} must be true or false, got {raw!r}")
+
+
+def transcript_enabled_from_config(config_path: str | None = None) -> bool:
+    """Whether session NDJSON capture is on (``runtime.transcript_enabled``).
+
+    Defaults to ``False`` when the key is absent. Only read from monkeybot.yaml —
+    not from environment variables.
+    """
+    global _warned_legacy_transcript_env
+    leftover = os.environ.get("MONKEYBOT_TRANSCRIPT_ENABLED", "").strip()
+    if leftover and not _warned_legacy_transcript_env:
+        _warned_legacy_transcript_env = True
+        logger.warning(
+            "MONKEYBOT_TRANSCRIPT_ENABLED is ignored — set runtime.transcript_enabled in monkeybot.yaml"
+        )
+    _, doc = load_monkeybot_yaml_dict(config_path)
+    return _bool_config_flag(
+        doc,
+        "runtime",
+        "transcript_enabled",
+        default=False,
+        label="runtime.transcript_enabled",
+    )
 
 
 def auto_schema_enabled_from_config(config_path: str | None = None) -> bool:
