@@ -91,7 +91,7 @@ _PINNED_ENV: dict[str, str] | None = None
 @dataclass(frozen=True, slots=True)
 class RuntimeConfig:
     revision: int
-    digest: str
+    digest: str  # yaml + pins + overlaid env_values (not yaml+pins alone)
     source_path: Path | None
     loaded_at: float
     realtime: RealtimeConfig
@@ -138,6 +138,28 @@ class ConfigStore:
             self._current = cfg
             self._config_path = config_path
             self._agent_root = agent_root
+
+    def _overlay_env(self, updates: Mapping[str, str]) -> None:
+        """Merge ``updates`` into ``_current.env_values`` without bumping revision.
+
+        Recomputes digest under the same lock as ``_set``. No-op when the store
+        is empty or when ``updates`` would not change any value.
+        """
+        with self._lock:
+            cfg = self._current
+            if cfg is None:
+                return
+            merged = dict(cfg.env_values)
+            changed = False
+            for key, value in updates.items():
+                if merged.get(key) != value:
+                    merged[key] = value
+                    changed = True
+            if not changed:
+                return
+            self._current = replace(
+                cfg, env_values=merged, digest=_digest_with_env(cfg.digest, merged)
+            )
 
     def _reset(self) -> None:
         with self._lock:
@@ -195,7 +217,13 @@ def current_env_or_none(key: str) -> str | None:
 
 
 def context_window_tokens(cfg: RuntimeConfig | None = None, default: int = 200_000) -> int:
-    """Effective ``MODEL_CONTEXT_WINDOW`` from a pinned snapshot or process env."""
+    """Effective ``MODEL_CONTEXT_WINDOW`` from a pinned snapshot or process env.
+
+    ``cfg is None`` consults the process store (same as :func:`current_env`),
+    unlike :func:`env_value` where ``None`` means empty store / ``os.environ``.
+    """
+    if cfg is None:
+        cfg = get_config_store().current_or_none()
     raw = env_value(cfg, "MODEL_CONTEXT_WINDOW", str(default)).strip()
     try:
         return max(1, int(raw))
@@ -215,22 +243,7 @@ def overlay_env_values(updates: Mapping[str, str]) -> None:
     recomputed over the new ``env_values`` so a cache keyed on digest cannot
     serve stale layout paths. Serialized under the store lock against ``_set``.
     """
-    store = get_config_store()
-    with store._lock:
-        cfg = store._current
-        if cfg is None:
-            return
-        merged = dict(cfg.env_values)
-        changed = False
-        for key, value in updates.items():
-            if merged.get(key) != value:
-                merged[key] = value
-                changed = True
-        if not changed:
-            return
-        store._current = replace(
-            cfg, env_values=merged, digest=_digest_with_env(cfg.digest, merged)
-        )
+    get_config_store()._overlay_env(updates)
 
 
 def pinned_env_names() -> frozenset[str]:

@@ -297,6 +297,25 @@ def test_context_window_tokens_warns_on_invalid_value(
     assert "invalid MODEL_CONTEXT_WINDOW" in caplog.text
 
 
+def test_context_window_tokens_none_cfg_reads_store_not_os_environ(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.snapshot import (
+        context_window_tokens,
+        current_env,
+        overlay_env_values,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    _write_yaml(tmp_path, "model:\n  context_window: 55555\n")
+    apply_monkeybot_runtime_env()
+    assert os.environ.get("MODEL_CONTEXT_WINDOW") == "55555"
+    overlay_env_values({"MODEL_CONTEXT_WINDOW": "99999"})
+    assert os.environ.get("MODEL_CONTEXT_WINDOW") == "55555"
+    assert current_env("MODEL_CONTEXT_WINDOW") == "99999"
+    assert context_window_tokens() == 99999
+
+
 def test_current_env_flag_opt_in_and_opt_out(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
