@@ -13,7 +13,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from monkeybot.core.config.runtime_env import ENV_TIERS, ConfigTier
@@ -52,7 +51,7 @@ _REDACT_ENV_KEYS = frozenset(
         "SANDBOX_SERVER_URL",
     }
 )
-_SECRET_KEY_RE = re.compile(r"KEY|TOKEN|SECRET|PASSWORD", re.IGNORECASE)
+_SECRET_KEY_RE = re.compile(r"(^|_)(KEY|TOKEN|SECRET|CREDENTIAL)$|PASSWORD", re.IGNORECASE)
 _HOT_PATH_EXPORT = ("SKILLS_PATH", "AGENT_MD")
 _ADMIN_TOKEN_ENV = "MONKEYBOT_ADMIN_TOKEN"
 
@@ -389,7 +388,7 @@ def build_admin_router() -> APIRouter:
     @router.post("/config/reload", response_model=ConfigReloadResponse)
     async def post_reload(
         request: Request, body: ReloadRequest | None = None
-    ) -> ConfigReloadResponse | JSONResponse:
+    ) -> ConfigReloadResponse:
         payload = body or ReloadRequest()
         registry = request.app.state.registry
         report = await run_config_reload(
@@ -398,7 +397,12 @@ def build_admin_router() -> APIRouter:
             env=payload.env,
         )
         if report.error is not None:
-            return JSONResponse(status_code=500, content=report.model_dump())
+            raise APIError(
+                500,
+                "RELOAD_APPLY_FAILED",
+                report.error,
+                uuid.uuid4().hex,
+            )
         return report
 
     return router

@@ -382,7 +382,8 @@ async def test_admin_reload_apply_failure_returns_500(
         r = await client.post("/admin/config/reload", json={})
     assert r.status_code == 500
     body = r.json()
-    assert "disconnect failed" in body["error"]
+    assert body["error"]["code"] == "RELOAD_APPLY_FAILED"
+    assert "disconnect failed" in body["error"]["message"]
     assert get_config_store().current().revision == 1
 
 
@@ -459,6 +460,8 @@ def test_redact_env_fails_closed_on_secret_names() -> None:
             "MONKEYBOT_ADMIN_TOKEN": "s3cret",
             "DB_PASSWORD": "hunter2",
             "DB_URL": "sqlite:///local.db",
+            "MONKEYBOT_SCHEDULER_ENABLED": "true",
+            "MODEL_MAX_TOKENS": "8192",
         }
     )
     assert out["MODEL_NAME"] == "flash"
@@ -466,6 +469,8 @@ def test_redact_env_fails_closed_on_secret_names() -> None:
     assert out["MONKEYBOT_ADMIN_TOKEN"] == "***"
     assert out["DB_PASSWORD"] == "***"
     assert out["DB_URL"] == "***"
+    assert out["MONKEYBOT_SCHEDULER_ENABLED"] == "true"
+    assert out["MODEL_MAX_TOKENS"] == "8192"
 
 
 @pytest.mark.asyncio
