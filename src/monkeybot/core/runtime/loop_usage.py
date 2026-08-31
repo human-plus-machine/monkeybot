@@ -61,12 +61,17 @@ def _merge_usage_event(usage: Usage, ev: UsageEvent) -> None:
     usage.cache_creation_tokens += ev.cache_creation_tokens
 
 
+_THINKING_BUDGET_PROVIDERS = frozenset(
+    {"gemini", "claude", "ollama", "ollama-cloud", "ollama-local"}
+)
+
+
 def _stream_thinking_budget(
     provider: Provider,
     resolved_messages: Sequence[Message],
 ) -> int | None:
     """Per-call thinking budget override; None keeps the provider default."""
-    if provider.name not in ("gemini", "claude", "ollama"):
+    if provider.name not in _THINKING_BUDGET_PROVIDERS:
         return None
     raw = os.environ.get("MONKEYBOT_RESUME_THINKING_BUDGET", "").strip()
     if not raw:
