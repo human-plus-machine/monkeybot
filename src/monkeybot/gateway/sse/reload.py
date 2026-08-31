@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from monkeybot.core.config.runtime_env import ENV_TIERS, ConfigTier
+from monkeybot.core.config.settings import ConfigError
 from monkeybot.core.config.snapshot import (
     ConfigDiff,
     RuntimeConfig,
@@ -28,7 +29,7 @@ from monkeybot.core.config.snapshot import (
 from monkeybot.core.context.tool_output_policy import invalidate_config_caches
 from monkeybot.core.layout import AgentLayout, resolve_agent_path
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.mcp.mcp_client import MCPCatalogApplyResult
+from monkeybot.core.mcp.ports_mcp import MCPCatalogApplyResult
 from monkeybot.core.runtime.events import ConfigReloaded, event_to_json
 from monkeybot.gateway.sse.models import APIError
 from monkeybot.gateway.sse.session_bus import SessionRegistry
@@ -68,7 +69,9 @@ def begin_in_flight_turn() -> None:
 def end_in_flight_turn() -> None:
     """Release the in-flight mark so MCP reconnect can proceed."""
     global _in_flight_turns
-    _in_flight_turns = max(0, _in_flight_turns - 1)
+    if _in_flight_turns <= 0:
+        raise RuntimeError("end_in_flight_turn without matching begin_in_flight_turn")
+    _in_flight_turns -= 1
     if _in_flight_turns == 0:
         _turns_idle.set()
 
@@ -303,7 +306,17 @@ async def run_config_reload(
             if store.current_or_none() is None:
                 load_into_store()
                 pins_committed = True
-            cfg, diff = store.prepare_reload()
+            try:
+                cfg, diff = store.prepare_reload()
+            except ConfigError as exc:
+                current = store.current_or_none()
+                report = ConfigReloadResponse(
+                    revision=current.revision if current is not None else 0,
+                    digest=current.digest if current is not None else "",
+                    error=str(exc),
+                )
+                _log_reload(report, noop=False)
+                return report
             if diff.noop:
                 report = ConfigReloadResponse(revision=cfg.revision, digest=cfg.digest)
                 _log_reload(report, noop=True)
@@ -343,7 +356,7 @@ async def run_config_reload(
                     _log_reload(report, noop=False)
                     return report
 
-            store.commit(cfg)
+            cfg = store.commit(cfg)
             pins_committed = True
         finally:
             if prev_pins is not None and not pins_committed:

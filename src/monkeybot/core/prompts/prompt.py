@@ -25,7 +25,6 @@ from monkeybot.core.types.content_blocks import Text
 
 # Cap injected user text so long pastes do not dominate the context window.
 _MAX_CURRENT_REQUEST_CHARS = 8000
-_DEFAULT_MEMORY_WINDOW_LINES = 12
 _CHARS_PER_TOKEN_ESTIMATE = 4
 
 
@@ -92,10 +91,7 @@ def _current_request_block(chat_messages: Sequence[Message] | None) -> str:
 def _session_attachments_block(catalog: Sequence[AttachmentRecord] | None) -> str:
     if not catalog:
         return ""
-    lines = [
-        f"- {r.attachment_id} ({r.filename}, {r.mime_type}): {r.description}"
-        for r in catalog
-    ]
+    lines = [f"- {r.attachment_id} ({r.filename}, {r.mime_type}): {r.description}" for r in catalog]
     return "\n\n## Session attachments\n" + "\n".join(lines)
 
 
@@ -122,6 +118,8 @@ def _curated_memory_lines(ctx: TurnContext) -> list[str]:
 
     No snapshot (tests / callers that did not pin config) leaves the index
     unchanged. Subagents pass ``context_curation_enabled=False`` to skip.
+    Window, cap, and token-threshold default to 0 (no truncation) so pinning a
+    snapshot does not drop memory lines unless the operator set those knobs.
     """
     lines = list(ctx.memory_index)
     if not ctx.context_curation_enabled:
@@ -136,23 +134,17 @@ def _curated_memory_lines(ctx: TurnContext) -> list[str]:
         lines = lines[-cap:]
     window = _positive_int(
         env_value(cfg, "CONTEXT_CURATION_MEMORY_WINDOW_LINES", ""),
-        _DEFAULT_MEMORY_WINDOW_LINES,
+        0,
     )
-    threshold = _positive_int(
-        env_value(cfg, "CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD", ""), 0
-    )
+    threshold = _positive_int(env_value(cfg, "CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD", ""), 0)
     over_window = window > 0 and len(lines) > window
     text = "\n".join(lines)
-    over_tokens = (
-        threshold > 0 and (len(text) // _CHARS_PER_TOKEN_ESTIMATE) > threshold
-    )
+    over_tokens = threshold > 0 and (len(text) // _CHARS_PER_TOKEN_ESTIMATE) > threshold
     if over_window or over_tokens:
         if window > 0:
             lines = lines[-window:]
         if threshold > 0:
-            while lines and (
-                len("\n".join(lines)) // _CHARS_PER_TOKEN_ESTIMATE
-            ) > threshold:
+            while lines and (len("\n".join(lines)) // _CHARS_PER_TOKEN_ESTIMATE) > threshold:
                 lines = lines[1:]
     return lines
 
@@ -209,9 +201,7 @@ def compose_volatile_tail(
     chat_messages: Sequence[Message] | None = None,
 ) -> str:
     """Volatile tail: current date + memory index + skills + current-request anchor."""
-    return "".join(
-        compose_volatile_tail_parts(ctx, chat_messages=chat_messages).values()
-    )
+    return "".join(compose_volatile_tail_parts(ctx, chat_messages=chat_messages).values())
 
 
 def compose_volatile_tail_parts(
