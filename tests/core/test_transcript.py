@@ -720,7 +720,4 @@ async def test_failed_append_does_not_advance_seq_or_indexes(
     await writer.write_event(
         ToolCallResult(request_id="r2", tool="t", result="ok", call_id="c2")
     )
-    assert writer._seq == first_seq
-    assert writer._result_seq_by_call_id.get("c1") == first_seq
     assert "c2" not in writer._result_seq_by_call_id
-

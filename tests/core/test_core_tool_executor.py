@@ -2550,6 +2550,35 @@ class TestCoreToolExecutorSandboxSelection:
         ex = _make_executor(tmp_path)
         assert isinstance(ex._terminal, SandboxExecutor)
 
+    def test_sandbox_follows_pinned_config_not_later_env(self, tmp_path, monkeypatch):
+        from monkeybot.core.config import reset_runtime_env_state_for_tests
+        from monkeybot.core.config.snapshot import build_runtime_config
+
+        reset_runtime_env_state_for_tests()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("SANDBOX_ENABLED", raising=False)
+        cfg_dir = tmp_path / "monkeybot_config"
+        cfg_dir.mkdir(exist_ok=True)
+        (cfg_dir / "monkeybot.yaml").write_text(
+            "sandbox:\n  enabled: true\n",
+            encoding="utf-8",
+        )
+        cfg = build_runtime_config(agent_root=tmp_path)
+        monkeypatch.setenv("SANDBOX_ENABLED", "false")
+        mem = tmp_path / "mem"
+        mem.mkdir(exist_ok=True)
+        skills = tmp_path / "skills"
+        skills.mkdir(exist_ok=True)
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            config=cfg,
+        )
+        assert isinstance(ex._terminal, SandboxExecutor)
+        reset_runtime_env_state_for_tests()
+
     def test_explicit_terminal_injection_bypasses_sandbox_env(self, tmp_path, monkeypatch):
         # Tests that inject a terminal= override must still work regardless of env.
         monkeypatch.setenv("SANDBOX_ENABLED", "true")

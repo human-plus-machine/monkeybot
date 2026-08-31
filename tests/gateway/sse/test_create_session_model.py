@@ -20,9 +20,6 @@ from monkeybot.gateway.sse.routes import create_app
 from monkeybot.gateway.sse.session_bus import SessionRegistry
 
 
-from monkeybot.core.types.content_blocks import ContentBlock, Text
-
-
 class _NoopLoopPort:
     async def start_turn(
         self,
@@ -130,6 +127,40 @@ async def test_create_session_with_model_stores_provider(
 
 
 @pytest.mark.asyncio
+async def test_create_session_with_model_passes_current_runtime_config(
+    client: AsyncClient,
+    registry: SessionRegistry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A session-level provider override must resolve against the live snapshot.
+
+    Otherwise a hot-reloaded MODEL_PROVIDER change is invisible to sessions
+    created right after the reload, since ``get_provider_config`` would fall
+    back to the stale process environment instead of ``ConfigStore.current()``.
+    """
+    from monkeybot.core.config.snapshot import get_config_store
+
+    sentinel_cfg = get_config_store().current_or_none()
+    seen_configs: list[object] = []
+
+    def _fake_get_provider_config(**kwargs: object) -> ProviderConfig:
+        seen_configs.append(kwargs.get("config"))
+        return ProviderConfig(provider=object(), model="gpt-5")  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "monkeybot.core.config.settings.get_provider_config",
+        _fake_get_provider_config,
+    )
+
+    r = await client.post(
+        "/sessions",
+        json={"model_provider": "openai", "model_name": "gpt-5"},
+    )
+    assert r.status_code == 201
+    assert seen_configs == [sentinel_cfg]
+
+
+@pytest.mark.asyncio
 async def test_create_session_model_unavailable_returns_400(
     client: AsyncClient,
     registry: SessionRegistry,
@@ -203,14 +234,14 @@ async def test_start_turn_prefers_session_provider(
     monkeypatch.setattr(
         gateway_app,
         "_resolved_workspace_paths",
-        lambda: (tmp_path, tmp_path / "skills", tmp_path / "artifacts"),
+        lambda *_a, **_k: (tmp_path, tmp_path / "skills", tmp_path / "artifacts"),
     )
 
-    gateway_app._deps.mcp = MagicMock()
-    gateway_app._deps.provider = global_provider
-    gateway_app._deps.inspectors = []
-    gateway_app._deps.hook_manager = None
-    gateway_app._deps.web_search_tool = None
+    gateway_app.gateway_runtime.mcp = MagicMock()
+    gateway_app.gateway_runtime.provider = global_provider
+    gateway_app.gateway_runtime.inspectors = []
+    gateway_app.gateway_runtime.hook_manager = None
+    gateway_app.gateway_runtime.web_search_tool = None
 
     mock_usage = AsyncMock()
     mock_history = MagicMock()
@@ -258,14 +289,14 @@ async def test_start_turn_falls_back_to_env(
     monkeypatch.setattr(
         gateway_app,
         "_resolved_workspace_paths",
-        lambda: (tmp_path, tmp_path / "skills", tmp_path / "artifacts"),
+        lambda *_a, **_k: (tmp_path, tmp_path / "skills", tmp_path / "artifacts"),
     )
 
-    gateway_app._deps.mcp = MagicMock()
-    gateway_app._deps.provider = global_provider
-    gateway_app._deps.inspectors = []
-    gateway_app._deps.hook_manager = None
-    gateway_app._deps.web_search_tool = None
+    gateway_app.gateway_runtime.mcp = MagicMock()
+    gateway_app.gateway_runtime.provider = global_provider
+    gateway_app.gateway_runtime.inspectors = []
+    gateway_app.gateway_runtime.hook_manager = None
+    gateway_app.gateway_runtime.web_search_tool = None
 
     mock_usage = AsyncMock()
     mock_history = MagicMock()

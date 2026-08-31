@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 
+from monkeybot.core.config.snapshot import RuntimeConfig, env_value_or_current
 from monkeybot.web_search.backends.duckduckgo import DuckDuckGoBackend
 from monkeybot.web_search.backends.firecrawl import FirecrawlBackend
 from monkeybot.web_search.backends.tavily import TavilyBackend
@@ -40,8 +41,8 @@ __all__ = [
 ]
 
 
-def build_backend() -> WebSearchBackend | None:
-    """Construct the configured backend from environment variables.
+def build_backend(cfg: RuntimeConfig | None = None) -> WebSearchBackend | None:
+    """Construct the configured backend from a pinned snapshot or process env.
 
     ``WEB_SEARCH_BACKEND`` selects the implementation:
 
@@ -52,7 +53,7 @@ def build_backend() -> WebSearchBackend | None:
 
     Returns ``None`` when ``WEB_SEARCH_BACKEND=none``.
     """
-    backend_name = os.environ.get("WEB_SEARCH_BACKEND", "duckduckgo").lower().strip()
+    backend_name = env_value_or_current(cfg, "WEB_SEARCH_BACKEND", "duckduckgo").lower().strip()
 
     if backend_name == "none":
         return None
@@ -60,17 +61,13 @@ def build_backend() -> WebSearchBackend | None:
     if backend_name == "tavily":
         api_key = os.environ.get("TAVILY_API_KEY", "").strip()
         if not api_key:
-            raise ValueError(
-                "WEB_SEARCH_BACKEND=tavily requires TAVILY_API_KEY to be set."
-            )
+            raise ValueError("WEB_SEARCH_BACKEND=tavily requires TAVILY_API_KEY to be set.")
         return TavilyBackend(api_key=api_key)
 
     if backend_name == "firecrawl":
         api_key = os.environ.get("FIRECRAWL_API_KEY", "").strip()
         if not api_key:
-            raise ValueError(
-                "WEB_SEARCH_BACKEND=firecrawl requires FIRECRAWL_API_KEY to be set."
-            )
+            raise ValueError("WEB_SEARCH_BACKEND=firecrawl requires FIRECRAWL_API_KEY to be set.")
         return FirecrawlBackend(api_key=api_key)
 
     if backend_name == "duckduckgo":

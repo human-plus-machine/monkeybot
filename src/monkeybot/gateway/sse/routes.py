@@ -28,6 +28,7 @@ from monkeybot.core.attachments.store import (
     AttachmentTooLargeError,
     UnsupportedAttachmentTypeError,
 )
+from monkeybot.core.config.snapshot import context_window_tokens
 from monkeybot.core.llm.usage import UsageGranularity
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.usage_buckets import coerce_granularity, validate_hour_bucket_window
@@ -59,6 +60,7 @@ from .models import (
     ToolConfirmationPOST,
     error_payload_dict,
 )
+from .reload import build_admin_router
 from .reply_body import ReplyBodyError, normalize_reply_to_user_content
 from .scheduler_routes import build_scheduler_router
 from .session_bus import SessionAlreadyExistsError, SessionBus, SessionRegistry
@@ -220,9 +222,7 @@ async def _drain_follow_up(
     if item is None:
         return
     if storage is not None:
-        acquired = await storage.session_turns().try_acquire(
-            session_id, item.request_id
-        )
+        acquired = await storage.session_turns().try_acquire(session_id, item.request_id)
         if not acquired:
             now_ms = int(time.time() * 1000)
             first_fail = item.first_lock_fail_at_ms or now_ms
@@ -371,9 +371,7 @@ async def _publish_admission_accepted(
         "admission accepted %s",
         kv(request_id=request_id, queue=queue, position=position),
     )
-    return AdmissionAcceptedResponse(
-        request_id=request_id, queue=queue, position=position
-    )
+    return AdmissionAcceptedResponse(request_id=request_id, queue=queue, position=position)
 
 
 class _StaticUsagePort:
@@ -386,11 +384,7 @@ class _StaticUsagePort:
         since: str | None,
     ) -> dict[str, Any]:
         _ = since
-        cap_raw = os.environ.get("MODEL_CONTEXT_WINDOW", "200000").strip()
-        try:
-            cw = max(1, int(cap_raw))
-        except ValueError:
-            cw = 200_000
+        cw = context_window_tokens()
         st = max(1, int(cw * SUMMARY_TRIGGER_RATIO))
         return {
             "session_id": session_id,
@@ -579,14 +573,16 @@ def create_app(
         session_model = None
         if body.model_provider or body.model_name:
             from monkeybot.core.config.settings import get_provider_config
+            from monkeybot.core.config.snapshot import get_config_store
 
             try:
-                cfg = get_provider_config(
+                provider_cfg = get_provider_config(
                     provider=body.model_provider,
                     model_name=body.model_name,
+                    config=get_config_store().current_or_none(),
                 )
-                session_provider = cfg.provider
-                session_model = cfg.model
+                session_provider = provider_cfg.provider
+                session_model = provider_cfg.model
             except Exception as exc:
                 raise APIError(
                     400,
@@ -646,9 +642,7 @@ def create_app(
             request_id=body.request_id,
             busy_is_error=True,
         )
-        user_content = _parse_user_content(
-            body=body, session_id=session_id, request=request
-        )
+        user_content = _parse_user_content(body=body, session_id=session_id, request=request)
         bus.current_request_id = body.request_id
         _schedule_turn(
             bus=bus,
@@ -685,9 +679,7 @@ def create_app(
                 "Session is idle; use POST /reply instead of /steer",
                 uuid.uuid4().hex,
             )
-        user_content = _parse_user_content(
-            body=body, session_id=session_id, request=request
-        )
+        user_content = _parse_user_content(body=body, session_id=session_id, request=request)
         try:
             position = bus.admission.enqueue_steer(user_content)
         except AdmissionQueueFullError as exc:
@@ -721,9 +713,7 @@ def create_app(
     ) -> AdmissionAcceptedResponse:
         """Enqueue a follow-up, or start immediately when the session is idle."""
         bus = _require_bus(reg_dep, session_id)
-        user_content = _parse_user_content(
-            body=body, session_id=session_id, request=request
-        )
+        user_content = _parse_user_content(body=body, session_id=session_id, request=request)
         storage = getattr(request.app.state, "storage", None)
         acquired = await _try_acquire_turn(
             bus=bus,
@@ -1204,6 +1194,7 @@ def create_app(
 
     app.include_router(api)
     app.include_router(build_scheduler_router(loop_port=loop, registry=reg))
+    app.include_router(build_admin_router())
 
     @app.get("/health", response_model=HealthResponse)
     async def health(request: Request) -> HealthResponse:

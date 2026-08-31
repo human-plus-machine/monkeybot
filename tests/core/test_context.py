@@ -1,6 +1,7 @@
 """Tests for TurnContext assembly and MCP tool merging."""
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -15,7 +16,9 @@ from monkeybot.core.context import (
     refresh_tools_after_loops_change,
     refresh_tools_after_mcp_change,
 )
+from monkeybot.core.mcp.ports_mcp import MCPCatalogApplyResult
 from monkeybot.core.memory.subsystem import MemorySubsystem
+from monkeybot.core.prompts.harness_prompt import harness_fixed_context
 from monkeybot.core.types.types_tools import ToolDef
 from tests.core.memory.helpers import make_memory_subsystem
 
@@ -113,6 +116,19 @@ class FakeMCPClient:
     async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         del path, raise_on_error
 
+    def set_env_overlay(self, env: Mapping[str, str] | None) -> dict[str, str] | None:
+        del env
+        return None
+
+    async def apply_catalog_diff(
+        self,
+        mcp_json_path: Path,
+        *,
+        raise_on_error: bool = False,
+    ) -> MCPCatalogApplyResult:
+        del mcp_json_path, raise_on_error
+        return MCPCatalogApplyResult()
+
 
 # Standard trusted skills fixture (e.g. evals/smoke_agent) — regression for list_skills descriptions.
 _IMAGE_GENERATOR_SKILL_MD = """---
@@ -204,10 +220,11 @@ def test_core_tool_defs_keep_hot_path_and_moved_policy() -> None:
         "grep",
         "run_command",
         "list_skills",
-        "enable_mcp",
         "enable_loops",
     ):
         assert name in tools
+    assert "enable_mcp" not in tools
+    assert "disable_mcp" not in tools
     assert "Prefer over run_command+ls" in tools["glob"].description
     assert "Prefer over run_command+grep" in tools["grep"].description
     assert "argv as a list" in tools["run_command"].description
@@ -215,6 +232,57 @@ def test_core_tool_defs_keep_hot_path_and_moved_policy() -> None:
     assert "cwd" in tools["run_command"].input_schema.get("properties", {})
     assert "writable workspace" in tools["write_file"].description
     assert "queued:true" in tools["task"].description
+
+
+def test_core_tool_defs_enable_mcp_enums_catalog_names() -> None:
+    tools = {t.name: t for t in _core_tool_defs(catalog_mcp_servers=("browser", "docs"))}
+    name_schema = tools["enable_mcp"].input_schema["properties"]["name"]
+    assert name_schema["enum"] == ["browser", "docs"]
+    assert "mcp.json" not in tools["enable_mcp"].description
+    assert "Do not read config files" in tools["enable_mcp"].description
+    assert "mcp.json" not in str(name_schema)
+    assert "disable_mcp" in tools
+
+
+def test_core_tool_defs_omits_enable_mcp_when_catalog_empty() -> None:
+    tools = {t.name: t for t in _core_tool_defs()}
+    assert "enable_mcp" not in tools
+    assert "disable_mcp" not in tools
+
+
+def test_core_tool_defs_and_harness_share_catalog_normalization() -> None:
+    messy = (" docs ", "", "browser", "browser", "  ")
+    tools = {t.name: t for t in _core_tool_defs(catalog_mcp_servers=messy)}
+    name_schema = tools["enable_mcp"].input_schema["properties"]["name"]
+    assert name_schema["enum"] == ["browser", "docs"]
+    out = harness_fixed_context(include_task_tool=False, catalog_mcp_servers=messy)
+    assert "Configured MCP servers: `browser`, `docs`." in out
+
+
+@pytest.mark.asyncio
+async def test_build_context_enable_mcp_enums_catalog(tmp_path: Path) -> None:
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("You are a helpful assistant.\n", encoding="utf-8")
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+
+    class _CatalogFake(FakeMCPClient):
+        def catalog_names(self) -> list[str]:
+            return ["browser"]
+
+    ctx = await build_context(
+        "thread-1",
+        "req-1",
+        agent_md_path=agent_path,
+        memory=_memory_subsystem(mem),
+        skills_path=skills,
+        mcp_client=_CatalogFake([]),
+    )
+    enable = next(t for t in ctx.tools if t.name == "enable_mcp")
+    assert enable.input_schema["properties"]["name"]["enum"] == ["browser"]
+    assert ctx.catalog_mcp_servers == ("browser",)
 
 
 @pytest.mark.asyncio
@@ -261,8 +329,6 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
         "search",
         "list_skills",
         "task",
-        "enable_mcp",
-        "disable_mcp",
         "enable_loops",
         "list_mcp_resources",
         "read_mcp_resource",
@@ -312,7 +378,8 @@ async def test_build_context_omits_progressive_mcp_meta_without_connected_mcp(
     assert "read_mcp_resource" not in names
     assert "list_mcp_prompts" not in names
     assert "get_mcp_prompt" not in names
-    assert "enable_mcp" in names
+    assert "enable_mcp" not in names
+    assert "disable_mcp" not in names
     assert "enable_loops" in names
     assert "disable_loops" not in names
     assert "start_loop" not in names

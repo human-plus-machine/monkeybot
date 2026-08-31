@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
+from monkeybot.core.config.snapshot import current_env
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.input_admission import InputAdmission
@@ -25,7 +26,6 @@ from .sse import format_data_event
 
 logger = logging.getLogger(__name__)
 
-PENDING_RESPONSE_TIMEOUT_SEC: float = float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
 # Soft-cancel wait before hard-cancelling an in-flight turn on session delete.
 _QUIESCE_TURN_TIMEOUT_SEC: float = float(os.environ.get("MONKEYBOT_QUIESCE_TURN_TIMEOUT_SEC", "30"))
 _QUIESCE_HARD_CANCEL_TIMEOUT_SEC: float = 5.0
@@ -42,7 +42,7 @@ class RemoveResult:
 
 
 def _replay_maxlen_from_env() -> int:
-    raw = os.environ.get("SSE_REPLAY_MAX", "256")
+    raw = current_env("SSE_REPLAY_MAX", "256")
     try:
         n = int(raw)
         return max(1, n)
@@ -52,7 +52,7 @@ def _replay_maxlen_from_env() -> int:
 
 def _nested_replay_maxlen_from_env() -> int:
     """Nested subagent traffic uses a separate replay lane (SSE_NESTED_REPLAY_MAX)."""
-    raw = os.environ.get("SSE_NESTED_REPLAY_MAX", "").strip()
+    raw = current_env("SSE_NESTED_REPLAY_MAX", "").strip()
     if not raw:
         return _replay_maxlen_from_env()
     try:
@@ -311,6 +311,10 @@ class SessionRegistry:
         bus.attachment_catalog = SessionAttachmentCatalog(session_id=session_id)
         self._sessions[session_id] = bus
         return bus
+
+    def iter_buses(self) -> list[SessionBus]:
+        """Snapshot of live session buses (does not mutate the registry)."""
+        return list(self._sessions.values())
 
     def _workspace_for_spill(self) -> Path:
         """Workspace root for spill cleanup: injected path or ``paths.workspace_root`` from yaml."""

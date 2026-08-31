@@ -45,7 +45,8 @@ def test_yaml_applies_when_env_unset(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 def test_scheduler_enabled_yaml_applies_and_enables_scheduler(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from monkeybot.scheduler.engine import scheduler_enabled_from_env
 
@@ -63,7 +64,8 @@ def test_scheduler_enabled_yaml_applies_and_enables_scheduler(
 
 
 def test_scheduler_enabled_explicit_env_wins_over_yaml(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from monkeybot.scheduler.engine import scheduler_enabled_from_env
 
@@ -81,14 +83,14 @@ def test_scheduler_enabled_explicit_env_wins_over_yaml(
 
 
 def test_google_cloud_project_wins_over_yaml_gcp_project_id(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
     (cfg_dir / "monkeybot.yaml").write_text(
-        "gcp:\n  project_id: yaml-placeholder\n"
-        "anthropic_vertex:\n  project_id: yaml-placeholder\n",
+        "gcp:\n  project_id: yaml-placeholder\nanthropic_vertex:\n  project_id: yaml-placeholder\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "from-env")
@@ -112,6 +114,23 @@ def test_existing_env_wins_over_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert os.environ.get("PORT") == "2222"
 
 
+def test_ollama_keep_alive_and_num_ctx_not_copied_to_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "model:\n  keep_alive: 60m\n  num_ctx: 8192\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OLLAMA_REQUEST_KEEP_ALIVE", raising=False)
+    monkeypatch.delenv("OLLAMA_NUM_CTX", raising=False)
+    runtime_env.apply_monkeybot_runtime_env()
+    assert "OLLAMA_REQUEST_KEEP_ALIVE" not in os.environ
+    assert "OLLAMA_NUM_CTX" not in os.environ
+
+
 def test_monkeybot_config_explicit_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     y = tmp_path / "custom.yaml"
     y.write_text(
@@ -124,7 +143,9 @@ def test_monkeybot_config_explicit_path(tmp_path: Path, monkeypatch: pytest.Monk
     assert os.environ.get("MODEL_PROVIDER") == "fake"
 
 
-def test_custom_config_paths_anchor_at_its_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_custom_config_paths_anchor_at_its_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     config = tmp_path / "custom" / "agent.yaml"
     config.parent.mkdir()
     config.write_text(
@@ -168,7 +189,7 @@ def test_gateway_cors_allow_origins(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
     (cfg_dir / "monkeybot.yaml").write_text(
-        "gateway:\n  cors_allow_origins: \"http://a.example,http://b.example\"\n",
+        'gateway:\n  cors_allow_origins: "http://a.example,http://b.example"\n',
         encoding="utf-8",
     )
     monkeypatch.delenv("MONKEYBOT_CORS_ALLOW_ORIGINS", raising=False)
@@ -260,7 +281,8 @@ def test_memory_storage_uri_sets_env(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 def test_legacy_memory_path_still_sets_memory_path_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     cfg_dir = tmp_path / "monkeybot_config"
@@ -329,10 +351,7 @@ def test_compression_ratios_not_mapped_from_yaml(
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
     (cfg_dir / "monkeybot.yaml").write_text(
-        "compression:\n"
-        "  light_ratio: 0.1\n"
-        "  moderate_ratio: 0.2\n"
-        "  aggressive_ratio: 0.3\n",
+        "compression:\n  light_ratio: 0.1\n  moderate_ratio: 0.2\n  aggressive_ratio: 0.3\n",
         encoding="utf-8",
     )
     for key in (
@@ -390,7 +409,8 @@ def test_invalid_yaml_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_realtime_nested_keys_flattened_to_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     cfg_dir = tmp_path / "monkeybot_config"

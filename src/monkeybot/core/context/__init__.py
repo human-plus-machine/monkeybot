@@ -8,20 +8,23 @@ import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 import yaml
 
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.tools import load_file_tool_def
 from monkeybot.core.config.settings import SubagentConfig
-from monkeybot.core.mcp.ports_mcp import MCPClientPort
+from monkeybot.core.mcp.ports_mcp import MCPClientPort, normalize_catalog_mcp_names
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import AgentEvent
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.todo_list.store import TodoListStore
+
+if TYPE_CHECKING:
+    from monkeybot.core.config.snapshot import RuntimeConfig
 
 
 @runtime_checkable
@@ -136,6 +139,9 @@ class TurnContext:
     to ``permission.remember_always_approval`` as its ``persist`` kwarg by
     ``tool_dispatch.py`` / ``realtime_loop.py``. None when no such hook is wired
     (the default for every deployment that doesn't enable computer tools)."""
+    config: RuntimeConfig | None = None
+    """Pinned ``RuntimeConfig`` for this turn. Mid-turn store reloads must not
+    change this object; ``None`` when the caller did not pin a snapshot."""
 
 
 _log = logging.getLogger(__name__)
@@ -387,6 +393,7 @@ def _core_tool_defs(
     *,
     include_task_tool: bool = True,
     subagent_type_names: Sequence[str] | None = None,
+    catalog_mcp_servers: Sequence[str] | None = None,
 ) -> list[ToolDef]:
     """Static core tools always available before MCP extensions."""
     default_lines = AGENT_READ_DEFAULT_LINES
@@ -577,26 +584,6 @@ def _core_tool_defs(
         },
         "required": [],
     }
-    enable_mcp_schema: dict[str, object] = {
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "Server name from mcp.json (e.g. browser).",
-            },
-        },
-        "required": ["name"],
-    }
-    disable_mcp_schema: dict[str, object] = {
-        "type": "object",
-        "properties": {
-            "name": {
-                "type": "string",
-                "description": "Connected MCP server name to disconnect.",
-            },
-        },
-        "required": ["name"],
-    }
     list_skills_schema: dict[str, object] = {"type": "object", "properties": {}}
     task_props: dict[str, object] = {
         "task": {
@@ -729,31 +716,55 @@ def _core_tool_defs(
                 task_schema,
             ),
         )
-    tools.extend(
-        [
-            ToolDef(
-                "enable_mcp",
-                "Connect a configured MCP server by name from mcp.json (e.g. browser). "
-                "On success returns connection status and discovered tools; on failure "
-                "returns the error (no separate status check needed). New server tools "
-                "and MCP resource/prompt tools appear on the next model step this turn.",
-                enable_mcp_schema,
-            ),
-            ToolDef(
-                "disable_mcp",
-                "Disconnect a connected MCP server by name and drop its tools from the "
-                "next model step this turn.",
-                disable_mcp_schema,
-            ),
-            ToolDef(
-                "enable_loops",
-                "Advertise scheduled-loop tools (`start_loop`, `loop_status`, "
-                "`pause_loop`, `resume_loop`, `stop_loop`, `disable_loops`) on the "
-                "next model step this turn. Requires durable storage (DB_URL). "
-                "Prefer the loop skill for procedure before starting a loop.",
-                {"type": "object", "properties": {}, "required": []},
-            ),
-        ]
+    catalog_names = list(normalize_catalog_mcp_names(catalog_mcp_servers))
+    if catalog_names:
+        tools.extend(
+            [
+                ToolDef(
+                    "enable_mcp",
+                    "Connect a catalogued MCP server by name from the harness MCP list. "
+                    "Do not read config files to discover servers. On success returns "
+                    "connection status and discovered tools; on failure returns the error "
+                    "(no separate status check needed). New server tools and MCP "
+                    "resource/prompt tools appear on the next model step this turn.",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "Catalogued MCP server name from the harness list.",
+                                "enum": catalog_names,
+                            },
+                        },
+                        "required": ["name"],
+                    },
+                ),
+                ToolDef(
+                    "disable_mcp",
+                    "Disconnect a connected MCP server by name and drop its tools from the "
+                    "next model step this turn.",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "Connected MCP server name to disconnect.",
+                            },
+                        },
+                        "required": ["name"],
+                    },
+                ),
+            ]
+        )
+    tools.append(
+        ToolDef(
+            "enable_loops",
+            "Advertise scheduled-loop tools (`start_loop`, `loop_status`, "
+            "`pause_loop`, `resume_loop`, `stop_loop`, `disable_loops`) on the "
+            "next model step this turn. Requires durable storage (DB_URL). "
+            "Prefer the loop skill for procedure before starting a loop.",
+            {"type": "object", "properties": {}, "required": []},
+        ),
     )
     return tools
 
@@ -853,6 +864,7 @@ async def build_context(
     loops_advertised: bool = False,
     todo_store: TodoListStore | None = None,
     approvals_persist: Callable[[str, str], bool] | None = None,
+    config: RuntimeConfig | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -886,6 +898,8 @@ async def build_context(
             ``## Todo list`` injection. Pass the same store to ``TodoListTool`` via ``extra_tools``.
         approvals_persist: Optional hook to durably persist "Always allow" approvals
             beyond the in-memory session cache; see ``TurnContext.approvals_persist``.
+        config: Optional pinned ``RuntimeConfig`` for this turn. When omitted the
+            turn is not snapshot-aware (tests / callers that only need env).
 
     Returns:
         Frozen :class:`TurnContext`.
@@ -899,10 +913,12 @@ async def build_context(
     registry = subagent_registry or {}
     type_names = sorted(registry)
     personas = tuple((name, registry[name].description) for name in type_names)
+    catalog_names = normalize_catalog_mcp_names(mcp_client.catalog_names())
     tools = list(
         _core_tool_defs(
             include_task_tool=include_task_tool,
             subagent_type_names=type_names,
+            catalog_mcp_servers=catalog_names,
         )
     )
     if attachments_enabled_from_env():
@@ -914,7 +930,6 @@ async def build_context(
         tools.extend(SCHEDULED_LOOP_TOOL_DEFS)
     for ct in extra_tools or []:
         tools.append(ct.tool_def)
-    catalog_names = tuple(mcp_client.catalog_names())
     return TurnContext(
         thread_id=thread_id,
         request_id=request_id,
@@ -938,6 +953,7 @@ async def build_context(
         scheduled_loops_available=scheduled_loops_available,
         todo_store=todo_store,
         approvals_persist=approvals_persist,
+        config=config,
     )
 
 

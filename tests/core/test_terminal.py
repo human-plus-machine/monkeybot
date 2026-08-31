@@ -986,10 +986,10 @@ def test_build_skill_runtime_env_prepends_gateway_python_bin(tmp_path, monkeypat
 
 
 def test_process_group_helpers_skip_on_windows(monkeypatch) -> None:
-    import monkeybot.core.tools.terminal as terminal
+    from monkeybot.core import subprocess_groups
 
-    monkeypatch.setattr(terminal, "_SUPPORTS_PROCESS_GROUPS", False)
-    assert terminal._process_group_id(12345) is None
+    monkeypatch.setattr(subprocess_groups, "SUPPORTS_PROCESS_GROUPS", False)
+    assert subprocess_groups.process_group_id(12345) is None
 
     class _Proc:
         returncode = None
@@ -1001,10 +1001,10 @@ def test_process_group_helpers_skip_on_windows(monkeypatch) -> None:
     proc = _Proc()
     calls: list[tuple[int, int]] = []
     monkeypatch.setattr(
-        terminal.os,
+        subprocess_groups.os,
         "killpg",
         lambda pgid, sig: calls.append((pgid, sig)),
     )
-    terminal._kill_process_group(999, proc)  # type: ignore[arg-type]
+    subprocess_groups.kill_process_group(999, proc)  # type: ignore[arg-type]
     assert calls == []
     assert proc.killed is True

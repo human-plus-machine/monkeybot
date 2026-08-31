@@ -29,6 +29,13 @@ cp -r examples/skills/diagnostics/ ./skills/
 ## Resources
 
 - [Getting Started](../docs/getting-started.md)
+- [Local Ollama prefix cache](../docs/ollama-local.md) — `keep_alive`, `num_ctx`, prefix-stable Modelfile
 - Config templates: `cli/src/monkeybot_cli/scaffold_defaults/` (via `monkeybot new`)
 - [Cloud deployment](../docs/cloud-deployment-design.md)
 - [SSE gateway / custom UI](../docs/sse-gateway-ui.md)
+
+## Ollama
+
+| Example | Purpose |
+|---|---|
+| [ollama/PrefixStable.Modelfile](ollama/PrefixStable.Modelfile) | Pin tool schemas in the system block so local KV prefix cache survives tool turns |

@@ -29,6 +29,14 @@ Configuration (environment variables or ``monkeybot.yaml``):
 - ``MODEL_THINKING_BUDGET`` — thinking control for reasoning models (e.g. Gemma 4):
   ``-1`` = Ollama default (thinking on when supported), ``0`` = off via
   ``reasoning_effort: none``, ``N > 0`` = on (no token budget on Ollama).
+- ``model.keep_alive`` (YAML only) — local only. How long Ollama keeps the model
+  (and its KV prefix cache) loaded after a request. Default ``24h``. Set ``"0"``
+  (or empty) to omit the field. Cloud mode never sends it. Distinct from the
+  *server* env ``OLLAMA_KEEP_ALIVE``.
+- ``model.num_ctx`` (YAML only) — local only. Optional pinned ``num_ctx``.
+  Omitted = Ollama Modelfile / server default. **Not** ``model.context_window``
+  (that drives summarization/spill). Changing this between requests reloads
+  the model and drops the prefix cache.
 
 Install the required extra::
 
@@ -41,7 +49,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import AsyncIterator, Sequence
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 from monkeybot.core.llm.provider import (
@@ -61,6 +69,8 @@ OllamaMode = Literal["auto", "cloud", "local"]
 _DEFAULT_LOCAL_URL = "http://localhost:11434"
 _DEFAULT_CLOUD_URL = "https://ollama.com"
 _DUMMY_API_KEY = "ollama"
+_DEFAULT_LOCAL_KEEP_ALIVE = "24h"
+_DISABLE_KEEP_ALIVE = frozenset({"", "0"})
 _log = logging.getLogger(__name__)
 
 
@@ -137,6 +147,15 @@ def _resolve_host_and_key(mode: OllamaMode = "auto") -> tuple[str, str]:
     return _DEFAULT_LOCAL_URL, _DUMMY_API_KEY
 
 
+def _is_local_runtime(mode: OllamaMode, host: str) -> bool:
+    """True when this provider instance talks to a local/self-hosted Ollama."""
+    if mode == "cloud":
+        return False
+    if mode == "local":
+        return True
+    return not _is_cloud_host(host)
+
+
 def reasoning_effort_for_thinking_budget(budget: int) -> str | None:
     """Map monkeybot ``thinking_budget`` to Ollama OpenAI-compat ``reasoning_effort``.
 
@@ -156,7 +175,9 @@ def _resolve_thinking_budget(
         return override
     if configured is not None:
         return configured
-    return int(os.environ.get("MODEL_THINKING_BUDGET", "-1"))
+    from monkeybot.core.config.snapshot import current_env
+
+    return int(current_env("MODEL_THINKING_BUDGET", "-1"))
 
 
 class OllamaProvider:
@@ -186,17 +207,44 @@ class OllamaProvider:
         temperature: float | None = None,
         max_tokens: int | None = None,
         thinking_budget: int | None = None,
+        keep_alive: str | None = None,
+        num_ctx: int | None = None,
     ) -> None:
         self._mode = mode
         self._base_url, self._api_key = _resolve_host_and_key(mode)
-        _log.info("ollama host resolved %s", kv(mode=self._mode, host=self._base_url))
         sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
-        self._thinking_budget = (
-            thinking_budget
-            if thinking_budget is not None
-            else int(os.environ.get("MODEL_THINKING_BUDGET", "-1"))
+        if thinking_budget is not None:
+            self._thinking_budget = thinking_budget
+        else:
+            from monkeybot.core.config.snapshot import current_env
+
+            self._thinking_budget = int(current_env("MODEL_THINKING_BUDGET", "-1"))
+        local = _is_local_runtime(mode, self._base_url)
+        if not local:
+            self._keep_alive = None
+            self._num_ctx = None
+        else:
+            if keep_alive is None:
+                self._keep_alive = _DEFAULT_LOCAL_KEEP_ALIVE
+            else:
+                s = str(keep_alive).strip()
+                self._keep_alive = None if s.lower() in _DISABLE_KEEP_ALIVE else s
+            if num_ctx is None:
+                self._num_ctx = None
+            elif num_ctx < 1:
+                raise ValueError(f"num_ctx must be a positive integer, got {num_ctx!r}")
+            else:
+                self._num_ctx = num_ctx
+        _log.info(
+            "ollama host resolved %s",
+            kv(
+                mode=self._mode,
+                host=self._base_url,
+                keep_alive=self._keep_alive,
+                num_ctx=self._num_ctx,
+            ),
         )
 
     def _resolve_base_url(self, model: str) -> str:
@@ -233,10 +281,13 @@ class OllamaProvider:
         thinking_budget: int | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         budget = _resolve_thinking_budget(self._thinking_budget, override=thinking_budget)
-        reasoning_effort = reasoning_effort_for_thinking_budget(budget)
-        effort_kw = (
-            {"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}
-        )
+        extra_body: dict[str, Any] | None = None
+        if self._keep_alive is not None or self._num_ctx is not None:
+            extra_body = {}
+            if self._keep_alive is not None:
+                extra_body["keep_alive"] = self._keep_alive
+            if self._num_ctx is not None:
+                extra_body["options"] = {"num_ctx": self._num_ctx}
         async for event in stream_chat_completions_with_tool_fallback(
             base_url=self._resolve_base_url(model),
             api_key=self._api_key,
@@ -246,6 +297,7 @@ class OllamaProvider:
             model=model,
             temperature=self._temperature,
             max_tokens=self._max_tokens,
-            **effort_kw,
+            reasoning_effort=reasoning_effort_for_thinking_budget(budget),
+            extra_body=extra_body,
         ):
             yield event

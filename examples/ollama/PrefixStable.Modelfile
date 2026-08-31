@@ -1,0 +1,49 @@
+# Prefix-stable chat template: pin tool definitions in the system block so
+# Ollama's KV prefix cache survives tool-call turns.
+#
+# Many stock templates only render tools when the last message is a user turn
+# (`{{- if and $.Tools $last }}`). After a tool result that block moves or
+# disappears, so the next request re-prefills the whole schema.
+#
+#   ollama create llama3.1:8b-prefix-stable -f PrefixStable.Modelfile
+#
+# Then set model.name to that tag. Change the FROM line to your base model.
+# See docs/ollama-local.md.
+
+FROM llama3.1:8b
+
+TEMPLATE """{{- if or .System .Tools }}<|start_header_id|>system<|end_header_id|>
+{{- if .System }}
+
+{{ .System }}
+{{- end }}
+{{- if .Tools }}
+
+You have access to the following functions. Use them via the native tool-call channel, not as JSON in assistant text.
+
+{{- range .Tools }}
+{{ .Function }}
+{{- end }}
+{{- end }}<|eot_id|>
+{{- end }}
+{{- range .Messages }}
+{{- if eq .Role "tool" }}<|start_header_id|>ipython<|end_header_id|>
+
+{{ .Content }}<|eot_id|>
+{{- else if eq .Role "assistant" }}<|start_header_id|>assistant<|end_header_id|>
+{{- if .ToolCalls }}
+{{- range .ToolCalls }}
+{{ .Function }}
+{{- end }}
+{{- end }}
+{{- if .Content }}
+
+{{ .Content }}
+{{- end }}<|eot_id|>
+{{- else }}<|start_header_id|>{{ .Role }}<|end_header_id|>
+
+{{ .Content }}<|eot_id|>
+{{- end }}
+{{- end }}<|start_header_id|>assistant<|end_header_id|>
+
+"""

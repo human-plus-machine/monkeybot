@@ -9,7 +9,7 @@ Use the **browser** MCP tools (`browser__*` in the active tool list) for any web
 
 ## Before any browser tool
 
-If `browser__*` tools are not in the active tool list yet, call **`enable_mcp("browser")` first**. That connects the configured server from `mcp.json` and advertises browser tools on the next model step (same user turn).
+If `browser__*` tools are not in the active tool list yet, call **`enable_mcp("browser")` first**. Use the server name from the harness MCP catalog (or this skill). Do not read MCP config files. That connects the catalogued server and advertises browser tools on the next model step (same user turn).
 
 ## Default: indexed DOM (prefer this)
 
@@ -65,4 +65,4 @@ When you finish a task on a host without a playbook—or discover selectors, wai
 
 ## Setup (operators)
 
-Add the `browser` MCP server to `monkeybot_config/mcp.json`. Schemas are not advertised until the agent calls `enable_mcp("browser")`. Full install, production deployment (local dev, self-hosted headless, Browser Use Cloud), env vars, and troubleshooting: **`docs/browser-mcp.md`** in the monkeybot repo (also linked from `docs/mcp.md`).
+The `browser` MCP server must already be catalogued by the operator. Do not read MCP config files to discover it — call `enable_mcp("browser")`. Full install, production deployment (local dev, self-hosted headless, Browser Use Cloud), env vars, and troubleshooting: **`docs/browser-mcp.md`** in the monkeybot repo (also linked from `docs/mcp.md`).

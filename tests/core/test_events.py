@@ -185,9 +185,7 @@ def test_agent_event_roundtrip_context_summarized() -> None:
 def test_agent_event_roundtrip_context_usage() -> None:
     from monkeybot.core.runtime.events import ContextUsage
 
-    ev = ContextUsage(
-        request_id="r1", estimated_tokens=42_000, context_window_tokens=200_000
-    )
+    ev = ContextUsage(request_id="r1", estimated_tokens=42_000, context_window_tokens=200_000)
     assert event_from_json(event_to_json(ev)) == ev
 
 
@@ -336,6 +334,20 @@ def test_sse_system_notification_event_roundtrip(data: dict[str, object] | None)
         notification_type="creditsExhausted",
         msg="out of credits",
         data=data,
+    )
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_config_reloaded_roundtrip() -> None:
+    from monkeybot.core.runtime.events import ConfigReloaded
+
+    ev = ConfigReloaded(
+        request_id="",
+        revision=3,
+        digest="abc",
+        hot=["MODEL_NAME"],
+        applied=["MODEL_PROVIDER"],
+        restart_required=["DB_URL"],
     )
     assert event_from_json(event_to_json(ev)) == ev
 

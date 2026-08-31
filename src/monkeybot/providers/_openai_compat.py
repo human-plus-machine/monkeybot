@@ -874,6 +874,7 @@ async def stream_chat_completions_with_tool_fallback(
     temperature: float,
     max_tokens: int,
     reasoning_effort: str | None = None,
+    extra_body: dict[str, Any] | None = None,
 ) -> AsyncIterator[ProviderEvent]:
     """Shared ``stream`` body for OpenAI-compat providers.
 
@@ -882,6 +883,10 @@ async def stream_chat_completions_with_tool_fallback(
     errors (raw upstream body may not be a clean 429, e.g. NVIDIA's own
     "ResourceExhausted" text) and caps in-flight concurrency per provider; see
     ``is_rate_limit_error`` / ``_provider_semaphore``.
+
+    ``extra_body`` is forwarded to the OpenAI SDK for vendor fields the typed
+    Chat Completions schema does not list (Ollama ``keep_alive`` / ``options``).
+    HuggingFace and NVIDIA omit it.
     """
     from openai import AsyncOpenAI  # noqa: PLC0415
 
@@ -902,6 +907,8 @@ async def stream_chat_completions_with_tool_fallback(
         kwargs["tools"] = openai_tools(tools)
     if reasoning_effort is not None:
         kwargs["reasoning_effort"] = reasoning_effort
+    if extra_body:
+        kwargs["extra_body"] = extra_body
 
     n_tools = len(tools)
     sem = _provider_semaphore(provider)

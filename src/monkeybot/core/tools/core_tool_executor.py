@@ -28,6 +28,7 @@ from monkeybot.core.attachments.store import (
     sniff_mime,
 )
 from monkeybot.core.config.settings import SubagentConfig, get_subagent_settings
+from monkeybot.core.config.snapshot import RuntimeConfig, env_value_or_current
 from monkeybot.core.context import (
     SCHEDULED_LOOP_TOOL_DEFS,
     CustomTool,
@@ -75,6 +76,11 @@ from monkeybot.core.subagents.subagent_proto import (
     resolve_subagent_script,
     resolve_task_agent_md_path,
     spawn_subagent,
+)
+from monkeybot.core.subprocess_groups import (
+    SUPPORTS_PROCESS_GROUPS,
+    process_group_id,
+    stop_subagent_process,
 )
 from monkeybot.core.tools.fs_isolation import memory_hidden_paths
 from monkeybot.core.tools.inspector import coerce_run_command_argv
@@ -195,23 +201,6 @@ def _is_under_spill_path(workspace_root: Path, rel_path: str) -> bool:
         return False
 
 
-async def _stop_subagent_process(proc: asyncio.subprocess.Process | None) -> None:
-    """SIGTERM then reap; SIGKILL if still alive after a short wait."""
-    if proc is None or proc.returncode is not None:
-        return
-    try:
-        proc.terminate()
-    except ProcessLookupError:
-        return
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=8.0)
-    except TimeoutError:
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        with contextlib.suppress(ProcessLookupError):
-            await proc.wait()
-
-
 def _task_child_env(
     *,
     repo_root: Path,
@@ -219,6 +208,7 @@ def _task_child_env(
     memory_uri: str,
     skills_path: Path,
     artifacts_path: Path | None,
+    config: RuntimeConfig | None = None,
 ) -> dict[str, str]:
     """Build subprocess env overlays for a nested task worker."""
     child_env = {
@@ -230,13 +220,14 @@ def _task_child_env(
     }
     if artifacts_path is not None:
         child_env["MONKEYBOT_SUBAGENT_ARTIFACTS_PATH"] = str(artifacts_path)
+
     for env_key, raw_val in (
-        ("MCP_CONFIG", os.environ.get("MCP_CONFIG", "")),
-        ("COMMAND_ALLOWLIST_CONFIG", os.environ.get("COMMAND_ALLOWLIST_CONFIG", "")),
+        ("MCP_CONFIG", env_value_or_current(config, "MCP_CONFIG")),
+        ("COMMAND_ALLOWLIST_CONFIG", env_value_or_current(config, "COMMAND_ALLOWLIST_CONFIG")),
     ):
         if raw_val.strip():
             child_env[env_key] = str(resolve_project_path(raw_val.strip(), agent_root))
-    db_raw = os.environ.get("DB_URL", "").strip()
+    db_raw = env_value_or_current(config, "DB_URL").strip()
     if db_raw:
         child_env["DB_URL"] = normalize_sqlite_db_url(db_raw, agent_root)
     return child_env
@@ -364,6 +355,7 @@ async def _await_subagent_drain(
     cancelled: asyncio.Event | None,
     timeout: float,
     proc_holder: list[asyncio.subprocess.Process | None],
+    pgid_holder: list[int | None],
     accum: _SubagentDrainAccum,
     run_id: str,
 ) -> None:
@@ -377,7 +369,7 @@ async def _await_subagent_drain(
             except TimeoutError:
                 errors.append(f"task: subagent exceeded {timeout:g}s timeout")
                 accum.note_exit_reason("timeout", force=True)
-                await _stop_subagent_process(proc_holder[0])
+                await stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
                 if not drain_task.done():
                     drain_task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
@@ -392,7 +384,7 @@ async def _await_subagent_drain(
         if not done:
             errors.append(f"task: subagent exceeded {timeout:g}s timeout")
             accum.note_exit_reason("timeout", force=True)
-            await _stop_subagent_process(proc_holder[0])
+            await stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
             cancel_wait.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cancel_wait
@@ -419,7 +411,7 @@ async def _await_subagent_drain(
         else:
             errors.append(_PARENT_CANCEL_TASK_ERR)
             accum.note_exit_reason("cancelled", force=True)
-            await _stop_subagent_process(proc_holder[0])
+            await stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
             if not drain_task.done():
                 drain_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -494,6 +486,7 @@ async def _run_inline_subagent_with_progress(
     """Spawn an inline subagent, forward nested SSE, always emit SubagentCompleted."""
     accum = _SubagentDrainAccum()
     proc_holder: list[asyncio.subprocess.Process | None] = [None]
+    pgid_holder: list[int | None] = [None]
     fail_count: list[int] = [0]
     label = subagent_type or "subagent"
 
@@ -501,6 +494,9 @@ async def _run_inline_subagent_with_progress(
         env = dict(os.environ)
         env.update(child_env)
         env["PYTHONUNBUFFERED"] = "1"
+        # Detach from the parent process group so timeout/cancel can killpg
+        # descendants. A parent SIGKILL/crash will not reap this tree — inline
+        # task has no subagent.pid reap path; those orphans are accepted.
         p = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
@@ -508,8 +504,10 @@ async def _run_inline_subagent_with_progress(
             stderr=asyncio.subprocess.DEVNULL,
             env=env,
             limit=SUBAGENT_STDOUT_LINE_LIMIT,
+            start_new_session=SUPPORTS_PROCESS_GROUPS,
         )
         proc_holder[0] = p
+        pgid_holder[0] = process_group_id(p.pid)
         return p
 
     logger.info(
@@ -569,6 +567,7 @@ async def _run_inline_subagent_with_progress(
                 cancelled=ctx.cancelled,
                 timeout=timeout,
                 proc_holder=proc_holder,
+                pgid_holder=pgid_holder,
                 accum=accum,
                 run_id=run_id,
             )
@@ -844,10 +843,13 @@ class CoreToolExecutor(ToolExecutorPort):
         subagent_registry: dict[str, SubagentConfig] | None = None,
         loops_registry: LoopsToolRegistry | None = None,
         knowledge: KnowledgeSubsystem | None = None,
+        config: RuntimeConfig | None = None,
     ) -> None:
         ws_settings = workspace_settings_from_config()
         self._skills_path = Path(skills_path).resolve()
-        self._artifacts_path = Path(artifacts_path).resolve() if artifacts_path is not None else None
+        self._artifacts_path = (
+            Path(artifacts_path).resolve() if artifacts_path is not None else None
+        )
         self._workspace = WorkspaceFileService(
             Path(workspace_root).resolve(),
             settings=ws_settings,
@@ -862,6 +864,7 @@ class CoreToolExecutor(ToolExecutorPort):
         self._scheduled_loop_store = scheduled_loop_store
         self._loops_registry = loops_registry if loops_registry is not None else LoopsToolRegistry()
         self._subagent_registry = dict(subagent_registry or {})
+        self._config = config
         self._terminal: TerminalExecutor | SandboxExecutor
         self._host_terminal: TerminalExecutor | None = None
         if terminal is not None:
@@ -911,7 +914,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 else terminal
             )
         else:
-            _scfg = SandboxConfig.from_env()
+            _scfg = SandboxConfig.from_env(self._config)
             if _scfg.enabled:
                 self._terminal = SandboxExecutor(
                     _scfg,
@@ -1722,13 +1725,14 @@ class CoreToolExecutor(ToolExecutorPort):
             memory_uri=memory_uri,
             skills_path=self._skills_path,
             artifacts_path=self._artifacts_path,
+            config=self._config,
         )
         payload = await _run_inline_subagent_with_progress(
             script=script,
             envelope=envelope,
             scratch=scratch,
             child_env=child_env,
-            timeout=get_subagent_settings().timeout_sec,
+            timeout=get_subagent_settings(config=self._config).timeout_sec,
             ctx=ctx,
             call=call,
             run_id=run_id,

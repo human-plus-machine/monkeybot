@@ -1,7 +1,7 @@
 """Regression guard: subagents must never get ``computer_*`` tools.
 
 ``subagent_worker.py`` builds its own ``extra_tools`` list independently of the
-gateway's ``_deps.computer_tools`` (see ``core/subagents/subagent_worker.py``,
+gateway's ``gateway_runtime.computer_tools`` (see ``core/subagents/subagent_worker.py``,
 which only ever appends the web-search tool) and loads permissions with
 ``allow_ask=False`` (``ask`` -> ``deny``), so even if a computer tool were
 somehow advertised, a "confirm" decision could never be reached in a subagent
