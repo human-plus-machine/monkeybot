@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
 from monkeybot.core.llm.provider import Provider
@@ -18,6 +18,9 @@ from monkeybot.providers.openai import OpenAIProvider
 from monkeybot.providers.openrouter import OpenRouterProvider
 from monkeybot.providers.sampling import resolve_model_sampling
 from monkeybot.providers.vertex_claude import VertexClaudeProvider
+
+if TYPE_CHECKING:
+    from monkeybot.core.config.snapshot import RuntimeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -111,13 +114,15 @@ class ProviderConfig:
     model: str
 
 
-def _resolve_gcp_project_id() -> str:
+def _resolve_gcp_project_id(config: RuntimeConfig | None = None) -> str:
     """GCP project for Vertex providers."""
+    from monkeybot.core.config.snapshot import env_value_or_current
+
     return (
-        (os.getenv("GCP_PROJECT_ID") or "").strip()
-        or (os.getenv("VERTEX_AI_PROJECT_ID") or "").strip()
-        or (os.getenv("ANTHROPIC_VERTEX_PROJECT_ID") or "").strip()
-        or (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip()
+        env_value_or_current(config, "GCP_PROJECT_ID").strip()
+        or env_value_or_current(config, "VERTEX_AI_PROJECT_ID").strip()
+        or env_value_or_current(config, "ANTHROPIC_VERTEX_PROJECT_ID").strip()
+        or env_value_or_current(config, "GOOGLE_CLOUD_PROJECT").strip()
     )
 
 
@@ -127,21 +132,28 @@ def get_provider_config(
     temperature: float | None = None,
     max_tokens: int | None = None,
     thinking_budget: int | None = None,
+    config: RuntimeConfig | None = None,
 ) -> ProviderConfig:
-    """Resolve a Provider and model id from environment or explicit parameters."""
-    raw_provider = str(provider or os.getenv("MODEL_PROVIDER") or "google_vertexai")
+    """Resolve a Provider and model id from a pinned snapshot, environment, or explicit parameters."""
+    from monkeybot.core.config.snapshot import env_value_or_current
+
+    raw_provider = str(
+        provider or env_value_or_current(config, "MODEL_PROVIDER") or "google_vertexai"
+    )
     provider_key = normalize_model_provider(raw_provider)
     if provider_key == "fake":
         raise ValueError(
             "MODEL_PROVIDER=fake is for gateway/tests only; inject ScriptedFakeProvider directly "
             "or use the gateway fake provider path."
         )
-    resolved_model = str(model_name or os.getenv("MODEL_NAME") or "gemini-2.5-flash")
-    sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
+    resolved_model = str(
+        model_name or env_value_or_current(config, "MODEL_NAME") or "gemini-2.5-flash"
+    )
+    sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens, config=config)
     thinking_budget = (
         thinking_budget
         if thinking_budget is not None
-        else int(os.getenv("MODEL_THINKING_BUDGET", "-1"))
+        else int(env_value_or_current(config, "MODEL_THINKING_BUDGET", "-1"))
     )
     if provider_key == "google_vertexai":
         return ProviderConfig(
@@ -185,19 +197,21 @@ def get_provider_config(
             resolved_model,
         )
     if provider_key == "vertex_anthropic":
-        project = _resolve_gcp_project_id()
+        project = _resolve_gcp_project_id(config)
         if not project:
             raise ValueError(
                 "vertex_anthropic provider requires a GCP project. "
                 "Set GCP_PROJECT_ID, VERTEX_AI_PROJECT_ID, ANTHROPIC_VERTEX_PROJECT_ID, "
                 "or GOOGLE_CLOUD_PROJECT (or gcp.project_id in monkeybot.yaml)."
             )
-        if os.getenv("VERTEX_AI_LOCATION"):
+        if env_value_or_current(config, "VERTEX_AI_LOCATION"):
             logger.warning(
                 "VERTEX_AI_LOCATION is no longer read for vertex_anthropic; "
                 "set ANTHROPIC_VERTEX_REGION instead"
             )
-        region = (os.getenv("ANTHROPIC_VERTEX_REGION") or "us-east5").strip() or "us-east5"
+        region = (
+            env_value_or_current(config, "ANTHROPIC_VERTEX_REGION") or "us-east5"
+        ).strip() or "us-east5"
         return ProviderConfig(
             VertexClaudeProvider(
                 project_id=project,
@@ -299,6 +313,16 @@ def _parse_subagent_entries(raw_entries: Any) -> list[SubagentConfig]:
     return configs
 
 
+def _persona_registry(entries: list[SubagentConfig]) -> dict[str, SubagentConfig]:
+    """Key personas by ``name``; raise :class:`ConfigError` on duplicates."""
+    registry: dict[str, SubagentConfig] = {}
+    for cfg in entries:
+        if cfg.name in registry:
+            raise ConfigError(f"Duplicate subagent name in monkeybot.yaml: {cfg.name!r}")
+        registry[cfg.name] = cfg
+    return registry
+
+
 def _subagents_section(doc: dict[str, Any]) -> dict[str, Any]:
     """Return the ``subagents:`` mapping, or empty dict when absent."""
     section = doc.get("subagents")
@@ -314,10 +338,13 @@ def _subagents_section(doc: dict[str, Any]) -> dict[str, Any]:
     return section
 
 
-def get_subagent_settings(config_path: str | None = None) -> SubagentSettings:
-    """Global ``task`` defaults from ``subagents:`` in monkeybot.yaml (config-file only)."""
-    _, doc = load_monkeybot_yaml_dict(config_path)
-    section = _subagents_section(doc)
+def subagent_settings_from_section(section: dict[str, Any]) -> SubagentSettings:
+    """Parse a ``subagents:`` mapping into :class:`SubagentSettings`.
+
+    Shared by :func:`get_subagent_settings` (reads the YAML file directly) and
+    the ``RuntimeConfig`` snapshot builder (parses the already-merged doc), so
+    the two never validate the section differently.
+    """
     if not section:
         return _DEFAULT_SUBAGENT_SETTINGS
 
@@ -358,6 +385,24 @@ def get_subagent_settings(config_path: str | None = None) -> SubagentSettings:
     )
 
 
+def get_subagent_settings(
+    config_path: str | None = None,
+    *,
+    config: RuntimeConfig | None = None,
+) -> SubagentSettings:
+    """Global ``task`` defaults from ``subagents:`` in monkeybot.yaml.
+
+    When ``config`` (a pinned ``RuntimeConfig`` snapshot) is given, its
+    ``subagent_settings`` field is returned instead of re-reading the YAML
+    file, so an in-flight turn spawning a subagent stays on the revision it
+    was pinned to rather than picking up a file edit mid-turn.
+    """
+    if config is not None:
+        return config.subagent_settings
+    _, doc = load_monkeybot_yaml_dict(config_path)
+    return subagent_settings_from_section(_subagents_section(doc))
+
+
 def get_subagent_configs(config_path: str | None = None) -> list[SubagentConfig]:
     """Return named personas from ``subagents.personas`` in monkeybot.yaml."""
     _, doc = load_monkeybot_yaml_dict(config_path)
@@ -365,14 +410,21 @@ def get_subagent_configs(config_path: str | None = None) -> list[SubagentConfig]
     return _parse_subagent_entries(section.get("personas"))
 
 
-def get_subagent_registry(config_path: str | None = None) -> dict[str, SubagentConfig]:
-    """Named subagent personas keyed by ``name``; raises :class:`ConfigError` on duplicates."""
-    registry: dict[str, SubagentConfig] = {}
-    for cfg in get_subagent_configs(config_path):
-        if cfg.name in registry:
-            raise ConfigError(f"Duplicate subagent name in monkeybot.yaml: {cfg.name!r}")
-        registry[cfg.name] = cfg
-    return registry
+def get_subagent_registry(
+    config_path: str | None = None,
+    *,
+    config: RuntimeConfig | None = None,
+) -> dict[str, SubagentConfig]:
+    """Named subagent personas keyed by ``name``; raises :class:`ConfigError` on duplicates.
+
+    When ``config`` (a pinned ``RuntimeConfig`` snapshot) is given, its
+    ``subagents`` field is returned instead of re-reading the YAML file, so
+    ``GatewayRuntime.apply`` cannot pick up a third disk state written between
+    ``prepare_reload`` and ``apply``.
+    """
+    if config is not None:
+        return dict(config.subagents)
+    return _persona_registry(get_subagent_configs(config_path))
 
 
 def _bool_config_flag(

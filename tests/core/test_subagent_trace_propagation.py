@@ -226,6 +226,74 @@ async def test_tool_task_sets_subagent_otel_service_name_in_child_env(
 
 
 @pytest.mark.asyncio
+async def test_tool_task_spawns_in_new_session_for_process_group_kill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inline task must start_new_session so timeout/cancel can killpg descendants."""
+    captured_kwargs: dict[str, object] = {}
+
+    async def fake_create_subprocess_exec(
+        *cmd: str | bytes,
+        env: dict[str, str] | None = None,
+        **kwargs: object,
+    ) -> asyncio.subprocess.Process:
+        del cmd, env
+        captured_kwargs.update(kwargs)
+        proc = MagicMock()
+        proc.pid = 4242
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.returncode = 0
+        proc.wait = AsyncMock(return_value=0)
+        return proc
+
+    async def fake_spawn(
+        script: str,
+        envelope: SubagentEnvelope,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+    ):
+        del script, scratch_dir, on_event, envelope
+        if subprocess_exec is not None:
+            await subprocess_exec(sys.executable, "-c", "pass")
+        yield TurnComplete(
+            request_id="req-1",
+            usage=UsageTotals(
+                input_tokens=1,
+                output_tokens=1,
+                cached_tokens=0,
+                cost_usd=0.0,
+                duration_ms=1,
+                estimated_prompt_tokens=0,
+            ),
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
+    monkeypatch.setattr(
+        "monkeybot.core.subprocess_groups.SUPPORTS_PROCESS_GROUPS",
+        True,
+    )
+    monkeypatch.setattr(
+        "monkeybot.core.subprocess_groups.process_group_id",
+        lambda pid: pid,
+    )
+    ex = _make_executor(tmp_path, monkeypatch)
+    ctx = _ctx()
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="c1", name="task", args={"task": "do work", "context": ""}),
+            ctx=ctx,
+        )
+    )
+    assert err is None and out is not None
+    assert captured_kwargs.get("start_new_session") is True
+
+
+@pytest.mark.asyncio
 async def test_tool_task_stdin_omits_traceparent_without_active_span(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

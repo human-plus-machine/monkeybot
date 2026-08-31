@@ -26,7 +26,13 @@ from monkeybot.core.config import (
     validate_provider_env,
     vertex_google_search_enabled_from_config,
 )
-from monkeybot.core.config.runtime_env import ENV_MAP, RETIRED_TOOLS_KEYS, warn_retired_tools_keys
+from monkeybot.core.config.runtime_env import (
+    ENV_MAP,
+    RETIRED_CONTEXT_CURATION_KEYS,
+    RETIRED_TOOLS_KEYS,
+    warn_retired_curation_keys,
+    warn_retired_tools_keys,
+)
 from monkeybot.core.config.settings import ollama_options_from_config
 from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES
 
@@ -539,6 +545,20 @@ class TestReadDefaultLinesFixed:
         )
         result = svc.read_file("wide.txt")
         assert result["end_line"] - result["start_line"] + 1 == 40
+
+
+class TestRetiredContextCurationKeys:
+    def test_curator_keys_retired_from_env_map(self) -> None:
+        assert "curator_model" in RETIRED_CONTEXT_CURATION_KEYS
+        assert "timeout_sec" in RETIRED_CONTEXT_CURATION_KEYS
+        assert ("context_curation", "curator_model") not in ENV_MAP
+        assert ("context_curation", "timeout_sec") not in ENV_MAP
+
+    def test_yaml_keys_warn_and_are_ignored(self) -> None:
+        found = warn_retired_curation_keys(
+            {"context_curation": {"curator_model": "x", "timeout_sec": 10, "enabled": True}}
+        )
+        assert found == ["curator_model", "timeout_sec"]
 
 
 class TestRealtimeConfig:
