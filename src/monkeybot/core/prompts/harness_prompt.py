@@ -13,6 +13,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from monkeybot.core.mcp.ports_mcp import normalize_catalog_mcp_names
+
 if TYPE_CHECKING:
     from monkeybot.core.config.snapshot import RuntimeConfig
 
@@ -56,7 +58,6 @@ This block is injected by the host every turn. Prefer the **active JSON tool lis
 - **Long multi-item tasks:** when a task has more than ~10 enumerable items (question lists, checklists), write incremental results to a workspace file early and update it as you go — context may be compacted mid-task.
 
 ### MCP
-- Names look like `server__tool` (double underscore). The list below is the complete catalog — call `enable_mcp` with one of those names. Do not read or search for MCP config files. Resource/prompt tools appear only after `enable_mcp`.
 {catalog_mcp_line}- MCP errors are plain text (not structured JSON). HTTP 4xx/5xx, "not found", "unauthorized", "forbidden", or similar means the tool **did not return usable data** — state what failed; do not fabricate content.
 - Call `enable_loops` before scheduled-loop tools appear.
 
@@ -162,18 +163,29 @@ def harness_fixed_context(
     on ``include_task_tool`` so it only appears when the ``task`` tool is active.
     ``memory_on`` selects the memory-storage path line (URI vs disabled).
     ``catalog_mcp_servers`` lists catalogued servers available via ``enable_mcp`` but not
-    connected until the model activates them. The model must use this list (and the
-    ``enable_mcp`` tool schema); it must not read control-plane config files.
+    connected until the model activates them. When the catalog is empty, this block does
+    not mention ``enable_mcp`` (the tool is also omitted from the JSON tool list).
+    The model must use this list (and the ``enable_mcp`` tool schema); it must not
+    read control-plane config files.
     """
     exec_note = (
         _RUN_COMMAND_EXEC_NOTE_SANDBOX if run_command_opensandbox else _RUN_COMMAND_EXEC_NOTE_HOST
     )
-    catalog = [n.strip() for n in (catalog_mcp_servers or ()) if n and str(n).strip()]
+    catalog = normalize_catalog_mcp_names(catalog_mcp_servers)
     if catalog:
         names = ", ".join(f"`{n}`" for n in catalog)
-        catalog_mcp_line = f"- Configured MCP servers: {names}.\n"
+        catalog_mcp_line = (
+            "- Names look like `server__tool` (double underscore). The list below is "
+            "the complete catalog — call `enable_mcp` with one of those names. Do not "
+            "read or search for MCP config files. Resource/prompt tools appear only "
+            "after `enable_mcp`.\n"
+            f"- Configured MCP servers: {names}.\n"
+        )
     else:
-        catalog_mcp_line = "- No MCP servers are configured.\n"
+        catalog_mcp_line = (
+            "- Names look like `server__tool` (double underscore). Do not read or "
+            "search for MCP config files.\n"
+        )
     body = _HARNESS_BODY.format(
         run_command_exec_note=exec_note,
         catalog_mcp_line=catalog_mcp_line,

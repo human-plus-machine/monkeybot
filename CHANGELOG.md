@@ -8,7 +8,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Progressive MCP: harness catalog + `enable_mcp` schema no longer mention `mcp.json`, which sent models to `read_file` a control-plane file outside the workspace. Catalog names are now an `enable_mcp` enum.
+- Progressive MCP: harness catalog + `enable_mcp` schema no longer mention `mcp.json`, which sent models to `read_file` a control-plane file outside the workspace. Catalog names are now an `enable_mcp` enum; the tool is omitted when the catalog is empty.
 
 ## [browser v0.4.0] - 2026-08-29
 
