@@ -15,7 +15,7 @@ from monkeybot.core.config import (
     get_config_store,
     reset_runtime_env_state_for_tests,
 )
-from monkeybot.core.config.runtime_env import ENV_FIELD_PATHS, ENV_MAP, ENV_TIERS
+from monkeybot.core.config.runtime_env import ENV_MAP, ENV_SPEC, ENV_TIERS
 from monkeybot.core.config.settings import SubagentSettings
 from monkeybot.core.config.snapshot import build_runtime_config, env_field_value
 
@@ -55,11 +55,13 @@ def test_env_map_three_way_exhaustiveness(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.chdir(tmp_path)
     env_names = set(ENV_MAP.values())
     assert len(ENV_MAP) == len(env_names)
+    assert set(ENV_SPEC) == env_names
     assert set(ENV_TIERS) == env_names
-    assert set(ENV_FIELD_PATHS) == env_names
     cfg = build_runtime_config(agent_root=tmp_path)
     for env_name in sorted(env_names):
-        assert ENV_TIERS[env_name] in ConfigTier
+        tier, _path = ENV_SPEC[env_name]
+        assert tier in ConfigTier
+        assert ENV_TIERS[env_name] is tier
         env_field_value(cfg, env_name)
 
 
@@ -507,6 +509,7 @@ def test_context_window_tokens_none_cfg_reads_store_not_os_environ(
     overlay_env_values({"MODEL_CONTEXT_WINDOW": "99999"})
     assert os.environ.get("MODEL_CONTEXT_WINDOW") == "55555"
     assert current_env("MODEL_CONTEXT_WINDOW") == "99999"
+    assert get_config_store().current().model.context_window == "99999"
     assert context_window_tokens() == 99999
 
 
@@ -531,11 +534,20 @@ def test_layout_export_overlays_resolved_paths(
     monkeypatch.chdir(tmp_path)
     _write_yaml(tmp_path, "runtime:\n  port: 1\n")
     layout = bootstrap_agent_layout(cwd=tmp_path)
+    cfg = get_config_store().current()
     assert current_env("SKILLS_PATH") == str(layout.skills_path)
     assert current_env("AGENT_MD") == str(layout.agent_md_path)
     assert current_env("DB_URL") == layout.db_url
     assert current_env("SKILLS_PATH") == os.environ["SKILLS_PATH"]
-    assert get_config_store().current().revision == 1
+    assert cfg.paths.skills_path == str(layout.skills_path)
+    assert cfg.paths.agent_md == str(layout.agent_md_path)
+    assert cfg.paths.db_url == layout.db_url
+    assert cfg.paths.mcp_config == str(layout.mcp_config_path)
+    assert cfg.paths.command_allowlist_config == str(layout.command_allowlist_path)
+    assert cfg.paths.permission_config == str(layout.permission_config_path)
+    assert cfg.paths.approvals_config == str(layout.approvals_path)
+    assert cfg.paths.memory_storage_uri == layout.memory_storage_uri
+    assert cfg.revision == 1
 
 
 def test_overlay_env_values_updates_digest_keeps_revision(
@@ -547,11 +559,116 @@ def test_overlay_env_values_updates_digest_keeps_revision(
     _write_yaml(tmp_path, "runtime:\n  port: 1\n")
     apply_monkeybot_runtime_env()
     before = get_config_store().current()
-    overlay_env_values({"SKILLS_PATH": "/tmp/skills-overlay"})
+    overlay_env_values({"SKILLS_PATH": "/tmp/skills-overlay", "DB_URL": "sqlite:///overlaid"})
     after = get_config_store().current()
     assert after.revision == before.revision == 1
     assert after.digest != before.digest
     assert current_env("SKILLS_PATH") == "/tmp/skills-overlay"
+    assert after.paths.skills_path == "/tmp/skills-overlay"
+    assert after.paths.db_url == "sqlite:///overlaid"
+    assert before.paths.db_url is None
+
+
+def test_reload_preserves_overlays_and_does_not_flag_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.snapshot import overlay_env_values
+
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(tmp_path, "model:\n  name: before\n")
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+    apply_monkeybot_runtime_env()
+    overlay_env_values({"DB_URL": "sqlite:///overlaid"})
+    store = get_config_store()
+    yaml_path.write_text("model:\n  name: after\n", encoding="utf-8")
+    reloaded, diff = store.reload()
+    assert not diff.noop
+    assert reloaded.model.name == "after"
+    assert reloaded.env_values["DB_URL"] == "sqlite:///overlaid"
+    assert reloaded.paths.db_url == "sqlite:///overlaid"
+    assert "DB_URL" not in diff.changed_env_keys
+    assert ConfigTier.RESTART not in diff.tiers
+
+
+def test_commit_mints_revision_under_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(tmp_path, "model:\n  name: first\n")
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+    apply_monkeybot_runtime_env()
+    store = get_config_store()
+    first = store.current()
+    yaml_path.write_text("model:\n  name: second\n", encoding="utf-8")
+    prepared_a, diff_a = store.prepare_reload()
+    prepared_b, diff_b = store.prepare_reload()
+    assert not diff_a.noop and not diff_b.noop
+    published_a = store.commit(prepared_a)
+    published_b = store.commit(prepared_b)
+    assert published_a.revision == first.revision + 1
+    assert published_b.revision == first.revision + 2
+    assert store.current() is published_b
+
+
+def test_concurrent_commits_mint_distinct_revisions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(tmp_path, "model:\n  name: first\n")
+    monkeypatch.delenv("MODEL_NAME", raising=False)
+    apply_monkeybot_runtime_env()
+    store = get_config_store()
+    first = store.current()
+    yaml_path.write_text("model:\n  name: second\n", encoding="utf-8")
+    barrier = threading.Barrier(2)
+    revisions: list[int] = []
+
+    def worker() -> None:
+        cfg, diff = store.prepare_reload()
+        assert not diff.noop
+        barrier.wait()
+        revisions.append(store.commit(cfg).revision)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(revisions) == [first.revision + 1, first.revision + 2]
+
+
+def test_skills_tree_hash_detects_edits_without_reading_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (skills / "SKILL.md").write_text("v1\n", encoding="utf-8")
+    _write_yaml(tmp_path, "runtime:\n  log_level: INFO\n")
+    apply_monkeybot_runtime_env()
+    store = get_config_store()
+    first = store.current()
+    assert first.paths.skills_digest is not None
+
+    (skills / "SKILL.md").write_text("v2\n", encoding="utf-8")
+    reloaded, diff = store.reload()
+    assert not diff.noop
+    assert "skills" in diff.changed_content
+    assert reloaded.paths.skills_digest != first.paths.skills_digest
+
+
+def test_skills_tree_hash_caps_file_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from monkeybot.core.config import snapshot as snapshot_mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(snapshot_mod, "_SKILLS_HASH_MAX_FILES", 3)
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    for i in range(10):
+        (skills / f"f{i}.md").write_text(f"{i}\n", encoding="utf-8")
+    _write_yaml(tmp_path, "runtime:\n  log_level: INFO\n")
+    apply_monkeybot_runtime_env()
+    assert get_config_store().current().paths.skills_digest is not None
 
 
 def test_extra_gcp_pins_are_visible_to_current_env(

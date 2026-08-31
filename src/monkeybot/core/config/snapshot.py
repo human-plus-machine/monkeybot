@@ -25,7 +25,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -241,7 +241,15 @@ def env_field_value(cfg: RuntimeConfig, env_name: str) -> Any:
 class ConfigStore:
     """Process-wide holder of the current ``RuntimeConfig`` pointer."""
 
-    __slots__ = ("_current", "_config_path", "_agent_root", "_lock", "_source_digest")
+    __slots__ = (
+        "_current",
+        "_config_path",
+        "_agent_root",
+        "_lock",
+        "_source_digest",
+        "_overlays",
+        "_prepared_disk",
+    )
 
     def __init__(self) -> None:
         self._current: RuntimeConfig | None = None
@@ -249,6 +257,8 @@ class ConfigStore:
         self._agent_root: Path | None = None
         self._lock = threading.Lock()
         self._source_digest: str | None = None
+        self._overlays: dict[str, str] = {}
+        self._prepared_disk: dict[int, str] = {}
 
     def current(self) -> RuntimeConfig:
         with self._lock:
@@ -272,12 +282,15 @@ class ConfigStore:
 
         Overlay-only digest changes (layout paths) do not count as a reload:
         comparison uses the last disk-built digest, not the overlay-folded one.
+        Layout overlays are re-applied onto the rebuilt snapshot so a later
+        admin reload cannot drop ``DB_URL`` / ``AGENT_MD`` / etc.
         """
         with self._lock:
             path = self._config_path if config_path is None else config_path
             root = self._agent_root if agent_root is None else agent_root
             current = self._current
             source_digest = self._source_digest
+            overlays = dict(self._overlays)
         built = build_runtime_config(config_path=path, agent_root=root, revision=0)
         if current is not None and source_digest is not None and built.digest == source_digest:
             logger.info(
@@ -285,8 +298,7 @@ class ConfigStore:
                 kv(revision=current.revision, digest=current.digest, noop=True),
             )
             return current, ConfigDiff.unchanged()
-        revision = 1 if current is None else current.revision + 1
-        prepared = replace(built, revision=revision)
+        prepared = _apply_overlays(built, overlays, base_digest=built.digest)
         diff = (
             diff_runtime_configs(current, prepared)
             if current is not None
@@ -297,6 +309,8 @@ class ConfigStore:
                 tiers=frozenset(ENV_TIERS[k] for k in prepared.env_values if k in ENV_TIERS),
             )
         )
+        with self._lock:
+            self._prepared_disk[id(prepared)] = built.digest
         return prepared, diff
 
     def commit(
@@ -305,16 +319,32 @@ class ConfigStore:
         *,
         config_path: Path | None = None,
         agent_root: Path | None = None,
-    ) -> None:
-        """Atomically publish ``cfg`` as the process current snapshot."""
+    ) -> RuntimeConfig:
+        """Atomically publish ``cfg`` as the process current snapshot.
+
+        Revision is minted here under the store lock so two concurrent
+        prepare/commit pairs cannot both land as N+1.
+        """
         with self._lock:
             path = self._config_path if config_path is None else config_path
             root = self._agent_root if agent_root is None else agent_root
-        self._set(cfg, config_path=path, agent_root=root)
+            current = self._current
+            revision = 1 if current is None else current.revision + 1
+            disk_digest = self._prepared_disk.pop(id(cfg), cfg.digest)
+            published = _apply_overlays(
+                replace(cfg, revision=revision),
+                self._overlays,
+                base_digest=disk_digest,
+            )
+            self._current = published
+            self._config_path = path
+            self._agent_root = root
+            self._source_digest = disk_digest
         logger.info(
             "config snapshot published %s",
-            kv(revision=cfg.revision, digest=cfg.digest, noop=False),
+            kv(revision=published.revision, digest=published.digest, noop=False),
         )
+        return published
 
     def reload(
         self, *, config_path: Path | None = None, agent_root: Path | None = None
@@ -322,7 +352,7 @@ class ConfigStore:
         """Rebuild from disk. No-op (same object, no revision bump) when digest matches."""
         cfg, diff = self.prepare_reload(config_path=config_path, agent_root=agent_root)
         if not diff.noop:
-            self.commit(cfg, config_path=config_path, agent_root=agent_root)
+            cfg = self.commit(cfg, config_path=config_path, agent_root=agent_root)
         return cfg, diff
 
     def _set(
@@ -341,10 +371,12 @@ class ConfigStore:
     def _overlay_env(self, updates: Mapping[str, str]) -> None:
         """Merge ``updates`` into ``_current.env_values`` without bumping revision.
 
-        Recomputes digest under the same lock as ``_set``. No-op when the store
-        is empty or when ``updates`` would not change any value. Leaves
-        ``_source_digest`` unchanged so a later reload can still no-op when
-        YAML and content files are unchanged.
+        Recomputes digest and typed section views under the same lock as
+        ``_set``. No-op when the store is empty or when ``updates`` would not
+        change any value. Leaves ``_source_digest`` unchanged so a later
+        reload can still no-op when YAML and content files are unchanged.
+        Overlay keys persist on the store and are re-applied by
+        :meth:`prepare_reload` / :meth:`commit`.
         """
         with self._lock:
             cfg = self._current
@@ -353,13 +385,14 @@ class ConfigStore:
             merged = dict(cfg.env_values)
             changed = False
             for key, value in updates.items():
+                self._overlays[key] = value
                 if merged.get(key) != value:
                     merged[key] = value
                     changed = True
             if not changed:
                 return
             base = self._source_digest or cfg.digest
-            self._current = replace(cfg, env_values=merged, digest=_digest_with_env(base, merged))
+            self._current = _snapshot_with_env(cfg, merged, base_digest=base)
 
     def _reset(self) -> None:
         with self._lock:
@@ -367,6 +400,8 @@ class ConfigStore:
             self._config_path = None
             self._agent_root = None
             self._source_digest = None
+            self._overlays = {}
+            self._prepared_disk = {}
 
 
 _PROCESS_STORE = ConfigStore()
@@ -445,22 +480,13 @@ def context_window_tokens(cfg: RuntimeConfig | None = None, default: int = 200_0
         return default
 
 
-# App-owned spawn keys the admin reload endpoint may patch. Pins *and* process
-# env are updated so subprocess transport (MCP / subagent workers) inherits them.
-RELOAD_PIN_ALLOWLIST: frozenset[str] = frozenset(
-    {
-        "MONKEYBOT_COMPUTER_TOOLS",
-        "MONKEYBOT_TRANSCRIPT_ENABLED",
-    }
-)
-
-
 def overlay_env_values(updates: Mapping[str, str]) -> None:
     """Merge ``updates`` into the current snapshot without bumping revision.
 
     Used by ``AgentLayout.export_environment`` so layout-resolved paths
     (``SKILLS_PATH``, ``AGENT_MD``, ``DB_URL``, …) are visible to
-    ``current_env`` after bootstrap. No-op when the store is empty.
+    ``current_env`` and the typed section views after bootstrap. No-op when
+    the store is empty.
 
     This completes the same revision rather than a YAML reload. Digest is
     recomputed over the new ``env_values`` so a cache keyed on digest cannot
@@ -474,49 +500,6 @@ def pinned_env_names() -> frozenset[str]:
     if _PINNED_ENV is None:
         return frozenset()
     return frozenset(_PINNED_ENV)
-
-
-def apply_reload_env_patch(patch: Mapping[str, str]) -> dict[str, str]:
-    """Update allowlisted app-owned pins. Returns the keys actually applied."""
-    global _PINNED_ENV
-    if _PINNED_ENV is None:
-        _PINNED_ENV = {}
-    applied: dict[str, str] = {}
-    for key, value in patch.items():
-        if key not in RELOAD_PIN_ALLOWLIST or not isinstance(value, str):
-            continue
-        _PINNED_ENV[key] = value
-        os.environ[key] = value
-        applied[key] = value
-    logger.info("reload env patch applied %s", kv(keys=",".join(sorted(applied))))
-    return applied
-
-
-def capture_reload_pins(keys: Iterable[str]) -> dict[str, str | None]:
-    """Snapshot current pin values for ``keys`` before staging an env patch.
-
-    Pair with :func:`restore_reload_pins` so a reload that fails after
-    :func:`apply_reload_env_patch` can roll pins (and ``os.environ``) back to
-    their pre-patch values instead of leaving subprocess transport ahead of
-    the (uncommitted) ``ConfigStore`` revision.
-    """
-    current = _PINNED_ENV or {}
-    return {key: current.get(key) for key in keys}
-
-
-def restore_reload_pins(prev: Mapping[str, str | None]) -> None:
-    """Undo a previously applied :func:`apply_reload_env_patch` on failure."""
-    global _PINNED_ENV
-    if _PINNED_ENV is None:
-        _PINNED_ENV = {}
-    for key, value in prev.items():
-        if value is None:
-            _PINNED_ENV.pop(key, None)
-            os.environ.pop(key, None)
-        else:
-            _PINNED_ENV[key] = value
-            os.environ[key] = value
-    logger.info("reload env patch rolled back %s", kv(keys=",".join(sorted(prev))))
 
 
 def reset_snapshot_state_for_tests() -> None:
@@ -665,6 +648,7 @@ def _effective_env(
 
 
 _HASH_CHUNK = 65536
+_SKILLS_HASH_MAX_FILES = 2048
 
 
 def _update_digest_from_file(digest: Any, path: Path) -> None:
@@ -682,19 +666,48 @@ def _hash_file(path: Path) -> str | None:
 
 
 def _hash_tree(path: Path) -> str | None:
+    """Digest a skills tree from relative path + mtime + size, not file bytes.
+
+    ``SKILLS_PATH`` is user-pointed and unbounded; reading every file on each
+    apply/reload would walk vendored deps and binaries. Metadata is enough to
+    notice edits. Caps the file count so a huge tree cannot stall startup.
+    """
     if path.is_file():
         return _hash_file(path)
     if not path.is_dir():
         return None
-    digest = hashlib.sha256()
-    for child in sorted(path.rglob("*")):
-        if not child.is_file():
+    files: list[Path] = []
+    truncated = False
+    for child in path.rglob("*"):
+        try:
+            is_file = child.is_file()
+        except OSError:
             continue
-        rel = child.relative_to(path).as_posix().encode()
+        if not is_file:
+            continue
+        files.append(child)
+        if len(files) >= _SKILLS_HASH_MAX_FILES:
+            truncated = True
+            break
+    files.sort(key=lambda p: p.as_posix())
+    digest = hashlib.sha256()
+    for child in files:
+        try:
+            st = child.stat()
+            rel = child.relative_to(path).as_posix().encode()
+        except OSError:
+            continue
         digest.update(rel)
         digest.update(b"\0")
-        _update_digest_from_file(digest, child)
+        digest.update(f"{st.st_mtime_ns}:{st.st_size}".encode())
         digest.update(b"\0")
+    if truncated:
+        digest.update(b"truncated\0")
+        logger.warning(
+            "skills tree hash capped at %s files: %s",
+            _SKILLS_HASH_MAX_FILES,
+            path,
+        )
     return digest.hexdigest()
 
 
@@ -747,6 +760,39 @@ def _digest_with_env(base_digest: str, env_values: Mapping[str, str]) -> str:
     payload = {"base": base_digest, "env": {k: env_values[k] for k in sorted(env_values)}}
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode()).hexdigest()
+
+
+def _snapshot_with_env(
+    cfg: RuntimeConfig, merged: dict[str, str], *, base_digest: str
+) -> RuntimeConfig:
+    """Copy ``cfg`` with ``merged`` env_values, a folded digest, and rebuilt typed views."""
+    return replace(
+        cfg,
+        env_values=merged,
+        digest=_digest_with_env(base_digest, merged),
+        model=_model_from_env(merged),
+        paths=_paths_from_env(merged, _paths_content(cfg.paths)),
+        gateway=_gateway_from_env(merged),
+        tools=_tools_from_env(merged),
+        memory=_memory_from_env(merged),
+        curation=_curation_from_env(merged),
+    )
+
+
+def _apply_overlays(
+    cfg: RuntimeConfig, overlays: Mapping[str, str], *, base_digest: str
+) -> RuntimeConfig:
+    if not overlays:
+        return cfg
+    merged = dict(cfg.env_values)
+    changed = False
+    for key, value in overlays.items():
+        if merged.get(key) != value:
+            merged[key] = value
+            changed = True
+    if not changed:
+        return cfg
+    return _snapshot_with_env(cfg, merged, base_digest=base_digest)
 
 
 def _model_from_env(env: Mapping[str, str]) -> ModelConfig:
@@ -875,9 +921,7 @@ __all__ = [
     "PathsConfig",
     "RuntimeConfig",
     "ToolsConfig",
-    "apply_reload_env_patch",
     "build_runtime_config",
-    "capture_reload_pins",
     "diff_runtime_configs",
     "env_field_value",
     "get_config_store",
@@ -892,5 +936,4 @@ __all__ = [
     "overlay_env_values",
     "pinned_env_names",
     "reset_snapshot_state_for_tests",
-    "restore_reload_pins",
 ]
