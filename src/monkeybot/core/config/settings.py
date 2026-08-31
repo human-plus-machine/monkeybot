@@ -310,6 +310,16 @@ def _parse_subagent_entries(raw_entries: Any) -> list[SubagentConfig]:
     return configs
 
 
+def _persona_registry(entries: list[SubagentConfig]) -> dict[str, SubagentConfig]:
+    """Key personas by ``name``; raise :class:`ConfigError` on duplicates."""
+    registry: dict[str, SubagentConfig] = {}
+    for cfg in entries:
+        if cfg.name in registry:
+            raise ConfigError(f"Duplicate subagent name in monkeybot.yaml: {cfg.name!r}")
+        registry[cfg.name] = cfg
+    return registry
+
+
 def _subagents_section(doc: dict[str, Any]) -> dict[str, Any]:
     """Return the ``subagents:`` mapping, or empty dict when absent."""
     section = doc.get("subagents")
@@ -411,12 +421,7 @@ def get_subagent_registry(
     """
     if config is not None:
         return dict(config.subagents)
-    registry: dict[str, SubagentConfig] = {}
-    for cfg in get_subagent_configs(config_path):
-        if cfg.name in registry:
-            raise ConfigError(f"Duplicate subagent name in monkeybot.yaml: {cfg.name!r}")
-        registry[cfg.name] = cfg
-    return registry
+    return _persona_registry(get_subagent_configs(config_path))
 
 
 def _bool_config_flag(

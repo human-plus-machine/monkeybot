@@ -489,6 +489,34 @@ async def test_subagents_apply_uses_pinned_snapshot_not_later_disk(
 
 
 @pytest.mark.asyncio
+async def test_duplicate_subagent_name_rejected_on_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    yaml_path = _boot_fake(
+        tmp_path,
+        monkeypatch,
+        "model:\n  provider: fake\n"
+        "subagents:\n  personas:\n    - name: helper\n      description: helps\n",
+    )
+    runtime = GatewayRuntime()
+    runtime.build_subagents(get_config_store().current())
+    old_registry = runtime.subagent_registry
+    yaml_path.write_text(
+        "model:\n  provider: fake\n"
+        "subagents:\n  personas:\n"
+        "    - name: helper\n      description: first\n"
+        "    - name: helper\n      description: SECOND-WINS\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="Duplicate subagent name"):
+        get_config_store().prepare_reload()
+    assert runtime.subagent_registry is old_registry
+    assert runtime.subagent_registry["helper"].description == "helps"
+    assert get_config_store().current().revision == 1
+    assert get_config_store().current().subagents["helper"].description == "helps"
+
+
+@pytest.mark.asyncio
 async def test_subagent_config_error_skips_memory_hooks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

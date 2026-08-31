@@ -55,7 +55,7 @@ from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.todo_list import TodoListStore, TodoListTool
 
-from .deps import RealtimeDependencies
+from .deps import LivePolicySlices, RealtimeDependencies
 from .errors import (
     AudioFormatError,
     ClientProtocolError,
@@ -116,7 +116,7 @@ def _resolved_workspace_paths() -> tuple[Path, Path]:
     return layout.workspace_root, layout.skills_path
 
 
-def _live_slices(deps: RealtimeDependencies) -> Any:
+def _live_slices(deps: RealtimeDependencies) -> LivePolicySlices:
     """Read live policy from ``gateway_runtime`` when this process shares it.
 
     ``RealtimeDependencies`` is frozen at startup with copies of inspectors,

@@ -460,6 +460,24 @@ def test_legacy_subagents_list_does_not_abort_apply(
     assert "bare list is no longer supported" in caplog.text
 
 
+def test_duplicate_subagent_names_abort_snapshot_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Duplicate persona names must fail closed — not last-write-wins."""
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(
+        tmp_path,
+        "model:\n  provider: fake\n"
+        "subagents:\n  personas:\n"
+        "    - name: helper\n      description: first\n"
+        "    - name: helper\n      description: SECOND-WINS\n",
+    )
+    with pytest.raises(ConfigError, match="Duplicate subagent name"):
+        apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    with pytest.raises(ConfigError, match="Duplicate subagent name"):
+        build_runtime_config(config_path=yaml_path, agent_root=tmp_path)
+
+
 def test_second_apply_warns_on_ignored_config_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

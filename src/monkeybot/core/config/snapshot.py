@@ -52,6 +52,7 @@ from monkeybot.core.config.settings import (
     SubagentConfig,
     SubagentSettings,
     _parse_subagent_entries,
+    _persona_registry,
     _subagents_section,
 )
 from monkeybot.core.config.settings import (
@@ -894,8 +895,10 @@ def _parse_subagents(
 
     Invalid or legacy shapes (bare list, bad types) warn and fall back to
     defaults so a malformed section cannot abort ``apply_monkeybot_runtime_env``
-    / ``bootstrap_agent_layout``. ``get_subagent_settings`` still raises when
-    the task tool actually asks for subagents.
+    / ``bootstrap_agent_layout``. Duplicate persona names still raise
+    :class:`ConfigError` so bootstrap and ``prepare_reload`` fail closed —
+    last-write-wins would silently drop a persona. ``get_subagent_settings``
+    still raises when the task tool actually asks for subagents.
     """
     try:
         section = _subagents_section(dict(doc))
@@ -903,9 +906,7 @@ def _parse_subagents(
     except ConfigError as exc:
         logger.warning("Ignoring invalid subagents section during snapshot load: %s", exc)
         return {}, SubagentSettings()
-    personas: dict[str, SubagentConfig] = {}
-    for cfg in _parse_subagent_entries(section.get("personas")):
-        personas[cfg.name] = cfg
+    personas = _persona_registry(_parse_subagent_entries(section.get("personas")))
     return personas, settings
 
 

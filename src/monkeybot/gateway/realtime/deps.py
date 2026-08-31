@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.config.settings import SubagentConfig
@@ -19,6 +19,23 @@ from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import StorageBackend
 from monkeybot.core.tools.inspector import ToolInspector
+
+
+class LivePolicySlices(Protocol):
+    """Hot-reloadable policy read by a realtime turn (inspectors, tools, allowlists).
+
+    Shared by :class:`RealtimeDependencies` and SSE ``GatewayRuntime`` so a
+    rename on either side fails at type-check instead of at runtime.
+    """
+
+    inspectors: list[ToolInspector]
+    hook_manager: HookManager | None
+    web_search_tool: Any | None
+    run_command_allowed_commands: list[str] | None
+    run_command_allowed_path_prefixes: list[str] | None
+    subagent_registry: dict[str, SubagentConfig]
+    computer_tools: list[Any]
+    computer_approvals_persist: Callable[[str, str], bool] | None
 
 
 @dataclass
