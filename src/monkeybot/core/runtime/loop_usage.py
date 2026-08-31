@@ -6,7 +6,7 @@ from collections.abc import Sequence
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.store import AttachmentStore
-from monkeybot.core.config.snapshot import RuntimeConfig, env_value
+from monkeybot.core.config.snapshot import RuntimeConfig, current_env, env_value
 from monkeybot.core.context import TurnContext
 from monkeybot.core.context.epoch import ContextEpochTracker, fingerprint_text
 from monkeybot.core.llm.provider import (
@@ -37,7 +37,12 @@ from .loop_messages import (
 def _effective_max_turns(max_turns: int | None, cfg: RuntimeConfig | None = None) -> int:
     if max_turns is not None:
         return max_turns
-    return int(env_value(cfg, "MAX_TURNS", "1000"))
+    raw = (
+        env_value(cfg, "MAX_TURNS", "1000")
+        if cfg is not None
+        else current_env("MAX_TURNS", "1000")
+    )
+    return int(raw)
 
 
 def _usage_to_totals(u: Usage) -> UsageTotals:
@@ -61,15 +66,24 @@ def _merge_usage_event(usage: Usage, ev: UsageEvent) -> None:
     usage.cache_creation_tokens += ev.cache_creation_tokens
 
 
+_THINKING_BUDGET_PROVIDERS = frozenset(
+    {"gemini", "claude", "ollama", "ollama-cloud", "ollama-local"}
+)
+
+
 def _stream_thinking_budget(
     provider: Provider,
     resolved_messages: Sequence[Message],
     cfg: RuntimeConfig | None = None,
 ) -> int | None:
     """Per-call thinking budget override; None keeps the provider default."""
-    if provider.name not in ("gemini", "claude", "ollama"):
+    if provider.name not in _THINKING_BUDGET_PROVIDERS:
         return None
-    raw = env_value(cfg, "MONKEYBOT_RESUME_THINKING_BUDGET", "").strip()
+    raw = (
+        env_value(cfg, "MONKEYBOT_RESUME_THINKING_BUDGET", "")
+        if cfg is not None
+        else current_env("MONKEYBOT_RESUME_THINKING_BUDGET", "")
+    ).strip()
     if not raw:
         return None
     try:

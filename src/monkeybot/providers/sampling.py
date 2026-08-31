@@ -33,30 +33,21 @@ def resolve_model_sampling(
     config: RuntimeConfig | None = None,
 ) -> ModelSamplingConfig:
     """Resolve temperature and max output tokens from args, snapshot, or environment."""
-    if temperature is not None:
-        resolved_temperature = float(temperature)
-    else:
-        raw = None
-        if config is not None:
-            raw = config.model.temperature
-        if raw is None or not str(raw).strip():
-            from monkeybot.core.config.snapshot import env_value
+    from monkeybot.core.config.snapshot import current_env, env_value
 
-            raw = env_value(config, "MODEL_TEMPERATURE", str(DEFAULT_MODEL_TEMPERATURE))
-        resolved_temperature = float(raw)
+    def _read(key: str, default: str) -> str:
+        return env_value(config, key, default) if config is not None else current_env(key, default)
 
-    if max_tokens is not None:
-        resolved_max_tokens = int(max_tokens)
-    else:
-        raw_max = None
-        if config is not None:
-            raw_max = config.model.max_tokens
-        if raw_max is None or not str(raw_max).strip():
-            from monkeybot.core.config.snapshot import env_value
-
-            raw_max = env_value(config, "MODEL_MAX_TOKENS", str(DEFAULT_MODEL_MAX_TOKENS))
-        resolved_max_tokens = int(raw_max)
-
+    resolved_temperature = (
+        float(temperature)
+        if temperature is not None
+        else float(_read("MODEL_TEMPERATURE", str(DEFAULT_MODEL_TEMPERATURE)))
+    )
+    resolved_max_tokens = (
+        int(max_tokens)
+        if max_tokens is not None
+        else int(_read("MODEL_MAX_TOKENS", str(DEFAULT_MODEL_MAX_TOKENS)))
+    )
     return ModelSamplingConfig(
         temperature=resolved_temperature,
         max_tokens=resolved_max_tokens,

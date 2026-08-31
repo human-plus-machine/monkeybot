@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import inspect
+import json
 import logging
 import sys
+from io import BytesIO
 from pathlib import Path
 from types import ModuleType
 from unittest.mock import MagicMock
+from urllib.error import HTTPError
+from urllib.request import ProxyHandler, Request
 
 import pytest
 from browser_mcp import server
 
 
 @pytest.fixture(autouse=True)
-def _reset_bh_state(monkeypatch: pytest.MonkeyPatch):
+def _reset_bh_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     original_bh = server._bh
     original_bound = server._bound_cdp
     original_env_flag = server._env_set_from_in_app_file
@@ -22,6 +27,7 @@ def _reset_bh_state(monkeypatch: pytest.MonkeyPatch):
     server._env_set_from_in_app_file = False
     monkeypatch.delenv("BU_CDP_URL", raising=False)
     monkeypatch.delenv("BU_CDP_WS", raising=False)
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", tmp_path / "in-app-cdp-url")
     yield
     server._bh = original_bh
     server._bound_cdp = original_bound
@@ -48,8 +54,10 @@ def test_apply_in_app_cdp_url_prefers_file_over_env(
     monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
     monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9222")
 
-    assert server._apply_in_app_cdp_url() == "http://127.0.0.1:9333"
-    assert server.os.environ.get("BU_CDP_URL") == "http://127.0.0.1:9333"
+    bound = server._apply_in_app_cdp_url()
+    assert bound == "ws://127.0.0.1:9333/devtools/browser/monkeybot"
+    assert server.os.environ.get("BU_CDP_WS") == bound
+    assert "BU_CDP_URL" not in server.os.environ
 
 
 def test_apply_in_app_cdp_url_reads_http_file(
@@ -59,8 +67,10 @@ def test_apply_in_app_cdp_url_reads_http_file(
     cdp_file.write_text("http://127.0.0.1:9333\n", encoding="utf-8")
     monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
 
-    assert server._apply_in_app_cdp_url() == "http://127.0.0.1:9333"
-    assert server.os.environ.get("BU_CDP_URL") == "http://127.0.0.1:9333"
+    bound = server._apply_in_app_cdp_url()
+    assert bound == "ws://127.0.0.1:9333/devtools/browser/monkeybot"
+    assert server.os.environ.get("BU_CDP_WS") == bound
+    assert "BU_CDP_URL" not in server.os.environ
 
 
 def test_apply_in_app_cdp_url_reads_ws_file(
@@ -73,6 +83,138 @@ def test_apply_in_app_cdp_url_reads_ws_file(
     assert server._apply_in_app_cdp_url() == "ws://127.0.0.1:9333/devtools"
     assert server.os.environ.get("BU_CDP_WS") == "ws://127.0.0.1:9333/devtools"
     assert "BU_CDP_URL" not in server.os.environ
+
+
+def test_apply_in_app_cdp_url_attaches_token_to_ws(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cdp_file = tmp_path / "in-app-cdp-url"
+    cdp_file.write_text("ws://127.0.0.1:9333/devtools/browser/monkeybot", encoding="utf-8")
+    (tmp_path / "in-app-cdp-token").write_text("secret-token\n", encoding="utf-8")
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
+
+    bound = server._apply_in_app_cdp_url()
+    assert bound == "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret-token"
+    assert server.os.environ.get("BU_CDP_WS") == bound
+    assert "BU_CDP_URL" not in server.os.environ
+
+
+def test_apply_in_app_cdp_url_replaces_empty_query_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cdp_file = tmp_path / "in-app-cdp-url"
+    cdp_file.write_text("ws://127.0.0.1:9333/devtools/browser/monkeybot?token=", encoding="utf-8")
+    (tmp_path / "in-app-cdp-token").write_text("secret-token", encoding="utf-8")
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
+
+    bound = server._apply_in_app_cdp_url()
+    assert bound == "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret-token"
+
+
+def test_apply_in_app_cdp_url_query_token_wins_over_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spaces writes the URL file (with the fresh query token) before the token file."""
+    cdp_file = tmp_path / "in-app-cdp-url"
+    cdp_file.write_text(
+        "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=from-url",
+        encoding="utf-8",
+    )
+    (tmp_path / "in-app-cdp-token").write_text("from-file", encoding="utf-8")
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
+
+    bound = server._apply_in_app_cdp_url()
+    assert bound == "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=from-url"
+
+
+def test_apply_in_app_cdp_url_http_file_keeps_query_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cdp_file = tmp_path / "in-app-cdp-url"
+    cdp_file.write_text("http://127.0.0.1:9333?token=from-url\n", encoding="utf-8")
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
+
+    bound = server._apply_in_app_cdp_url()
+    assert bound == "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=from-url"
+
+
+def test_apply_in_app_cdp_url_ignores_stale_token_without_url_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A leftover token file must not rewrite operator CDP env."""
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", tmp_path / "in-app-cdp-url")
+    (tmp_path / "in-app-cdp-token").write_text("secret-token", encoding="utf-8")
+    monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9222")
+
+    assert server._apply_in_app_cdp_url() == "http://127.0.0.1:9222"
+    assert server.os.environ.get("BU_CDP_URL") == "http://127.0.0.1:9222"
+    assert "BU_CDP_WS" not in server.os.environ
+
+
+def test_apply_in_app_cdp_url_does_not_attach_token_to_cloud_ws(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", tmp_path / "in-app-cdp-url")
+    (tmp_path / "in-app-cdp-token").write_text("secret-token", encoding="utf-8")
+    monkeypatch.setenv("BU_CDP_WS", "wss://cloud.example/cdp")
+
+    assert server._apply_in_app_cdp_url() == "wss://cloud.example/cdp"
+    assert server.os.environ.get("BU_CDP_WS") == "wss://cloud.example/cdp"
+
+
+def test_apply_in_app_cdp_url_ignores_non_loopback_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cdp_file = tmp_path / "in-app-cdp-url"
+    cdp_file.write_text("wss://evil.example/devtools?token=stolen", encoding="utf-8")
+    (tmp_path / "in-app-cdp-token").write_text("local-token", encoding="utf-8")
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
+    monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9222")
+
+    assert server._apply_in_app_cdp_url() == "http://127.0.0.1:9222"
+    assert "local-token" not in (server.os.environ.get("BU_CDP_WS") or "")
+    assert "local-token" not in (server.os.environ.get("BU_CDP_URL") or "")
+
+
+def test_raise_rewritten_in_app_cdp_error_replaces_chrome_popup_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cdp_file = tmp_path / "in-app-cdp-url"
+    cdp_file.write_text("ws://127.0.0.1:9333/devtools/browser/monkeybot", encoding="utf-8")
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
+
+    with pytest.raises(RuntimeError, match="Spaces browser") as excinfo:
+        server._raise_rewritten_in_app_cdp_error(
+            RuntimeError(
+                "permission-blocked: Chrome is reachable, but the per-session "
+                "Allow remote debugging popup has not been accepted"
+            )
+        )
+    assert excinfo.value.__cause__ is None
+
+
+def test_raise_rewritten_in_app_cdp_error_matches_ws_handshake_403(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cdp_file = tmp_path / "in-app-cdp-url"
+    cdp_file.write_text("ws://127.0.0.1:9333/devtools/browser/monkeybot", encoding="utf-8")
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
+
+    with pytest.raises(RuntimeError, match="Spaces browser"):
+        server._raise_rewritten_in_app_cdp_error(
+            RuntimeError("ws handshake failed: HTTP 403 Forbidden")
+        )
+
+
+def test_raise_rewritten_in_app_cdp_error_ignores_stale_token_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", tmp_path / "in-app-cdp-url")
+    (tmp_path / "in-app-cdp-token").write_text("secret-token", encoding="utf-8")
+
+    server._raise_rewritten_in_app_cdp_error(
+        RuntimeError("ws handshake failed: HTTP 403 Forbidden")
+    )
 
 
 def test_apply_in_app_cdp_url_missing_file_is_silent(
@@ -93,8 +235,9 @@ def test_apply_in_app_cdp_url_clears_env_once_in_app_file_disappears(
     cdp_file.write_text("http://127.0.0.1:9333", encoding="utf-8")
     monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
 
-    assert server._apply_in_app_cdp_url() == "http://127.0.0.1:9333"
-    assert server.os.environ.get("BU_CDP_URL") == "http://127.0.0.1:9333"
+    bound = server._apply_in_app_cdp_url()
+    assert bound == "ws://127.0.0.1:9333/devtools/browser/monkeybot"
+    assert server.os.environ.get("BU_CDP_WS") == bound
 
     cdp_file.unlink()
 
@@ -114,7 +257,7 @@ def test_apply_in_app_cdp_url_preserves_operator_env_once_in_app_file_disappears
     cdp_file.write_text("http://127.0.0.1:9333", encoding="utf-8")
     monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
 
-    assert server._apply_in_app_cdp_url() == "http://127.0.0.1:9333"
+    assert server._apply_in_app_cdp_url() == "ws://127.0.0.1:9333/devtools/browser/monkeybot"
 
     cdp_file.unlink()
 
@@ -138,6 +281,21 @@ def test_apply_in_app_cdp_url_logs_oserror(
         assert server._apply_in_app_cdp_url() is None
 
     assert any("failed reading in-app CDP URL file" in r.message for r in caplog.records)
+
+
+def test_apply_in_app_cdp_url_logs_token_oserror(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    cdp_file = tmp_path / "in-app-cdp-url"
+    cdp_file.write_text("ws://127.0.0.1:9333/devtools/browser/monkeybot", encoding="utf-8")
+    (tmp_path / "in-app-cdp-token").mkdir()
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
+
+    with caplog.at_level(logging.WARNING, logger="browser_mcp.server"):
+        bound = server._apply_in_app_cdp_url()
+
+    assert bound == "ws://127.0.0.1:9333/devtools/browser/monkeybot"
+    assert any("failed reading in-app CDP token file" in r.message for r in caplog.records)
 
 
 def test_browser_harness_bounces_alive_daemon_when_cdp_set(
@@ -206,3 +364,426 @@ def test_browser_harness_rebounds_when_cdp_changes(
     admin.restart_daemon.assert_called_once()
     admin.ensure_daemon.assert_called_once()
     assert server._bound_cdp == "http://127.0.0.1:9333"
+
+
+def test_redact_cdp_token_strips_query_value() -> None:
+    raw = "connecting to ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret-token"
+    redacted = server._redact_cdp_token(raw)
+    assert "secret-token" not in redacted
+    assert "token=[redacted]" in redacted
+
+
+def test_tool_redacts_token_in_ensure_daemon_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BU_CDP_WS", "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret")
+    admin, _helpers = _install_fake_harness(monkeypatch)
+    admin.daemon_alive.return_value = False
+    admin.ensure_daemon.side_effect = RuntimeError(
+        "CDP WS handshake failed: connecting to "
+        "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret -- remote down"
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        server.browser_page_info()
+
+    assert "secret" not in str(excinfo.value)
+    assert "token=[redacted]" in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+
+
+def test_tool_redacts_token_in_restart_daemon_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BU_CDP_WS", "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret")
+    admin, _helpers = _install_fake_harness(monkeypatch)
+    admin.daemon_alive.return_value = True
+    server._bound_cdp = "http://127.0.0.1:9222"
+    admin.restart_daemon.side_effect = RuntimeError(
+        "connecting to ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret"
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        server.browser_page_info()
+
+    assert "secret" not in str(excinfo.value)
+    assert "token=[redacted]" in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+
+
+def test_tool_redacts_token_raised_after_daemon_is_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The daemon can hand back a tokenized endpoint long after ensure_daemon()."""
+    monkeypatch.setenv("BU_CDP_WS", "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret")
+    admin, helpers = _install_fake_harness(monkeypatch)
+    admin.daemon_alive.return_value = False
+    helpers.page_info.side_effect = RuntimeError(
+        "cdp disconnected: ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret"
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        server.browser_page_info()
+
+    assert "secret" not in str(excinfo.value)
+    assert "token=[redacted]" in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+
+
+def test_every_registered_tool_is_wrapped_for_redaction() -> None:
+    """New tools must not be able to opt out of redaction by forgetting a decorator."""
+    unwrapped = [
+        name
+        for name, obj in vars(server).items()
+        if name.startswith("browser_")
+        and callable(obj)
+        and getattr(obj, "__wrapped__", None) is None
+    ]
+    assert unwrapped == []
+
+
+def test_public_tool_preserves_tool_schema() -> None:
+    """FastMCP builds the arg schema from the signature, so wrapping must be transparent."""
+    sig = inspect.signature(server.browser_login)
+    assert list(sig.parameters) == ["username", "expected_origin"]
+    assert server.browser_login.__name__ == "browser_login"
+    assert server.browser_login.__doc__ is not None
+
+
+def test_loopback_opener_ignores_http_proxy() -> None:
+    """Empty ProxyHandler({}) suppresses urllib's default env-based proxy handler."""
+    assert not any(isinstance(h, ProxyHandler) for h in server._LOOPBACK_OPENER.handlers)
+
+
+class _FakeHttpResponse:
+    def __init__(self, payload: object, status: int = 200) -> None:
+        self._raw = json.dumps(payload).encode("utf-8")
+        self.status = status
+
+    def __enter__(self) -> _FakeHttpResponse:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._raw
+
+
+def _publish_loopback_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cdp_file = tmp_path / "in-app-cdp-url"
+    cdp_file.write_text("ws://127.0.0.1:9333/devtools/browser/monkeybot", encoding="utf-8")
+    (tmp_path / "in-app-cdp-token").write_text("secret-token", encoding="utf-8")
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
+
+
+def test_sealed_login_posts_bearer_without_query_token_or_host_spoof(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    captured: dict[str, object] = {}
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        captured["req"] = req
+        captured["timeout"] = timeout
+        return _FakeHttpResponse({"ok": True, "loggedIn": True, "password": "leaked"})
+
+    monkeypatch.setattr(server, "_loopback_open", fake_open)
+
+    result = server._sealed_login("alice", None)
+
+    req = captured["req"]
+    assert isinstance(req, Request)
+    assert result == {"ok": True, "loggedIn": True}
+    assert req.full_url == "http://127.0.0.1:9333/json/login"
+    assert "token=" not in req.full_url
+    assert req.get_header("Authorization") == "Bearer secret-token"
+    assert req.get_method() == "POST"
+    assert req.data is not None
+    assert json.loads(req.data.decode("utf-8")) == {"username": "alice"}
+    assert captured["timeout"] == server._LOGIN_TIMEOUT_S
+
+
+def test_browser_login_tool_returns_json_without_password(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse({"ok": True, "loggedIn": True, "password": "leaked"})
+
+    monkeypatch.setattr(server, "_loopback_open", fake_open)
+
+    assert json.loads(server.browser_login("alice")) == {"ok": True, "loggedIn": True}
+
+
+def test_sealed_login_returns_origin_the_bridge_acted_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The agent drives tabs by CDP session, so it needs the origin to verify."""
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse(
+            {"ok": True, "loggedIn": True, "origin": "https://example.com", "password": "leaked"}
+        )
+
+    monkeypatch.setattr(server, "_loopback_open", fake_open)
+
+    assert server._sealed_login(None, None) == {
+        "ok": True,
+        "loggedIn": True,
+        "origin": "https://example.com",
+    }
+
+
+def test_sealed_login_forwards_expected_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    captured: dict[str, object] = {}
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        captured["req"] = req
+        return _FakeHttpResponse({"ok": True, "loggedIn": True, "origin": "https://example.com"})
+
+    monkeypatch.setattr(server, "_loopback_open", fake_open)
+
+    server._sealed_login("alice", "https://example.com")
+
+    req = captured["req"]
+    assert isinstance(req, Request)
+    assert req.data is not None
+    assert json.loads(req.data.decode("utf-8")) == {
+        "username": "alice",
+        "expectedOrigin": "https://example.com",
+    }
+
+
+def test_sealed_login_surfaces_origin_mismatch_with_actual_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mismatch must stay verbatim, not collapse to the generic 'login failed'."""
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps(
+        {
+            "ok": False,
+            "loggedIn": False,
+            "origin": "https://other.example",
+            "error": "focused tab is on a different origin",
+        }
+    ).encode("utf-8")
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        raise HTTPError(req.full_url, 400, "Bad Request", hdrs=None, fp=BytesIO(payload))
+
+    monkeypatch.setattr(server, "_loopback_open", fake_open)
+
+    assert server._sealed_login(None, "https://example.com") == {
+        "ok": False,
+        "loggedIn": False,
+        "origin": "https://other.example",
+        "error": "focused tab is on a different origin",
+    }
+
+
+def test_sealed_login_fails_when_bridge_cannot_verify_expected_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An older Spaces build drops expectedOrigin — never report that as verified."""
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse({"ok": True, "loggedIn": True})
+
+    monkeypatch.setattr(server, "_loopback_open", fake_open)
+
+    assert server._sealed_login(None, "https://example.com") == {
+        "ok": False,
+        "loggedIn": True,
+        "error": "in-app browser could not verify the origin",
+    }
+
+
+def test_sealed_login_ignores_non_string_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse({"ok": True, "loggedIn": True, "origin": {"nested": "junk"}})
+
+    monkeypatch.setattr(server, "_loopback_open", fake_open)
+
+    assert server._sealed_login(None, None) == {"ok": True, "loggedIn": True}
+
+
+def test_sealed_login_refuses_non_loopback_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cdp_file = tmp_path / "in-app-cdp-url"
+    cdp_file.write_text("wss://evil.example/devtools?token=stolen", encoding="utf-8")
+    (tmp_path / "in-app-cdp-token").write_text("local-token", encoding="utf-8")
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
+
+    def fail_open(*args: object, **kwargs: object) -> None:
+        raise AssertionError("must not POST login off loopback")
+
+    monkeypatch.setattr(server, "_loopback_open", fail_open)
+
+    assert server._sealed_login(None, None) == {
+        "ok": False,
+        "loggedIn": False,
+        "error": "in-app browser is not available",
+    }
+
+
+def test_sealed_login_missing_token_is_actionable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cdp_file = tmp_path / "in-app-cdp-url"
+    cdp_file.write_text("ws://127.0.0.1:9333/devtools/browser/monkeybot", encoding="utf-8")
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
+
+    def fail_open(*args: object, **kwargs: object) -> None:
+        raise AssertionError("must not POST login without a token")
+
+    monkeypatch.setattr(server, "_loopback_open", fail_open)
+
+    assert server._sealed_login(None, None) == {
+        "ok": False,
+        "loggedIn": False,
+        "error": "in-app browser token is missing",
+    }
+
+
+def test_sealed_login_maps_unknown_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        raise HTTPError(req.full_url, 500, "boom", hdrs=None, fp=None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(server, "_loopback_open", fake_open)
+
+    assert server._sealed_login(None, None) == {
+        "ok": False,
+        "loggedIn": False,
+        "error": "login failed",
+    }
+
+
+def test_sealed_login_reads_allowlisted_error_from_http_400(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spaces returns HTTP 400 with a JSON body for every failed login."""
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps(
+        {
+            "ok": False,
+            "loggedIn": False,
+            "error": "this password is not allowed for agent use",
+        }
+    ).encode("utf-8")
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        raise HTTPError(req.full_url, 400, "Bad Request", hdrs=None, fp=BytesIO(payload))
+
+    monkeypatch.setattr(server, "_loopback_open", fake_open)
+
+    assert server._sealed_login(None, None) == {
+        "ok": False,
+        "loggedIn": False,
+        "error": "this password is not allowed for agent use",
+    }
+
+
+def test_sealed_login_maps_http_403_to_missing_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        raise HTTPError(
+            req.full_url,
+            403,
+            "Forbidden",
+            hdrs=None,
+            fp=BytesIO(b'{"error": "forbidden"}'),
+        )
+
+    monkeypatch.setattr(server, "_loopback_open", fake_open)
+
+    assert server._sealed_login(None, None) == {
+        "ok": False,
+        "loggedIn": False,
+        "error": "in-app browser token is missing",
+    }
+
+
+def test_sealed_login_refuses_when_agentcore_is_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    server._bound_cdp = "agentcore"
+
+    def fail_open(*args: object, **kwargs: object) -> None:
+        raise AssertionError("must not POST login while AgentCore is bound")
+
+    monkeypatch.setattr(server, "_loopback_open", fail_open)
+
+    assert server._sealed_login(None, None) == {
+        "ok": False,
+        "loggedIn": False,
+        "error": "in-app browser is not available",
+    }
+
+
+def test_sealed_login_prefers_query_token_over_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cdp_file = tmp_path / "in-app-cdp-url"
+    cdp_file.write_text(
+        "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=from-url",
+        encoding="utf-8",
+    )
+    (tmp_path / "in-app-cdp-token").write_text("from-file", encoding="utf-8")
+    monkeypatch.setattr(server, "_IN_APP_CDP_URL_FILE", cdp_file)
+    captured: dict[str, object] = {}
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        captured["req"] = req
+        return _FakeHttpResponse({"ok": True, "loggedIn": True})
+
+    monkeypatch.setattr(server, "_loopback_open", fake_open)
+
+    assert server._sealed_login(None, None) == {"ok": True, "loggedIn": True}
+    req = captured["req"]
+    assert isinstance(req, Request)
+    assert req.get_header("Authorization") == "Bearer from-url"
+
+
+def test_sealed_login_keeps_allowlisted_bridge_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse(
+            {"ok": False, "loggedIn": False, "error": "this password is not allowed for agent use"}
+        )
+
+    monkeypatch.setattr(server, "_loopback_open", fake_open)
+
+    assert server._sealed_login(None, None) == {
+        "ok": False,
+        "loggedIn": False,
+        "error": "this password is not allowed for agent use",
+    }
+
+
+def test_in_app_http_origin_keeps_https_for_wss() -> None:
+    assert (
+        server._in_app_http_origin("wss://127.0.0.1:9333/devtools/browser/monkeybot")
+        == "https://127.0.0.1:9333"
+    )
+    assert server._in_app_http_origin("wss://cloud.example/cdp") is None

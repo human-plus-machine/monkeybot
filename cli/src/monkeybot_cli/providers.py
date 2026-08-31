@@ -59,6 +59,17 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
         (),
         credentials_optional=True,
     ),
+    "ollama-cloud": ProviderSpec(
+        ("ollama-cloud", "ollama_cloud"),
+        "ollama",
+        ("OLLAMA_API_KEY",),
+    ),
+    "ollama-local": ProviderSpec(
+        ("ollama-local", "ollama_local"),
+        "ollama",
+        (),
+        credentials_optional=True,
+    ),
     "fake": ProviderSpec(("fake",), None, (), credentials_optional=True),
 }
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
 from monkeybot.core.llm.provider import Provider
@@ -30,6 +30,16 @@ _MODEL_PROVIDER_ALIASES: dict[str, str] = {
     "google-vertexai": "google_vertexai",
     "vertex-claude": "vertex_anthropic",
     "vertex_claude": "vertex_anthropic",
+    # Hyphen form is the YAML / desktop-app id (unlike vertex-claude, which
+    # maps onto a different internal id).
+    "ollama_cloud": "ollama-cloud",
+    "ollama_local": "ollama-local",
+}
+
+_OLLAMA_MODES: dict[str, Literal["auto", "cloud", "local"]] = {
+    "ollama": "auto",
+    "ollama-cloud": "cloud",
+    "ollama-local": "local",
 }
 
 
@@ -106,20 +116,20 @@ class ProviderConfig:
 
 def _resolve_gcp_project_id(config: RuntimeConfig | None = None) -> str:
     """GCP project for Vertex providers."""
-    from monkeybot.core.config.snapshot import env_value
+    from monkeybot.core.config.snapshot import current_env, env_value
 
     if config is not None:
-        for candidate in (
-            config.model.vertex_project_id,
-            config.model.anthropic_vertex_project_id,
-        ):
-            if candidate and candidate.strip():
-                return candidate.strip()
+        return (
+            env_value(config, "GCP_PROJECT_ID").strip()
+            or env_value(config, "VERTEX_AI_PROJECT_ID").strip()
+            or env_value(config, "ANTHROPIC_VERTEX_PROJECT_ID").strip()
+            or env_value(config, "GOOGLE_CLOUD_PROJECT").strip()
+        )
     return (
-        (os.getenv("GCP_PROJECT_ID") or "").strip()
-        or env_value(config, "VERTEX_AI_PROJECT_ID").strip()
-        or env_value(config, "ANTHROPIC_VERTEX_PROJECT_ID").strip()
-        or (os.getenv("GOOGLE_CLOUD_PROJECT") or "").strip()
+        current_env("GCP_PROJECT_ID").strip()
+        or current_env("VERTEX_AI_PROJECT_ID").strip()
+        or current_env("ANTHROPIC_VERTEX_PROJECT_ID").strip()
+        or current_env("GOOGLE_CLOUD_PROJECT").strip()
     )
 
 
@@ -132,29 +142,27 @@ def get_provider_config(
     config: RuntimeConfig | None = None,
 ) -> ProviderConfig:
     """Resolve a Provider and model id from a pinned snapshot, environment, or explicit parameters."""
-    from monkeybot.core.config.snapshot import env_value
+    from monkeybot.core.config.snapshot import current_env, env_value
 
-    raw_provider = str(
-        provider or env_value(config, "MODEL_PROVIDER") or "google_vertexai"
-    )
+    def _read(key: str, default: str = "") -> str:
+        return env_value(config, key, default) if config is not None else current_env(key, default)
+
+    raw_provider = str(provider or _read("MODEL_PROVIDER") or "google_vertexai")
     provider_key = normalize_model_provider(raw_provider)
     if provider_key == "fake":
         raise ValueError(
             "MODEL_PROVIDER=fake is for gateway/tests only; inject ScriptedFakeProvider directly "
             "or use the gateway fake provider path."
         )
-    resolved_model = str(
-        model_name or env_value(config, "MODEL_NAME") or "gemini-2.5-flash"
-    )
+    resolved_model = str(model_name or _read("MODEL_NAME") or "gemini-2.5-flash")
     sampling = resolve_model_sampling(
         temperature=temperature, max_tokens=max_tokens, config=config
     )
-    if thinking_budget is not None:
-        resolved_thinking = thinking_budget
-    else:
-        raw_thinking = env_value(config, "MODEL_THINKING_BUDGET", "-1")
-        resolved_thinking = int(raw_thinking)
-    thinking_budget = resolved_thinking
+    thinking_budget = (
+        thinking_budget
+        if thinking_budget is not None
+        else int(_read("MODEL_THINKING_BUDGET", "-1"))
+    )
     if provider_key == "google_vertexai":
         return ProviderConfig(
             GeminiProvider(
@@ -204,14 +212,12 @@ def get_provider_config(
                 "Set GCP_PROJECT_ID, VERTEX_AI_PROJECT_ID, ANTHROPIC_VERTEX_PROJECT_ID, "
                 "or GOOGLE_CLOUD_PROJECT (or gcp.project_id in monkeybot.yaml)."
             )
-        if env_value(config, "VERTEX_AI_LOCATION"):
+        if _read("VERTEX_AI_LOCATION"):
             logger.warning(
                 "VERTEX_AI_LOCATION is no longer read for vertex_anthropic; "
                 "set ANTHROPIC_VERTEX_REGION instead"
             )
-        region = (
-            env_value(config, "ANTHROPIC_VERTEX_REGION", "us-east5").strip() or "us-east5"
-        )
+        region = (_read("ANTHROPIC_VERTEX_REGION") or "us-east5").strip() or "us-east5"
         return ProviderConfig(
             VertexClaudeProvider(
                 project_id=project,
@@ -229,9 +235,11 @@ def get_provider_config(
             ),
             resolved_model,
         )
-    if provider_key == "ollama":
+    ollama_mode = _OLLAMA_MODES.get(provider_key)
+    if ollama_mode is not None:
         return ProviderConfig(
             OllamaProvider(
+                mode=ollama_mode,
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
                 thinking_budget=thinking_budget,
@@ -269,7 +277,7 @@ def get_provider_config(
     raise ValueError(
         f"Unsupported model provider: {provider_key}. "
         "Supported providers: google_vertexai, openai, anthropic, vertex_anthropic, "
-        "huggingface, ollama, nvidia, openrouter, aws_bedrock"
+        "huggingface, ollama, ollama-cloud, ollama-local, nvidia, openrouter, aws_bedrock"
     )
 
 

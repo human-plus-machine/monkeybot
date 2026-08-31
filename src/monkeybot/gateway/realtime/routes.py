@@ -17,9 +17,7 @@ from fastapi.responses import JSONResponse
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.config.realtime_config import RealtimeConfig
 from monkeybot.core.config.snapshot import (
-    context_window_tokens as snapshot_context_window_tokens,
-)
-from monkeybot.core.config.snapshot import (
+    context_window_tokens,
     current_env,
     env_flag,
     env_value,
@@ -160,7 +158,7 @@ async def _build_realtime_context(
         skills_path=skills_path,
         mcp_client=deps.mcp,
         model=model,
-        context_window_tokens=snapshot_context_window_tokens(cfg),
+        context_window_tokens=context_window_tokens(cfg),
         workspace_root=workspace_root,
         enable_context_curation=True,
         extra_tools=_parent_extra_tools(deps, todo_store),
@@ -519,7 +517,7 @@ async def _handle_provider_event(
                 ws,
                 ServerUsageFrame(
                     usage=state.metrics.to_usage_payload(
-                        context_window_tokens=snapshot_context_window_tokens(ctx.config)
+                        context_window_tokens=context_window_tokens(ctx.config)
                     )
                 ),
             )
@@ -532,9 +530,9 @@ async def _handle_provider_event(
         await _send_frame(
             ws,
             ServerUsageFrame(
-                usage=state.metrics.to_usage_payload(
-                    context_window_tokens=snapshot_context_window_tokens(ctx.config)
-                )
+                    usage=state.metrics.to_usage_payload(
+                        context_window_tokens=context_window_tokens(ctx.config)
+                    )
             ),
         )
     elif isinstance(event, RealtimeInterrupted):
