@@ -19,8 +19,6 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-_RUNTIME_ENV_APPLIED = False
-
 # (section, key) -> os.environ name
 # YAML gcp/anthropic_vertex project ids map here; prefer GOOGLE_CLOUD_PROJECT when set in .env.
 _GCP_PROJECT_ENV_KEYS = frozenset({"VERTEX_AI_PROJECT_ID", "ANTHROPIC_VERTEX_PROJECT_ID"})
@@ -62,8 +60,6 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("context_curation", "memory_window_lines"): "CONTEXT_CURATION_MEMORY_WINDOW_LINES",
     ("context_curation", "memory_index_cap"): "MEMORY_INDEX_CAP",
     ("context_curation", "memory_token_threshold"): "CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD",
-    ("context_curation", "curator_model"): "CONTEXT_CURATOR_MODEL",
-    ("context_curation", "timeout_sec"): "CONTEXT_CURATION_TIMEOUT_SEC",
     ("memory", "enabled"): "MONKEYBOT_MEMORY_HOOK_ENABLED",
     ("memory", "backend"): "MEMPALACE_BACKEND",
     ("memory", "embedding_model"): "MEMPALACE_EMBEDDING_MODEL",
@@ -94,9 +90,18 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("realtime", "audio.max_utterance_sec"): "MONKEYBOT_REALTIME_AUDIO_MAX_UTTERANCE_SEC",
     ("realtime", "session.max_duration_sec"): "MONKEYBOT_REALTIME_SESSION_MAX_DURATION_SEC",
     ("realtime", "session.idle_timeout_sec"): "MONKEYBOT_REALTIME_SESSION_IDLE_TIMEOUT_SEC",
-    ("realtime", "session.max_response_turn_sec"): "MONKEYBOT_REALTIME_SESSION_MAX_RESPONSE_TURN_SEC",
-    ("realtime", "session.max_concurrent_sessions"): "MONKEYBOT_REALTIME_SESSION_MAX_CONCURRENT_SESSIONS",
-    ("realtime", "metrics.emit_summary_on_close"): "MONKEYBOT_REALTIME_METRICS_EMIT_SUMMARY_ON_CLOSE",
+    (
+        "realtime",
+        "session.max_response_turn_sec",
+    ): "MONKEYBOT_REALTIME_SESSION_MAX_RESPONSE_TURN_SEC",
+    (
+        "realtime",
+        "session.max_concurrent_sessions",
+    ): "MONKEYBOT_REALTIME_SESSION_MAX_CONCURRENT_SESSIONS",
+    (
+        "realtime",
+        "metrics.emit_summary_on_close",
+    ): "MONKEYBOT_REALTIME_METRICS_EMIT_SUMMARY_ON_CLOSE",
 }
 
 # Backward-compatible alias for internal/tests.
@@ -109,6 +114,12 @@ RETIRED_TOOLS_KEYS: frozenset[str] = frozenset(
         "spill_min_chars",
         "spill_read_max_lines",
         "read_default_lines",
+    }
+)
+RETIRED_CONTEXT_CURATION_KEYS: frozenset[str] = frozenset(
+    {
+        "curator_model",
+        "timeout_sec",
     }
 )
 
@@ -135,15 +146,35 @@ def warn_retired_tools_keys(doc: Mapping[str, Any]) -> list[str]:
     for key in sorted(RETIRED_TOOLS_KEYS):
         if key in tools:
             found.append(key)
-            message = _RETIRED_TOOLS_WARNINGS_OVERRIDES.get(key) or _SPILL_SIZING_RETIRED_MSG.format(key=key)
+            message = _RETIRED_TOOLS_WARNINGS_OVERRIDES.get(
+                key
+            ) or _SPILL_SIZING_RETIRED_MSG.format(key=key)
             logger.warning(message)
     return found
 
 
+def warn_retired_curation_keys(doc: Mapping[str, Any]) -> list[str]:
+    """Log one warning per retired ``context_curation.*`` key; return the keys found."""
+    section = doc.get("context_curation")
+    if not isinstance(section, dict):
+        return []
+    found: list[str] = []
+    for key in sorted(RETIRED_CONTEXT_CURATION_KEYS):
+        if key in section:
+            found.append(key)
+            logger.warning(
+                "context_curation.%s is retired and ignored — the LLM curator "
+                "was removed; window and token knobs still apply",
+                key,
+            )
+    return found
+
+
 def reset_runtime_env_state_for_tests() -> None:
-    """Allow a second ``apply_monkeybot_runtime_env`` in the same interpreter (tests only)."""
-    global _RUNTIME_ENV_APPLIED
-    _RUNTIME_ENV_APPLIED = False
+    """Clear the process ConfigStore and pin capture (tests only)."""
+    from monkeybot.core.config.snapshot import reset_snapshot_state_for_tests
+
+    reset_snapshot_state_for_tests()
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -266,68 +297,66 @@ def _merge_with_includes(primary_path: Path, root: dict[str, Any]) -> dict[str, 
 def apply_monkeybot_runtime_env(
     *, config_path: Path | None = None, agent_root: Path | None = None
 ) -> Path | None:
-    """Apply YAML-backed defaults to ``os.environ`` (unset keys only). Safe to call twice."""
-    global _RUNTIME_ENV_APPLIED
-    if _RUNTIME_ENV_APPLIED:
-        return None
+    """Apply YAML-backed defaults to ``os.environ`` (unset keys only).
 
-    path = config_path or _resolve_config_path(agent_root=agent_root)
-    if path is None:
-        _RUNTIME_ENV_APPLIED = True
+    Loads the process ``RuntimeConfig`` snapshot on first call. Already-set env
+    keys are never overwritten — ``os.environ`` stays the subprocess transport,
+    not the in-process store.
+    """
+    from monkeybot.core.config.snapshot import (
+        get_config_store,
+        load_into_store,
+        pinned_env_names,
+    )
+
+    store = get_config_store()
+    try:
+        cfg = store.current_or_none()
+        if cfg is None:
+            cfg = load_into_store(config_path=config_path, agent_root=agent_root)
+        else:
+            _warn_if_config_path_ignored(cfg.source_path, config_path)
+    except Exception as exc:
+        path = config_path or _resolve_config_path(agent_root=agent_root)
+        logger.error("Failed to load %s: %s", path, exc)
+        raise
+
+    google_cloud_project = (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()
+    pins = pinned_env_names()
+    yaml_keys = [env_key for env_key in cfg.env_values if env_key not in pins]
+    for env_key in yaml_keys:
+        env_val = cfg.env_values[env_key]
+        # Existing process env wins; WORKSPACE_ROOT blocks YAML workspace_root.
+        if env_key in os.environ or (
+            env_key == "MONKEYBOT_WORKSPACE_ROOT" and os.environ.get("WORKSPACE_ROOT")
+        ):
+            continue
+        os.environ[env_key] = env_val
+        if env_key in _GCP_PROJECT_ENV_KEYS and google_cloud_project:
+            logger.debug("Set from GOOGLE_CLOUD_PROJECT: %s=%s", env_key, google_cloud_project)
+        else:
+            logger.debug("Set from monkeybot.yaml: %s=%s", env_key, env_val)
+
+    if cfg.source_path is None:
         logger.debug(
             "No monkeybot.yaml found (MONKEYBOT_CONFIG / monkeybot_config/monkeybot.yaml); skipping"
         )
         return None
 
-    try:
-        root = _load_yaml_file(path)
-        merged = _merge_with_includes(path, root)
-        flat = _flatten_config(merged)
-    except Exception as exc:
-        logger.error("Failed to load %s: %s", path, exc)
-        raise
+    logger.info("Applied runtime config from %s (%d keys)", cfg.source_path, len(yaml_keys))
+    return cfg.source_path
 
-    warn_retired_tools_keys(merged)
 
-    _RUNTIME_ENV_APPLIED = True
-    google_cloud_project = (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()
-    from monkeybot.core.layout import (
-        resolve_agent_path,
-        resolve_agent_root,
-        resolve_memory_storage_uri,
-        resolve_sqlite_url,
+def _warn_if_config_path_ignored(loaded: Path | None, config_path: Path | None) -> None:
+    """Warn when a later apply asks for a different YAML than the loaded snapshot."""
+    if config_path is None:
+        return
+    requested = config_path.expanduser().resolve()
+    resolved = loaded.resolve() if loaded is not None else None
+    if resolved == requested:
+        return
+    logger.warning(
+        "RuntimeConfig already loaded from %s; ignoring %s",
+        resolved if resolved is not None else "<none>",
+        requested,
     )
-
-    anchor = agent_root or resolve_agent_root(config_path=path)
-    for env_key, env_val in flat.items():
-        # WORKSPACE_ROOT remains a supported legacy process override.  Do not
-        # let a YAML default materialize MONKEYBOT_WORKSPACE_ROOT ahead of it.
-        if env_key in os.environ or (
-            env_key == "MONKEYBOT_WORKSPACE_ROOT" and os.environ.get("WORKSPACE_ROOT")
-        ):
-            continue
-        if env_key in _GCP_PROJECT_ENV_KEYS and google_cloud_project:
-            os.environ[env_key] = google_cloud_project
-            logger.debug(
-                "Set from GOOGLE_CLOUD_PROJECT: %s=%s", env_key, google_cloud_project
-            )
-            continue
-        if env_key in {
-            "AGENT_MD",
-            "MEMORY_PATH",
-            "SKILLS_PATH",
-            "MCP_CONFIG",
-            "COMMAND_ALLOWLIST_CONFIG",
-            "PERMISSION_CONFIG",
-            "MONKEYBOT_WORKSPACE_ROOT",
-        }:
-            env_val = str(resolve_agent_path(env_val, anchor))
-        elif env_key == "DB_URL":
-            env_val = resolve_sqlite_url(env_val, anchor)
-        elif env_key == "MEMORY_STORAGE_URI":
-            env_val = resolve_memory_storage_uri(env_val, anchor)
-        os.environ[env_key] = env_val
-        logger.debug("Set from monkeybot.yaml: %s=%s", env_key, env_val)
-
-    logger.info("Applied runtime config from %s (%d keys)", path, len(flat))
-    return path
