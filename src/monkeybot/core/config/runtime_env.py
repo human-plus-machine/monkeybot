@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Mapping
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -106,6 +107,129 @@ ENV_MAP: dict[tuple[str, str], str] = {
 
 # Backward-compatible alias for internal/tests.
 _ENV_MAP = ENV_MAP
+
+
+class ConfigTier(StrEnum):
+    """Reload action for one ``ENV_MAP`` key. Every mapped key has exactly one tier."""
+
+    HOT = "hot"
+    REBUILD = "rebuild"
+    RECONNECT_MCP = "reconnect_mcp"
+    RESTART = "restart"
+
+
+# env var -> (reload tier, dotted RuntimeConfig path). Must cover ``ENV_MAP`` 1:1
+# (enforced in tests). One map so a new setting cannot get a path without a tier.
+ENV_SPEC: dict[str, tuple[ConfigTier, str]] = {
+    # HOT — next turn reads the new snapshot.
+    "MODEL_NAME": (ConfigTier.HOT, "model.name"),
+    "MAX_TURNS": (ConfigTier.HOT, "model.max_turns"),
+    "MODEL_CONTEXT_WINDOW": (ConfigTier.HOT, "model.context_window"),
+    "CONTEXT_SUMMARIZATION_MODEL": (ConfigTier.HOT, "model.summarization_model"),
+    "MODEL_CACHE_RETENTION": (ConfigTier.HOT, "model.cache_retention"),
+    "CONTEXT_CURATION_ENABLED": (ConfigTier.HOT, "curation.enabled"),
+    "CONTEXT_CURATION_MEMORY_WINDOW_LINES": (ConfigTier.HOT, "curation.memory_window_lines"),
+    "MEMORY_INDEX_CAP": (ConfigTier.HOT, "curation.memory_index_cap"),
+    "CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD": (
+        ConfigTier.HOT,
+        "curation.memory_token_threshold",
+    ),
+    "MONKEYBOT_TODO_LIST_ENABLED": (ConfigTier.HOT, "tools.todo_list_enabled"),
+    "MONKEYBOT_TODO_LIST_MIRROR_TO_DISK": (ConfigTier.HOT, "tools.todo_list_mirror_to_disk"),
+    "MONKEYBOT_EMISSION_STYLE": (ConfigTier.HOT, "gateway.emission_style"),
+    "MONKEYBOT_TRANSCRIPT_ENABLED": (ConfigTier.HOT, "gateway.transcript_enabled"),
+    "MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE": (ConfigTier.HOT, "gateway.transcript_include_live"),
+    "LOG_LEVEL": (ConfigTier.HOT, "gateway.log_level"),
+    "AGENT_MD": (ConfigTier.HOT, "paths.agent_md"),
+    "SKILLS_PATH": (ConfigTier.HOT, "paths.skills_path"),
+    "MONKEYBOT_RESUME_THINKING_BUDGET": (ConfigTier.HOT, "tools.resume_thinking_budget"),
+    # REBUILD — swap a GatewayRuntime slice (provider, inspectors, web search, memory hook).
+    "MODEL_PROVIDER": (ConfigTier.REBUILD, "model.provider"),
+    "MODEL_TEMPERATURE": (ConfigTier.REBUILD, "model.temperature"),
+    "MODEL_MAX_TOKENS": (ConfigTier.REBUILD, "model.max_tokens"),
+    "MODEL_THINKING_BUDGET": (ConfigTier.REBUILD, "model.thinking_budget"),
+    "COMMAND_ALLOWLIST_CONFIG": (ConfigTier.REBUILD, "paths.command_allowlist_config"),
+    "PERMISSION_CONFIG": (ConfigTier.REBUILD, "paths.permission_config"),
+    "WEB_SEARCH_BACKEND": (ConfigTier.REBUILD, "tools.web_search_backend"),
+    "WEB_SEARCH_MAX_RESULTS": (ConfigTier.REBUILD, "tools.web_search_max_results"),
+    "MONKEYBOT_MEMORY_HOOK_ENABLED": (ConfigTier.REBUILD, "memory.enabled"),
+    "VERTEX_AI_PROJECT_ID": (ConfigTier.REBUILD, "model.vertex_project_id"),
+    "VERTEX_AI_LOCATION": (ConfigTier.REBUILD, "model.vertex_location"),
+    "ANTHROPIC_VERTEX_PROJECT_ID": (ConfigTier.REBUILD, "model.anthropic_vertex_project_id"),
+    "ANTHROPIC_VERTEX_REGION": (ConfigTier.REBUILD, "model.anthropic_vertex_region"),
+    "PENDING_RESPONSE_TIMEOUT_SEC": (ConfigTier.REBUILD, "gateway.pending_response_timeout_sec"),
+    "MONKEYBOT_TOOL_DENIED_PATTERNS": (ConfigTier.REBUILD, "tools.denied_patterns"),
+    "MONKEYBOT_COMPUTER_TOOLS": (ConfigTier.REBUILD, "tools.computer_enabled"),
+    "MONKEYBOT_APPROVALS_CONFIG": (ConfigTier.REBUILD, "paths.approvals_config"),
+    "SANDBOX_ENABLED": (ConfigTier.REBUILD, "tools.sandbox_enabled"),
+    "SANDBOX_SERVER_URL": (ConfigTier.REBUILD, "tools.sandbox_server_url"),
+    "SANDBOX_IMAGE": (ConfigTier.REBUILD, "tools.sandbox_image"),
+    "SANDBOX_TTL_SECONDS": (ConfigTier.REBUILD, "tools.sandbox_ttl_seconds"),
+    "SANDBOX_SHARED_FILESYSTEM": (ConfigTier.REBUILD, "tools.sandbox_shared_filesystem"),
+    "MONKEYBOT_SCHEDULER_ENABLED": (ConfigTier.REBUILD, "tools.scheduler_enabled"),
+    "MONKEYBOT_FAKE_PROVIDER_EVENTS": (ConfigTier.REBUILD, "model.fake_provider_events"),
+    # RECONNECT_MCP — diff-based MCP reconnect; path *or* file content.
+    "MCP_CONFIG": (ConfigTier.RECONNECT_MCP, "paths.mcp_config"),
+    # RESTART — do not attempt in-process (identity, bind, storage, realtime).
+    "DB_URL": (ConfigTier.RESTART, "paths.db_url"),
+    "MONKEYBOT_WORKSPACE_ROOT": (ConfigTier.RESTART, "paths.workspace_root"),
+    "MONKEYBOT_AGENT_ID": (ConfigTier.RESTART, "paths.agent_id"),
+    "MEMORY_STORAGE_URI": (ConfigTier.RESTART, "paths.memory_storage_uri"),
+    "MEMORY_PATH": (ConfigTier.RESTART, "paths.memory_path"),
+    "PORT": (ConfigTier.RESTART, "gateway.port"),
+    "GATEWAY_PORT": (ConfigTier.RESTART, "gateway.gateway_port"),
+    "SSE_REPLAY_MAX": (ConfigTier.RESTART, "gateway.sse_replay_max"),
+    "SSE_NESTED_REPLAY_MAX": (ConfigTier.RESTART, "gateway.sse_nested_replay_max"),
+    "GRACEFUL_SHUTDOWN_TIMEOUT_SEC": (ConfigTier.RESTART, "gateway.graceful_shutdown_timeout_sec"),
+    "MONKEYBOT_CORS_ALLOW_ORIGINS": (ConfigTier.RESTART, "gateway.cors_allow_origins"),
+    "MEMPALACE_BACKEND": (ConfigTier.RESTART, "memory.backend"),
+    "MEMPALACE_EMBEDDING_MODEL": (ConfigTier.RESTART, "memory.embedding_model"),
+    "MONKEYBOT_HARNESS_MODE": (ConfigTier.RESTART, "gateway.harness_mode"),
+    "MONKEYBOT_REALTIME_WS_ENABLED": (ConfigTier.RESTART, "realtime.websocket.enabled"),
+    "MONKEYBOT_REALTIME_WS_PORT": (ConfigTier.RESTART, "realtime.websocket.port"),
+    "MONKEYBOT_REALTIME_AUDIO_INPUT_FORMAT": (ConfigTier.RESTART, "realtime.audio.input_format"),
+    "MONKEYBOT_REALTIME_AUDIO_OUTPUT_FORMAT": (ConfigTier.RESTART, "realtime.audio.output_format"),
+    "MONKEYBOT_REALTIME_AUDIO_CHUNK_MS": (ConfigTier.RESTART, "realtime.audio.chunk_ms"),
+    "MONKEYBOT_REALTIME_AUDIO_MAX_UTTERANCE_SEC": (
+        ConfigTier.RESTART,
+        "realtime.audio.max_utterance_sec",
+    ),
+    "MONKEYBOT_REALTIME_SESSION_MAX_DURATION_SEC": (
+        ConfigTier.RESTART,
+        "realtime.session.max_duration_sec",
+    ),
+    "MONKEYBOT_REALTIME_SESSION_IDLE_TIMEOUT_SEC": (
+        ConfigTier.RESTART,
+        "realtime.session.idle_timeout_sec",
+    ),
+    "MONKEYBOT_REALTIME_SESSION_MAX_RESPONSE_TURN_SEC": (
+        ConfigTier.RESTART,
+        "realtime.session.max_response_turn_sec",
+    ),
+    "MONKEYBOT_REALTIME_SESSION_MAX_CONCURRENT_SESSIONS": (
+        ConfigTier.RESTART,
+        "realtime.session.max_concurrent_sessions",
+    ),
+    "MONKEYBOT_REALTIME_METRICS_EMIT_SUMMARY_ON_CLOSE": (
+        ConfigTier.RESTART,
+        "realtime.metrics.emit_summary_on_close",
+    ),
+}
+
+ENV_TIERS: dict[str, ConfigTier] = {name: spec[0] for name, spec in ENV_SPEC.items()}
+ENV_FIELD_PATHS: dict[str, str] = {name: spec[1] for name, spec in ENV_SPEC.items()}
+
+# Content-addressed files tracked by digest, mapped to the ENV_MAP key whose tier applies.
+CONTENT_DIGEST_TIERS: dict[str, str] = {
+    "agent_md": "AGENT_MD",
+    "skills": "SKILLS_PATH",
+    "mcp_config": "MCP_CONFIG",
+    "command_allowlist": "COMMAND_ALLOWLIST_CONFIG",
+    "permission_config": "PERMISSION_CONFIG",
+}
+
+# Synthetic diff key for ``subagents.personas`` (not in ENV_MAP). Always REBUILD.
+SUBAGENTS_DIFF_KEY = "subagents.*"
 
 # YAML keys that used to map to env but are retired. Still accepted in the file
 # (no unknown-key rejection), but warn so configs are not silently ignored.
@@ -299,9 +423,9 @@ def apply_monkeybot_runtime_env(
 ) -> Path | None:
     """Apply YAML-backed defaults to ``os.environ`` (unset keys only).
 
-    Loads the process ``RuntimeConfig`` snapshot on first call. Already-set env
-    keys are never overwritten — ``os.environ`` stays the subprocess transport,
-    not the in-process store.
+    Always (re)loads the process ``RuntimeConfig`` snapshot. Unchanged files are
+    a digest no-op (same revision). Already-set env keys are never overwritten —
+    ``os.environ`` stays the subprocess transport, not the in-process store.
     """
     from monkeybot.core.config.snapshot import (
         get_config_store,
@@ -316,6 +440,7 @@ def apply_monkeybot_runtime_env(
             cfg = load_into_store(config_path=config_path, agent_root=agent_root)
         else:
             _warn_if_config_path_ignored(cfg.source_path, config_path)
+            cfg, _diff = store.reload()
     except Exception as exc:
         path = config_path or _resolve_config_path(agent_root=agent_root)
         logger.error("Failed to load %s: %s", path, exc)
