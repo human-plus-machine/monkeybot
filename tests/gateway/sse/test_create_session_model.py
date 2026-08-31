@@ -206,11 +206,11 @@ async def test_start_turn_prefers_session_provider(
         lambda: (tmp_path, tmp_path / "skills", tmp_path / "artifacts"),
     )
 
-    gateway_app._deps.mcp = MagicMock()
-    gateway_app._deps.provider = global_provider
-    gateway_app._deps.inspectors = []
-    gateway_app._deps.hook_manager = None
-    gateway_app._deps.web_search_tool = None
+    gateway_app.gateway_runtime.mcp = MagicMock()
+    gateway_app.gateway_runtime.provider = global_provider
+    gateway_app.gateway_runtime.inspectors = []
+    gateway_app.gateway_runtime.hook_manager = None
+    gateway_app.gateway_runtime.web_search_tool = None
 
     mock_usage = AsyncMock()
     mock_history = MagicMock()
@@ -261,11 +261,11 @@ async def test_start_turn_falls_back_to_env(
         lambda: (tmp_path, tmp_path / "skills", tmp_path / "artifacts"),
     )
 
-    gateway_app._deps.mcp = MagicMock()
-    gateway_app._deps.provider = global_provider
-    gateway_app._deps.inspectors = []
-    gateway_app._deps.hook_manager = None
-    gateway_app._deps.web_search_tool = None
+    gateway_app.gateway_runtime.mcp = MagicMock()
+    gateway_app.gateway_runtime.provider = global_provider
+    gateway_app.gateway_runtime.inspectors = []
+    gateway_app.gateway_runtime.hook_manager = None
+    gateway_app.gateway_runtime.web_search_tool = None
 
     mock_usage = AsyncMock()
     mock_history = MagicMock()
