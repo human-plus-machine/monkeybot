@@ -237,23 +237,23 @@ async def test_assistant_boundary_writes_talk_transcript(
         lambda *_args, **_kwargs: MagicMock(),
     )
 
-    from monkeybot.gateway.sse import app as sse_app
+    from monkeybot.gateway.sse import reload as reload_mod
 
     in_flight: list[int] = []
-    real_begin = sse_app.begin_in_flight_turn
-    real_end = sse_app.end_in_flight_turn
+    real_begin = reload_mod.begin_in_flight_turn
+    real_end = reload_mod.end_in_flight_turn
 
     def _begin() -> None:
         real_begin()
-        in_flight.append(sse_app._in_flight_turns)
+        in_flight.append(reload_mod._in_flight_turns)
 
-    monkeypatch.setattr("monkeybot.gateway.sse.app.begin_in_flight_turn", _begin)
-    monkeypatch.setattr("monkeybot.gateway.sse.app.end_in_flight_turn", real_end)
+    monkeypatch.setattr("monkeybot.gateway.sse.reload.begin_in_flight_turn", _begin)
+    monkeypatch.setattr("monkeybot.gateway.sse.reload.end_in_flight_turn", real_end)
 
     await _handle_assistant_boundary(MagicMock(), state, ctx, history, deps, None, None)
 
     assert in_flight and in_flight[0] >= 1
-    assert sse_app._in_flight_turns == 0
+    assert reload_mod._in_flight_turns == 0
 
     lines = [json.loads(line) for line in writer.path.read_text(encoding="utf-8").splitlines()]
     types = [line["type"] for line in lines]

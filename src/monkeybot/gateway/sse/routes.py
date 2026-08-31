@@ -60,6 +60,7 @@ from .models import (
     ToolConfirmationPOST,
     error_payload_dict,
 )
+from .reload import build_admin_router
 from .reply_body import ReplyBodyError, normalize_reply_to_user_content
 from .scheduler_routes import build_scheduler_router
 from .session_bus import SessionAlreadyExistsError, SessionBus, SessionRegistry
@@ -572,14 +573,16 @@ def create_app(
         session_model = None
         if body.model_provider or body.model_name:
             from monkeybot.core.config.settings import get_provider_config
+            from monkeybot.core.config.snapshot import get_config_store
 
             try:
-                cfg = get_provider_config(
+                provider_cfg = get_provider_config(
                     provider=body.model_provider,
                     model_name=body.model_name,
+                    config=get_config_store().current_or_none(),
                 )
-                session_provider = cfg.provider
-                session_model = cfg.model
+                session_provider = provider_cfg.provider
+                session_model = provider_cfg.model
             except Exception as exc:
                 raise APIError(
                     400,
@@ -1191,6 +1194,7 @@ def create_app(
 
     app.include_router(api)
     app.include_router(build_scheduler_router(loop_port=loop, registry=reg))
+    app.include_router(build_admin_router())
 
     @app.get("/health", response_model=HealthResponse)
     async def health(request: Request) -> HealthResponse:

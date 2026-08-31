@@ -86,6 +86,12 @@ from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env, log_gateway_startup
 from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.models import AgentUsageResponse, SessionUsageResponse
+from monkeybot.gateway.sse.reload import (
+    begin_in_flight_turn,
+    end_in_flight_turn,
+    get_reload_lock,
+    wait_for_idle_turns,
+)
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
 from monkeybot.todo_list import TodoListStore, TodoListTool
@@ -93,34 +99,6 @@ from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
 
 logger = logging.getLogger(__name__)
-
-_in_flight_turns = 0
-_turns_idle = asyncio.Event()
-_turns_idle.set()
-IDLE_TURN_WAIT_SEC = 60.0
-
-
-def begin_in_flight_turn() -> None:
-    """Mark a turn as using pinned live deps (MCP transports, provider, …)."""
-    global _in_flight_turns
-    _in_flight_turns += 1
-    _turns_idle.clear()
-
-
-def end_in_flight_turn() -> None:
-    """Release the in-flight mark so MCP reconnect can proceed."""
-    global _in_flight_turns
-    if _in_flight_turns <= 0:
-        raise RuntimeError("end_in_flight_turn without matching begin_in_flight_turn")
-    _in_flight_turns -= 1
-    if _in_flight_turns == 0:
-        _turns_idle.set()
-
-
-async def wait_for_idle_turns(*, timeout_sec: float | None = None) -> None:
-    """Block until no turn is using pinned process-wide deps."""
-    limit = IDLE_TURN_WAIT_SEC if timeout_sec is None else timeout_sec
-    await asyncio.wait_for(_turns_idle.wait(), timeout=limit)
 
 
 @dataclass(frozen=True)
@@ -702,21 +680,6 @@ class GatewayLoopPort:
         if bus is None:
             return
 
-        mcp = gateway_runtime.mcp
-        inspectors = gateway_runtime.inspectors
-        provider = bus.provider or gateway_runtime.provider
-        cfg = get_config_store().current_or_none()
-
-        if mcp is None or provider is None:
-            logger.error("gateway deps not initialized")
-            await bus.publish_data(
-                event_to_json(AgentError(request_id=request_id, error="gateway_not_ready"))
-            )
-            await bus.publish_data(
-                event_to_json(TurnComplete(request_id=request_id, usage=UsageTotals()))
-            )
-            return
-
         serving = self._serving_app()
         backend: StorageBackend = serving.state.storage
         history = backend.history()
@@ -737,11 +700,37 @@ class GatewayLoopPort:
         executor: CoreToolExecutor | None = None
         in_flight = False
         try:
-            begin_in_flight_turn()
-            in_flight = True
-            model_name = bus.model_name or (
-                env_value(cfg, "MODEL_NAME", "gemini-2.5-flash") or "gemini-2.5-flash"
-            )
+            async with get_reload_lock():
+                mcp = gateway_runtime.mcp
+                inspectors = list(gateway_runtime.inspectors)
+                provider = bus.provider or gateway_runtime.provider
+                cfg = get_config_store().current_or_none()
+                model_name = bus.model_name or (
+                    env_value(cfg, "MODEL_NAME", "gemini-2.5-flash") or "gemini-2.5-flash"
+                )
+                begin_in_flight_turn()
+                in_flight = True
+                web_search_tool = gateway_runtime.web_search_tool
+                computer_tools = list(gateway_runtime.computer_tools)
+                subagent_registry = dict(gateway_runtime.subagent_registry)
+                hook_manager = gateway_runtime.hook_manager
+                loops_registry = gateway_runtime.loops_registry
+                run_command_allowed_commands = gateway_runtime.run_command_allowed_commands
+                run_command_allowed_path_prefixes = (
+                    gateway_runtime.run_command_allowed_path_prefixes
+                )
+                approvals_persist = gateway_runtime.computer_approvals_persist
+
+            if mcp is None or provider is None:
+                logger.error("gateway deps not initialized")
+                await bus.publish_data(
+                    event_to_json(AgentError(request_id=request_id, error="gateway_not_ready"))
+                )
+                await bus.publish_data(
+                    event_to_json(TurnComplete(request_id=request_id, usage=UsageTotals()))
+                )
+                return
+
             agent_path = _default_agent_path(bus)
 
             workspace_root, skills_resolved, artifacts_resolved = _resolved_workspace_paths(cfg)
@@ -767,12 +756,8 @@ class GatewayLoopPort:
                 rows = await history.load(session_id)
                 bus.attachment_catalog.rebuild_from_history(rows)
 
-            extra_tools: list[Any] = (
-                [gateway_runtime.web_search_tool]
-                if gateway_runtime.web_search_tool is not None
-                else []
-            )
-            extra_tools.extend(gateway_runtime.computer_tools)
+            extra_tools: list[Any] = [web_search_tool] if web_search_tool is not None else []
+            extra_tools.extend(computer_tools)
             todo_store = None
             if env_flag(cfg, "MONKEYBOT_TODO_LIST_ENABLED", default=True):
                 if bus.todo_store is None:
@@ -783,7 +768,7 @@ class GatewayLoopPort:
 
             storage_backend = getattr(serving.state, "storage", None)
             loops_available = storage_backend is not None
-            loops_advertised = loops_available and gateway_runtime.loops_registry.advertised
+            loops_advertised = loops_available and loops_registry.advertised
             summarization_model = env_value(cfg, "CONTEXT_SUMMARIZATION_MODEL", "").strip() or None
 
             try:
@@ -802,11 +787,11 @@ class GatewayLoopPort:
                     sse_bus=bus,
                     event_publisher=_SessionBusEventPublisher(bus),
                     extra_tools=extra_tools,
-                    subagent_registry=gateway_runtime.subagent_registry,
+                    subagent_registry=subagent_registry,
                     scheduled_loops_available=loops_available,
                     loops_advertised=loops_advertised,
                     todo_store=todo_store,
-                    approvals_persist=gateway_runtime.computer_approvals_persist,
+                    approvals_persist=approvals_persist,
                     config=cfg,
                     enable_context_curation=env_flag(cfg, "CONTEXT_CURATION_ENABLED", default=True),
                 )
@@ -828,15 +813,15 @@ class GatewayLoopPort:
                 artifacts_path=artifacts_resolved,
                 mcp=mcp,
                 extra_tools=extra_tools,
-                run_command_allowed_commands=gateway_runtime.run_command_allowed_commands,
-                run_command_allowed_path_prefixes=gateway_runtime.run_command_allowed_path_prefixes,
+                run_command_allowed_commands=run_command_allowed_commands,
+                run_command_allowed_path_prefixes=run_command_allowed_path_prefixes,
                 attachment_store=attachment_store,
                 run_store=storage_backend.runs() if storage_backend is not None else None,
                 scheduled_loop_store=(
                     storage_backend.scheduled_loops() if storage_backend is not None else None
                 ),
-                subagent_registry=gateway_runtime.subagent_registry,
-                loops_registry=gateway_runtime.loops_registry,
+                subagent_registry=subagent_registry,
+                loops_registry=loops_registry,
                 config=cfg,
             )
             if transcript_writer is not None:
@@ -852,7 +837,7 @@ class GatewayLoopPort:
                 inspectors=inspectors,
                 tool_executor=executor,
                 cancelled=cancel_event,
-                hook_manager=gateway_runtime.hook_manager,
+                hook_manager=hook_manager,
                 attachment_store=attachment_store,
                 attachment_catalog=bus.attachment_catalog,
                 transcript_writer=transcript_writer,
@@ -1067,6 +1052,8 @@ async def _startup(fastapi_app: FastAPI) -> None:
         logger.error("invalid subagents config: %s", exc)
         raise
 
+    fastapi_app.state.gateway_runtime = gateway_runtime
+
     if otel_enabled:
         from monkeybot.observability.instrumentation import instrument_fastapi_app
 
@@ -1109,6 +1096,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
 
 async def _shutdown(fastapi_app: FastAPI) -> None:
     """Tear down MCP sessions and storage backend."""
+    fastapi_app.state.gateway_runtime = None
     from monkeybot.observability import shutdown_observability
 
     try:

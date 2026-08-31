@@ -706,3 +706,31 @@ def test_extra_gcp_pins_are_visible_to_current_env(
     assert cfg.env_values["GOOGLE_CLOUD_LOCATION"] == "us-east1"
     monkeypatch.setenv("GCP_PROJECT_ID", "later")
     assert current_env("GCP_PROJECT_ID") == "gcp-pin"
+
+
+def test_apply_reload_env_patch_captures_operator_pins_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from monkeybot.core.config.snapshot import apply_reload_env_patch, pinned_env_names
+
+    monkeypatch.setenv("MODEL_NAME", "flash")
+    apply_reload_env_patch({"MONKEYBOT_TRANSCRIPT_ENABLED": "true"})
+    names = pinned_env_names()
+    assert "MODEL_NAME" in names
+    assert "MONKEYBOT_TRANSCRIPT_ENABLED" in names
+
+
+def test_restore_reload_pins_preserves_operator_environ(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from monkeybot.core.config.snapshot import (
+        apply_reload_env_patch,
+        capture_reload_pins,
+        restore_reload_pins,
+    )
+
+    monkeypatch.setenv("MONKEYBOT_TRANSCRIPT_ENABLED", "from-operator")
+    prev = capture_reload_pins(["MONKEYBOT_TRANSCRIPT_ENABLED"])
+    apply_reload_env_patch({"MONKEYBOT_TRANSCRIPT_ENABLED": "true"})
+    restore_reload_pins(prev)
+    assert os.environ.get("MONKEYBOT_TRANSCRIPT_ENABLED") == "from-operator"

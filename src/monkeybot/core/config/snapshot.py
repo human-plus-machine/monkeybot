@@ -25,7 +25,7 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
@@ -496,11 +496,68 @@ def overlay_env_values(updates: Mapping[str, str]) -> None:
     get_config_store()._overlay_env(updates)
 
 
+# App-owned spawn keys the admin reload endpoint may patch. Pins *and* process
+# env are updated so subprocess transport (MCP / subagent workers) inherits them.
+RELOAD_PIN_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "MONKEYBOT_COMPUTER_TOOLS",
+        "MONKEYBOT_TRANSCRIPT_ENABLED",
+    }
+)
+
+
 def pinned_env_names() -> frozenset[str]:
     """ENV_MAP (and extra) keys captured as pins on first build."""
     if _PINNED_ENV is None:
         return frozenset()
     return frozenset(_PINNED_ENV)
+
+
+def apply_reload_env_patch(patch: Mapping[str, str]) -> dict[str, str]:
+    """Update allowlisted app-owned pins. Returns the keys actually applied.
+
+    Captures operator env pins first so a patch cannot initialize ``_PINNED_ENV``
+    to ``{}`` and permanently skip :func:`_capture_pins`.
+    """
+    pinned = _capture_pins()
+    applied: dict[str, str] = {}
+    for key, value in patch.items():
+        if key not in RELOAD_PIN_ALLOWLIST or not isinstance(value, str):
+            continue
+        pinned[key] = value
+        os.environ[key] = value
+        applied[key] = value
+    logger.info("reload env patch applied %s", kv(keys=",".join(sorted(applied))))
+    return applied
+
+
+def capture_reload_pins(keys: Iterable[str]) -> dict[str, tuple[str | None, str | None]]:
+    """Snapshot pin *and* ``os.environ`` values for ``keys`` before an env patch.
+
+    The two stores are not always in sync: an operator env var can be present
+    in ``os.environ`` while absent from ``_PINNED_ENV``. Pair with
+    :func:`restore_reload_pins` so rollback restores each independently
+    instead of ``pop``-ing a real env var that was never a pin.
+    """
+    current = _PINNED_ENV or {}
+    return {key: (current.get(key), os.environ.get(key)) for key in keys}
+
+
+def restore_reload_pins(prev: Mapping[str, tuple[str | None, str | None]]) -> None:
+    """Undo a previously applied :func:`apply_reload_env_patch` on failure."""
+    global _PINNED_ENV
+    if _PINNED_ENV is None:
+        _PINNED_ENV = {}
+    for key, (pin_value, environ_value) in prev.items():
+        if pin_value is None:
+            _PINNED_ENV.pop(key, None)
+        else:
+            _PINNED_ENV[key] = pin_value
+        if environ_value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = environ_value
+    logger.info("reload env patch rolled back %s", kv(keys=",".join(sorted(prev))))
 
 
 def reset_snapshot_state_for_tests() -> None:
@@ -936,5 +993,8 @@ __all__ = [
     "load_into_store",
     "overlay_env_values",
     "pinned_env_names",
+    "apply_reload_env_patch",
+    "capture_reload_pins",
+    "restore_reload_pins",
     "reset_snapshot_state_for_tests",
 ]

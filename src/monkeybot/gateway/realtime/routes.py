@@ -166,17 +166,22 @@ async def _build_realtime_context(
 ) -> TurnContext:
     if deps.mcp is None:
         raise RuntimeError("MCP client is not initialized")
-    from monkeybot.gateway.sse.app import begin_in_flight_turn, end_in_flight_turn
+    from monkeybot.gateway.sse.reload import (
+        begin_in_flight_turn,
+        end_in_flight_turn,
+        get_reload_lock,
+    )
 
     workspace_root, skills_path = _resolved_workspace_paths()
-    cfg = get_config_store().current_or_none()
     agent_path = AgentLayout.from_environment().agent_md_path
-    model = env_value(cfg, "MODEL_NAME", "gemini-2.5-flash") or "gemini-2.5-flash"
-    live = _live_slices(deps)
     loops_available = deps.storage is not None
     loops_advertised = loops_available and deps.loops_registry.advertised
-    begin_in_flight_turn()
+    async with get_reload_lock():
+        cfg = get_config_store().current_or_none()
+        live = _live_slices(deps)
+        begin_in_flight_turn()
     try:
+        model = env_value(cfg, "MODEL_NAME", "gemini-2.5-flash") or "gemini-2.5-flash"
         return await build_context(
             thread_id=session_id,
             request_id=request_id,
@@ -356,19 +361,24 @@ async def _handle_assistant_boundary(
     if turn.is_empty:
         return
 
-    from monkeybot.gateway.sse.app import begin_in_flight_turn, end_in_flight_turn
-
-    live = _live_slices(deps)
-    tool_executor = _create_tool_executor(
-        deps, attachment_store, todo_store=state.todo_store, config=ctx.config
+    from monkeybot.gateway.sse.reload import (
+        begin_in_flight_turn,
+        end_in_flight_turn,
+        get_reload_lock,
     )
-    tool_results: list[Any] = []
-    inject_texts: list[str] = []
+
     # Consume once per utterance so tool-call then prose boundaries do not
     # duplicate the same user row in HistoryStore.
     user_text = state.buffer.consume_user_text_for_commit().strip()
     turn_error: str | None = None
-    begin_in_flight_turn()
+    tool_results: list[Any] = []
+    inject_texts: list[str] = []
+    async with get_reload_lock():
+        live = _live_slices(deps)
+        tool_executor = _create_tool_executor(
+            deps, attachment_store, todo_store=state.todo_store, config=ctx.config
+        )
+        begin_in_flight_turn()
     try:
         try:
             async for event in run_realtime_turn(
