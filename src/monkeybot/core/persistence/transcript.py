@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.path_safety import (
     is_legacy_path_component_safe,
     path_contained_under,
@@ -39,7 +40,10 @@ from monkeybot.core.path_safety import (
 from monkeybot.core.runtime.events import (
     AgentEvent,
     AssistantTextEnded,
+    SystemContextUpdated,
     ThinkingBlockComplete,
+    ToolCallResult,
+    ToolCallStarted,
     event_to_json,
     is_durable_event,
 )
@@ -270,61 +274,98 @@ def _index_scanned_messages(state: _ScanState, messages: Any, seq: int) -> None:
         state.msg_ref_by_hash[_json_hash(content)] = (seq, index)
 
 
+def _index_schema(state: _ScanState, tools: Any, seq: int | None) -> None:
+    if isinstance(tools, list):
+        state.last_schema_hash = _json_hash(tools)
+        state.last_schema_seq = seq
+        return
+    if not isinstance(tools, dict):
+        return
+    h = tools.get("schema_hash")
+    s = tools.get("schema_seq")
+    if isinstance(h, str):
+        state.last_schema_hash = h
+    if isinstance(s, int):
+        state.last_schema_seq = s
+
+
+def _index_hashed_text(state: _ScanState, obj: dict[str, Any], seq: int | None) -> None:
+    field = _HASH_TEXT_FIELDS.get(str(obj.get("type") or ""))
+    if not field:
+        return
+    text = obj.get(field)
+    if not isinstance(text, str) or not text:
+        return
+    digest = obj.get("hash")
+    state.anchor_by_kind[str(obj.get("type"))] = _TextAnchor(
+        hash=digest if isinstance(digest, str) and digest else _json_hash(text),
+        text=text,
+        seq=seq,
+    )
+
+
+def _index_record(state: _ScanState, obj: dict[str, Any]) -> None:
+    seq = obj.get("seq")
+    seq_n = seq if isinstance(seq, int) else None
+    if seq_n is not None and seq_n > state.max_seq:
+        state.max_seq = seq_n
+    rtype = obj.get("type")
+    if rtype == "SessionManifest":
+        state.last_manifest = obj
+        return
+    if rtype == "ProviderRequest":
+        _index_schema(state, obj.get("tools"), seq_n)
+        if seq_n is not None:
+            _index_scanned_messages(state, obj.get("messages"), seq_n)
+    elif rtype == "ToolCallResult":
+        cid = obj.get("call_id")
+        if isinstance(cid, str) and cid and seq_n is not None:
+            state.result_seq_by_call_id[cid] = seq_n
+    _index_hashed_text(state, obj, seq_n)
+
+
 def _scan_transcript(path: Path) -> _ScanState:
     state = _ScanState()
     if not path.is_file():
         return state
     try:
         with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
+            for line_no, line in enumerate(fh, start=1):
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
+                    logger.debug(
+                        "skipping corrupt NDJSON line %s", kv(line=line_no, path=path)
+                    )
                     continue
-                if not isinstance(obj, dict):
-                    continue
-                seq = obj.get("seq")
-                if isinstance(seq, int) and seq > state.max_seq:
-                    state.max_seq = seq
-                rtype = obj.get("type")
-                if rtype == "SessionManifest":
-                    state.last_manifest = obj
-                    continue
-                if rtype == "ProviderRequest":
-                    tools = obj.get("tools")
-                    if isinstance(tools, list):
-                        state.last_schema_hash = _json_hash(tools)
-                        state.last_schema_seq = seq if isinstance(seq, int) else None
-                    elif isinstance(tools, dict):
-                        h = tools.get("schema_hash")
-                        s = tools.get("schema_seq")
-                        if isinstance(h, str):
-                            state.last_schema_hash = h
-                        if isinstance(s, int):
-                            state.last_schema_seq = s
-                    if isinstance(seq, int):
-                        _index_scanned_messages(state, obj.get("messages"), seq)
-                elif rtype == "ToolCallResult":
-                    cid = obj.get("call_id")
-                    if isinstance(cid, str) and cid and isinstance(seq, int):
-                        state.result_seq_by_call_id[cid] = seq
-                field = _HASH_TEXT_FIELDS.get(str(rtype or ""))
-                if field:
-                    # Only full-text records re-anchor; diff records point back at one.
-                    text = obj.get(field)
-                    if isinstance(text, str) and text:
-                        digest = obj.get("hash")
-                        state.anchor_by_kind[str(rtype)] = _TextAnchor(
-                            hash=digest if isinstance(digest, str) and digest else _json_hash(text),
-                            text=text,
-                            seq=seq if isinstance(seq, int) else None,
-                        )
+                if isinstance(obj, dict):
+                    _index_record(state, obj)
     except OSError:
-        return _ScanState()
+        logger.warning("transcript resume scan failed %s", kv(path=path), exc_info=True)
     return state
+
+
+def _debug_fields(event: AgentEvent) -> dict[str, Any]:
+    """Harness-debug fields for NDJSON only — never serialized on the SSE wire."""
+    extra: dict[str, Any] = {}
+    if isinstance(event, ToolCallStarted):
+        if event.inspector_decision:
+            extra["inspector_decision"] = event.inspector_decision
+        if event.resource:
+            extra["resource"] = event.resource
+        if event.resolved_path:
+            extra["resolved_path"] = event.resolved_path
+    elif isinstance(event, ToolCallResult):
+        if event.error_kind:
+            extra["error_kind"] = event.error_kind
+        if event.duration_ms is not None:
+            extra["duration_ms"] = event.duration_ms
+    elif isinstance(event, SystemContextUpdated) and event.text:
+        extra["text"] = event.text
+    return extra
 
 
 class TranscriptWriter:
@@ -393,26 +434,17 @@ class TranscriptWriter:
         }
         new_fp = _manifest_fingerprint(record)
         async with self._lock:
-            if self._manifest_written and self._last_manifest is not None:
-                if _manifest_fingerprint(self._last_manifest) == new_fp:
-                    return
-                record["resumed"] = True
-
-            def _write() -> None:
-                self._path.parent.mkdir(parents=True, exist_ok=True)
-                line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
-                with self._path.open("a", encoding="utf-8") as fh:
-                    fh.write(line + "\n")
-
-            try:
-                await asyncio.to_thread(_write)
-            except OSError:
-                logger.warning(
-                    "transcript manifest write failed for %s", self._session_id, exc_info=True
-                )
+            if (
+                self._manifest_written
+                and self._last_manifest is not None
+                and _manifest_fingerprint(self._last_manifest) == new_fp
+            ):
                 return
-            self._manifest_written = True
-            self._last_manifest = record
+            if self._manifest_written:
+                record["resumed"] = True
+            if await self._write_unlocked(record):
+                self._manifest_written = True
+                self._last_manifest = record
 
     async def drain(self) -> None:
         """Wait until any in-flight append holds the lock (then release).
@@ -421,6 +453,25 @@ class TranscriptWriter:
         """
         async with self._lock:
             return
+
+    async def _write_unlocked(self, record: dict[str, Any]) -> bool:
+        line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
+
+        def _write() -> None:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a", encoding="utf-8") as fh:
+                fh.write(line)
+
+        try:
+            await asyncio.to_thread(_write)
+        except OSError:
+            logger.warning(
+                "transcript write failed %s",
+                kv(session_id=self._session_id, path=self._path),
+                exc_info=True,
+            )
+            return False
+        return True
 
     def _stub_blocks(
         self, msg: dict[str, object], text_refs: dict[str, int]
@@ -558,21 +609,12 @@ class TranscriptWriter:
         payload["diff"] = diff
         return payload, False
 
-    async def _append_line(self, record: dict[str, Any]) -> int:
+    async def _append_line(self, record: dict[str, Any]) -> int | None:
         async with self._lock:
-            self._seq += 1
-            seq = self._seq
-            line = json.dumps({"seq": seq, **record}, ensure_ascii=False, separators=(",", ":"))
-
-            def _append() -> None:
-                self._path.parent.mkdir(parents=True, exist_ok=True)
-                with self._path.open("a", encoding="utf-8") as fh:
-                    fh.write(line + "\n")
-
-            try:
-                await asyncio.to_thread(_append)
-            except OSError:
-                logger.warning("transcript append failed for %s", self._session_id, exc_info=True)
+            seq = self._seq + 1
+            if not await self._write_unlocked({"seq": seq, **record}):
+                return None
+            self._seq = seq
             return seq
 
     async def write_user_message(self, *, request_id: str, content: str) -> None:
@@ -596,11 +638,14 @@ class TranscriptWriter:
         if not extra and not is_durable_event(event):
             return
         payload = json.loads(event_to_json(event))
+        payload.update(_debug_fields(event))
         rtype = str(payload.get("type") or "")
         field = _HASH_TEXT_FIELDS.get(rtype)
         text = payload.get(field) if field else None
         payload, is_anchor = self._enrich_hashed_text(payload)
         seq = await self._append_line({"ts": now_iso(), **payload})
+        if seq is None:
+            return
         if isinstance(text, str) and text:
             self._last_text_by_kind[rtype] = (text, seq)
             if is_anchor:
@@ -650,6 +695,8 @@ class TranscriptWriter:
             if tools_dirty_reason:
                 record["tools_dirty_reason"] = tools_dirty_reason
         seq = await self._append_line(record)
+        if seq is None:
+            return
         for content_hash, index in owned.items():
             self._msg_ref_by_hash[content_hash] = (seq, index)
         if payload is not None:

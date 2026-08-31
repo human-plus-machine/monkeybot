@@ -326,7 +326,6 @@ async def test_tool_response_stub_references_result_seq(tmp_path: Path) -> None:
             tool="glob",
             result="a" * 100,
             call_id="c1",
-            ok=True,
         )
     )
     await writer.write_provider_request(
@@ -485,7 +484,7 @@ async def test_tool_call_result_must_be_written_before_provider_request_stub(
     assert "result_seq" not in early["messages"][0]["content"][0]
 
     await writer.write_event(
-        ToolCallResult(request_id="r1", tool="glob", result="blob", call_id="c1", ok=True)
+        ToolCallResult(request_id="r1", tool="glob", result="blob", call_id="c1")
     )
     await writer.write_provider_request(
         request_id="r1",
@@ -666,3 +665,62 @@ async def test_context_usage_written_as_extra_kind(tmp_path: Path) -> None:
     assert lines[0]["type"] == "ContextUsage"
     assert lines[0]["estimated_tokens"] == 40942
     assert lines[0]["inner_turn"] == 2
+
+
+@pytest.mark.asyncio
+async def test_write_event_keeps_debug_fields_off_the_sse_shape(tmp_path: Path) -> None:
+    writer = TranscriptWriter("sess-debug", workspace_root=tmp_path)
+    await writer.write_event(
+        ToolCallStarted(
+            request_id="r1",
+            tool="read_file",
+            label="read_file",
+            args={"path": "notes.md"},
+            call_id="c1",
+            inspector_decision="allow",
+            resource="notes.md",
+            resolved_path="notes.md",
+        )
+    )
+    await writer.write_event(
+        ToolCallResult(
+            request_id="r1",
+            tool="read_file",
+            result="ok",
+            call_id="c1",
+            error_kind="runtime",
+            duration_ms=12,
+        )
+    )
+    started, result = _read_lines(writer.path)
+    assert started["inspector_decision"] == "allow"
+    assert started["resource"] == "notes.md"
+    assert started["resolved_path"] == "notes.md"
+    assert result["error_kind"] == "runtime"
+    assert result["duration_ms"] == 12
+    assert "ok" not in result
+
+
+@pytest.mark.asyncio
+async def test_failed_append_does_not_advance_seq_or_indexes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    writer = TranscriptWriter("sess-fail", workspace_root=tmp_path)
+    await writer.write_event(
+        ToolCallResult(request_id="r1", tool="t", result="ok", call_id="c1")
+    )
+    first_seq = writer._seq
+
+    async def boom(_fn: object, *args: object, **kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(asyncio, "to_thread", boom)
+    await writer.write_event(
+        ToolCallResult(request_id="r2", tool="t", result="ok", call_id="c2")
+    )
+    assert writer._seq == first_seq
+    assert writer._result_seq_by_call_id.get("c1") == first_seq
+    assert "c2" not in writer._result_seq_by_call_id
+

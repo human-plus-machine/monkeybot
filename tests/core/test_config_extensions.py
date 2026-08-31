@@ -29,7 +29,6 @@ from monkeybot.core.config import (
 )
 from monkeybot.core.config.runtime_env import (
     ENV_MAP,
-    RETIRED_RUNTIME_KEYS,
     RETIRED_TOOLS_KEYS,
     warn_retired_tools_keys,
 )
@@ -488,9 +487,10 @@ class TestReadDefaultLinesFixed:
     def test_retired_from_yaml(self) -> None:
         assert "read_default_lines" in RETIRED_TOOLS_KEYS
         assert ("tools", "read_default_lines") not in ENV_MAP
-        assert "transcript_include_live" in RETIRED_RUNTIME_KEYS
         assert ("runtime", "transcript_include_live") not in ENV_MAP
         assert ("runtime", "transcript_enabled") not in ENV_MAP
+        found = warn_retired_tools_keys({"runtime": {"transcript_include_live": True}})
+        assert found == ["transcript_include_live"]
 
     def test_yaml_key_warns_and_is_ignored(self) -> None:
         found = warn_retired_tools_keys({"tools": {"read_default_lines": 20000}})

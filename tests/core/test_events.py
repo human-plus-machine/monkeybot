@@ -21,6 +21,7 @@ from monkeybot.core.runtime.events import (
     ImageBlock,
     QueuedInputAccepted,
     RedactedThinkingBlock,
+    SystemContextUpdated,
     SystemNotificationEvent,
     SystemPromptSnapshot,
     Thinking,
@@ -70,7 +71,7 @@ def test_agent_event_roundtrip_tool_call_result_with_error() -> None:
     assert event_from_json(event_to_json(ev)) == ev
 
 
-def test_agent_event_roundtrip_tool_call_started_inspector_fields() -> None:
+def test_sse_omits_tool_call_started_debug_fields() -> None:
     ev = ToolCallStarted(
         request_id="r1",
         tool="read_file",
@@ -81,21 +82,37 @@ def test_agent_event_roundtrip_tool_call_started_inspector_fields() -> None:
         resource="notes.md",
         resolved_path="notes.md",
     )
-    assert event_from_json(event_to_json(ev)) == ev
+    payload = json.loads(event_to_json(ev))
+    assert "inspector_decision" not in payload
+    assert "resource" not in payload
+    assert "resolved_path" not in payload
 
 
-def test_agent_event_roundtrip_tool_call_result_outcome_fields() -> None:
+def test_sse_omits_tool_call_result_debug_fields() -> None:
     ev = ToolCallResult(
         request_id="r1",
         tool="read_file",
         result="ok",
         error=None,
         call_id="c1",
-        error_kind=None,
-        ok=True,
+        error_kind="runtime",
         duration_ms=12,
     )
-    assert event_from_json(event_to_json(ev)) == ev
+    payload = json.loads(event_to_json(ev))
+    assert "error_kind" not in payload
+    assert "ok" not in payload
+    assert "duration_ms" not in payload
+
+
+def test_sse_omits_system_context_updated_text() -> None:
+    ev = SystemContextUpdated(
+        request_id="r1", epoch_id=1, changed_sources=["current_request"], text="secret"
+    )
+    payload = json.loads(event_to_json(ev))
+    assert "text" not in payload
+
+
+def test_tool_call_started_without_call_id_defaults_empty() -> None:
     payload = '{"type":"ToolCallStarted","request_id":"r1","tool":"x","label":"L","args":{}}'
     out = event_from_json(payload)
     assert isinstance(out, ToolCallStarted)

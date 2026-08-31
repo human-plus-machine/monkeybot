@@ -115,15 +115,13 @@ def _tool_outcome(
                         shaped_blocks.append(block)
                 response_blocks = shaped_blocks
                 body = _blocks_to_sse_summary(response_blocks)
-    ok, error_kind = _envelope_ok_and_kind(result.error, body)
     event = ToolCallResult(
         request_id=request_id,
         tool=call.name,
         result=body,
         error=result.error,
         call_id=call.call_id,
-        error_kind=error_kind,
-        ok=ok,
+        error_kind=_envelope_error_kind(result.error, body),
         duration_ms=duration_ms,
     )
     response = ToolResponse(
@@ -177,11 +175,6 @@ class ToolBatchState:
     needs_followup_after_tools: bool = True
     tools_dirty_reason: str | None = None
     started_at: dict[str, float] = dataclasses.field(default_factory=dict)
-
-    def mark_tools_dirty_reason(self, reason: str) -> None:
-        """Record why tools changed, keeping the first cause of this batch."""
-        if self.tools_dirty_reason is None:
-            self.tools_dirty_reason = reason
 
 
 @dataclasses.dataclass
@@ -258,7 +251,11 @@ def _resolved_path_for_call(call: ToolCall, ctx: TurnContext) -> str | None:
         if path_contained_under(root_p, candidate) is None:
             return rel
         return candidate.relative_to(root_p).as_posix() or "."
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        logger.debug(
+            "resolved_path fallback %s",
+            kv(tool=call.name, path=rel, error=str(exc)),
+        )
         return rel
 
 
@@ -270,13 +267,9 @@ def _started_event(
     inspector_decision: str | None = None,
     started_at: dict[str, float] | None = None,
 ) -> ToolCallStarted:
-    resource: str | None = None
-    try:
-        resource = resource_for_call(
-            InspectorToolCall(call_id=call.call_id, name=call.name, args=dict(call.args))
-        )
-    except Exception:
-        resource = None
+    resource = resource_for_call(
+        InspectorToolCall(call_id=call.call_id, name=call.name, args=dict(call.args))
+    )
     if started_at is not None and call.call_id:
         started_at[call.call_id] = time.monotonic()
     return ToolCallStarted(
@@ -292,23 +285,18 @@ def _started_event(
     )
 
 
-def _envelope_ok_and_kind(error: str | None, body: str) -> tuple[bool, str | None]:
+def _envelope_error_kind(error: str | None, body: str) -> str | None:
     raw = error if error is not None else body
-    ok = error is None
-    kind: str | None = None
     if not raw:
-        return ok, kind
+        return None
     try:
         obj = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
-        return ok, kind
+        return None
     if not isinstance(obj, dict):
-        return ok, kind
-    if isinstance(obj.get("ok"), bool):
-        ok = bool(obj["ok"])
-    if isinstance(obj.get("error_kind"), str):
-        kind = obj["error_kind"]
-    return ok, kind
+        return None
+    kind = obj.get("error_kind")
+    return kind if isinstance(kind, str) else None
 
 
 async def _resolve_inspector_decision(
@@ -921,7 +909,8 @@ async def _post_batch_budget_and_registry(
         ctx = refresh_tools_after_mcp_change(ctx, mcp_client)
         state.ctx = ctx
         state.tools_dirty = True
-        state.mark_tools_dirty_reason("mcp")
+        if state.tools_dirty_reason is None:
+            state.tools_dirty_reason = "mcp"
         doom_tracker.exempt_names = _doom_loop_exempt_names(ctx.tools)
         logger.info(
             "refreshed ctx.tools after MCP registry change %s",
@@ -937,7 +926,8 @@ async def _post_batch_budget_and_registry(
         ctx = refresh_tools_after_loops_change(ctx, loops_advertised=advertised)
         state.ctx = ctx
         state.tools_dirty = True
-        state.mark_tools_dirty_reason("loops")
+        if state.tools_dirty_reason is None:
+            state.tools_dirty_reason = "loops"
         doom_tracker.exempt_names = _doom_loop_exempt_names(ctx.tools)
         logger.info(
             "refreshed ctx.tools after loops registry change %s",

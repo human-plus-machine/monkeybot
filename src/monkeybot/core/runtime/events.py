@@ -71,7 +71,6 @@ class ToolCallResult:
     error: str | None = None
     call_id: str = ""
     error_kind: str | None = None
-    ok: bool | None = None
     duration_ms: int | None = None
 
 
@@ -632,7 +631,6 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             **base,
             "epoch_id": event.epoch_id,
             "changed_sources": list(event.changed_sources),
-            **({"text": event.text} if event.text else {}),
         }
     if isinstance(event, AssistantTextEnded):
         out = dict(base)
@@ -664,22 +662,10 @@ def event_to_json(event: AgentEvent) -> str:
             payload["parse_error"] = event.parse_error
         if event.call_id:
             payload["call_id"] = event.call_id
-        if event.inspector_decision:
-            payload["inspector_decision"] = event.inspector_decision
-        if event.resource:
-            payload["resource"] = event.resource
-        if event.resolved_path:
-            payload["resolved_path"] = event.resolved_path
     elif isinstance(event, ToolCallResult):
         payload = {**base, "tool": event.tool, "result": event.result, "error": event.error}
         if event.call_id:
             payload["call_id"] = event.call_id
-        if event.error_kind:
-            payload["error_kind"] = event.error_kind
-        if event.ok is not None:
-            payload["ok"] = event.ok
-        if event.duration_ms is not None:
-            payload["duration_ms"] = event.duration_ms
     elif isinstance(event, TurnComplete):
         u = event.usage
         payload = {
@@ -838,10 +824,12 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         call_id = call_id_raw if isinstance(call_id_raw, str) else ""
         kind_raw = payload.get("error_kind")
         error_kind = kind_raw if isinstance(kind_raw, str) else None
-        ok_raw = payload.get("ok")
-        ok = ok_raw if isinstance(ok_raw, bool) else None
         dur_raw = payload.get("duration_ms")
-        duration_ms = int(dur_raw) if isinstance(dur_raw, (int, float)) and not isinstance(dur_raw, bool) else None
+        duration_ms = (
+            int(dur_raw)
+            if isinstance(dur_raw, (int, float)) and not isinstance(dur_raw, bool)
+            else None
+        )
         return ToolCallResult(
             request_id=rid,
             tool=tool,
@@ -849,7 +837,6 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
             error=err,
             call_id=call_id,
             error_kind=error_kind,
-            ok=ok,
             duration_ms=duration_ms,
         )
     if t == "TurnComplete":

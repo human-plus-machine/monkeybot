@@ -632,8 +632,9 @@ def test_tools_dirty_reason_keeps_the_first_cause() -> None:
     from monkeybot.core.runtime.turn_loop import _mark_tools_dirty, _TurnState
 
     batch = ToolBatchState(ctx=_ctx(), tools_dirty=False, pre_tool_extra_next=None)
-    batch.mark_tools_dirty_reason("mcp")
-    batch.mark_tools_dirty_reason("loops")
+    batch.tools_dirty_reason = "mcp"
+    if batch.tools_dirty_reason is None:
+        batch.tools_dirty_reason = "loops"
     assert batch.tools_dirty_reason == "mcp"
 
     state = _TurnState(

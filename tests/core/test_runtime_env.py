@@ -437,7 +437,7 @@ def test_retired_transcript_include_live_warns_and_is_not_mapped(
     assert os.environ.get("MONKEYBOT_TRANSCRIPT_ENABLED") is None
     assert os.environ.get("MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE") is None
     assert ("runtime", "transcript_include_live") not in runtime_env.ENV_MAP
-    found = runtime_env.warn_retired_runtime_keys(
+    found = runtime_env.warn_retired_tools_keys(
         {"runtime": {"transcript_include_live": True}}
     )
     assert found == ["transcript_include_live"]

@@ -123,46 +123,26 @@ _RETIRED_TOOLS_WARNINGS_OVERRIDES: dict[str, str] = {
     ),
 }
 
-RETIRED_RUNTIME_KEYS: frozenset[str] = frozenset({"transcript_include_live"})
-
-_RETIRED_RUNTIME_WARNINGS: dict[str, str] = {
-    "transcript_include_live": (
-        "runtime.transcript_include_live is retired and ignored — "
-        "transcript capture is runtime.transcript_enabled only"
-    ),
-}
-
-
 def warn_retired_tools_keys(doc: Mapping[str, Any]) -> list[str]:
-    """Log one warning per retired ``tools.*`` key; return the keys found."""
+    """Log one warning per retired YAML key; return the keys found."""
+    found: list[str] = []
     tools = doc.get("tools")
-    if not isinstance(tools, dict):
-        return []
-    found: list[str] = []
-    for key in sorted(RETIRED_TOOLS_KEYS):
-        if key in tools:
-            found.append(key)
-            message = _RETIRED_TOOLS_WARNINGS_OVERRIDES.get(key) or _SPILL_SIZING_RETIRED_MSG.format(key=key)
-            logger.warning(message)
-    return found
-
-
-def warn_retired_runtime_keys(doc: Mapping[str, Any]) -> list[str]:
-    """Log one warning per retired ``runtime.*`` key; return the keys found."""
+    if isinstance(tools, dict):
+        for key in sorted(RETIRED_TOOLS_KEYS):
+            if key in tools:
+                found.append(key)
+                message = _RETIRED_TOOLS_WARNINGS_OVERRIDES.get(
+                    key
+                ) or _SPILL_SIZING_RETIRED_MSG.format(key=key)
+                logger.warning(message)
     runtime = doc.get("runtime")
-    if not isinstance(runtime, dict):
-        return []
-    found: list[str] = []
-    for key in sorted(RETIRED_RUNTIME_KEYS):
-        if key in runtime:
-            found.append(key)
-            logger.warning(_RETIRED_RUNTIME_WARNINGS.get(key, f"runtime.{key} is retired and ignored"))
+    if isinstance(runtime, dict) and "transcript_include_live" in runtime:
+        found.append("transcript_include_live")
+        logger.warning(
+            "runtime.transcript_include_live is retired and ignored — "
+            "transcript capture is runtime.transcript_enabled only"
+        )
     return found
-
-
-def warn_retired_config_keys(doc: Mapping[str, Any]) -> list[str]:
-    """Log warnings for all retired YAML keys (tools + runtime)."""
-    return warn_retired_tools_keys(doc) + warn_retired_runtime_keys(doc)
 
 
 def reset_runtime_env_state_for_tests() -> None:
@@ -312,7 +292,7 @@ def apply_monkeybot_runtime_env(
         logger.error("Failed to load %s: %s", path, exc)
         raise
 
-    warn_retired_config_keys(merged)
+    warn_retired_tools_keys(merged)
 
     _RUNTIME_ENV_APPLIED = True
     google_cloud_project = (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()

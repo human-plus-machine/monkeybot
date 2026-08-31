@@ -3149,6 +3149,6 @@ async def test_tool_call_started_carries_inspector_and_resolved_path(tmp_path: P
     assert started.resource == "notes.md"
     assert started.resolved_path == "notes.md"
     result = next(e for e in events if isinstance(e, ToolCallResult))
-    assert result.ok is True
+    assert result.error is None
     assert result.duration_ms is not None
     assert result.duration_ms >= 0

@@ -246,6 +246,6 @@ def validate_monkeybot_yaml_doc(doc: dict[str, Any], *, env: dict[str, str] | No
             flat[key] = env[key]
     validate_provider_env(flat)
 
-    from monkeybot.core.config.runtime_env import warn_retired_config_keys
+    from monkeybot.core.config.runtime_env import warn_retired_tools_keys
 
-    warn_retired_config_keys(doc)
+    warn_retired_tools_keys(doc)
