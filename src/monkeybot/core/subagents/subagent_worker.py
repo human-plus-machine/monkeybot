@@ -18,6 +18,13 @@ from monkeybot.core.config.settings import (
     normalize_model_provider,
     subagent_vertex_google_search_from_config,
 )
+from monkeybot.core.config.snapshot import (
+    context_window_tokens,
+    current_env,
+    current_env_or_none,
+    env_value,
+    get_config_store,
+)
 from monkeybot.core.context import TurnContext, build_context
 from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
 from monkeybot.core.knowledge.config import knowledge_enabled_from_config
@@ -191,13 +198,16 @@ def _event_for_ndjson_pipe(evt: AgentEvent) -> AgentEvent:
 
 
 def _resolve_provider() -> Provider:
-    mode = normalize_model_provider(os.environ.get("MODEL_PROVIDER", "google_vertexai"))
+    cfg = get_config_store().current_or_none()
+    mode = normalize_model_provider(
+        env_value(cfg, "MODEL_PROVIDER", "google_vertexai") or "google_vertexai"
+    )
     if mode != "fake":
-        return get_provider_config(provider=mode).provider
+        return get_provider_config(provider=mode, config=cfg).provider
 
     import json
 
-    raw = os.environ.get("MONKEYBOT_FAKE_PROVIDER_EVENTS", "")
+    raw = current_env("MONKEYBOT_FAKE_PROVIDER_EVENTS", "")
     if not raw:
         return ScriptedFakeProvider(
             [
@@ -292,7 +302,7 @@ async def _async_main() -> None:
 
         mcp = MCPClient()
         mcp_config = resolve_project_path(
-            os.environ.get("MCP_CONFIG", "monkeybot_config/mcp.json"), agent_root
+            current_env("MCP_CONFIG", "monkeybot_config/mcp.json"), agent_root
         )
         strict = os.environ.get("MCP_STRICT_LOAD", "").strip().lower() in ("1", "true", "yes")
         try:
@@ -304,7 +314,7 @@ async def _async_main() -> None:
         run_allow_cmds: list[str] | None = None
         run_allow_paths: list[str] | None = None
         tiers_path = resolve_project_path(
-            os.environ.get("COMMAND_ALLOWLIST_CONFIG", "monkeybot_config/command_allowlist.yaml"),
+            current_env("COMMAND_ALLOWLIST_CONFIG", "monkeybot_config/command_allowlist.yaml"),
             agent_root,
         )
         try:
@@ -317,7 +327,7 @@ async def _async_main() -> None:
         except Exception:
             logger.exception("command tier load failed")
 
-        raw_rules = os.environ.get("MONKEYBOT_TOOL_DENIED_PATTERNS")
+        raw_rules = current_env_or_none("MONKEYBOT_TOOL_DENIED_PATTERNS")
         if raw_rules is None:
             rules_patterns = ["rm -rf", "/etc/passwd", "DROP TABLE"]
         else:
@@ -326,7 +336,7 @@ async def _async_main() -> None:
             inspectors.append(RulesInspector(rules_patterns))
 
         perm_path = resolve_project_path(
-            os.environ.get("PERMISSION_CONFIG", "monkeybot_config/permissions.yaml"),
+            current_env("PERMISSION_CONFIG", "monkeybot_config/permissions.yaml"),
             agent_root,
         )
         # Subagents have no interactive session to prompt: reuse the parent's
@@ -347,11 +357,8 @@ async def _async_main() -> None:
             thread_id = f"subagent:{spill_session}:{uuid.uuid4().hex[:10]}"
         request_id = f"sub-{uuid.uuid4().hex[:12]}"
 
-        cap_raw = os.environ.get("MODEL_CONTEXT_WINDOW", "200000").strip()
-        try:
-            context_window_tokens = max(1, int(cap_raw))
-        except ValueError:
-            context_window_tokens = 200_000
+        cfg = get_config_store().current_or_none()
+        window_tokens = context_window_tokens(cfg)
 
         try:
             _ws_backend = _build_web_search_backend()
@@ -368,7 +375,7 @@ async def _async_main() -> None:
         if mem_uri:
             memory = MemorySubsystem(
                 memory_uri=mem_uri,
-                db_url=os.environ.get("DB_URL", "sqlite:///data/monkeybot.db"),
+                db_url=current_env("DB_URL", "sqlite:///data/monkeybot.db"),
                 agent_id=agent_root.name,
                 agent_name=agent_root.name,
                 ingest_enabled=False,
@@ -409,9 +416,10 @@ async def _async_main() -> None:
             model=envelope.model,
             include_task_tool=False,
             workspace_root=ws,
-            context_window_tokens=context_window_tokens,
+            context_window_tokens=window_tokens,
             enable_context_curation=False,
             extra_tools=extra_tools,
+            config=cfg,
         )
 
         executor = CoreToolExecutor(
@@ -424,6 +432,7 @@ async def _async_main() -> None:
             run_command_allowed_commands=run_allow_cmds,
             run_command_allowed_path_prefixes=run_allow_paths,
             knowledge=knowledge,
+            config=cfg,
         )
         history = backend.history()
 
@@ -482,7 +491,9 @@ async def _async_main() -> None:
 def main() -> None:
     from monkeybot.core.logging_utils import normalize_log_level
 
-    logging.basicConfig(level=normalize_log_level(os.environ.get("LOG_LEVEL"), default="WARNING"))
+    logging.basicConfig(
+        level=normalize_log_level(current_env_or_none("LOG_LEVEL"), default="WARNING")
+    )
     try:
         asyncio.run(_async_main())
     except SystemExit:

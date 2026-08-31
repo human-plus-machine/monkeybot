@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Protocol
 
+from monkeybot.core.config.snapshot import current_env
 from monkeybot.core.persistence.backends import ScheduledLoopStore
 from monkeybot.core.persistence.scheduled_loops import ScheduledLoopRow, format_tick_prompt
 from monkeybot.core.types.content_blocks import ContentBlock, Text
@@ -87,7 +88,7 @@ def scheduler_settings() -> SchedulerSettings:
 
 
 def scheduler_enabled_from_env() -> bool:
-    raw = os.environ.get("MONKEYBOT_SCHEDULER_ENABLED", "").strip().lower()
+    raw = current_env("MONKEYBOT_SCHEDULER_ENABLED", "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Final, TypeVar, cast
@@ -198,11 +197,13 @@ def sqlite_path_from_db_url(db_url: str | None = None) -> str:
     """Resolve sqlite database path suitable for aiosqlite.connect().
 
     Accepts sqlite:////absolute/path, sqlite:///relative/path, sqlite:///:memory:.
-    If db_url is None, reads os.environ.get('DB_URL', DEFAULT_DB_URL).
+    If db_url is None, reads ``DB_URL`` from the runtime snapshot (default DEFAULT_DB_URL).
     Raises ValueError if scheme is not sqlite or path is empty.
     """
     if db_url is None:
-        db_url = os.environ.get("DB_URL", DEFAULT_DB_URL)
+        from monkeybot.core.config.snapshot import current_env
+
+        db_url = current_env("DB_URL", DEFAULT_DB_URL)
     stripped = db_url.strip()
     if not stripped:
         raise ValueError("Database URL is empty")

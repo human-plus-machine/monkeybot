@@ -111,7 +111,9 @@ uv sync
 | `vertex-claude` | `GCP_PROJECT_ID` / `GOOGLE_CLOUD_PROJECT` / `ANTHROPIC_VERTEX_PROJECT_ID` (ADC) | `monkeybot[vertex-claude]` |
 | `aws_bedrock` | `AWS_ACCESS_KEY_ID` / `AWS_PROFILE` + `AWS_REGION` | `monkeybot[bedrock]` |
 | `huggingface` | `HF_TOKEN` (or `HUGGINGFACE_API_KEY`) | `monkeybot[huggingface]` |
-| `ollama` | None required — `OLLAMA_BASE_URL` (default `http://localhost:11434`) for a non-default server | `monkeybot[ollama]` |
+| `ollama-cloud` | `OLLAMA_API_KEY` | `monkeybot[ollama]` |
+| `ollama-local` | None required — `OLLAMA_BASE_URL` (default `http://localhost:11434`) | `monkeybot[ollama]` |
+| `ollama` | Legacy auto-route (key + blank URL = cloud; explicit URL wins) | `monkeybot[ollama]` |
 
 **Agent-first dependencies.** The CLI is thin — it does **not** install provider/storage extras globally. `monkeybot new` scaffolds a `pyproject.toml` with the selected provider (and any `--with` extras). Run plain `uv sync` in the agent directory. `monkeybot run` / `chat` spawn the gateway from that project's interpreter (`.venv/bin/python`, else `uv run python`), and `doctor` checks extras in that same interpreter. For a config-only tree (just `monkeybot_config/`, no `pyproject.toml`) the gateway uses the CLI's interpreter when it already has MonkeyBot 3.x (and MemPalace if memory is on). If memory is enabled and that interpreter cannot import MemPalace, `run` / `chat` provision a cached CLI-managed venv under `~/.cache/monkeybot/runtimes/` holding `monkeybot[memory]` pinned to the running core (never rewrites a `pyproject.toml`). `doctor` reuses that cache when it is already present. Otherwise extras must be installed in the CLI env (`uv tool install --with 'monkeybot[<extra>]' monkeybot-cli`).
 

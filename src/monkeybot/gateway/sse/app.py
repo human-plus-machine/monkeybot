@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import json
 import logging
 import os
 from collections.abc import AsyncIterator, Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from monkeybot.computer import build_computer_tools, should_enable_computer_tool
 from monkeybot.computer.permissions import build_computer_permission_inspector, build_persist_hook
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
+from monkeybot.core.config.runtime_env import SUBAGENTS_DIFF_KEY, ConfigTier
 from monkeybot.core.config.settings import (
     ConfigError,
     SubagentConfig,
@@ -32,6 +34,16 @@ from monkeybot.core.config.settings import (
     normalize_model_provider,
     vertex_google_search_enabled_from_config,
 )
+from monkeybot.core.config.snapshot import (
+    ConfigDiff,
+    RuntimeConfig,
+    context_window_tokens,
+    current_env,
+    current_env_or_none,
+    env_flag,
+    env_value,
+    get_config_store,
+)
 from monkeybot.core.context import LoopsToolRegistry, build_context
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
@@ -39,7 +51,7 @@ from monkeybot.core.knowledge.config import (
     knowledge_enabled_from_config,
     knowledge_read_only_from_env,
 )
-from monkeybot.core.layout import AgentLayout
+from monkeybot.core.layout import AgentLayout, resolve_agent_path
 from monkeybot.core.llm.provider import (
     Done,
     Provider,
@@ -51,7 +63,8 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.llm.usage import Usage as UsageRecord
 from monkeybot.core.llm.usage import UsageGranularity
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.mcp.mcp_client import MCPClient
+from monkeybot.core.mcp.mcp_client import MCPClient, mcp_file_env_refs
+from monkeybot.core.mcp.ports_mcp import MCPCatalogApplyResult
 from monkeybot.core.memory.config import memory_enabled_from_config
 from monkeybot.core.memory.subsystem import MemoryConfigurationError, MemorySubsystem
 from monkeybot.core.persistence.backends import (
@@ -59,7 +72,7 @@ from monkeybot.core.persistence.backends import (
     UsageStore,
     create_storage_backend,
 )
-from monkeybot.core.persistence.transcript import TranscriptWriter, transcript_enabled_from_env
+from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.events import AgentEvent, TurnComplete, UsageTotals, event_to_json
 from monkeybot.core.runtime.events import Error as AgentError
 from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
@@ -73,9 +86,15 @@ from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env, log_gateway_startup
 from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.models import AgentUsageResponse, SessionUsageResponse
+from monkeybot.gateway.sse.reload import (
+    begin_in_flight_turn,
+    end_in_flight_turn,
+    get_reload_lock,
+    wait_for_idle_turns,
+)
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
-from monkeybot.todo_list import TodoListStore, TodoListTool, todo_list_enabled_from_env
+from monkeybot.todo_list import TodoListStore, TodoListTool
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
 
@@ -94,8 +113,59 @@ class _SessionBusEventPublisher:
 
 
 @dataclass
-class _GatewayDeps:
-    """Process-level deps populated on startup (mutable module singleton)."""
+class RuntimeApplyResult:
+    """Keys ``GatewayRuntime.apply`` actually rebuilt, plus MCP catalog outcome."""
+
+    applied: list[str] = field(default_factory=list)
+    mcp: MCPCatalogApplyResult = field(default_factory=MCPCatalogApplyResult)
+    error: str | None = None
+
+
+# Restart-only GatewayRuntime fields. Everything else is a live slice that
+# ``apply()`` stages and installs. Derived so adding a field cannot be silently
+# dropped from ``_install_live_slices``.
+_RESTART_ONLY_ATTRS = frozenset({"mcp", "memory", "knowledge", "loops_registry"})
+_LIVE_SLICE_ATTRS: tuple[str, ...] = ()
+
+
+def _app_memory_state(
+    fastapi_app: FastAPI | None,
+) -> tuple[Any, Any, Any] | None:
+    if fastapi_app is None:
+        return None
+    state = fastapi_app.state
+    return (
+        getattr(state, "memory", None),
+        getattr(state, "memory_status", None),
+        getattr(state, "memory_detail", None),
+    )
+
+
+def _restore_app_memory(fastapi_app: FastAPI | None, prev: tuple[Any, Any, Any] | None) -> None:
+    if fastapi_app is None or prev is None:
+        return
+    fastapi_app.state.memory = prev[0]
+    fastapi_app.state.memory_status = prev[1]
+    fastapi_app.state.memory_detail = prev[2]
+
+
+def _resolved_cfg_path(
+    cfg: RuntimeConfig | None,
+    key: str,
+    fallback: Path,
+    agent_root: Path,
+) -> Path:
+    """Resolve a snapshot path against ``agent_root``; keep ``fallback`` when unset."""
+    raw = env_value(cfg, key, "").strip()
+    return resolve_agent_path(raw, agent_root) if raw else fallback
+
+
+@dataclass
+class GatewayRuntime:
+    """Process-level deps populated on startup; ``apply()`` rebuilds hot slices.
+
+    The live instance is the module singleton ``gateway_runtime``.
+    """
 
     mcp: MCPClient | None = None
     inspectors: list[ToolInspector] = field(default_factory=list)
@@ -111,22 +181,301 @@ class _GatewayDeps:
     computer_tools: list[Any] = field(default_factory=list)
     computer_approvals_persist: Callable[[str, str], bool] | None = None
 
+    def build_inspectors(
+        self, layout: AgentLayout, cfg: RuntimeConfig | None = None, *, fail_closed: bool = False
+    ) -> None:
+        """Rebuild command-tier, rules, permission, and computer-tool inspectors.
 
-_deps = _GatewayDeps()
+        Startup (``fail_closed=False``) falls open to allow-all when the
+        command-tier file is *missing* — there is no prior policy to protect yet.
+        A malformed (not missing) allowlist still raises, including at boot:
+        silently widening to allow-all would hide a broken policy. Reload
+        (``fail_closed=True``, from ``_rebuild_live_slices``) also raises when a
+        policy was already active and the file is now missing, so the caller
+        keeps the last known-good inspector and does not commit a config that
+        silently widens an active allowlist to allow-all.
+        """
+        tiers_path = _resolved_cfg_path(
+            cfg, "COMMAND_ALLOWLIST_CONFIG", layout.command_allowlist_path, layout.agent_root
+        )
+        had_policy = self.run_command_allowed_commands is not None
+        inspectors: list[ToolInspector] = []
+        try:
+            tier_insp = CommandTierInspector(tiers_path)
+        except FileNotFoundError as exc:
+            if fail_closed and had_policy:
+                raise ConfigError(
+                    f"command tier config missing ({tiers_path}); refusing to widen an "
+                    "active allowlist to allow-all on reload"
+                ) from exc
+            logger.info("command tiers missing (%s); allowing all tool calls", tiers_path)
+            self.run_command_allowed_commands = None
+            self.run_command_allowed_path_prefixes = None
+        else:
+            inspectors.append(tier_insp)
+            self.run_command_allowed_commands = list(tier_insp.allowed_commands)
+            self.run_command_allowed_path_prefixes = list(tier_insp.allowed_path_prefixes)
+
+        denied = _tool_denied_patterns(cfg)
+        if denied:
+            inspectors.append(RulesInspector(denied))
+
+        perm_path = _resolved_cfg_path(
+            cfg, "PERMISSION_CONFIG", layout.permission_config_path, layout.agent_root
+        )
+        approvals_path = _resolved_cfg_path(
+            cfg, "MONKEYBOT_APPROVALS_CONFIG", layout.approvals_path, layout.agent_root
+        )
+        if should_enable_computer_tools(cfg):
+            self.computer_tools = build_computer_tools()
+            self.computer_approvals_persist = build_persist_hook(approvals_path)
+            inspectors.append(build_computer_permission_inspector(perm_path, approvals_path))
+        else:
+            self.computer_tools = []
+            self.computer_approvals_persist = None
+            perm_insp = try_load_permission_inspector(perm_path)
+            if perm_insp is not None:
+                inspectors.append(perm_insp)
+
+        inspectors.append(LoopStartInspector())
+        self.inspectors = inspectors
+
+    def build_provider(self, cfg: RuntimeConfig | None = None) -> None:
+        self.provider = _resolve_provider(cfg)
+
+    def build_web_search(self, cfg: RuntimeConfig | None = None) -> None:
+        try:
+            backend_ws = _build_web_search_backend(cfg)
+            if backend_ws is not None:
+                self.web_search_tool = WebSearchTool(backend_ws)
+                logger.info("web search enabled: backend=%s", backend_ws.name)
+            else:
+                self.web_search_tool = None
+        except Exception as exc:
+            logger.warning("web search backend init failed — disabling: %s", exc)
+            self.web_search_tool = None
+
+    def build_subagents(self, cfg: RuntimeConfig | None = None) -> None:
+        self.subagent_registry = get_subagent_registry(config=cfg)
+        if self.subagent_registry:
+            logger.info(
+                "subagent personas loaded: %s",
+                ", ".join(sorted(self.subagent_registry)),
+            )
+
+    def rebuild_memory_hooks(self, cfg: RuntimeConfig | None, fastapi_app: FastAPI | None) -> None:
+        """Re-bind memory/knowledge hooks without reopening storage (URI is restart-only)."""
+        enabled = env_flag(cfg, "MONKEYBOT_MEMORY_HOOK_ENABLED", default=True)
+        mgr = HookManager()
+        has_hooks = False
+        if enabled and self.memory is not None:
+            self.memory.register_hooks(mgr)
+            has_hooks = True
+        if self.knowledge is not None:
+            self.knowledge.register_hooks(mgr)
+            has_hooks = True
+        self.hook_manager = mgr if has_hooks else None
+        if fastapi_app is None:
+            return
+        if enabled and self.memory is not None:
+            fastapi_app.state.memory = self.memory
+            fastapi_app.state.memory_status = "enabled"
+            fastapi_app.state.memory_detail = None
+        elif not enabled:
+            fastapi_app.state.memory = None
+            fastapi_app.state.memory_status = "disabled"
+            fastapi_app.state.memory_detail = "memory.enabled=false"
+
+    def _mcp_config_path(self, cfg: RuntimeConfig, layout: AgentLayout) -> Path:
+        return _resolved_cfg_path(cfg, "MCP_CONFIG", layout.mcp_config_path, layout.agent_root)
+
+    def needs_mcp_apply(self, cfg: RuntimeConfig, diff: ConfigDiff) -> bool:
+        """True when catalog file or interpolated ``${VAR}`` overlay values changed."""
+        if self.mcp is None:
+            return False
+        if ConfigTier.RECONNECT_MCP in diff.tiers:
+            return True
+        layout = AgentLayout.from_environment()
+        return bool(diff.changed_env_keys & mcp_file_env_refs(self._mcp_config_path(cfg, layout)))
+
+    def _rebuild_live_slices(
+        self,
+        cfg: RuntimeConfig,
+        diff: ConfigDiff,
+        layout: AgentLayout,
+        fastapi_app: FastAPI | None,
+    ) -> tuple[list[str], str | None]:
+        applied: list[str] = []
+        error: str | None = None
+        provider_keys = {
+            "MODEL_PROVIDER",
+            "MODEL_TEMPERATURE",
+            "MODEL_MAX_TOKENS",
+            "MODEL_THINKING_BUDGET",
+            "VERTEX_AI_PROJECT_ID",
+            "VERTEX_AI_LOCATION",
+            "ANTHROPIC_VERTEX_PROJECT_ID",
+            "ANTHROPIC_VERTEX_REGION",
+            "MONKEYBOT_FAKE_PROVIDER_EVENTS",
+        }
+        inspector_keys = {
+            "COMMAND_ALLOWLIST_CONFIG",
+            "PERMISSION_CONFIG",
+            "MONKEYBOT_TOOL_DENIED_PATTERNS",
+            "MONKEYBOT_COMPUTER_TOOLS",
+            "MONKEYBOT_APPROVALS_CONFIG",
+        }
+        web_search_keys = {"WEB_SEARCH_BACKEND", "WEB_SEARCH_MAX_RESULTS"}
+        if diff.changed_env_keys & provider_keys:
+            self.build_provider(cfg)
+            applied.extend(sorted(diff.changed_env_keys & provider_keys))
+            logger.info(
+                "config slice rebuilt %s",
+                kv(slice="provider", revision=cfg.revision),
+            )
+        if diff.changed_env_keys & inspector_keys:
+            try:
+                self.build_inspectors(layout, cfg, fail_closed=True)
+            except Exception as exc:
+                error = f"inspector config load failed: {exc}"
+                logger.exception(
+                    "inspector config load failed %s",
+                    kv(revision=cfg.revision, error=error),
+                )
+                return applied, error
+            applied.extend(sorted(diff.changed_env_keys & inspector_keys))
+            logger.info(
+                "config slice rebuilt %s",
+                kv(slice="inspectors", revision=cfg.revision),
+            )
+        if diff.changed_env_keys & web_search_keys:
+            self.build_web_search(cfg)
+            applied.extend(sorted(diff.changed_env_keys & web_search_keys))
+            logger.info(
+                "config slice rebuilt %s",
+                kv(slice="web_search", revision=cfg.revision),
+            )
+        if SUBAGENTS_DIFF_KEY in diff.changed_env_keys or "subagents" in diff.changed_content:
+            try:
+                self.build_subagents(cfg)
+                applied.append(SUBAGENTS_DIFF_KEY)
+                logger.info(
+                    "config slice rebuilt %s",
+                    kv(slice="subagents", revision=cfg.revision),
+                )
+            except ConfigError as exc:
+                error = str(exc)
+                logger.error(
+                    "invalid subagents config on reload %s",
+                    kv(revision=cfg.revision, error=error),
+                )
+                return applied, error
+        if "MONKEYBOT_MEMORY_HOOK_ENABLED" in diff.changed_env_keys:
+            self.rebuild_memory_hooks(cfg, fastapi_app)
+            applied.append("MONKEYBOT_MEMORY_HOOK_ENABLED")
+            logger.info(
+                "config slice rebuilt %s",
+                kv(slice="memory_hooks", revision=cfg.revision),
+            )
+        return applied, error
+
+    def _install_live_slices(self, staging: GatewayRuntime) -> None:
+        for name in _LIVE_SLICE_ATTRS:
+            setattr(self, name, getattr(staging, name))
+
+    async def apply(
+        self,
+        cfg: RuntimeConfig,
+        diff: ConfigDiff,
+        *,
+        fastapi_app: FastAPI | None = None,
+        registry: SessionRegistry | None = None,
+    ) -> RuntimeApplyResult:
+        """Rebuild slices named in ``diff.tiers``. Does not touch SessionRegistry state.
+
+        Slice mutations land on a staging copy and are installed only after
+        rebuild and MCP apply both succeed, so a later subagent/MCP error cannot
+        leave live deps on the new config while ``RuntimeConfig`` stays old.
+        """
+        del registry
+        layout = AgentLayout.from_environment()
+        staging = copy.copy(self)
+        applied: list[str] = []
+        mcp_result = MCPCatalogApplyResult()
+        memory_prev = _app_memory_state(fastapi_app)
+        if ConfigTier.REBUILD in diff.tiers:
+            applied, error = staging._rebuild_live_slices(cfg, diff, layout, fastapi_app)
+            if error:
+                _restore_app_memory(fastapi_app, memory_prev)
+                return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
+        if self.needs_mcp_apply(cfg, diff) and self.mcp is not None:
+            mcp_path = self._mcp_config_path(cfg, layout)
+            prev_overlay = self.mcp.env_overlay
+            overlay_committed = False
+            try:
+                await wait_for_idle_turns()
+                self.mcp.set_env_overlay(cfg.env_values)
+                mcp_result = await self.mcp.apply_catalog_diff(mcp_path)
+                overlay_committed = True
+                if "MCP_CONFIG" in diff.changed_env_keys:
+                    applied.append("MCP_CONFIG")
+                logger.info(
+                    "config slice rebuilt %s",
+                    kv(slice="mcp", revision=cfg.revision),
+                )
+            except TimeoutError:
+                error = "MCP reload timed out waiting for in-flight turns"
+                logger.warning(
+                    "MCP reload idle wait timed out %s",
+                    kv(path=str(mcp_path), revision=cfg.revision),
+                )
+                _restore_app_memory(fastapi_app, memory_prev)
+                return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
+            except Exception as exc:
+                error = f"MCP catalog diff failed: {exc}"
+                logger.exception(
+                    "MCP catalog diff failed %s",
+                    kv(
+                        path=str(mcp_path),
+                        revision=cfg.revision,
+                        error=str(exc),
+                    ),
+                )
+                _restore_app_memory(fastapi_app, memory_prev)
+                return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
+            finally:
+                if not overlay_committed:
+                    self.mcp.set_env_overlay(prev_overlay)
+        self._install_live_slices(staging)
+        return RuntimeApplyResult(applied=applied, mcp=mcp_result)
+
+
+gateway_runtime = GatewayRuntime()
+_LIVE_SLICE_ATTRS = tuple(
+    f.name for f in fields(GatewayRuntime) if f.name not in _RESTART_ONLY_ATTRS
+)
 
 
 def _env_context_window_tokens() -> int:
-    cap_raw = os.environ.get("MODEL_CONTEXT_WINDOW", "200000").strip()
-    try:
-        return max(1, int(cap_raw))
-    except ValueError:
-        return 200_000
+    return context_window_tokens()
 
 
-def _resolved_workspace_paths() -> tuple[Path, Path, Path | None]:
-    """Resolve writable workspace, read-only skills, and artifacts mount from the agent layout."""
+def _resolved_workspace_paths(
+    cfg: RuntimeConfig | None = None,
+) -> tuple[Path, Path, Path | None]:
+    """Resolve writable workspace, read-only skills, and artifacts mount.
+
+    ``SKILLS_PATH`` is HOT: prefer the turn-pinned snapshot (or the process
+    snapshot when called outside a turn) over process env so YAML path changes
+    apply on the next turn without overwriting spawn pins.
+    """
     layout = AgentLayout.from_environment()
-    return layout.workspace_root, layout.skills_path, layout.artifacts_path
+    skills = layout.skills_path
+    snap = cfg if cfg is not None else get_config_store().current_or_none()
+    raw = env_value(snap, "SKILLS_PATH", "").strip()
+    if raw:
+        skills = resolve_agent_path(raw, layout.agent_root)
+    return layout.workspace_root, skills, layout.artifacts_path
 
 
 def _memory_storage_uri() -> str:
@@ -240,7 +589,7 @@ def _content_blocks_to_text(blocks: list[ContentBlock]) -> str:
 def _default_agent_path(bus: SessionBus) -> Path:
     if bus.agent_md:
         return Path(bus.agent_md)
-    env = os.environ.get("AGENT_MD")
+    env = current_env_or_none("AGENT_MD")
     if not env:
         raise RuntimeError("AGENT_MD must be set when session has no agent_md path")
     return Path(env)
@@ -248,7 +597,7 @@ def _default_agent_path(bus: SessionBus) -> Path:
 
 def _scripted_fake_provider() -> Provider:
     """Deterministic provider for ``MODEL_PROVIDER=fake`` (tests and local dev)."""
-    raw = os.environ.get("MONKEYBOT_FAKE_PROVIDER_EVENTS", "")
+    raw = current_env("MONKEYBOT_FAKE_PROVIDER_EVENTS", "")
     if not raw:
         return ScriptedFakeProvider(
             [
@@ -296,11 +645,14 @@ def _scripted_fake_provider() -> Provider:
     return ScriptedFakeProvider(flat)
 
 
-def _resolve_provider() -> Provider:
-    mode = normalize_model_provider(os.environ.get("MODEL_PROVIDER", "google_vertexai"))
+def _resolve_provider(cfg: RuntimeConfig | None = None) -> Provider:
+    snap = cfg if cfg is not None else get_config_store().current_or_none()
+    mode = normalize_model_provider(
+        env_value(snap, "MODEL_PROVIDER", "google_vertexai") or "google_vertexai"
+    )
     if mode == "fake":
         return _scripted_fake_provider()
-    return get_provider_config(provider=mode).provider
+    return get_provider_config(provider=mode, config=snap).provider
 
 
 class GatewayLoopPort:
@@ -328,20 +680,6 @@ class GatewayLoopPort:
         if bus is None:
             return
 
-        mcp = _deps.mcp
-        inspectors = _deps.inspectors
-        provider = bus.provider or _deps.provider
-
-        if mcp is None or provider is None:
-            logger.error("gateway deps not initialized")
-            await bus.publish_data(
-                event_to_json(AgentError(request_id=request_id, error="gateway_not_ready"))
-            )
-            await bus.publish_data(
-                event_to_json(TurnComplete(request_id=request_id, usage=UsageTotals()))
-            )
-            return
-
         serving = self._serving_app()
         backend: StorageBackend = serving.state.storage
         history = backend.history()
@@ -360,14 +698,45 @@ class GatewayLoopPort:
         watcher = asyncio.create_task(_watch_cancel())
 
         executor: CoreToolExecutor | None = None
+        in_flight = False
         try:
-            model_name = bus.model_name or os.environ.get("MODEL_NAME", "gemini-2.5-flash")
+            async with get_reload_lock():
+                mcp = gateway_runtime.mcp
+                inspectors = list(gateway_runtime.inspectors)
+                provider = bus.provider or gateway_runtime.provider
+                cfg = get_config_store().current_or_none()
+                model_name = bus.model_name or (
+                    env_value(cfg, "MODEL_NAME", "gemini-2.5-flash") or "gemini-2.5-flash"
+                )
+                begin_in_flight_turn()
+                in_flight = True
+                web_search_tool = gateway_runtime.web_search_tool
+                computer_tools = list(gateway_runtime.computer_tools)
+                subagent_registry = dict(gateway_runtime.subagent_registry)
+                hook_manager = gateway_runtime.hook_manager
+                loops_registry = gateway_runtime.loops_registry
+                run_command_allowed_commands = gateway_runtime.run_command_allowed_commands
+                run_command_allowed_path_prefixes = (
+                    gateway_runtime.run_command_allowed_path_prefixes
+                )
+                approvals_persist = gateway_runtime.computer_approvals_persist
+
+            if mcp is None or provider is None:
+                logger.error("gateway deps not initialized")
+                await bus.publish_data(
+                    event_to_json(AgentError(request_id=request_id, error="gateway_not_ready"))
+                )
+                await bus.publish_data(
+                    event_to_json(TurnComplete(request_id=request_id, usage=UsageTotals()))
+                )
+                return
+
             agent_path = _default_agent_path(bus)
 
-            workspace_root, skills_resolved, artifacts_resolved = _resolved_workspace_paths()
+            workspace_root, skills_resolved, artifacts_resolved = _resolved_workspace_paths(cfg)
 
             transcript_writer: TranscriptWriter | None = None
-            if transcript_enabled_from_env():
+            if env_flag(cfg, "MONKEYBOT_TRANSCRIPT_ENABLED", default=False):
                 if bus.transcript_writer is None:
                     bus.transcript_writer = TranscriptWriter(
                         session_id, workspace_root=workspace_root
@@ -387,12 +756,10 @@ class GatewayLoopPort:
                 rows = await history.load(session_id)
                 bus.attachment_catalog.rebuild_from_history(rows)
 
-            extra_tools: list[Any] = (
-                [_deps.web_search_tool] if _deps.web_search_tool is not None else []
-            )
-            extra_tools.extend(_deps.computer_tools)
+            extra_tools: list[Any] = [web_search_tool] if web_search_tool is not None else []
+            extra_tools.extend(computer_tools)
             todo_store = None
-            if todo_list_enabled_from_env():
+            if env_flag(cfg, "MONKEYBOT_TODO_LIST_ENABLED", default=True):
                 if bus.todo_store is None:
                     bus.todo_store = TodoListStore(session_id, workspace_root=workspace_root)
                     await bus.todo_store.hydrate_from_disk()
@@ -401,7 +768,8 @@ class GatewayLoopPort:
 
             storage_backend = getattr(serving.state, "storage", None)
             loops_available = storage_backend is not None
-            loops_advertised = loops_available and _deps.loops_registry.advertised
+            loops_advertised = loops_available and loops_registry.advertised
+            summarization_model = env_value(cfg, "CONTEXT_SUMMARIZATION_MODEL", "").strip() or None
 
             try:
                 ctx = await build_context(
@@ -412,17 +780,20 @@ class GatewayLoopPort:
                     skills_path=skills_resolved,
                     mcp_client=mcp,
                     model=model_name,
+                    summarization_model=summarization_model,
                     cancelled=cancel_event,
-                    context_window_tokens=_env_context_window_tokens(),
+                    context_window_tokens=context_window_tokens(cfg),
                     workspace_root=workspace_root,
                     sse_bus=bus,
                     event_publisher=_SessionBusEventPublisher(bus),
                     extra_tools=extra_tools,
-                    subagent_registry=_deps.subagent_registry,
+                    subagent_registry=subagent_registry,
                     scheduled_loops_available=loops_available,
                     loops_advertised=loops_advertised,
                     todo_store=todo_store,
-                    approvals_persist=_deps.computer_approvals_persist,
+                    approvals_persist=approvals_persist,
+                    config=cfg,
+                    enable_context_curation=env_flag(cfg, "CONTEXT_CURATION_ENABLED", default=True),
                 )
             except Exception as exc:
                 logger.exception("build_context failed")
@@ -442,15 +813,16 @@ class GatewayLoopPort:
                 artifacts_path=artifacts_resolved,
                 mcp=mcp,
                 extra_tools=extra_tools,
-                run_command_allowed_commands=_deps.run_command_allowed_commands,
-                run_command_allowed_path_prefixes=_deps.run_command_allowed_path_prefixes,
+                run_command_allowed_commands=run_command_allowed_commands,
+                run_command_allowed_path_prefixes=run_command_allowed_path_prefixes,
                 attachment_store=attachment_store,
                 run_store=storage_backend.runs() if storage_backend is not None else None,
                 scheduled_loop_store=(
                     storage_backend.scheduled_loops() if storage_backend is not None else None
                 ),
-                subagent_registry=_deps.subagent_registry,
-                loops_registry=_deps.loops_registry,
+                subagent_registry=subagent_registry,
+                loops_registry=loops_registry,
+                config=cfg,
             )
             if transcript_writer is not None:
                 await transcript_writer.write_user_message(
@@ -465,7 +837,7 @@ class GatewayLoopPort:
                 inspectors=inspectors,
                 tool_executor=executor,
                 cancelled=cancel_event,
-                hook_manager=_deps.hook_manager,
+                hook_manager=hook_manager,
                 attachment_store=attachment_store,
                 attachment_catalog=bus.attachment_catalog,
                 transcript_writer=transcript_writer,
@@ -493,6 +865,8 @@ class GatewayLoopPort:
                     await transcript_writer.write_event(evt)
                 await bus.publish_data(event_to_json(evt))
         finally:
+            if in_flight:
+                end_in_flight_turn()
             if executor is not None:
                 await executor.aclose()
             watcher.cancel()
@@ -511,7 +885,7 @@ def _cors_allow_origins() -> list[str]:
 
     Set to ``*`` to allow any origin (credentials disabled by Starlette rules for ``*``).
     """
-    raw = os.environ.get("MONKEYBOT_CORS_ALLOW_ORIGINS", "").strip()
+    raw = current_env("MONKEYBOT_CORS_ALLOW_ORIGINS", "").strip()
     if not raw:
         return ["http://localhost:5173"]
     if raw == "*":
@@ -520,9 +894,13 @@ def _cors_allow_origins() -> list[str]:
     return parts if parts else ["http://localhost:5173"]
 
 
-def _tool_denied_patterns() -> list[str]:
+def _tool_denied_patterns(cfg: RuntimeConfig | None = None) -> list[str]:
     """Substring deny list for :class:`RulesInspector`. Empty ``MONKEYBOT_TOOL_DENIED_PATTERNS`` disables."""
-    raw = os.environ.get("MONKEYBOT_TOOL_DENIED_PATTERNS")
+    raw: str | None
+    if cfg is not None:
+        raw = cfg.env_values.get("MONKEYBOT_TOOL_DENIED_PATTERNS")
+    else:
+        raw = current_env_or_none("MONKEYBOT_TOOL_DENIED_PATTERNS")
     if raw is None:
         return ["rm -rf", "/etc/passwd", "DROP TABLE"]
     return [p.strip() for p in raw.split(",") if p.strip()]
@@ -553,69 +931,32 @@ async def _startup(fastapi_app: FastAPI) -> None:
     fastapi_app.state.usage = _UsageStoreAdapter(backend.usage())
 
     mcp = MCPClient()
-    _deps.mcp = mcp
+    gateway_runtime.mcp = mcp
     mcp_config = layout.mcp_config_path
+    cfg = get_config_store().current_or_none()
+    if cfg is not None:
+        mcp.set_env_overlay(cfg.env_values)
     strict = os.environ.get("MCP_STRICT_LOAD", "").strip().lower() in ("1", "true", "yes")
     try:
         await mcp.load_from_config(mcp_config, raise_on_error=strict)
     except OSError as exc:
         logger.info("MCP config skipped (%s): %s", mcp_config, exc)
 
-    tiers_path = layout.command_allowlist_path
-    _deps.run_command_allowed_commands = None
-    _deps.run_command_allowed_path_prefixes = None
-    inspectors: list[ToolInspector] = []
-    try:
-        tier_insp = CommandTierInspector(tiers_path)
-        inspectors.append(tier_insp)
-        _deps.run_command_allowed_commands = list(tier_insp.allowed_commands)
-        _deps.run_command_allowed_path_prefixes = list(tier_insp.allowed_path_prefixes)
-    except FileNotFoundError:
-        logger.info("command tiers missing (%s); allowing all tool calls", tiers_path)
-    except Exception as exc:
-        logger.exception("command tier load failed: %s", exc)
-
-    denied = _tool_denied_patterns()
-    if denied:
-        inspectors.append(RulesInspector(denied))
-
-    perm_path = layout.permission_config_path
-    if should_enable_computer_tools():
-        _deps.computer_tools = build_computer_tools()
-        _deps.computer_approvals_persist = build_persist_hook(layout.approvals_path)
-        inspectors.append(build_computer_permission_inspector(perm_path, layout.approvals_path))
-    else:
-        perm_insp = try_load_permission_inspector(perm_path)
-        if perm_insp is not None:
-            inspectors.append(perm_insp)
-
-    inspectors.append(LoopStartInspector())
-    _deps.inspectors = inspectors
-
-    _deps.provider = _resolve_provider()
+    gateway_runtime.build_inspectors(layout, cfg)
+    gateway_runtime.build_provider(cfg)
+    gateway_runtime.build_web_search(cfg)
 
     vertex_gs = vertex_google_search_enabled_from_config()
-    try:
-        backend_ws = _build_web_search_backend()
-        if backend_ws is not None:
-            _deps.web_search_tool = WebSearchTool(backend_ws)
-            logger.info("web search enabled: backend=%s", backend_ws.name)
-        else:
-            _deps.web_search_tool = None
-    except Exception as exc:
-        logger.warning("web search backend init failed — disabling: %s", exc)
-        _deps.web_search_tool = None
-
     if vertex_gs:
         logger.info("vertex google_search grounding enabled")
-    if _deps.web_search_tool is None and not vertex_gs:
+    if gateway_runtime.web_search_tool is None and not vertex_gs:
         logger.info("web search disabled (WEB_SEARCH_BACKEND=none)")
 
     try:
         if not memory_enabled_from_config():
             logger.info("memory disabled (memory.enabled=false)")
-            _deps.hook_manager = None
-            _deps.memory = None
+            gateway_runtime.hook_manager = None
+            gateway_runtime.memory = None
             fastapi_app.state.memory = None
             fastapi_app.state.memory_status = "disabled"
             fastapi_app.state.memory_detail = "memory.enabled=false"
@@ -632,8 +973,8 @@ async def _startup(fastapi_app: FastAPI) -> None:
             )
             await memory.ensure_ready()
             memory.register_hooks(mgr)
-            _deps.hook_manager = mgr
-            _deps.memory = memory
+            gateway_runtime.hook_manager = mgr
+            gateway_runtime.memory = memory
             fastapi_app.state.memory = memory
             fastapi_app.state.memory_status = "enabled"
             fastapi_app.state.memory_detail = None
@@ -642,8 +983,8 @@ async def _startup(fastapi_app: FastAPI) -> None:
         raise
     except Exception as exc:
         logger.warning("memory setup failed; continuing without: %r", exc)
-        _deps.hook_manager = None
-        _deps.memory = None
+        gateway_runtime.hook_manager = None
+        gateway_runtime.memory = None
         fastapi_app.state.memory = None
         fastapi_app.state.memory_status = "unavailable"
         fastapi_app.state.memory_detail = str(exc)
@@ -667,12 +1008,12 @@ async def _startup(fastapi_app: FastAPI) -> None:
                 index_path=Path(settings.index_path),
                 read_only=False,
             )
-            hook_mgr = _deps.hook_manager
+            hook_mgr = gateway_runtime.hook_manager
             if hook_mgr is None:
                 hook_mgr = HookManager()
-                _deps.hook_manager = hook_mgr
+                gateway_runtime.hook_manager = hook_mgr
             knowledge.register_hooks(hook_mgr)
-            _deps.knowledge = knowledge
+            gateway_runtime.knowledge = knowledge
             fastapi_app.state.knowledge = knowledge
 
             async def _knowledge_startup_scan() -> None:
@@ -686,7 +1027,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
             logger.info("knowledge layer enabled (index=%s)", settings.index_path)
         except Exception as exc:
             logger.warning("knowledge layer setup failed; continuing without: %r", exc)
-            _deps.knowledge = None
+            gateway_runtime.knowledge = None
             fastapi_app.state.knowledge = None
     else:
         logger.info("knowledge layer disabled via knowledge.enabled")
@@ -706,15 +1047,12 @@ async def _startup(fastapi_app: FastAPI) -> None:
         logger.info("attachments disabled via ATTACHMENTS_ENABLED")
 
     try:
-        _deps.subagent_registry = get_subagent_registry()
-        if _deps.subagent_registry:
-            logger.info(
-                "subagent personas loaded: %s",
-                ", ".join(sorted(_deps.subagent_registry)),
-            )
+        gateway_runtime.build_subagents(cfg)
     except ConfigError as exc:
         logger.error("invalid subagents config: %s", exc)
         raise
+
+    fastapi_app.state.gateway_runtime = gateway_runtime
 
     if otel_enabled:
         from monkeybot.observability.instrumentation import instrument_fastapi_app
@@ -758,6 +1096,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
 
 async def _shutdown(fastapi_app: FastAPI) -> None:
     """Tear down MCP sessions and storage backend."""
+    fastapi_app.state.gateway_runtime = None
     from monkeybot.observability import shutdown_observability
 
     try:
@@ -771,30 +1110,30 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
     except Exception:
         logger.warning("transcript analysis on shutdown failed", exc_info=True)
 
-    mcp = _deps.mcp
+    mcp = gateway_runtime.mcp
     if mcp is not None:
         for name in list(getattr(mcp, "_servers", {}).keys()):
             await mcp.disconnect(name)
 
-    knowledge = _deps.knowledge or getattr(fastapi_app.state, "knowledge", None)
+    knowledge = gateway_runtime.knowledge or getattr(fastapi_app.state, "knowledge", None)
     if knowledge is not None:
         try:
             await knowledge.close()
         except Exception as exc:
             logger.warning("knowledge close failed: %s", exc)
-        _deps.knowledge = None
+        gateway_runtime.knowledge = None
         try:
             fastapi_app.state.knowledge = None
         except Exception as exc:
             logger.warning("knowledge state clear failed: %s", exc)
 
-    memory = _deps.memory or getattr(fastapi_app.state, "memory", None)
+    memory = gateway_runtime.memory or getattr(fastapi_app.state, "memory", None)
     if memory is not None:
         try:
             await memory.close()
         except Exception as exc:
             logger.warning("memory close failed: %s", exc)
-        _deps.memory = None
+        gateway_runtime.memory = None
         try:
             fastapi_app.state.memory = None
         except Exception as exc:

@@ -11,6 +11,28 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - Subagent timeout/cancel now walks and kills the full process tree (including nested `run_command` sessions that use their own `start_new_session` process groups), not only the subagent leader's session. `process_group_id` returns `None` when the PID is gone instead of treating a recycled PID as a process group. The tree walk's non-`/proc` fallback (macOS) now uses `pgrep -P` instead of an invalid BSD `ps -P` invocation that silently returned no children. `stop_subagent_process` also `killpg`s the spawn-time `pgid` directly (in addition to the tree walk) so a leader that has already been reaped no longer leaves descendants orphaned.
 - Firestore scheduled loops: `list_all`/`list_due` skip (and log) a single malformed document — e.g. `interval_ms <= 0` from legacy/hand-edited data — instead of raising out of the mapper and stalling the scheduler poll loop for every other loop.
 
+## [browser v0.4.0] - 2026-08-29
+
+### Added
+
+- `browser_login`: sign in with a Spaces-saved password without exposing the credential. Returns the `origin` it acted on and accepts `expected_origin`, so a login cannot silently land on a tab other than the one the agent is driving. In-app CDP uses a tokenized WebSocket URL so a 403 is not misreported as Chrome's Allow-remote-debugging popup.
+
+### Fixed
+
+- Scrubs `?token=` values from every browser tool error rather than only daemon startup, so the in-app CDP token cannot reach the agent transcript through a mid-session harness failure.
+
+## [cli v0.5.1] - 2026-08-28
+
+### Changed
+
+- CLI extras catalog / `monkeybot new` provider menu lists `ollama-cloud` and `ollama-local` instead of a single `ollama` row. `--with ollama` and `--provider ollama` still work.
+
+## [core v3.0.4] - 2026-08-28
+
+### Added
+
+- Explicit `ollama-cloud` and `ollama-local` provider ids so Cloud always hits `https://ollama.com` even when a leftover local `OLLAMA_BASE_URL` is set. Legacy `ollama` still auto-routes from env.
+
 ## [core v3.0.3] - 2026-08-23
 
 ### Added

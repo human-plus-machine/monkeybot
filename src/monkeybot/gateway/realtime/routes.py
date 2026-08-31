@@ -16,6 +16,15 @@ from fastapi.responses import JSONResponse
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.config.realtime_config import RealtimeConfig
+from monkeybot.core.config.snapshot import (
+    RuntimeConfig,
+    context_window_tokens,
+    current_env,
+    env_flag,
+    env_value,
+    env_value_or_current,
+    get_config_store,
+)
 from monkeybot.core.context import TurnContext, build_context
 from monkeybot.core.layout import AgentLayout
 from monkeybot.core.llm.realtime_provider import (
@@ -44,9 +53,9 @@ from monkeybot.core.runtime.realtime_loop import run_realtime_turn
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.types.content_blocks import Text
-from monkeybot.todo_list import TodoListStore, TodoListTool, todo_list_enabled_from_env
+from monkeybot.todo_list import TodoListStore, TodoListTool
 
-from .deps import RealtimeDependencies
+from .deps import LivePolicySlices, RealtimeDependencies
 from .errors import (
     AudioFormatError,
     ClientProtocolError,
@@ -92,17 +101,12 @@ from .wire import (
 logger = logging.getLogger("monkeybot.gateway.realtime.routes")
 
 
-def _env_context_window_tokens() -> int:
-    cap_raw = os.environ.get("MODEL_CONTEXT_WINDOW", "200000").strip()
+def _pending_response_timeout_sec(cfg: RuntimeConfig | None = None) -> float:
     try:
-        return max(1, int(cap_raw))
-    except ValueError:
-        return 200_000
-
-
-def _pending_response_timeout_sec() -> float:
-    try:
-        return max(1.0, float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300")))
+        return max(
+            1.0,
+            float(env_value_or_current(cfg, "PENDING_RESPONSE_TIMEOUT_SEC", "300")),
+        )
     except ValueError:
         return 300.0
 
@@ -112,13 +116,30 @@ def _resolved_workspace_paths() -> tuple[Path, Path]:
     return layout.workspace_root, layout.skills_path
 
 
+def _live_slices(deps: RealtimeDependencies) -> LivePolicySlices:
+    """Read live policy from ``gateway_runtime`` when this process shares it.
+
+    ``RealtimeDependencies`` is frozen at startup with copies of inspectors,
+    allowlists, and tools. ``GatewayRuntime.apply`` installs new slices on the
+    SSE singleton only, so a reload that tightens the allowlist would otherwise
+    never reach an already-open realtime session. Isolated tests that construct
+    ``deps`` without the SSE runtime keep using ``deps``.
+    """
+    from monkeybot.gateway.sse.app import gateway_runtime
+
+    if deps.mcp is not None and deps.mcp is gateway_runtime.mcp:
+        return gateway_runtime
+    return deps
+
+
 def _parent_extra_tools(
     deps: RealtimeDependencies,
     todo_store: TodoListStore | None,
 ) -> list[Any]:
     """Web search + computer_* + optional session todo tool for the parent realtime agent."""
-    tools: list[Any] = [deps.web_search_tool] if deps.web_search_tool is not None else []
-    tools.extend(deps.computer_tools)
+    live = _live_slices(deps)
+    tools: list[Any] = [live.web_search_tool] if live.web_search_tool is not None else []
+    tools.extend(live.computer_tools)
     if todo_store is not None:
         tools.append(TodoListTool(todo_store))
     return tools
@@ -128,7 +149,9 @@ async def _maybe_todo_store(
     manager: RealtimeSessionManager, session_id: str, workspace_root: Path
 ) -> TodoListStore | None:
     """Reuse the manager-cached store while the session is live; reconnect rehydrates from disk."""
-    if not todo_list_enabled_from_env():
+    if not env_flag(
+        get_config_store().current_or_none(), "MONKEYBOT_TODO_LIST_ENABLED", default=True
+    ):
         return None
     return await manager.get_or_create_todo_store(session_id, workspace_root=workspace_root)
 
@@ -143,30 +166,44 @@ async def _build_realtime_context(
 ) -> TurnContext:
     if deps.mcp is None:
         raise RuntimeError("MCP client is not initialized")
+    from monkeybot.gateway.sse.reload import (
+        begin_in_flight_turn,
+        end_in_flight_turn,
+        get_reload_lock,
+    )
+
     workspace_root, skills_path = _resolved_workspace_paths()
     agent_path = AgentLayout.from_environment().agent_md_path
-    model = os.environ.get("MODEL_NAME", "gemini-2.5-flash")
     loops_available = deps.storage is not None
     loops_advertised = loops_available and deps.loops_registry.advertised
-    return await build_context(
-        thread_id=session_id,
-        request_id=request_id,
-        agent_md_path=agent_path,
-        memory=deps.memory,
-        skills_path=skills_path,
-        mcp_client=deps.mcp,
-        model=model,
-        context_window_tokens=_env_context_window_tokens(),
-        workspace_root=workspace_root,
-        enable_context_curation=True,
-        extra_tools=_parent_extra_tools(deps, todo_store),
-        subagent_registry=deps.subagent_registry,
-        scheduled_loops_available=loops_available,
-        loops_advertised=loops_advertised,
-        todo_store=todo_store,
-        approvals_persist=deps.computer_approvals_persist,
-        cancelled=cancelled,
-    )
+    async with get_reload_lock():
+        cfg = get_config_store().current_or_none()
+        live = _live_slices(deps)
+        begin_in_flight_turn()
+    try:
+        model = env_value(cfg, "MODEL_NAME", "gemini-2.5-flash") or "gemini-2.5-flash"
+        return await build_context(
+            thread_id=session_id,
+            request_id=request_id,
+            agent_md_path=agent_path,
+            memory=deps.memory,
+            skills_path=skills_path,
+            mcp_client=deps.mcp,
+            model=model,
+            context_window_tokens=context_window_tokens(cfg),
+            workspace_root=workspace_root,
+            enable_context_curation=True,
+            extra_tools=_parent_extra_tools(deps, todo_store),
+            subagent_registry=live.subagent_registry,
+            scheduled_loops_available=loops_available,
+            loops_advertised=loops_advertised,
+            todo_store=todo_store,
+            approvals_persist=live.computer_approvals_persist,
+            cancelled=cancelled,
+            config=cfg,
+        )
+    finally:
+        end_in_flight_turn()
 
 
 def _create_tool_executor(
@@ -174,9 +211,18 @@ def _create_tool_executor(
     attachment_store: Any | None = None,
     *,
     todo_store: TodoListStore | None = None,
+    config: Any | None = None,
 ) -> CoreToolExecutor:
+    """Build the tool executor for one assistant boundary.
+
+    ``config`` should be the connection-pinned ``ctx.config`` snapshot, not a
+    fresh ``get_config_store().current_or_none()`` read — a reload mid-connection
+    would otherwise let later boundaries use new sandbox/tool settings while the
+    connection context and provider session stay on the revision they opened with.
+    """
     if deps.mcp is None:
         raise RuntimeError("MCP client is not initialized")
+    live = _live_slices(deps)
     workspace_root, skills_path = _resolved_workspace_paths()
     storage = deps.storage
     return CoreToolExecutor(
@@ -186,13 +232,14 @@ def _create_tool_executor(
         artifacts_path=AgentLayout.from_environment().artifacts_path,
         mcp=deps.mcp,
         extra_tools=_parent_extra_tools(deps, todo_store),
-        run_command_allowed_commands=deps.run_command_allowed_commands,
-        run_command_allowed_path_prefixes=deps.run_command_allowed_path_prefixes,
+        run_command_allowed_commands=live.run_command_allowed_commands,
+        run_command_allowed_path_prefixes=live.run_command_allowed_path_prefixes,
         attachment_store=attachment_store,
         run_store=storage.runs() if storage is not None else None,
         scheduled_loop_store=storage.scheduled_loops() if storage is not None else None,
-        subagent_registry=deps.subagent_registry,
+        subagent_registry=live.subagent_registry,
         loops_registry=deps.loops_registry,
+        config=config if config is not None else get_config_store().current_or_none(),
     )
 
 
@@ -200,10 +247,8 @@ def _make_realtime_session_config(
     ctx: TurnContext,
     realtime_config: RealtimeConfig,
 ) -> RealtimeSessionConfig:
-    input_fmt_str = os.environ.get("MONKEYBOT_REALTIME_AUDIO_INPUT_FORMAT", "pcm_s16le_24khz_mono")
-    output_fmt_str = os.environ.get(
-        "MONKEYBOT_REALTIME_AUDIO_OUTPUT_FORMAT", "pcm_s16le_24khz_mono"
-    )
+    input_fmt_str = current_env("MONKEYBOT_REALTIME_AUDIO_INPUT_FORMAT", "pcm_s16le_24khz_mono")
+    output_fmt_str = current_env("MONKEYBOT_REALTIME_AUDIO_OUTPUT_FORMAT", "pcm_s16le_24khz_mono")
 
     def _parse(fmt: str) -> AudioFormat:
         parts = fmt.lower().split("_")
@@ -316,110 +361,124 @@ async def _handle_assistant_boundary(
     if turn.is_empty:
         return
 
-    tool_executor = _create_tool_executor(deps, attachment_store, todo_store=state.todo_store)
-    tool_results: list[Any] = []
-    inject_texts: list[str] = []
+    from monkeybot.gateway.sse.reload import (
+        begin_in_flight_turn,
+        end_in_flight_turn,
+        get_reload_lock,
+    )
+
     # Consume once per utterance so tool-call then prose boundaries do not
     # duplicate the same user row in HistoryStore.
     user_text = state.buffer.consume_user_text_for_commit().strip()
     turn_error: str | None = None
-    try:
-        async for event in run_realtime_turn(
-            user_content=[Text(text=user_text)] if user_text else "",
-            assistant_text=turn.text,
-            assistant_tool_calls=turn.tool_calls,
-            ctx=ctx,
-            history=history,
-            tool_executor=tool_executor,
-            inspectors=deps.inspectors,
-            hook_manager=deps.hook_manager,
-            attachment_store=attachment_store,
-            attachment_catalog=attachment_catalog,
-            tool_results_out=tool_results,
-            inject_texts_out=inject_texts,
-            pending_bus=state,
-            transcript_writer=state.transcript_writer,
-        ):
-            if state.transcript_writer is not None:
-                await state.transcript_writer.write_event(event)
-            if isinstance(event, AgentError):
-                turn_error = event.error
-            elif isinstance(event, ToolCallResult):
-                await _send_frame(
-                    ws,
-                    ServerToolResultFrame(
-                        call_id=event.call_id,
-                        name=event.tool,
-                        result=event.result or "",
-                        error=event.error,
-                    ),
-                )
-            elif isinstance(event, ToolConfirmationRequestEvent):
-                await _send_frame(
-                    ws,
-                    ServerToolConfirmationFrame(
-                        tool_call_id=event.tool_call_id,
-                        tool_name=event.tool_name,
-                        prompt=event.prompt or f"Allow tool `{event.tool_name}`?",
-                        arguments=dict(event.arguments or {}),
-                        timeout_sec=_pending_response_timeout_sec(),
-                    ),
-                )
-            elif isinstance(event, ActionRequiredEvent) and event.action_type == "elicitation":
-                payload = dict(event.payload or {})
-                prompt_raw = payload.get("message") or payload.get("prompt")
-                prompt = (
-                    prompt_raw.strip()
-                    if isinstance(prompt_raw, str) and prompt_raw.strip()
-                    else "Agent requests input"
-                )
-                schema_raw = (
-                    payload.get("requestedSchema")
-                    or payload.get("requested_schema")
-                    or payload.get("schema")
-                )
-                schema = dict(schema_raw) if isinstance(schema_raw, dict) else None
-                await _send_frame(
-                    ws,
-                    ServerElicitationFrame(
-                        elicitation_id=event.id,
-                        prompt=prompt,
-                        schema=schema,
-                        timeout_sec=_pending_response_timeout_sec(),
-                    ),
-                )
-    except Exception:
-        logger.exception(
-            "run_realtime_turn failed %s",
-            kv(request_id=state.request_id, session_id=state.session_id),
+    tool_results: list[Any] = []
+    inject_texts: list[str] = []
+    async with get_reload_lock():
+        live = _live_slices(deps)
+        tool_executor = _create_tool_executor(
+            deps, attachment_store, todo_store=state.todo_store, config=ctx.config
         )
-        await _send_frame(
-            ws,
-            ServerErrorFrame(error="Failed to process realtime turn"),
-        )
-        if state.state == "tool_running":
-            state.transition("listening")
-        return
-
-    if turn_error:
-        await _send_frame(ws, ServerErrorFrame(error=turn_error))
-
+        begin_in_flight_turn()
     try:
-        if tool_results:
-            # Outstanding tool calls must be answered immediately or Gemini Live hangs.
-            # Also enqueue for idle flush so any follow-up context is ordered correctly.
-            await _inject_tool_results(state, tool_results)
+        try:
+            async for event in run_realtime_turn(
+                user_content=[Text(text=user_text)] if user_text else "",
+                assistant_text=turn.text,
+                assistant_tool_calls=turn.tool_calls,
+                ctx=ctx,
+                history=history,
+                tool_executor=tool_executor,
+                inspectors=live.inspectors,
+                hook_manager=live.hook_manager,
+                attachment_store=attachment_store,
+                attachment_catalog=attachment_catalog,
+                tool_results_out=tool_results,
+                inject_texts_out=inject_texts,
+                pending_bus=state,
+                transcript_writer=state.transcript_writer,
+            ):
+                if state.transcript_writer is not None:
+                    await state.transcript_writer.write_event(event)
+                if isinstance(event, AgentError):
+                    turn_error = event.error
+                elif isinstance(event, ToolCallResult):
+                    await _send_frame(
+                        ws,
+                        ServerToolResultFrame(
+                            call_id=event.call_id,
+                            name=event.tool,
+                            result=event.result or "",
+                            error=event.error,
+                        ),
+                    )
+                elif isinstance(event, ToolConfirmationRequestEvent):
+                    await _send_frame(
+                        ws,
+                        ServerToolConfirmationFrame(
+                            tool_call_id=event.tool_call_id,
+                            tool_name=event.tool_name,
+                            prompt=event.prompt or f"Allow tool `{event.tool_name}`?",
+                            arguments=dict(event.arguments or {}),
+                            timeout_sec=_pending_response_timeout_sec(ctx.config),
+                        ),
+                    )
+                elif isinstance(event, ActionRequiredEvent) and event.action_type == "elicitation":
+                    payload = dict(event.payload or {})
+                    prompt_raw = payload.get("message") or payload.get("prompt")
+                    prompt = (
+                        prompt_raw.strip()
+                        if isinstance(prompt_raw, str) and prompt_raw.strip()
+                        else "Agent requests input"
+                    )
+                    schema_raw = (
+                        payload.get("requestedSchema")
+                        or payload.get("requested_schema")
+                        or payload.get("schema")
+                    )
+                    schema = dict(schema_raw) if isinstance(schema_raw, dict) else None
+                    await _send_frame(
+                        ws,
+                        ServerElicitationFrame(
+                            elicitation_id=event.id,
+                            prompt=prompt,
+                            schema=schema,
+                            timeout_sec=_pending_response_timeout_sec(ctx.config),
+                        ),
+                    )
+        except Exception:
+            logger.exception(
+                "run_realtime_turn failed %s",
+                kv(request_id=state.request_id, session_id=state.session_id),
+            )
+            await _send_frame(
+                ws,
+                ServerErrorFrame(error="Failed to process realtime turn"),
+            )
+            if state.state == "tool_running":
+                state.transition("listening")
+            return
 
-        for text in inject_texts:
-            if state.is_idle():
-                await state.realtime_session.send_context(text)
-            else:
-                state.enqueue_idle_delivery(text)
+        if turn_error:
+            await _send_frame(ws, ServerErrorFrame(error=turn_error))
 
-        await _flush_idle_deliveries(state)
+        try:
+            if tool_results:
+                # Outstanding tool calls must be answered immediately or Gemini Live hangs.
+                # Also enqueue for idle flush so any follow-up context is ordered correctly.
+                await _inject_tool_results(state, tool_results)
+
+            for text in inject_texts:
+                if state.is_idle():
+                    await state.realtime_session.send_context(text)
+                else:
+                    state.enqueue_idle_delivery(text)
+
+            await _flush_idle_deliveries(state)
+        finally:
+            if state.state == "tool_running":
+                state.transition("listening")
     finally:
-        if state.state == "tool_running":
-            state.transition("listening")
+        end_in_flight_turn()
 
 
 async def _process_provider_events(
@@ -505,7 +564,7 @@ async def _handle_provider_event(
                 ws,
                 ServerUsageFrame(
                     usage=state.metrics.to_usage_payload(
-                        context_window_tokens=_env_context_window_tokens()
+                        context_window_tokens=context_window_tokens(ctx.config)
                     )
                 ),
             )
@@ -519,7 +578,7 @@ async def _handle_provider_event(
             ws,
             ServerUsageFrame(
                 usage=state.metrics.to_usage_payload(
-                    context_window_tokens=_env_context_window_tokens()
+                    context_window_tokens=context_window_tokens(ctx.config)
                 )
             ),
         )
