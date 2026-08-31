@@ -252,3 +252,19 @@ async def test_second_writer_continues_seq_from_existing_file(tmp_path: Path) ->
     assert seqs == [1, 2, 3]
     assert lines[-1]["type"] == "UserMessage"
     assert lines[-1]["request_id"] == "r2"
+
+
+@pytest.mark.asyncio
+async def test_include_live_rereads_env_after_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE", "false")
+    writer = TranscriptWriter("sess-hot-live", workspace_root=tmp_path)
+    await writer.write_event(AssistantDelta(request_id="r1", delta="skip-me"))
+    assert not writer.path.is_file()
+
+    monkeypatch.setenv("MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE", "true")
+    await writer.write_event(AssistantDelta(request_id="r1", delta="keep-me"))
+    lines = _read_lines(writer.path)
+    assert lines[-1]["type"] == "AssistantDelta"
+    assert lines[-1]["delta"] == "keep-me"

@@ -1,6 +1,7 @@
 """Tests for TurnContext assembly and MCP tool merging."""
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from monkeybot.core.context import (
     refresh_tools_after_loops_change,
     refresh_tools_after_mcp_change,
 )
+from monkeybot.core.mcp.ports_mcp import MCPCatalogApplyResult
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.types.types_tools import ToolDef
 from tests.core.memory.helpers import make_memory_subsystem
@@ -112,6 +114,19 @@ class FakeMCPClient:
 
     async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         del path, raise_on_error
+
+    def set_env_overlay(self, env: Mapping[str, str] | None) -> dict[str, str] | None:
+        del env
+        return None
+
+    async def apply_catalog_diff(
+        self,
+        mcp_json_path: Path,
+        *,
+        raise_on_error: bool = False,
+    ) -> MCPCatalogApplyResult:
+        del mcp_json_path, raise_on_error
+        return MCPCatalogApplyResult()
 
 
 # Standard trusted skills fixture (e.g. evals/smoke_agent) — regression for list_skills descriptions.

@@ -19,11 +19,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any
 
+from monkeybot.core.config.snapshot import current_env_flag
 from monkeybot.core.path_safety import (
     is_legacy_path_component_safe,
     path_contained_under,
@@ -39,14 +39,12 @@ _TRANSCRIPT_FILENAME = "transcript.ndjson"
 
 def transcript_enabled_from_env() -> bool:
     """Opt-in only; default off (``MONKEYBOT_TRANSCRIPT_ENABLED``)."""
-    raw = os.environ.get("MONKEYBOT_TRANSCRIPT_ENABLED", "false").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    return current_env_flag("MONKEYBOT_TRANSCRIPT_ENABLED", default=False)
 
 
 def transcript_include_live_from_env() -> bool:
     """When true, write live-only streaming events too (default durable-only)."""
-    raw = os.environ.get("MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE", "false").strip().lower()
-    return raw in ("1", "true", "yes", "on")
+    return current_env_flag("MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE", default=False)
 
 
 def now_iso() -> str:
@@ -160,9 +158,14 @@ class TranscriptWriter:
         # Resume from the highest seq already on disk so reused session dirs
         # never emit duplicate evidence pointers.
         self._seq = _max_seq_in_transcript(self._path) if self._path.is_file() else 0
-        self._include_live = (
-            transcript_include_live_from_env() if include_live is None else include_live
-        )
+        self._include_live_override = include_live
+
+    @property
+    def _include_live(self) -> bool:
+        """HOT: re-read the snapshot each write so session reuse picks up reloads."""
+        if self._include_live_override is not None:
+            return self._include_live_override
+        return transcript_include_live_from_env()
 
     @property
     def path(self) -> Path:
