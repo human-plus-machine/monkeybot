@@ -498,7 +498,9 @@ class GeminiProvider:
         decls = _tool_defs_to_declarations(tools)
 
         count_cfg_kwargs: dict[str, Any] = {}
-        if system_instruction:
+        # CountTokensConfig.system_instruction is only accepted by the SDK in
+        # Vertex AI mode; Developer API (API key) mode raises a ValueError.
+        if system_instruction and not self._api_key:
             count_cfg_kwargs["system_instruction"] = system_instruction
         count_tools: list[Any] = []
         if decls:
