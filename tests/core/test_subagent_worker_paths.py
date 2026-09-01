@@ -12,7 +12,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from monkeybot.core.config import reset_runtime_env_state_for_tests
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_config() -> None:
+    reset_runtime_env_state_for_tests()
+    yield
+    reset_runtime_env_state_for_tests()
 
 
 @pytest.mark.asyncio
@@ -42,7 +50,6 @@ async def test_worker_resolves_relative_agent_md_from_project_root(
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("AGENT_MD", "./monkeybot_config/AGENT.md")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
-    (cfg / "monkeybot.yaml").write_text("model:\n  provider: fake\n", encoding="utf-8")
     monkeypatch.setenv(
         "MONKEYBOT_FAKE_PROVIDER_EVENTS",
         json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),
@@ -149,7 +156,6 @@ async def _run_worker_capturing_vertex_google_search(
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("AGENT_MD", "./monkeybot_config/AGENT.md")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
-    (cfg / "monkeybot.yaml").write_text("model:\n  provider: fake\n", encoding="utf-8")
     monkeypatch.setenv(
         "MONKEYBOT_FAKE_PROVIDER_EVENTS",
         json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),
@@ -292,7 +298,6 @@ async def _run_worker_capture_thread_id(
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("AGENT_MD", "./monkeybot_config/AGENT.md")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
-    (cfg / "monkeybot.yaml").write_text("model:\n  provider: fake\n", encoding="utf-8")
     monkeypatch.setenv(
         "MONKEYBOT_FAKE_PROVIDER_EVENTS",
         json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),

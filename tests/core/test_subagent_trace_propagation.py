@@ -15,6 +15,7 @@ import pytest
 from opentelemetry import propagate, trace
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
+from monkeybot.core.config import reset_runtime_env_state_for_tests
 from monkeybot.core.context import TurnContext
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.memory.subsystem import MemorySubsystem
@@ -103,6 +104,9 @@ def _make_executor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CoreToolE
 @pytest.fixture(autouse=True)
 def _w3c_textmap() -> None:
     propagate.set_global_textmap(TraceContextTextMapPropagator())
+    reset_runtime_env_state_for_tests()
+    yield
+    reset_runtime_env_state_for_tests()
 
 
 @pytest.mark.asyncio
@@ -398,10 +402,6 @@ def _install_worker_mocks(
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("MEMORY_STORAGE_URI", mem_uri)
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
-    (tmp_path / "monkeybot_config").mkdir(exist_ok=True)
-    (tmp_path / "monkeybot_config" / "monkeybot.yaml").write_text(
-        "model:\n  provider: fake\n", encoding="utf-8"
-    )
     monkeypatch.setenv(
         "MONKEYBOT_FAKE_PROVIDER_EVENTS",
         json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),
@@ -567,10 +567,6 @@ async def test_worker_completes_without_memory_uri(
     skills.mkdir()
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
-    (tmp_path / "monkeybot_config").mkdir(exist_ok=True)
-    (tmp_path / "monkeybot_config" / "monkeybot.yaml").write_text(
-        "model:\n  provider: fake\n", encoding="utf-8"
-    )
     monkeypatch.setenv(
         "MONKEYBOT_FAKE_PROVIDER_EVENTS",
         json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),
