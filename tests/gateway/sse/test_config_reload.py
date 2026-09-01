@@ -378,9 +378,7 @@ async def test_invalid_subagents_surfaces_error(
         encoding="utf-8",
     )
     with pytest.raises(APIError) as exc_info:
-        await run_config_reload(
-            registry=SessionRegistry(), fastapi_app=_app_with_runtime(runtime)
-        )
+        await run_config_reload(registry=SessionRegistry(), fastapi_app=_app_with_runtime(runtime))
     assert exc_info.value.status_code == 400
     assert "Duplicate subagent" in exc_info.value.message
     assert "helper" in runtime.subagent_registry
@@ -485,7 +483,8 @@ async def test_env_patch_computer_tools_allowlist(
             json={"env": {"MONKEYBOT_TRANSCRIPT_ENABLED": "true"}},
         )
     assert r.status_code == 200
-    assert os.environ.get("MONKEYBOT_TRANSCRIPT_ENABLED") == "true"
+    # YAML-only: reload must not advertise or apply the retired env pin.
+    assert os.environ.get("MONKEYBOT_TRANSCRIPT_ENABLED") is None
 
 
 @pytest.mark.asyncio
@@ -623,7 +622,7 @@ async def test_failed_reload_rolls_back_staged_env_patch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A patch applied before a failed apply must not outlive the failed reload."""
-    monkeypatch.delenv("MONKEYBOT_TRANSCRIPT_ENABLED", raising=False)
+    monkeypatch.delenv("MONKEYBOT_COMPUTER_TOOLS", raising=False)
     yaml_path = _boot_fake(
         tmp_path,
         monkeypatch,
@@ -644,14 +643,14 @@ async def test_failed_reload_rolls_back_staged_env_patch(
         await run_config_reload(
             registry=SessionRegistry(),
             fastapi_app=_app_with_runtime(runtime),
-            env={"MONKEYBOT_TRANSCRIPT_ENABLED": "true"},
+            env={"MONKEYBOT_COMPUTER_TOOLS": "true"},
         )
     assert exc_info.value.status_code == 400
     assert "Duplicate subagent" in exc_info.value.message
     # The staged patch must not survive a reload that never committed.
-    assert os.environ.get("MONKEYBOT_TRANSCRIPT_ENABLED") is None
+    assert os.environ.get("MONKEYBOT_COMPUTER_TOOLS") is None
     assert get_config_store().current().revision == 1
-    assert get_config_store().current().env_values.get("MONKEYBOT_TRANSCRIPT_ENABLED") != "true"
+    assert get_config_store().current().env_values.get("MONKEYBOT_COMPUTER_TOOLS") != "true"
 
 
 @pytest.mark.asyncio
@@ -673,6 +672,7 @@ async def test_first_load_env_patch_keeps_operator_pins(
     assert report.error is None
     assert "MODEL_NAME" in pinned_env_names()
     assert get_config_store().current().model.name == "from-env"
+    assert os.environ.get("MONKEYBOT_TRANSCRIPT_ENABLED") is None
 
 
 @pytest.mark.asyncio

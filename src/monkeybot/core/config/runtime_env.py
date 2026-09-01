@@ -135,8 +135,6 @@ ENV_SPEC: dict[str, tuple[ConfigTier, str]] = {
     "MONKEYBOT_TODO_LIST_ENABLED": (ConfigTier.HOT, "tools.todo_list_enabled"),
     "MONKEYBOT_TODO_LIST_MIRROR_TO_DISK": (ConfigTier.HOT, "tools.todo_list_mirror_to_disk"),
     "MONKEYBOT_EMISSION_STYLE": (ConfigTier.HOT, "gateway.emission_style"),
-    "MONKEYBOT_TRANSCRIPT_ENABLED": (ConfigTier.HOT, "gateway.transcript_enabled"),
-    "MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE": (ConfigTier.HOT, "gateway.transcript_include_live"),
     "LOG_LEVEL": (ConfigTier.HOT, "gateway.log_level"),
     "AGENT_MD": (ConfigTier.HOT, "paths.agent_md"),
     "SKILLS_PATH": (ConfigTier.HOT, "paths.skills_path"),
@@ -299,9 +297,11 @@ def warn_retired_curation_keys(doc: Mapping[str, Any]) -> list[str]:
 
 def reset_runtime_env_state_for_tests() -> None:
     """Clear the process ConfigStore and pin capture (tests only)."""
+    from monkeybot.core.config.settings import reset_transcript_enabled_cache_for_tests
     from monkeybot.core.config.snapshot import reset_snapshot_state_for_tests
 
     reset_snapshot_state_for_tests()
+    reset_transcript_enabled_cache_for_tests()
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:

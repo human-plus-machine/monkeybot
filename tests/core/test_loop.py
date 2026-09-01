@@ -49,7 +49,7 @@ from monkeybot.core.runtime.loop import run
 from monkeybot.core.runtime.loop_messages import _messages_for_provider
 from monkeybot.core.runtime.loop_usage import _merge_usage_event, _usage_to_totals
 from monkeybot.core.runtime.tool_batch import _chunk_tool_calls
-from monkeybot.core.runtime.tool_dispatch import _image_events
+from monkeybot.core.runtime.tool_dispatch import _image_events, _resolved_path_for_call
 from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
 from monkeybot.core.tools.inspector import Decision
 from monkeybot.core.tools.types import ToolExecutionResult
@@ -3152,3 +3152,9 @@ async def test_tool_call_started_carries_inspector_and_resolved_path(tmp_path: P
     assert result.error is None
     assert result.duration_ms is not None
     assert result.duration_ms >= 0
+
+
+def test_resolved_path_skips_non_filesystem_tools(tmp_path: Path) -> None:
+    ctx = _ctx(workspace_root=tmp_path)
+    call = ToolCall(call_id="c1", name="enable_mcp", args={"path": "mcp.json"})
+    assert _resolved_path_for_call(call, ctx) is None

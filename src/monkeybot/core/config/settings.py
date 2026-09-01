@@ -7,7 +7,10 @@ import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
+from monkeybot.core.config.yaml_loader import (
+    load_monkeybot_yaml_dict,
+    resolve_monkeybot_config_path,
+)
 from monkeybot.core.llm.provider import Provider
 from monkeybot.providers.claude import ClaudeProvider
 from monkeybot.providers.gemini import GeminiProvider
@@ -24,6 +27,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _warned_legacy_transcript_env = False
+# Stamp is (resolved path, mtime_ns, size). Include-file edits are not in the
+# stamp; this flag lives on the primary yaml so a primary mtime change is enough.
+_transcript_enabled_cache: tuple[tuple[str | None, int | None, int | None], bool] | None = None
 
 _MODEL_PROVIDER_ALIASES: dict[str, str] = {
     "gemini": "google_vertexai",
@@ -447,27 +453,53 @@ def _bool_config_flag(
     raise ConfigError(f"{label} must be true or false, got {raw!r}")
 
 
+def _transcript_enabled_stamp(
+    config_path: str | None,
+) -> tuple[str | None, int | None, int | None]:
+    path = resolve_monkeybot_config_path(config_path)
+    if path is None:
+        return (None, None, None)
+    try:
+        st = path.stat()
+        return (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (str(path), None, None)
+
+
+def reset_transcript_enabled_cache_for_tests() -> None:
+    """Drop the YAML-mtime cache so tests see a freshly written config."""
+    global _transcript_enabled_cache
+    _transcript_enabled_cache = None
+
+
 def transcript_enabled_from_config(config_path: str | None = None) -> bool:
     """Whether session NDJSON capture is on (``runtime.transcript_enabled``).
 
     Defaults to ``False`` when the key is absent. Only read from monkeybot.yaml —
-    not from environment variables.
+    not from environment variables. Cached on the resolved path + mtime so the
+    SSE stream handler and realtime connect do not re-open and merge YAML every
+    turn.
     """
-    global _warned_legacy_transcript_env
+    global _warned_legacy_transcript_env, _transcript_enabled_cache
     leftover = os.environ.get("MONKEYBOT_TRANSCRIPT_ENABLED", "").strip()
     if leftover and not _warned_legacy_transcript_env:
         _warned_legacy_transcript_env = True
         logger.warning(
             "MONKEYBOT_TRANSCRIPT_ENABLED is ignored — set runtime.transcript_enabled in monkeybot.yaml"
         )
+    stamp = _transcript_enabled_stamp(config_path)
+    if _transcript_enabled_cache is not None and _transcript_enabled_cache[0] == stamp:
+        return _transcript_enabled_cache[1]
     _, doc = load_monkeybot_yaml_dict(config_path)
-    return _bool_config_flag(
+    value = _bool_config_flag(
         doc,
         "runtime",
         "transcript_enabled",
         default=False,
         label="runtime.transcript_enabled",
     )
+    _transcript_enabled_cache = (stamp, value)
+    return value
 
 
 def ollama_options_from_config(config_path: str | None = None) -> tuple[str | None, int | None]:

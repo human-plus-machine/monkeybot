@@ -29,6 +29,7 @@ from monkeybot.core.config import (
 )
 from monkeybot.core.config.runtime_env import (
     ENV_MAP,
+    ENV_SPEC,
     RETIRED_CONTEXT_CURATION_KEYS,
     RETIRED_TOOLS_KEYS,
     warn_retired_curation_keys,
@@ -478,9 +479,7 @@ class TestTranscriptEnabledConfig:
         config_path.write_text("runtime:\n  transcript_enabled: false\n", encoding="utf-8")
         assert transcript_enabled_from_config(str(config_path)) is False
 
-    def test_env_var_does_not_enable(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_env_var_does_not_enable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         config_path = tmp_path / "monkeybot.yaml"
         config_path.write_text("runtime:\n  transcript_enabled: false\n", encoding="utf-8")
         monkeypatch.setenv("MONKEYBOT_TRANSCRIPT_ENABLED", "true")
@@ -494,6 +493,30 @@ class TestTranscriptEnabledConfig:
 
     def test_not_mapped_to_env(self) -> None:
         assert ("runtime", "transcript_enabled") not in ENV_MAP
+        assert "MONKEYBOT_TRANSCRIPT_ENABLED" not in ENV_SPEC
+        assert "MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE" not in ENV_SPEC
+
+    def test_caches_yaml_until_mtime_changes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from monkeybot.core.config import settings as settings_mod
+
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("runtime:\n  transcript_enabled: true\n", encoding="utf-8")
+        assert transcript_enabled_from_config(str(config_path)) is True
+        calls = {"n": 0}
+        real = settings_mod.load_monkeybot_yaml_dict
+
+        def counted(*args: object, **kwargs: object) -> object:
+            calls["n"] += 1
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(settings_mod, "load_monkeybot_yaml_dict", counted)
+        assert transcript_enabled_from_config(str(config_path)) is True
+        assert calls["n"] == 0
+        config_path.write_text("runtime:\n  transcript_enabled: false\n", encoding="utf-8")
+        assert transcript_enabled_from_config(str(config_path)) is False
+        assert calls["n"] == 1
 
 
 class TestOllamaOptionsConfig:

@@ -278,6 +278,8 @@ class SystemContextUpdated:
     request_id: str = ""
     epoch_id: int = 0
     changed_sources: list[str] = field(default_factory=list)
+    # Injected body for transcript NDJSON only. ``event_to_json`` omits it;
+    # ``TranscriptWriter._debug_fields`` writes it back onto the file record.
     text: str = ""
 
 

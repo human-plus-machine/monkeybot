@@ -262,6 +262,8 @@ async def test_manifest_documents_every_pointer_the_writer_emits(tmp_path: Path)
     documented = set(_read_lines(writer.path)[0]["format"])
     emitted = {"text_seq", "result_seq", "schema_seq", "content_seq", "base_seq", "diff", "changed"}
     assert emitted <= documented, f"undocumented pointers: {sorted(emitted - documented)}"
+    content_seq_doc = _read_lines(writer.path)[0]["format"]["content_seq"]
+    assert "result_seq" in content_seq_doc and "text_seq" in content_seq_doc
 
 
 @pytest.mark.asyncio
@@ -558,6 +560,29 @@ async def test_system_prompt_snapshot_full_once_then_hash(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_text_seq_points_at_anchor_not_changed_false_stub(tmp_path: Path) -> None:
+    """text_seq must cite a record that still has a ``text`` field."""
+    writer = TranscriptWriter("sess-text-seq-anchor", workspace_root=tmp_path)
+    prompt = "# Identity\n" + "\n".join(f"rule {i}" for i in range(100))
+    await writer.write_event(SystemPromptSnapshot(request_id="r1", inner_turn=1, text=prompt))
+    await writer.write_event(SystemPromptSnapshot(request_id="r1", inner_turn=2, text=prompt))
+    await writer.write_provider_request(
+        request_id="r1",
+        inner_turn=2,
+        model="gpt-5",
+        messages=[{"role": "system", "content": prompt}],
+        thinking_budget=None,
+    )
+
+    lines = _read_lines(writer.path)
+    assert "text" in lines[0]
+    assert lines[1]["changed"] is False
+    assert "text" not in lines[1]
+    req = lines[2]
+    assert req["messages"][0]["text_seq"] == lines[0]["seq"]
+
+
+@pytest.mark.asyncio
 async def test_drifting_system_prompt_written_as_diff_against_anchor(tmp_path: Path) -> None:
     writer = TranscriptWriter("sess-drift", workspace_root=tmp_path)
     body = "\n".join(f"line {i}" for i in range(200))
@@ -708,16 +733,13 @@ async def test_failed_append_does_not_advance_seq_or_indexes(
     import asyncio
 
     writer = TranscriptWriter("sess-fail", workspace_root=tmp_path)
-    await writer.write_event(
-        ToolCallResult(request_id="r1", tool="t", result="ok", call_id="c1")
-    )
+    await writer.write_event(ToolCallResult(request_id="r1", tool="t", result="ok", call_id="c1"))
     first_seq = writer._seq
 
     async def boom(_fn: object, *args: object, **kwargs: object) -> None:
         raise OSError("disk full")
 
     monkeypatch.setattr(asyncio, "to_thread", boom)
-    await writer.write_event(
-        ToolCallResult(request_id="r2", tool="t", result="ok", call_id="c2")
-    )
+    await writer.write_event(ToolCallResult(request_id="r2", tool="t", result="ok", call_id="c2"))
+    assert writer._seq == first_seq
     assert "c2" not in writer._result_seq_by_call_id

@@ -26,7 +26,6 @@ import difflib
 import hashlib
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any
@@ -70,7 +69,10 @@ _STUB_FORMAT: dict[str, str] = {
     "text_seq": "text is the `text` of that record",
     "result_seq": "result is the `result` of that ToolCallResult",
     "schema_seq": "full tool schema is the `tools` of that ProviderRequest",
-    "content_seq": "content is messages[content_index].content of that record",
+    "content_seq": (
+        "content is messages[content_index].content of that record; that body may "
+        "itself contain result_seq/text_seq (resolve those next — content_seq does not chain)"
+    ),
     "base_seq": "apply this record's `diff` to that record's `text`; diffs never chain",
     "diff": "unified diff, no ---/+++ header, lines split on \\n (not splitlines)",
     "changed": "false: same as base_seq. true: see `diff`. absent with `text`: full body",
@@ -217,17 +219,18 @@ def runtime_manifest_fields(
     """Stable config snapshot for ``SessionManifest`` (no allowlist dump)."""
     from monkeybot import __version__ as monkeybot_version
     from monkeybot.computer import should_enable_computer_tools
+    from monkeybot.core.config.snapshot import current_env
     from monkeybot.core.tools.sandbox_executor import SandboxConfig
 
     uri = memory_storage_uri
     if uri is None:
-        uri = os.environ.get("MEMORY_STORAGE_URI", "") or None
+        uri = current_env("MEMORY_STORAGE_URI", "") or None
     on = memory_on
     if on is None:
         on = bool(uri)
     window = context_window_tokens
     if window is None:
-        raw = os.environ.get("MODEL_CONTEXT_WINDOW", "").strip()
+        raw = current_env("MODEL_CONTEXT_WINDOW", "").strip()
         window = int(raw) if raw.isdigit() else None
     fields: dict[str, Any] = {
         "harness_version": monkeybot_version,
@@ -337,9 +340,7 @@ def _scan_transcript(path: Path) -> _ScanState:
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
-                    logger.debug(
-                        "skipping corrupt NDJSON line %s", kv(line=line_no, path=path)
-                    )
+                    logger.debug("skipping corrupt NDJSON line %s", kv(line=line_no, path=path))
                     continue
                 if isinstance(obj, dict):
                     _index_record(state, obj)
@@ -402,8 +403,8 @@ class TranscriptWriter:
         self._last_schema_seq = scanned.last_schema_seq
         self._result_seq_by_call_id = dict(scanned.result_seq_by_call_id)
         self._anchor_by_kind = dict(scanned.anchor_by_kind)
-        # Newest record per kind, anchor or diff. On resume only full-text records
-        # can seed this, so a stub may be skipped once until the next snapshot.
+        # Newest full-text (anchor) record per kind. Diff / changed:false stubs
+        # have no `text` field, so text_seq must never point at them.
         self._last_text_by_kind: dict[str, tuple[str, int]] = {
             kind: (anchor.text, anchor.seq)
             for kind, anchor in scanned.anchor_by_kind.items()
@@ -473,9 +474,7 @@ class TranscriptWriter:
             return False
         return True
 
-    def _stub_blocks(
-        self, msg: dict[str, object], text_refs: dict[str, int]
-    ) -> dict[str, object]:
+    def _stub_blocks(self, msg: dict[str, object], text_refs: dict[str, int]) -> dict[str, object]:
         """Point tool-result and injected-context blocks at the records holding them."""
         content = msg.get("content")
         if not isinstance(content, list):
@@ -646,12 +645,9 @@ class TranscriptWriter:
         seq = await self._append_line({"ts": now_iso(), **payload})
         if seq is None:
             return
-        if isinstance(text, str) and text:
+        if is_anchor and isinstance(text, str) and text:
             self._last_text_by_kind[rtype] = (text, seq)
-            if is_anchor:
-                self._anchor_by_kind[rtype] = _TextAnchor(
-                    hash=str(payload["hash"]), text=text, seq=seq
-                )
+            self._anchor_by_kind[rtype] = _TextAnchor(hash=str(payload["hash"]), text=text, seq=seq)
         if rtype == "ToolCallResult":
             cid = payload.get("call_id")
             if isinstance(cid, str) and cid:

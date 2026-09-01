@@ -152,8 +152,6 @@ class GatewayConfig:
     graceful_shutdown_timeout_sec: str | None = None
     cors_allow_origins: str | None = None
     emission_style: str | None = None
-    transcript_enabled: str | None = None
-    transcript_include_live: str | None = None
     harness_mode: str | None = None
 
 
@@ -501,7 +499,6 @@ def overlay_env_values(updates: Mapping[str, str]) -> None:
 RELOAD_PIN_ALLOWLIST: frozenset[str] = frozenset(
     {
         "MONKEYBOT_COMPUTER_TOOLS",
-        "MONKEYBOT_TRANSCRIPT_ENABLED",
     }
 )
 
@@ -904,8 +901,6 @@ def _gateway_from_env(env: Mapping[str, str]) -> GatewayConfig:
         graceful_shutdown_timeout_sec=env.get("GRACEFUL_SHUTDOWN_TIMEOUT_SEC"),
         cors_allow_origins=env.get("MONKEYBOT_CORS_ALLOW_ORIGINS"),
         emission_style=env.get("MONKEYBOT_EMISSION_STYLE"),
-        transcript_enabled=env.get("MONKEYBOT_TRANSCRIPT_ENABLED"),
-        transcript_include_live=env.get("MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE"),
         harness_mode=env.get("MONKEYBOT_HARNESS_MODE"),
     )
 

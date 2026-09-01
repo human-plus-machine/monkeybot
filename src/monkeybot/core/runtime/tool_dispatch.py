@@ -237,7 +237,24 @@ class _InspectorGateOutcome:
     decision: str = "allow"
 
 
+# Workspace tools whose ``path`` arg is a filesystem path. MCP / computer /
+# other tools may also send ``path``; resolving those against workspace_root
+# is misleading and was on the hot dispatch path for every such call.
+_RESOLVE_PATH_TOOLS: frozenset[str] = frozenset(
+    {
+        "read_file",
+        "write_file",
+        "replace_in_file",
+        "edit_file",
+        "apply_patch",
+        "load_file",
+    }
+)
+
+
 def _resolved_path_for_call(call: ToolCall, ctx: TurnContext) -> str | None:
+    if call.name not in _RESOLVE_PATH_TOOLS:
+        return None
     raw = call.args.get("path")
     if not isinstance(raw, str) or not raw.strip():
         return None
@@ -1019,7 +1036,7 @@ async def dispatch_tool_batch(
         call: ToolCall,
         result: ToolExecutionResult,
     ) -> tuple[ToolCallResult, ToolResponse]:
-        t0 = state.started_at.get(call.call_id)
+        t0 = state.started_at.pop(call.call_id, None) if call.call_id else None
         duration_ms = int((time.monotonic() - t0) * 1000) if t0 is not None else None
         event, response = _tool_outcome(
             call, ctx.request_id, result, duration_ms=duration_ms
