@@ -3,11 +3,12 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+    volumes:
+      # Overlay only — do not replace the image's scaffolded monkeybot.yaml.
+      - ./docker/demo.yaml:/app/monkeybot_config/demo.yaml:ro
+      - ./docker/demo-model.yaml:/app/monkeybot_config/demo-model.yaml:ro
     environment:
-      # A self-contained health-checkable demo. Production deployments provide
-      # their provider credentials and model configuration through `.env`.
-      MODEL_PROVIDER: fake
-      MODEL_NAME: fake
+      MONKEYBOT_CONFIG: /app/monkeybot_config/demo.yaml
       WEB_SEARCH_BACKEND: none
     ports:
       - "8080:8080"

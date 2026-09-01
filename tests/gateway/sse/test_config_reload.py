@@ -670,8 +670,8 @@ async def test_first_load_env_patch_keeps_operator_pins(
         env={"MONKEYBOT_TRANSCRIPT_ENABLED": "true"},
     )
     assert report.error is None
-    assert "MODEL_NAME" in pinned_env_names()
-    assert get_config_store().current().model.name == "from-env"
+    assert "MODEL_NAME" not in pinned_env_names()
+    assert get_config_store().current().model.name == "yaml-name"
     assert os.environ.get("MONKEYBOT_TRANSCRIPT_ENABLED") is None
 
 

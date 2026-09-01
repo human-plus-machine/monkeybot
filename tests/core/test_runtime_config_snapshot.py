@@ -15,7 +15,7 @@ from monkeybot.core.config import (
     get_config_store,
     reset_runtime_env_state_for_tests,
 )
-from monkeybot.core.config.runtime_env import ENV_MAP, ENV_SPEC, ENV_TIERS
+from monkeybot.core.config.runtime_env import ENV_MAP, ENV_SPEC, ENV_TIERS, YAML_ONLY_ENV_KEYS
 from monkeybot.core.config.settings import SubagentSettings
 from monkeybot.core.config.snapshot import build_runtime_config, env_field_value
 
@@ -57,6 +57,7 @@ def test_env_map_three_way_exhaustiveness(tmp_path: Path, monkeypatch: pytest.Mo
     assert len(ENV_MAP) == len(env_names)
     assert set(ENV_SPEC) == env_names
     assert set(ENV_TIERS) == env_names
+    assert env_names >= YAML_ONLY_ENV_KEYS
     cfg = build_runtime_config(agent_root=tmp_path)
     for env_name in sorted(env_names):
         tier, _path = ENV_SPEC[env_name]
@@ -71,32 +72,32 @@ def test_pinned_env_beats_yaml_on_build_and_reload(
     monkeypatch.chdir(tmp_path)
     yaml_path = _write_yaml(tmp_path, "model:\n  name: from-yaml\nruntime:\n  port: 1111\n")
     monkeypatch.setenv("MODEL_NAME", "from-env")
-    monkeypatch.delenv("PORT", raising=False)
+    monkeypatch.setenv("PORT", "2222")
 
     applied = apply_monkeybot_runtime_env()
     assert applied == yaml_path.resolve()
     store = get_config_store()
     first = store.current()
-    assert first.model.name == "from-env"
-    assert first.gateway.port == "1111"
-    assert first.env_values.get("MODEL_NAME") == "from-env"
-    assert first.env_values.get("PORT") == "1111"
+    assert first.model.name == "from-yaml"
+    assert first.gateway.port == "2222"
+    assert first.env_values.get("MODEL_NAME") == "from-yaml"
+    assert first.env_values.get("PORT") == "2222"
     assert os.environ.get("MODEL_NAME") == "from-env"
-    assert os.environ.get("PORT") == "1111"
+    assert os.environ.get("PORT") == "2222"
     first_revision = first.revision
 
     yaml_path.write_text(
-        "model:\n  name: yaml-after-reload\nruntime:\n  port: 2222\n",
+        "model:\n  name: yaml-after-reload\nruntime:\n  port: 3333\n",
         encoding="utf-8",
     )
     reloaded, diff = store.reload()
     assert not diff.noop
     assert reloaded.revision == first_revision + 1
-    assert reloaded.model.name == "from-env"
+    assert reloaded.model.name == "yaml-after-reload"
     assert reloaded.gateway.port == "2222"
-    # Step 1 does not re-mutate process env on reload.
+    # YAML-only model keys are not copied to process env; PORT pin is not rewritten.
     assert os.environ.get("MODEL_NAME") == "from-env"
-    assert os.environ.get("PORT") == "1111"
+    assert os.environ.get("PORT") == "2222"
 
 
 def test_reload_unchanged_files_is_digest_noop(
@@ -216,8 +217,8 @@ def test_apply_sets_same_env_keys_as_today(tmp_path: Path, monkeypatch: pytest.M
     apply_monkeybot_runtime_env()
 
     assert os.environ.get("PORT") == "2222"
-    assert os.environ.get("MODEL_NAME") == "test-model-x"
-    assert os.environ.get("MODEL_PROVIDER") == "fake"
+    assert os.environ.get("MODEL_NAME") is None
+    assert os.environ.get("MODEL_PROVIDER") is None
     assert os.environ.get("MONKEYBOT_TOOL_DENIED_PATTERNS") == "one,two"
     assert os.environ.get("MONKEYBOT_COMPUTER_TOOLS") == "true"
     assert os.environ.get("MONKEYBOT_WORKSPACE_ROOT") == str((tmp_path / "agent-ws").resolve())
@@ -523,9 +524,9 @@ def test_context_window_tokens_none_cfg_reads_store_not_os_environ(
     monkeypatch.chdir(tmp_path)
     _write_yaml(tmp_path, "model:\n  context_window: 55555\n")
     apply_monkeybot_runtime_env()
-    assert os.environ.get("MODEL_CONTEXT_WINDOW") == "55555"
+    assert os.environ.get("MODEL_CONTEXT_WINDOW") is None
     overlay_env_values({"MODEL_CONTEXT_WINDOW": "99999"})
-    assert os.environ.get("MODEL_CONTEXT_WINDOW") == "55555"
+    assert os.environ.get("MODEL_CONTEXT_WINDOW") is None
     assert current_env("MODEL_CONTEXT_WINDOW") == "99999"
     assert get_config_store().current().model.context_window == "99999"
     assert context_window_tokens() == 99999
@@ -713,11 +714,11 @@ def test_apply_reload_env_patch_captures_operator_pins_first(
 ) -> None:
     from monkeybot.core.config.snapshot import apply_reload_env_patch, pinned_env_names
 
-    monkeypatch.setenv("MODEL_NAME", "flash")
+    monkeypatch.setenv("PORT", "8080")
     monkeypatch.delenv("MONKEYBOT_COMPUTER_TOOLS", raising=False)
     apply_reload_env_patch({"MONKEYBOT_COMPUTER_TOOLS": "true"})
     names = pinned_env_names()
-    assert "MODEL_NAME" in names
+    assert "PORT" in names
     assert "MONKEYBOT_COMPUTER_TOOLS" in names
 
 

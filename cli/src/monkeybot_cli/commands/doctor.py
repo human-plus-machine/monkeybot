@@ -466,7 +466,7 @@ def run_doctor(args: argparse.Namespace) -> int:
 
     thinking_raw = model.get("thinking_budget") if isinstance(model, dict) else None
     if thinking_raw is None:
-        thinking_raw = os.environ.get("MODEL_THINKING_BUDGET", "-1")
+        thinking_raw = "-1"
     num_ctx_raw = model.get("num_ctx") if isinstance(model, dict) else None
     model_name = str(model.get("name", "")).strip() if isinstance(model, dict) else ""
     _add_ollama_local_checks(

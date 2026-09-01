@@ -17,7 +17,7 @@ from monkeybot.core.config import (
     validate_monkeybot_yaml_doc,
     validate_provider_env,
 )
-from monkeybot.core.config.runtime_env import ENV_MAP
+from monkeybot.core.config.runtime_env import _flatten_config
 from monkeybot.core.config.settings import ConfigError, normalize_model_provider
 from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
 from monkeybot.core.layout import resolve_agent_root
@@ -35,18 +35,7 @@ def _resolve_path(base: Path, rel: str) -> Path:
 
 
 def _flatten_to_env(doc: dict[str, Any]) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for (section, key), env_name in ENV_MAP.items():
-        sec = doc.get(section)
-        if not isinstance(sec, dict) or key not in sec:
-            continue
-        raw = sec[key]
-        if raw is None:
-            continue
-        if isinstance(raw, bool):
-            out[env_name] = "true" if raw else "false"
-        else:
-            out[env_name] = str(raw)
+    out = _flatten_config(doc)
     gcp = doc.get("gcp") if isinstance(doc.get("gcp"), dict) else {}
     if isinstance(gcp, dict) and gcp.get("project_id"):
         out["GCP_PROJECT_ID"] = str(gcp["project_id"])

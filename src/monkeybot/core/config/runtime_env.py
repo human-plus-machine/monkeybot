@@ -1,6 +1,8 @@
 """Load ``monkeybot_config/monkeybot.yaml`` into ``os.environ`` for unset keys only.
 
-Precedence: existing process environment (including ``.env`` via dotenv) wins.
+Precedence: existing process environment (including ``.env`` via dotenv) wins
+for ``ENV_MAP`` keys except ``YAML_ONLY_ENV_KEYS`` (``model.*``), which are
+YAML-only — leftover process env is ignored (and warned) once a snapshot loads.
 Discovery: ``MONKEYBOT_CONFIG`` if set, else the nearest parent directory with
 ``monkeybot_config/monkeybot.yaml``. Relative ``paths.*`` values are anchored
 at the agent root, never the process working directory.
@@ -102,6 +104,22 @@ ENV_MAP: dict[tuple[str, str], str] = {
         "metrics.emit_summary_on_close",
     ): "MONKEYBOT_REALTIME_METRICS_EMIT_SUMMARY_ON_CLOSE",
 }
+
+# Flattened into snapshot ``env_values`` but never pinned from process env and
+# never written back to ``os.environ``. Leftover values are warned and ignored.
+YAML_ONLY_ENV_KEYS: frozenset[str] = frozenset(
+    {
+        "MODEL_PROVIDER",
+        "MODEL_NAME",
+        "MODEL_TEMPERATURE",
+        "MODEL_MAX_TOKENS",
+        "MODEL_THINKING_BUDGET",
+        "MODEL_CONTEXT_WINDOW",
+        "CONTEXT_SUMMARIZATION_MODEL",
+        "MAX_TURNS",
+        "MODEL_CACHE_RETENTION",
+    }
+)
 
 # Backward-compatible alias for internal/tests.
 _ENV_MAP = ENV_MAP
@@ -295,6 +313,17 @@ def warn_retired_curation_keys(doc: Mapping[str, Any]) -> list[str]:
     return found
 
 
+def warn_yaml_only_model_env() -> list[str]:
+    """Warn when process env still has retired model overlay keys; return those found."""
+    found = [name for name in sorted(YAML_ONLY_ENV_KEYS) if name in os.environ]
+    if found:
+        logger.warning(
+            "ignoring YAML-only model env: %s — set model.* in monkeybot.yaml instead",
+            ",".join(found),
+        )
+    return found
+
+
 def reset_runtime_env_state_for_tests() -> None:
     """Clear the process ConfigStore and pin capture (tests only)."""
     from monkeybot.core.config.settings import reset_transcript_enabled_cache_for_tests
@@ -424,11 +453,12 @@ def _merge_with_includes(primary_path: Path, root: dict[str, Any]) -> dict[str, 
 def apply_monkeybot_runtime_env(
     *, config_path: Path | None = None, agent_root: Path | None = None
 ) -> Path | None:
-    """Apply YAML-backed defaults to ``os.environ`` (unset keys only).
+    """Apply YAML-backed defaults to ``os.environ`` (unset ``ENV_MAP`` keys only).
 
     Always (re)loads the process ``RuntimeConfig`` snapshot. Unchanged files are
     a digest no-op (same revision). Already-set env keys are never overwritten —
     ``os.environ`` stays the subprocess transport, not the in-process store.
+    YAML-only ``model.*`` keys stay in the snapshot and are not copied to process env.
     """
     from monkeybot.core.config.snapshot import (
         get_config_store,
@@ -451,7 +481,11 @@ def apply_monkeybot_runtime_env(
 
     google_cloud_project = (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip()
     pins = pinned_env_names()
-    yaml_keys = [env_key for env_key in cfg.env_values if env_key not in pins]
+    yaml_keys = [
+        env_key
+        for env_key in cfg.env_values
+        if env_key not in pins and env_key not in YAML_ONLY_ENV_KEYS
+    ]
     for env_key in yaml_keys:
         env_val = cfg.env_values[env_key]
         # Existing process env wins; WORKSPACE_ROOT blocks YAML workspace_root.

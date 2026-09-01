@@ -21,12 +21,12 @@ Configuration (environment variables or ``monkeybot.yaml``):
 - ``OLLAMA_API_KEY`` — required for Ollama Cloud (ollama.com/settings/keys).
   Local Ollama ignores it; the OpenAI SDK still needs a non-empty string, so a
   dummy is used when unset.
-- ``MODEL_NAME`` — model id passed to the API (e.g. ``llama3.1``, ``qwen2.5``,
+- ``model.name`` — model id passed to the API (e.g. ``llama3.1``, ``qwen2.5``,
   or a cloud id such as ``glm-5.3-flash``). Local models must already be pulled
   (``ollama pull <model>``).
-- ``MODEL_TEMPERATURE`` — sampling temperature (default: ``0.7``; set via ``monkeybot.yaml`` / constructor)
-- ``MODEL_MAX_TOKENS`` — max output tokens (default: ``60000``; set via ``monkeybot.yaml`` / constructor)
-- ``MODEL_THINKING_BUDGET`` — thinking control for reasoning models (e.g. Gemma 4):
+- ``model.temperature`` — sampling temperature (default: ``0.7``; YAML-only)
+- ``model.max_tokens`` — max output tokens (default: ``60000``; YAML-only)
+- ``model.thinking_budget`` — thinking control for reasoning models (e.g. Gemma 4):
   ``-1`` = Ollama default (thinking on when supported), ``0`` = off via
   ``reasoning_effort: none``, ``N > 0`` = on (no token budget on Ollama).
 - ``model.keep_alive`` (YAML only) — local only. How long Ollama keeps the model

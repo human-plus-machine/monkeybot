@@ -11,9 +11,9 @@ Configuration (environment variables or ``monkeybot.yaml``):
   (takes precedence over ``HF_BASE_URL`` and the default)
 - ``HF_BASE_URL`` — OpenAI-compat base host (default:
   ``https://router.huggingface.co/hf-inference``; append ``/v1`` when missing)
-- ``MODEL_NAME`` — model id passed to the API (e.g. ``meta-llama/Llama-3.1-8B-Instruct``)
-- ``MODEL_TEMPERATURE`` — sampling temperature (default: ``0.7``; set via ``monkeybot.yaml`` / constructor)
-- ``MODEL_MAX_TOKENS`` — max output tokens (default: ``60000``; set via ``monkeybot.yaml`` / constructor)
+- ``model.name`` — model id passed to the API (e.g. ``meta-llama/Llama-3.1-8B-Instruct``)
+- ``model.temperature`` — sampling temperature (default: ``0.7``; YAML-only)
+- ``model.max_tokens`` — max output tokens (default: ``60000``; YAML-only)
 
 Install the required extra::
 

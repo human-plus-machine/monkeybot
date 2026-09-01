@@ -3,7 +3,7 @@
 All providers resolve sampling once at construction via :func:`resolve_model_sampling`.
 :func:`~monkeybot.core.config.settings.get_provider_config` is the primary entry point;
 direct provider construction falls back to a pinned ``RuntimeConfig`` or
-``MODEL_TEMPERATURE`` / ``MODEL_MAX_TOKENS``.
+``model.temperature`` / ``model.max_tokens`` in ``monkeybot.yaml``.
 """
 
 from __future__ import annotations

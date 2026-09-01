@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- `model.provider`, `model.name`, `model.temperature`, `model.max_tokens`, `model.thinking_budget`, `model.context_window`, `model.summarization_model`, `model.max_turns`, and `model.cache_retention` are YAML-only. Process env `MODEL_PROVIDER`, `MODEL_NAME`, `MODEL_TEMPERATURE`, `MODEL_MAX_TOKENS`, `MODEL_THINKING_BUDGET`, `MODEL_CONTEXT_WINDOW`, `CONTEXT_SUMMARIZATION_MODEL`, `MAX_TURNS`, and `MODEL_CACHE_RETENTION` are ignored (a warning is logged). Set them under `model:` in `monkeybot.yaml`. Credentials (`GEMINI_API_KEY`, `NVIDIA_API_KEY`, …) stay in `.env`.
+
 ### Added
 
 - Local Ollama prefix-cache knobs: `ollama-local` sends `keep_alive` (default 24h, `model.keep_alive`) and optional pinned `num_ctx` (`model.num_ctx`) via OpenAI-compat `extra_body`. YAML-only — not mapped from the runtime env. `model.context_window` is never mapped to `num_ctx`. `doctor` warns on `*-mlx` tags, default thinking on known reasoning tags, and huge `num_ctx`, and fails on unparseable/`<1` `num_ctx`. See `docs/ollama-local.md` and `examples/ollama/PrefixStable.Modelfile`.
