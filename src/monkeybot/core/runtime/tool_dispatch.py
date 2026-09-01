@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import logging
-import os
+import time
 from collections.abc import AsyncIterator, Callable, Sequence
+from pathlib import Path
 from typing import cast
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.store import AttachmentStore
+from monkeybot.core.config.snapshot import env_value_or_current
 from monkeybot.core.context import (
     TurnContext,
     refresh_tools_after_loops_change,
@@ -27,6 +30,7 @@ from monkeybot.core.llm.provider import Provider, ToolCall
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.messages.tool_integrity import cancelled_tool_result_text
+from monkeybot.core.path_safety import path_contained_under
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.runtime.context_budget import ContextBudgeter
 from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector
@@ -76,6 +80,8 @@ def _tool_outcome(
     call: ToolCall,
     request_id: str,
     result: ToolExecutionResult,
+    *,
+    duration_ms: int | None = None,
 ) -> tuple[ToolCallResult, ToolResponse]:
     """Build the (event, history block) pair for a finished tool call.
 
@@ -115,6 +121,8 @@ def _tool_outcome(
         result=body,
         error=result.error,
         call_id=call.call_id,
+        error_kind=_envelope_error_kind(result.error, body),
+        duration_ms=duration_ms,
     )
     response = ToolResponse(
         id=call.call_id,
@@ -165,6 +173,8 @@ class ToolBatchState:
     pre_tool_extra_next: str | None
     aborted: bool = False
     needs_followup_after_tools: bool = True
+    tools_dirty_reason: str | None = None
+    started_at: dict[str, float] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
@@ -189,7 +199,8 @@ async def _emit_rejected_batch(
     *,
     ordered: Sequence[ToolCall],
     stream_truncated: bool,
-    request_id: str,
+    ctx: TurnContext,
+    started_at: dict[str, float],
     thread_id: str,
     all_tool_responses: list[ContentBlock],
     finish_tool: _FinishTool,
@@ -198,7 +209,7 @@ async def _emit_rejected_batch(
     logger.warning(
         "rejecting truncated/incomplete tool batch %s",
         kv(
-            request_id=request_id,
+            request_id=ctx.request_id,
             thread_id=thread_id,
             truncated=stream_truncated,
             n_calls=len(ordered),
@@ -206,12 +217,11 @@ async def _emit_rejected_batch(
     )
     for call in ordered:
         err = _rejected_tool_batch_error(call, truncated=stream_truncated)
-        yield ToolCallStarted(
-            request_id=request_id,
-            tool=call.name,
-            label=call.name,
-            args=dict(call.args),
+        yield _started_event(
+            call,
+            ctx,
             parse_error=call.parse_error,
+            started_at=started_at,
         )
         result_evt, tool_resp = finish_tool(call, ToolExecutionResult.err(err))
         yield result_evt
@@ -224,6 +234,86 @@ class _InspectorGateOutcome:
 
     allowed: bool = True
     denial_message: str | None = None
+    decision: str = "allow"
+
+
+# Workspace tools whose ``path`` arg is a filesystem path. MCP / computer /
+# other tools may also send ``path``; resolving those against workspace_root
+# is misleading and was on the hot dispatch path for every such call.
+_RESOLVE_PATH_TOOLS: frozenset[str] = frozenset(
+    {
+        "read_file",
+        "write_file",
+        "replace_in_file",
+        "edit_file",
+        "apply_patch",
+        "load_file",
+    }
+)
+
+
+def _resolved_path_for_call(call: ToolCall, ctx: TurnContext) -> str | None:
+    if call.name not in _RESOLVE_PATH_TOOLS:
+        return None
+    raw = call.args.get("path")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    rel = raw.strip()
+    root = ctx.workspace_root
+    if root is None:
+        return rel
+    try:
+        root_p = Path(root).resolve()
+        candidate = (root_p / rel).resolve()
+        if path_contained_under(root_p, candidate) is None:
+            return rel
+        return candidate.relative_to(root_p).as_posix() or "."
+    except (OSError, ValueError) as exc:
+        logger.debug(
+            "resolved_path fallback %s",
+            kv(tool=call.name, path=rel, error=str(exc)),
+        )
+        return rel
+
+
+def _started_event(
+    call: ToolCall,
+    ctx: TurnContext,
+    *,
+    parse_error: str | None = None,
+    inspector_decision: str | None = None,
+    started_at: dict[str, float] | None = None,
+) -> ToolCallStarted:
+    resource = resource_for_call(
+        InspectorToolCall(call_id=call.call_id, name=call.name, args=dict(call.args))
+    )
+    if started_at is not None and call.call_id:
+        started_at[call.call_id] = time.monotonic()
+    return ToolCallStarted(
+        request_id=ctx.request_id,
+        tool=call.name,
+        label=call.name,
+        args=dict(call.args),
+        parse_error=parse_error,
+        call_id=call.call_id,
+        inspector_decision=inspector_decision,
+        resource=resource,
+        resolved_path=_resolved_path_for_call(call, ctx),
+    )
+
+
+def _envelope_error_kind(error: str | None, body: str) -> str | None:
+    raw = error if error is not None else body
+    if not raw:
+        return None
+    try:
+        obj = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    kind = obj.get("error_kind")
+    return kind if isinstance(kind, str) else None
 
 
 async def _resolve_inspector_decision(
@@ -249,6 +339,7 @@ async def _resolve_inspector_decision(
                 pass
             case "deny":
                 outcome.allowed = False
+                outcome.decision = "deny"
                 outcome.denial_message = decision.message
                 logger.debug(
                     "tool inspector deny %s",
@@ -264,6 +355,7 @@ async def _resolve_inspector_decision(
             case "confirm":
                 if ctx.sse_bus is None:
                     outcome.allowed = False
+                    outcome.decision = "deny"
                     outcome.denial_message = (
                         decision.message
                         or "Confirmation required but no SSE session is available"
@@ -278,18 +370,23 @@ async def _resolve_inspector_decision(
                     arguments=dict(call.args),
                     prompt=decision.message,
                 )
+                timeout_sec = float(
+                    env_value_or_current(ctx.config, "PENDING_RESPONSE_TIMEOUT_SEC", "300")
+                )
                 payload = await _await_user_response_any(
-                    bus, fut, call.call_id, timeout_sec=None
+                    bus, fut, call.call_id, timeout_sec=timeout_sec, config=ctx.config
                 )
                 if payload.get("_timeout"):
                     outcome.allowed = False
-                    to = int(
-                        float(os.environ.get("PENDING_RESPONSE_TIMEOUT_SEC", "300"))
-                    )
+                    outcome.decision = "confirm_denied"
+                    to = int(timeout_sec)
                     outcome.denial_message = f"user did not respond within {to}s"
                     return
                 if payload.get("approved"):
                     outcome.allowed = True
+                    outcome.decision = (
+                        "confirm_always" if payload.get("always") else "confirm_approved"
+                    )
                     if payload.get("always"):
                         remember_always_approval(
                             bus,
@@ -319,6 +416,7 @@ async def _resolve_inspector_decision(
                     )
                 else:
                     outcome.allowed = False
+                    outcome.decision = "confirm_denied"
                     reason_raw = payload.get("reason")
                     outcome.denial_message = (
                         (reason_raw if isinstance(reason_raw, str) else None)
@@ -345,6 +443,7 @@ async def _gate_chunk_calls(
     cancelled: asyncio.Event | None,
     finish_tool: _FinishTool,
     result: _GateChunkResult,
+    started_at: dict[str, float],
 ) -> AsyncIterator[AgentEvent]:
     """Gate one chunk: cancel, parse_error, and inspector allow/deny/confirm.
 
@@ -370,13 +469,11 @@ async def _gate_chunk_calls(
         # tool error result so the model can self-correct instead of
         # executing the tool with empty arguments.
         if call.parse_error:
-            yield ToolCallStarted(
-                request_id=ctx.request_id,
-                tool=call.name,
-                label=call.name,
-                args=dict(call.args),
+            yield _started_event(
+                call,
+                ctx,
                 parse_error=call.parse_error,
-                call_id=call.call_id,
+                started_at=started_at,
             )
             result_evt, tool_resp = finish_tool(
                 call, ToolExecutionResult.err(call.parse_error)
@@ -418,12 +515,11 @@ async def _gate_chunk_calls(
 
         if not insp_outcome.allowed:
             msg = insp_outcome.denial_message or "tool call denied"
-            yield ToolCallStarted(
-                request_id=ctx.request_id,
-                tool=call.name,
-                label=call.name,
-                args=dict(call.args),
-                call_id=call.call_id,
+            yield _started_event(
+                call,
+                ctx,
+                inspector_decision=insp_outcome.decision,
+                started_at=started_at,
             )
             result_evt, tool_resp = finish_tool(
                 call, ToolExecutionResult.err(msg)
@@ -432,12 +528,11 @@ async def _gate_chunk_calls(
             chunk_responses.append(tool_resp)
             continue
 
-        yield ToolCallStarted(
-            request_id=ctx.request_id,
-            tool=call.name,
-            label=call.name,
-            args=dict(call.args),
-            call_id=call.call_id,
+        yield _started_event(
+            call,
+            ctx,
+            inspector_decision=insp_outcome.decision,
+            started_at=started_at,
         )
         allowed_exec.append(call)
 
@@ -832,6 +927,8 @@ async def _post_batch_budget_and_registry(
         ctx = refresh_tools_after_mcp_change(ctx, mcp_client)
         state.ctx = ctx
         state.tools_dirty = True
+        if state.tools_dirty_reason is None:
+            state.tools_dirty_reason = "mcp"
         doom_tracker.exempt_names = _doom_loop_exempt_names(ctx.tools)
         logger.info(
             "refreshed ctx.tools after MCP registry change %s",
@@ -847,6 +944,8 @@ async def _post_batch_budget_and_registry(
         ctx = refresh_tools_after_loops_change(ctx, loops_advertised=advertised)
         state.ctx = ctx
         state.tools_dirty = True
+        if state.tools_dirty_reason is None:
+            state.tools_dirty_reason = "loops"
         doom_tracker.exempt_names = _doom_loop_exempt_names(ctx.tools)
         logger.info(
             "refreshed ctx.tools after loops registry change %s",
@@ -937,7 +1036,11 @@ async def dispatch_tool_batch(
         call: ToolCall,
         result: ToolExecutionResult,
     ) -> tuple[ToolCallResult, ToolResponse]:
-        event, response = _tool_outcome(call, ctx.request_id, result)
+        t0 = state.started_at.pop(call.call_id, None) if call.call_id else None
+        duration_ms = int((time.monotonic() - t0) * 1000) if t0 is not None else None
+        event, response = _tool_outcome(
+            call, ctx.request_id, result, duration_ms=duration_ms
+        )
         doom_tracker.record(call.name, dict(call.args))
         return event, response
 
@@ -958,7 +1061,8 @@ async def dispatch_tool_batch(
         async for evt in _emit_rejected_batch(
             ordered=ordered,
             stream_truncated=stream_truncated,
-            request_id=ctx.request_id,
+            ctx=ctx,
+            started_at=state.started_at,
             thread_id=ctx.thread_id,
             all_tool_responses=all_tool_responses,
             finish_tool=_finish_tool,
@@ -983,6 +1087,7 @@ async def dispatch_tool_batch(
             cancelled=cancelled,
             finish_tool=_finish_tool,
             result=gate_result,
+            started_at=state.started_at,
         ):
             yield evt
 

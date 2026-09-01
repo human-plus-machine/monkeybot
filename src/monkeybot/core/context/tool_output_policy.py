@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -12,6 +11,7 @@ from typing import Any, Literal
 
 import yaml
 
+from monkeybot.core.config.snapshot import current_env
 from monkeybot.core.tools.inspector import CommandTierConfigError
 
 ContentTypeHint = Literal["json", "logs", "code", "prose", "auto"]
@@ -62,7 +62,7 @@ _BUILTIN_TOOL_BUDGETS: dict[str, ToolOutputBudget] = {
 def _resolve_policy_path(path: Path | None) -> Path | None:
     if path is not None:
         return path if path.is_file() else None
-    raw = os.environ.get("COMMAND_ALLOWLIST_CONFIG", "").strip()
+    raw = current_env("COMMAND_ALLOWLIST_CONFIG", "").strip()
     if not raw:
         return None
     p = Path(raw).expanduser()
@@ -71,9 +71,7 @@ def _resolve_policy_path(path: Path | None) -> Path | None:
 
 def _parse_tool_output_entry(path: Path, tool_name: str, raw: Any) -> ToolOutputBudget:
     if not isinstance(raw, dict):
-        raise CommandTierConfigError(
-            path, f"tool_output.{tool_name} must be a mapping"
-        )
+        raise CommandTierConfigError(path, f"tool_output.{tool_name} must be a mapping")
     content_type: ContentTypeHint | None = None
     ct_raw = raw.get("content_type")
     if ct_raw is not None:
@@ -257,8 +255,24 @@ def reset_tool_output_policy_cache_for_tests() -> None:
     reset_mcp_tool_registry_for_tests()
 
 
+def invalidate_config_caches() -> None:
+    """Drop process-wide caches derived from YAML / context-window config.
+
+    Called from gateway config reload. Does not clear the MCP tool-name registry
+    — that tracks live connections, not file contents.
+    """
+    cached_tool_output_policies.cache_clear()
+    # Function-local: core_tool_executor → spill_inventory → tool_shapers → this module.
+    from monkeybot.core.tools.core_tool_executor import workspace_settings_from_config
+    from monkeybot.core.tools.spill_inventory import spill_budgets_from_window
+
+    workspace_settings_from_config.cache_clear()
+    spill_budgets_from_window.cache_clear()
+
+
 __all__ = [
     "ToolOutputBudget",
+    "invalidate_config_caches",
     "load_tool_output_policies",
     "parse_tool_output_section",
     "register_mcp_tool_names",

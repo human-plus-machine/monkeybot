@@ -1,10 +1,27 @@
 """MCP client port — structural contract for Story 5 implementation."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from monkeybot.core.types.types_tools import ToolDef
+
+
+def normalize_catalog_mcp_names(names: Sequence[str] | None) -> tuple[str, ...]:
+    """Strip, drop empties, sort, and dedupe catalogued MCP server names."""
+    return tuple(sorted({n.strip() for n in (names or ()) if n and str(n).strip()}))
+
+
+@dataclass(frozen=True)
+class MCPCatalogApplyResult:
+    """Outcome of a live catalog diff (untouched children stay up)."""
+
+    reconnected: tuple[str, ...] = ()
+    kept: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+    added: tuple[str, ...] = ()
+    failed: tuple[str, ...] = ()
 
 
 class MCPClientPort(Protocol):
@@ -96,8 +113,22 @@ class MCPClientPort(Protocol):
         """Fetch a named MCP prompt (optional string arguments)."""
         ...
 
-    async def load_from_config(
-        self, path: Path, *, raise_on_error: bool = False
-    ) -> None:
+    async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         """Load mcp.json if present; no-op when path is missing (Story 5 semantics)."""
+        ...
+
+    def set_env_overlay(self, env: Mapping[str, str] | None) -> dict[str, str] | None:
+        """Use a copied snapshot of env values when interpolating ``mcp.json`` ``${VAR}`` refs.
+
+        Returns the previous overlay so callers can restore on failure.
+        """
+        ...
+
+    async def apply_catalog_diff(
+        self,
+        mcp_json_path: Path,
+        *,
+        raise_on_error: bool = False,
+    ) -> MCPCatalogApplyResult:
+        """Reconnect only added/changed/removed servers; leave untouched children running."""
         ...

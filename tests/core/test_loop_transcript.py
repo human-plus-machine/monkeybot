@@ -261,6 +261,7 @@ async def test_run_with_transcript_writer_writes_message_deltas_on_tool_loop(
     assert first["inner_turn"] == 1
     assert first["message_offset"] == 0
     assert "tools" in first
+    assert first.get("tools_include_reason") == "first_inner_turn"
     assert len(first["messages"]) >= 1
 
     assert second["inner_turn"] == 2
@@ -268,3 +269,11 @@ async def test_run_with_transcript_writer_writes_message_deltas_on_tool_loop(
     assert "tools" not in second
     assert len(second["messages"]) >= 1
     assert len(second["messages"]) < len(first["messages"]) + len(second["messages"])
+
+    types = [line["type"] for line in lines]
+    first_req = types.index("ProviderRequest")
+    second_req = types.index("ProviderRequest", first_req + 1)
+    # Gateway teeing is out of this test; when ToolCallResult is present it
+    # must precede the next ProviderRequest (writer invariant).
+    if "ToolCallResult" in types:
+        assert types.index("ToolCallResult") < second_req

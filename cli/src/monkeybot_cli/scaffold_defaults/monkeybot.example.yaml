@@ -29,7 +29,7 @@ runtime:
   # Internal debugging only (not agent-visible): write every AgentEvent and raw
   # provider request/response for each session to
   # {workspace_root}/.monkeybot/transcripts/{UTC}_{session_id}/transcript.ndjson.
-  # (env: MONKEYBOT_TRANSCRIPT_ENABLED)
+  # YAML-only (not overridable via environment).
   transcript_enabled: true
 
 # Required: choose the conversational harness for this deployment.
@@ -102,6 +102,12 @@ model:
   # cache_retention: short
   # Optional cheaper model for sync history summarization (env: CONTEXT_SUMMARIZATION_MODEL); omit = main model
   # summarization_model: gemini-3-flash
+  # Ollama-local only (YAML). Default 24h so the KV prefix cache survives idle.
+  # Set "0" to omit. Distinct from the Ollama daemon env OLLAMA_KEEP_ALIVE.
+  # keep_alive: 24h
+  # Ollama-local only (YAML). Pin llama num_ctx; omit = server default.
+  # Do NOT copy context_window here — that budget is summarization/spill, often 1M.
+  # num_ctx: 8192
 
 # Non-secret GCP identifiers (prefer .env for secrets / ADC path).
 # gcp:

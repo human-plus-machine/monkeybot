@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import hashlib
+import json
 import logging
 from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
@@ -234,6 +236,23 @@ async def _drain_steers(
         yield UserSteered(request_id=ctx.request_id, text=preview)
 
 
+def _tools_schema_hash(tools: Sequence[ToolDef]) -> str:
+    payload = [t.to_model_schema() for t in tools]
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _mark_tools_dirty(state: _TurnState, reason: str, tools: Sequence[ToolDef]) -> None:
+    digest = _tools_schema_hash(tools)
+    if digest != state.tools_schema_hash:
+        state.tools_dirty = True
+        # First cause wins: a BEFORE_PROVIDER hook re-marking tools that MCP already
+        # dirtied must not relabel the change as its own.
+        if state.tools_dirty_reason is None:
+            state.tools_dirty_reason = reason
+    state.tools_schema_hash = digest
+
+
 @dataclasses.dataclass
 class _TurnState:
     """Long-lived + per-turn working state for one user message."""
@@ -269,6 +288,8 @@ class _TurnState:
     stream_truncated: bool = False
     last_preflight_tokens: int = 0
     provider_stream_failed: bool = False
+    tools_dirty_reason: str | None = None
+    tools_schema_hash: str = ""
 
 
 async def _prepare_turn_context(
@@ -333,7 +354,7 @@ async def _prepare_turn_context(
     )
     if tool_def_payload is not None and tool_def_payload.tools is not None:
         state.turn_tools = list(tool_def_payload.tools)
-        state.tools_dirty = True
+        _mark_tools_dirty(state, "hook", state.turn_tools)
         logger.debug(
             "tool.definition hook replaced tools %s",
             kv(
@@ -343,6 +364,8 @@ async def _prepare_turn_context(
                 tool_count=len(state.turn_tools),
             ),
         )
+    elif not state.tools_schema_hash:
+        state.tools_schema_hash = _tools_schema_hash(state.turn_tools)
     # Preflight uses unshaped history; pressure shaping applied after token count.
     state.resolved_messages = convert_to_provider(
         state.chat_messages,
@@ -415,7 +438,9 @@ async def _preflight_prompt_tokens(
     provider: Provider,
     vertex_google_search: bool,
 ) -> int:
-    state.stream_thinking = _stream_thinking_budget(provider, state.resolved_messages)
+    state.stream_thinking = _stream_thinking_budget(
+        provider, state.resolved_messages, state.ctx.config
+    )
     return await _provider_prompt_input_tokens(
         provider,
         state.provider_messages,
@@ -513,6 +538,7 @@ async def _run_history_summarization(
             request_id=state.ctx.request_id,
             estimated_tokens=post,
             context_window_tokens=state.ctx.context_window_tokens,
+            inner_turn=state.turn_index,
         )
 
 
@@ -627,7 +653,7 @@ async def _apply_pressure_and_before_provider(
         before_payload, state.provider_messages, state.turn_tools
     )
     if tools_replaced:
-        state.tools_dirty = True
+        _mark_tools_dirty(state, "hook", state.turn_tools)
     if before_payload is not None and (
         tools_replaced or before_payload.provider_messages is not None
     ):
@@ -675,6 +701,7 @@ async def _maybe_compact_and_shape(
         request_id=state.ctx.request_id,
         estimated_tokens=preflight,
         context_window_tokens=state.ctx.context_window_tokens,
+        inner_turn=state.turn_index,
     )
     cap = max(1, int(state.ctx.context_window_tokens * SUMMARY_TRIGGER_RATIO))
     async for evt in _maybe_summarize_on_token_pressure(
@@ -722,6 +749,18 @@ async def _write_transcript_provider_request(
         message_offset = state.provider_messages_written
         messages_reset = False
     include_tools = state.turn_index == 1 or messages_reset or state.tools_dirty
+    tools_include_reason: str | None = None
+    tools_dirty_reason: str | None = None
+    if include_tools:
+        if state.turn_index == 1:
+            # turn_index is the inner-loop counter, reset for every user message,
+            # so this fires once per user turn — not once per session.
+            tools_include_reason = "first_inner_turn"
+        elif messages_reset:
+            tools_include_reason = "messages_reset"
+        else:
+            tools_include_reason = "tools_dirty"
+            tools_dirty_reason = state.tools_dirty_reason
     await transcript_writer.write_provider_request(
         request_id=state.ctx.request_id,
         inner_turn=state.turn_index,
@@ -731,9 +770,12 @@ async def _write_transcript_provider_request(
         messages_reset=messages_reset,
         tools=[t.to_model_schema() for t in state.turn_tools] if include_tools else None,
         thinking_budget=state.stream_thinking,
+        tools_include_reason=tools_include_reason,
+        tools_dirty_reason=tools_dirty_reason,
     )
     state.provider_messages_written = len(state.provider_messages)
     state.tools_dirty = False
+    state.tools_dirty_reason = None
 
 
 async def _consume_provider_stream_body(
@@ -1237,6 +1279,7 @@ async def _append_tool_requests_and_dispatch(
     batch_state = ToolBatchState(
         ctx=state.ctx,
         tools_dirty=state.tools_dirty,
+        tools_dirty_reason=state.tools_dirty_reason,
         pre_tool_extra_next=state.pre_tool_extra_next,
     )
     async for evt in dispatch_tool_batch(
@@ -1261,6 +1304,7 @@ async def _append_tool_requests_and_dispatch(
         yield evt
     state.ctx = batch_state.ctx
     state.tools_dirty = batch_state.tools_dirty
+    state.tools_dirty_reason = batch_state.tools_dirty_reason
     state.pre_tool_extra_next = batch_state.pre_tool_extra_next
     if batch_state.aborted:
         state.needs_followup_after_tools = batch_state.needs_followup_after_tools
@@ -1296,7 +1340,7 @@ async def _run_inner_core(
     state = _TurnState(
         ctx=ctx,
         user_text=_user_text_from_content(user_content),
-        effective_max=_effective_max_turns(max_turns),
+        effective_max=_effective_max_turns(max_turns, ctx.config),
         doom_tracker=_DoomLoopTracker(
             threshold=_effective_doom_loop_threshold(),
             exempt_names=_doom_loop_exempt_names(ctx.tools),

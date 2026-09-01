@@ -2,7 +2,7 @@
 
 This document anchors the **monkeybot harness** — the runtime that owns turn semantics, tool dispatch, prompt composition, memory, and persistence. Use it when adding or modifying features so new work stays compatible with existing behavior and invariants.
 
-**Related docs:** [Getting Started](getting-started.md) · [SSE Gateway](sse-gateway-ui.md) · [MCP](mcp.md) · [Skills](skills.md) · [Cloud deployment](cloud-deployment-design.md)
+**Related docs:** [Getting Started](getting-started.md) · [Local Ollama](ollama-local.md) · [SSE Gateway](sse-gateway-ui.md) · [MCP](mcp.md) · [Skills](skills.md) · [Cloud deployment](cloud-deployment-design.md)
 
 ---
 
@@ -220,8 +220,9 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 | `anthropic` | — | anthropic-messages | `cache_control` + `x-session-affinity` |
 | `vertex_anthropic` | vertex-claude | anthropic-messages | `cache_control` |
 | `aws_bedrock` | — | anthropic-messages | `cache_control` |
-| `huggingface` / `nvidia` / `ollama` | — | openai-compat | none |
-| `ollama-cloud` / `ollama-local` | ollama_cloud, ollama_local | openai-compat | none |
+| `huggingface` / `nvidia` / `ollama` | — | openai-compat | none (legacy `ollama` auto-route: local gets keep_alive) |
+| `ollama-cloud` | ollama_cloud | openai-compat | none |
+| `ollama-local` | ollama_local | openai-compat | `keep_alive` (default 24h) + optional `num_ctx`; no Anthropic `cache_control` |
 | `fake` | — | fake | gateway/test only |
 
 **Auth:** see CLI `monkeybot doctor` and `cli/.../providers.py` (`PROVIDER_SPECS`).
@@ -233,7 +234,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `count_input_tokens()` must match the same payload shape as `stream()` (summarization triggers, tool budgets).
 - Provider resolution via `MODEL_PROVIDER` aliases (`gemini` → `google_vertexai`, `vertex-claude` → `vertex_anthropic`).
 - Optional extras in `pyproject.toml`: `gemini`, `openai`, `claude`, `vertex-claude`, `bedrock`, `huggingface`, `ollama`, `nvidia`.
-- `ollama`, `huggingface`, and `nvidia` share the OpenAI-compatible streaming core (`providers/_openai_compat.py`) and only differ in base URL / auth. Prefer explicit ids: `ollama-cloud` always hits `https://ollama.com` and requires `OLLAMA_API_KEY`; `ollama-local` always uses the local/self-hosted host (`OLLAMA_BASE_URL`, default `http://localhost:11434`) and needs no API key. Legacy `ollama` still auto-routes (a key with no URL means cloud; an explicit URL always wins). `nvidia` hits `https://integrate.api.nvidia.com/v1` and needs a free `NVIDIA_API_KEY` from build.nvidia.com.
+- `ollama`, `huggingface`, and `nvidia` share the OpenAI-compatible streaming core (`providers/_openai_compat.py`) and only differ in base URL / auth. Prefer explicit ids: `ollama-cloud` always hits `https://ollama.com` and requires `OLLAMA_API_KEY`; `ollama-local` always uses the local/self-hosted host (`OLLAMA_BASE_URL`, default `http://localhost:11434`) and needs no API key. Local requests send `keep_alive` (default 24h, `model.keep_alive`) and optional pinned `num_ctx` (`model.num_ctx`) via `extra_body` so Ollama's in-memory KV prefix cache survives idle — see [Local Ollama prefix cache](ollama-local.md). Both knobs are YAML-only. Legacy `ollama` still auto-routes (a key with no URL means cloud; an explicit URL always wins). `nvidia` hits `https://integrate.api.nvidia.com/v1` and needs a free `NVIDIA_API_KEY` from build.nvidia.com.
 - `MODEL_PROVIDER=fake` is gateway/test-only; unit tests inject `ScriptedFakeProvider` directly.
 - An `Image`/`File` block inside a `ToolResponse` reaches Anthropic-family, Bedrock, and Gemini models in place. The OpenAI-compat family instead promotes an `Image` into a synthetic user turn appended after the tool row (`providers/_openai_compat.py::messages_to_openai`) — `File` (PDF) results are never promoted, since Chat Completions has no document wire type.
 
@@ -242,6 +243,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Anthropic family: `cache_control` on stable system prefix + last tool when retention ≠ `none`; optional `x-session-affinity` header.
 - OpenAI: `x-session-affinity` when retention ≠ `none`; `prompt_cache_retention=24h` when `long`.
 - Gemini: relies on implicit prefix caching (epoch keeps stable baseline byte-identical); hints accepted as no-ops.
+- Ollama local: `keep_alive` + optional `num_ctx` on `/v1` `extra_body` (not Anthropic `cache_control`). `model.context_window` is never mapped to `num_ctx`.
 
 **Depends on:** `ToolDef`, `ContentBlock` serialization per adapter.
 
@@ -408,7 +410,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
   - Durable boundaries: `ToolCallStarted`, `ToolCallResult`, `TurnComplete`, `Error`, `ContextSummarized`, `AssistantTextEnded` (with `text`), `ThinkingBlockComplete`, epoch/steer admissions, etc.
   - Live-only: streaming deltas (`AssistantDelta`, `ToolInputDelta`, `ThinkingBlockDelta`, …), progress heartbeats, playground snapshots.
 - **Tool settlement:** live `ToolCallResult` mirrors durable `ToolResponse` blocks appended after the tool batch (one user row per model tool-call turn, call-order preserved). Crash between assistant `ToolRequest` append and batched responses is repaired in-memory on load (`tool_integrity`).
-- **Optional NDJSON transcript** (`MONKEYBOT_TRANSCRIPT_ENABLED`): writes durable events by default; set `MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE=1` for full SSE fidelity. CLI-spawned `chat` and `talk` gateways enable it by default for `/export-trace`; an explicit `MONKEYBOT_TRANSCRIPT_ENABLED=0` still disables capture.
+- **Optional NDJSON transcript** (`runtime.transcript_enabled` in monkeybot.yaml, default off, YAML-only): writes durable events plus provider request/response records into `transcript.ndjson`. Repeated tool schemas and `toolResponse` bodies are stubbed by reference (`schema_seq` / `result_seq`). The scaffold example yaml enables it so `/export-trace` works without extra setup.
 
 **Invariants:**
 - Lazy backend imports.

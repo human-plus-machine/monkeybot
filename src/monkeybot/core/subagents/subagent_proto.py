@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from monkeybot.core.config.settings import SubagentConfig
+from monkeybot.core.config.snapshot import current_env
 from monkeybot.core.layout import (
     resolve_agent_path,
     resolve_agent_root,
@@ -98,7 +99,7 @@ def resolve_default_agent_md_path(agent_root: Path | None = None) -> Path:
     Returns the first existing file. Raises if none of the candidates exist.
     """
     root = agent_root if agent_root is not None else resolve_agent_project_root()
-    raw = os.environ.get("AGENT_MD", "").strip()
+    raw = current_env("AGENT_MD", "").strip()
     if raw:
         path = resolve_project_path(raw, root)
         if path.is_file():

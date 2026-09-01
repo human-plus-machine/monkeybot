@@ -73,14 +73,16 @@ class MemorySubsystem:
         storage: Any | None = None,
         outbox: OutboxStore | None = None,
     ) -> None:
+        from monkeybot.core.config.snapshot import current_env
+
         self._memory_uri = memory_uri.strip()
         self._db_url = db_url
         self._agent_id = agent_id
         self._storage = storage
-        self.backend = (backend or os.environ.get("MEMPALACE_BACKEND") or DEFAULT_BACKEND).strip()
+        self.backend = (backend or current_env("MEMPALACE_BACKEND") or DEFAULT_BACKEND).strip()
         self.embedding_model = (
             embedding_model
-            or os.environ.get("MEMPALACE_EMBEDDING_MODEL")
+            or current_env("MEMPALACE_EMBEDDING_MODEL")
             or DEFAULT_EMBEDDING_MODEL
         ).strip()
         self._palace: PalacePort = palace or create_palace(

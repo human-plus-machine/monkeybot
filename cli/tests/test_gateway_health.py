@@ -48,7 +48,7 @@ def test_wait_for_health_rejects_dead_child_after_stale_200() -> None:
         assert wait_for_health("http://127.0.0.1:18080", proc, timeout_s=1.0) is False
 
 
-def test_spawn_gateway_enables_transcript_capture(tmp_path: Path, monkeypatch) -> None:
+def test_spawn_gateway_does_not_set_transcript_env(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     def fake_popen(*args: object, **kwargs: object) -> object:
@@ -65,7 +65,7 @@ def test_spawn_gateway_enables_transcript_capture(tmp_path: Path, monkeypatch) -
     try:
         env = captured["env"]
         assert isinstance(env, dict)
-        assert env["MONKEYBOT_TRANSCRIPT_ENABLED"] == "1"
+        assert "MONKEYBOT_TRANSCRIPT_ENABLED" not in env
     finally:
         spawned.log_file.close()
         spawned.log_path.unlink()

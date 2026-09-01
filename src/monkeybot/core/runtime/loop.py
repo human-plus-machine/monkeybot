@@ -42,8 +42,8 @@ from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.tools.inspector import ToolInspector
 from monkeybot.core.types.content_blocks import ContentBlock
 
-from .events import AgentEvent, Error, TurnComplete
 from .context_budget import SUMMARY_TRIGGER_RATIO
+from .events import AgentEvent, Error, TurnComplete
 from .input_admission import InputAdmission
 from .loop_hooks import _drain_hook_settlement
 from .loop_messages import _normalize_user_content
@@ -96,7 +96,7 @@ async def run(
     t0 = time.monotonic()
     trace_id_capture: list[str | None] = [None]
     blocks = _normalize_user_content(user_content)
-    effective_max = _effective_max_turns(max_turns)
+    effective_max = _effective_max_turns(max_turns, ctx.config)
     logger.debug(
         "harness run start %s",
         kv(

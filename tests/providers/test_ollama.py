@@ -204,7 +204,7 @@ async def test_ollama_stream_omits_reasoning_effort_by_default(
     )
     provider = OllamaProvider(thinking_budget=-1)
     _ = [ev async for ev in provider.stream([], [], model="gemma4:12b")]
-    assert "reasoning_effort" not in captured[0]
+    assert captured[0].get("reasoning_effort") is None
     assert captured[0]["provider"] == "ollama"
 
 
@@ -225,3 +225,112 @@ async def test_cloud_stream_passes_provider_name(monkeypatch: pytest.MonkeyPatch
     provider = OllamaProvider(mode="cloud")
     _ = [ev async for ev in provider.stream([], [], model="glm-5.3-flash")]
     assert captured[0]["provider"] == "ollama-cloud"
+    assert not captured[0].get("extra_body")
+
+
+def test_local_constructor_rejects_non_positive_num_ctx() -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        OllamaProvider(mode="local", num_ctx=-1)
+    with pytest.raises(ValueError, match="positive integer"):
+        OllamaProvider(mode="local", num_ctx=0)
+
+
+def _capture_stream(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    captured: list[dict[str, Any]] = []
+
+    async def _fake_stream(**kwargs: Any):
+        captured.append(kwargs)
+        if False:  # pragma: no cover
+            yield
+
+    monkeypatch.setattr(
+        "monkeybot.providers.ollama.stream_chat_completions_with_tool_fallback",
+        _fake_stream,
+    )
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_local_stream_sends_keep_alive_24h(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _capture_stream(monkeypatch)
+    provider = OllamaProvider(mode="local")
+    _ = [ev async for ev in provider.stream([], [], model="llama3.1")]
+    extra = captured[0]["extra_body"]
+    assert extra["keep_alive"] == "24h"
+    assert "options" not in extra
+
+
+@pytest.mark.asyncio
+async def test_local_stream_keep_alive_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _capture_stream(monkeypatch)
+    provider = OllamaProvider(mode="local", keep_alive="60m")
+    _ = [ev async for ev in provider.stream([], [], model="llama3.1")]
+    extra = captured[0]["extra_body"]
+    assert extra["keep_alive"] == "60m"
+    assert "options" not in extra
+
+
+@pytest.mark.asyncio
+async def test_local_stream_omits_keep_alive_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _capture_stream(monkeypatch)
+    provider = OllamaProvider(mode="local", keep_alive="0")
+    _ = [ev async for ev in provider.stream([], [], model="llama3.1")]
+    assert not captured[0].get("extra_body")
+
+
+@pytest.mark.asyncio
+async def test_local_stream_omits_keep_alive_when_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _capture_stream(monkeypatch)
+    provider = OllamaProvider(mode="local", keep_alive="")
+    _ = [ev async for ev in provider.stream([], [], model="llama3.1")]
+    assert not captured[0].get("extra_body")
+
+
+@pytest.mark.asyncio
+async def test_legacy_auto_local_sends_keep_alive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    captured = _capture_stream(monkeypatch)
+    provider = OllamaProvider()
+    _ = [ev async for ev in provider.stream([], [], model="llama3.1")]
+    assert captured[0]["extra_body"]["keep_alive"] == "24h"
+
+
+@pytest.mark.asyncio
+async def test_cloud_stream_omits_keep_alive_and_num_ctx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama-cloud-key")
+    captured = _capture_stream(monkeypatch)
+    provider = OllamaProvider(mode="cloud", keep_alive="24h", num_ctx=8192)
+    _ = [ev async for ev in provider.stream([], [], model="glm-5.3-flash")]
+    assert not captured[0].get("extra_body")
+
+
+@pytest.mark.asyncio
+async def test_local_stream_pins_num_ctx_stably(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _capture_stream(monkeypatch)
+    provider = OllamaProvider(mode="local", num_ctx=8192)
+    _ = [ev async for ev in provider.stream([], [], model="llama3.1")]
+    _ = [ev async for ev in provider.stream([], [], model="llama3.1")]
+    assert len(captured) == 2
+    extra = captured[0]["extra_body"]
+    assert extra["keep_alive"] == "24h"
+    assert extra["options"] == {"num_ctx": 8192}
+    assert captured[1]["extra_body"]["options"]["num_ctx"] == 8192
+
+
+@pytest.mark.asyncio
+async def test_local_stream_ignores_env_knobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OLLAMA_REQUEST_KEEP_ALIVE", "0")
+    monkeypatch.setenv("OLLAMA_NUM_CTX", "4096")
+    captured = _capture_stream(monkeypatch)
+    provider = OllamaProvider(mode="local")
+    _ = [ev async for ev in provider.stream([], [], model="llama3.1")]
+    extra = captured[0]["extra_body"]
+    assert extra["keep_alive"] == "24h"
+    assert "options" not in extra

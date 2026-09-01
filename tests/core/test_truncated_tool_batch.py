@@ -173,3 +173,20 @@ async def test_run_executes_valid_call_when_sibling_has_parse_error() -> None:
     assert len(exe.calls) == 1
     assert exe.calls[0].call_id == "b"
     assert isinstance(events[-1], TurnComplete)
+
+
+@pytest.mark.asyncio
+async def test_await_user_response_uses_pinned_config_timeout() -> None:
+    import asyncio
+    from types import SimpleNamespace
+
+    from monkeybot.core.runtime.tool_batch import _await_user_response_any
+
+    class Bus:
+        def abandon_pending_timeout(self, key: str) -> None:
+            del key
+
+    pinned = SimpleNamespace(env_values={"PENDING_RESPONSE_TIMEOUT_SEC": "0.05"})
+    fut: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+    result = await _await_user_response_any(Bus(), fut, "k", config=pinned)  # type: ignore[arg-type]
+    assert result == {"_timeout": True}

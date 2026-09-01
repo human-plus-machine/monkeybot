@@ -432,10 +432,12 @@ def create_palace(
     backend: str | None = None,
     embedding_model: str | None = None,
 ) -> PalacePort:
+    from monkeybot.core.config.snapshot import current_env
+
     path = palace_path_from_uri(memory_uri)
-    be = (backend or os.environ.get("MEMPALACE_BACKEND") or DEFAULT_BACKEND).strip()
+    be = (backend or current_env("MEMPALACE_BACKEND") or DEFAULT_BACKEND).strip()
     model = (
-        embedding_model or os.environ.get("MEMPALACE_EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL
+        embedding_model or current_env("MEMPALACE_EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL
     ).strip()
     if not mempalace_available():
         raise MemoryDependencyError(

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any, cast
 
@@ -44,12 +43,14 @@ class VertexClaudeProvider:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> None:
-        self._project_id = (project_id or "").strip() or os.environ.get(
+        from monkeybot.core.config.snapshot import current_env
+
+        self._project_id = (project_id or "").strip() or current_env(
             "ANTHROPIC_VERTEX_PROJECT_ID", ""
         ).strip()
         self._region = (
             (region or "").strip()
-            or os.environ.get("ANTHROPIC_VERTEX_REGION", "").strip()
+            or current_env("ANTHROPIC_VERTEX_REGION", "").strip()
             or "global"
         )
         if not self._project_id:
