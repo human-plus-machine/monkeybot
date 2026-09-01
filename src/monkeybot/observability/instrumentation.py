@@ -41,10 +41,6 @@ class ObservingProvider:
     def supports_streaming(self) -> bool:
         return self._inner.supports_streaming
 
-    @property
-    def supports_tool_result_media(self) -> bool:
-        return self._inner.supports_tool_result_media
-
     async def count_input_tokens(
         self,
         messages: Sequence[Message],

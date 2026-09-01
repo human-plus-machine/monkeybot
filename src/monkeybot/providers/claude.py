@@ -31,10 +31,6 @@ class ClaudeProvider:
     def supports_streaming(self) -> bool:
         return True
 
-    @property
-    def supports_tool_result_media(self) -> bool:
-        return True
-
     def __init__(
         self,
         *,

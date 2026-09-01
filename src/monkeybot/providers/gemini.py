@@ -555,12 +555,6 @@ class GeminiProvider:
     def supports_streaming(self) -> bool:
         return self._supports_streaming
 
-    @property
-    def supports_tool_result_media(self) -> bool:
-        # inline_data parts are appended alongside the functionResponse part —
-        # see _messages_to_contents.
-        return True
-
     async def count_input_tokens(
         self,
         messages: Sequence[Message],

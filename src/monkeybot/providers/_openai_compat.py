@@ -374,10 +374,13 @@ def openai_tools(tools: Sequence[ToolDef]) -> list[dict[str, Any]]:
 
 
 # Flat per-image token estimate for `image_url` content parts. Not exact vendor
-# tokenization, but bounds it: tokenizing the base64 data URL as JSON text (the
-# fallback below) counts ~1 token per 4 base64 chars, so a 1MB screenshot would
-# count as ~340K tokens and trigger spurious compaction.
-_IMAGE_URL_TOKEN_ESTIMATE = 200
+# tokenization, but bounds it in both directions: tokenizing the base64 data URL
+# as JSON text (the fallback below) counts ~1 token per 4 base64 chars, so a 1MB
+# screenshot would count as ~340K tokens and trigger spurious compaction, while
+# undercounting risks skipping compaction and hitting a hard context-overflow
+# 400. OpenAI bills a 1024x1024 image at ~1.1K tokens, so this errs high rather
+# than risk the overflow failure mode.
+_IMAGE_URL_TOKEN_ESTIMATE = 1000
 
 
 def _content_list_token_count(encoding: Any, content: list[Any]) -> int:

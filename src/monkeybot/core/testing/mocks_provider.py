@@ -45,12 +45,10 @@ class ScriptedFakeProvider:
         *,
         name: str = "fake",
         supports_streaming: bool = True,
-        supports_tool_result_media: bool = True,
     ) -> None:
         self._events = list(events)
         self._name = name
         self._supports_streaming = supports_streaming
-        self._supports_tool_result_media = supports_tool_result_media
 
     @property
     def name(self) -> str:
@@ -59,10 +57,6 @@ class ScriptedFakeProvider:
     @property
     def supports_streaming(self) -> bool:
         return self._supports_streaming
-
-    @property
-    def supports_tool_result_media(self) -> bool:
-        return self._supports_tool_result_media
 
     async def stream(
         self,

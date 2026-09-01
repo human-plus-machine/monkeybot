@@ -407,7 +407,7 @@ async def test_openai_token_count_bounded_for_promoted_image() -> None:
     ]
     enc = tiktoken.get_encoding("cl100k_base")
     count = openai_messages_token_count(enc, rows)
-    assert count < 1_000
+    assert count < 2_000
 
 
 async def test_openai_canonical_four_turn_image_tool_result_inserts_promoted_row() -> None:
