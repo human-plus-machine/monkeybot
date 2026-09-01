@@ -38,6 +38,7 @@ def test_no_env_map_os_environ_gets_outside_allowlist() -> None:
             line_no = text.count("\n", 0, match.start()) + 1
             rel = path.relative_to(_REPO_ROOT)
             hits.append(f"{rel}:{line_no}: {match.group(0).strip()}")
-    assert not hits, "ENV_MAP keys must be read via current_env/env_value, not os.environ.get:\n" + "\n".join(
-        hits
+    assert not hits, (
+        "ENV_MAP keys must be read via current_env/env_value, "
+        "not os.environ.get:\n" + "\n".join(hits)
     )

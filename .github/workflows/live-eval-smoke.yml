@@ -111,17 +111,13 @@ jobs:
         working-directory: evals/smoke_agent
         env:
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-          # Pin agent model for CI; env beats monkeybot.yaml.
-          MODEL_PROVIDER: nvidia
-          MODEL_NAME: thinkingmachines/inkling
+          # Agent model is YAML-only (evals/smoke_agent/monkeybot_config/monkeybot.yaml).
           # smoke_agent monkeybot.yaml sets runtime.port: 8080; the health check and
           # AGENT_URL below expect 8787, so pin PORT explicitly (env beats yaml).
           PORT: "8787"
           SANDBOX_ENABLED: "false" # no Docker socket in this runner
-          # No MODEL_CONTEXT_WINDOW override: that was only needed for
-          # context/summarization_trigger.yaml (see evals/suites/smoke.yaml), which is
-          # currently excluded from smoke pending a retune against thinkingmachines/inkling.
-          # Re-add MODEL_CONTEXT_WINDOW: "8000" here alongside it if it comes back.
+          # summarization_trigger is excluded from smoke; if it returns, set
+          # model.context_window in smoke_agent YAML (not MODEL_CONTEXT_WINDOW env).
         run: |
           uv run -m monkeybot.gateway.main > /tmp/gateway.log 2>&1 &
           echo $! > /tmp/gateway.pid
@@ -143,9 +139,8 @@ jobs:
           JUDGE_PROVIDER: nvidia
           JUDGE_MODEL: nvidia/nemotron-3-ultra-550b-a55b
           NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-          # Scorecard metadata: report the model the gateway actually ran.
-          MODEL_PROVIDER: nvidia
-          MODEL_NAME: thinkingmachines/inkling
+          # Scorecard metadata: read the model the gateway ran from smoke_agent YAML.
+          MONKEYBOT_AGENT_CONFIG: evals/smoke_agent/monkeybot_config/monkeybot.yaml
           EVENT_NAME: ${{ github.event_name }}
           # thinkingmachines/inkling gets rate-limited by NVIDIA even at low concurrency;
           # each scenario itself makes several requests in quick succession, so space

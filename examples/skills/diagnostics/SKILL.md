@@ -28,4 +28,4 @@ a bundled script.
 
 ## Expected env vars (full check)
 
-`AGENT_NAME`, `MODEL_PROVIDER`, `VERTEX_AI_PROJECT_ID`, `SKILLS_DIR` — missing vars appear in `issues`.
+`AGENT_NAME`, `VERTEX_AI_PROJECT_ID`, `SKILLS_DIR` — missing vars appear in `issues`.

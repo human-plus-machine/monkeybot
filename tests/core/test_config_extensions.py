@@ -32,6 +32,7 @@ from monkeybot.core.config.runtime_env import (
     ENV_SPEC,
     RETIRED_CONTEXT_CURATION_KEYS,
     RETIRED_TOOLS_KEYS,
+    YAML_ONLY_ENV_KEYS,
     warn_retired_curation_keys,
     warn_retired_tools_keys,
 )
@@ -42,6 +43,8 @@ from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES
 class TestEnvMap:
     def test_model_provider_maps(self) -> None:
         assert ENV_MAP[("model", "provider")] == "MODEL_PROVIDER"
+        assert "MODEL_PROVIDER" in YAML_ONLY_ENV_KEYS
+        assert "MODEL_NAME" in YAML_ONLY_ENV_KEYS
         assert ("model", "keep_alive") not in ENV_MAP
         assert ("model", "num_ctx") not in ENV_MAP
 

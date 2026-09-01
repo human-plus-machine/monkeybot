@@ -119,9 +119,9 @@ MEMORY_STORAGE_URI = s3://my-bucket/monkeybot-memory
 AGENT_MD_PATH      = /app/monkeybot_config/AGENT.md
 SKILLS_PATH        = /app/skills
 MONKEYBOT_WORKSPACE_ROOT = /agent/workspace
-MODEL_PROVIDER     = aws_bedrock
-MODEL_NAME         = (your Bedrock model id)
 ```
+
+Set `model.provider: aws_bedrock` and `model.name` to your Bedrock model id in `monkeybot.yaml` (YAML-only).
 
 **Layout:** Package `monkeybot_config/` and `skills/` with the handler bundle as
 read-only inputs. AgentCore workspace is ephemeral unless you explicitly use

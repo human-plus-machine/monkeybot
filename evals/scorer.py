@@ -27,13 +27,7 @@ _METRIC_CLASS_ALIASES: dict[str, str] = {
 
 
 def _read_agent_model_config() -> tuple[str, str]:
-    """Agent model provider/name: ``MODEL_PROVIDER``/``MODEL_NAME`` env (same override
-    the gateway honors) > mounted monkeybot.yaml > defaults."""
-    if os.environ.get("MODEL_PROVIDER"):
-        return (
-            os.environ["MODEL_PROVIDER"].strip().lower(),
-            os.environ.get("MODEL_NAME", "").strip(),
-        )
+    """Agent model provider/name from monkeybot.yaml (YAML-only)."""
     config_path = os.environ.get("MONKEYBOT_AGENT_CONFIG", "/config/monkeybot.yaml")
     try:
         with open(config_path, encoding="utf-8") as f:

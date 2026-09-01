@@ -1,0 +1,4 @@
+# Compose entry: keep the image's scaffolded monkeybot.yaml and overlay demo-model.yaml.
+includes:
+  - monkeybot.yaml
+  - demo-model.yaml

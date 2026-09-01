@@ -315,12 +315,12 @@ async def run_config_reload(
         runtime: Any | None = None
         needs_apply = False
         try:
-            if store.current_or_none() is None:
-                load_into_store()
-            if env:
-                prev_pins = capture_reload_pins(env.keys())
-                apply_reload_env_patch(env)
             try:
+                if store.current_or_none() is None:
+                    load_into_store()
+                if env:
+                    prev_pins = capture_reload_pins(env.keys())
+                    apply_reload_env_patch(env)
                 cfg, diff = store.prepare_reload()
             except ConfigError as exc:
                 current = store.current_or_none()

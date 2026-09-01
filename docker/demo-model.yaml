@@ -1,0 +1,5 @@
+# Compose overlay: fake provider so `docker compose up` is health-checkable
+# without credentials. Keep WEB_SEARCH_BACKEND=none in compose env.
+model:
+  provider: fake
+  name: fake

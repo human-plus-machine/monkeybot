@@ -1,5 +1,5 @@
 # Crossing the real summarization threshold needs enough accumulated token volume. Set
-# MODEL_CONTEXT_WINDOW to a small value (e.g. 8000) on the agent process running this scenario
+# model.context_window to a small value (e.g. 8000) on the agent running this scenario
 # so SUMMARY_TRIGGER_RATIO * context_window is reachable within a handful of turns — don't rely
 # on the production 200k default, or this scenario will pass without ever exercising curation.
 description: "Long multi-turn conversation crosses the real summarization threshold"

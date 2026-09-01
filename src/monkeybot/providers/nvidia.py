@@ -9,9 +9,9 @@ Configuration (environment variables or ``monkeybot.yaml``):
   (open any model card → "Get API Key"); starts with ``nvapi-``
 - ``NVIDIA_BASE_URL`` — OpenAI-compat base host (default:
   ``https://integrate.api.nvidia.com/v1``)
-- ``MODEL_NAME`` — model id passed to the API (e.g. ``meta/llama-3.3-70b-instruct``)
-- ``MODEL_TEMPERATURE`` — sampling temperature (default: ``0.7``; set via ``monkeybot.yaml`` / constructor)
-- ``MODEL_MAX_TOKENS`` — max output tokens (default: ``60000``; set via ``monkeybot.yaml`` / constructor)
+- ``model.name`` — model id passed to the API (e.g. ``meta/llama-3.3-70b-instruct``)
+- ``model.temperature`` — sampling temperature (default: ``0.7``; YAML-only)
+- ``model.max_tokens`` — max output tokens (default: ``60000``; YAML-only)
 
 Install the required extra::
 

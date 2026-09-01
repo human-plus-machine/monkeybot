@@ -63,8 +63,6 @@ model:
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `MODEL_PROVIDER` | Yes | `google_vertexai` | Must be `google_vertexai` or `google_genai` for realtime v1. |
-| `MODEL_NAME` | Yes | `gemini-2.5-flash` | Model used for realtime. Context curation can use a separate curator model. |
 | `GEMINI_API_KEY` | Yes (Google AI Studio) | — | API key when using `google_genai`. |
 | `VERTEX_AI_PROJECT_ID` | Yes (Vertex) | — | GCP project for Vertex AI. |
 | `VERTEX_AI_LOCATION` | No | `us-central1` | Vertex region. |
@@ -113,14 +111,15 @@ uv tool install monkeybot-cli
 ## 4. Run Locally
 
 ```bash
-# Run from an agent root whose monkeybot_config/monkeybot.yaml enables realtime.
+# Run from an agent root whose monkeybot_config/monkeybot.yaml enables realtime
+# and sets model.provider / model.name (YAML-only).
 
 # Google AI Studio (gemini-3.1-flash-live-preview)
-export MODEL_PROVIDER=google_genai
+# monkeybot.yaml: model.provider: google_genai
 export GEMINI_API_KEY=your-api-key
 
 # Or Vertex AI
-# export MODEL_PROVIDER=google_vertexai
+# monkeybot.yaml: model.provider: google_vertexai
 # export VERTEX_AI_PROJECT_ID=your-project
 # export VERTEX_AI_LOCATION=us-central1
 
@@ -182,7 +181,6 @@ Override the container command to start the realtime entrypoint:
 
 ```bash
 docker run -p 8000:8000 \
-  -e MODEL_PROVIDER=google_vertexai \
   -e VERTEX_AI_PROJECT_ID=your-project \
   -e DB_URL=postgresql://... \
   -e MEMORY_STORAGE_URI=gcs://your-bucket/monkeybot-memory \
@@ -244,7 +242,7 @@ Export these logs to your monitoring stack (Cloud Logging, Datadog, etc.) the sa
 Vertex AI Agent Engine provides managed Gemini Live (`bidi_stream_query`) endpoints. The MonkeyBot `GeminiLiveProvider` uses the same `google-genai` SDK as the turn-based Vertex provider.
 
 1. Build with `realtime-gemini` extra.
-2. Set `MODEL_PROVIDER=google_vertexai` and `VERTEX_AI_PROJECT_ID`.
+2. Set `model.provider: google_vertexai` in `monkeybot.yaml` and `VERTEX_AI_PROJECT_ID`.
 3. The gateway calls `client.aio.live.connect(...)` using the Vertex project/location inferred from `VERTEX_AI_PROJECT_ID` and `VERTEX_AI_LOCATION`.
 4. Ensure the runtime service account has `roles/aiplatform.user`.
 
@@ -255,7 +253,7 @@ Vertex AI Agent Engine provides managed Gemini Live (`bidi_stream_query`) endpoi
 Google AI Studio is the only surface that hosts the `gemini-3.1-flash-live-preview` preview model as of mid-2026.
 
 1. Build with `realtime-gemini` extra.
-2. Set `MODEL_PROVIDER=google_genai` and `GEMINI_API_KEY`.
+2. Set `model.provider: google_genai` in `monkeybot.yaml` and `GEMINI_API_KEY`.
 3. The gateway calls `client.aio.live.connect(...)` with `api_key=GEMINI_API_KEY`.
 4. For production, use [ephemeral tokens](https://ai.google.dev/gemini-api/docs/live-api/session-management) so the API key does not travel to clients.
 
