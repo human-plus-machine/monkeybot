@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Breaking
+
+- `context_curation` is retired. The section no longer maps to env or trims MemPalace wake-up lines. Leftover YAML still loads and logs one warning; `CONTEXT_CURATION_*` / `MEMORY_INDEX_CAP` process env is unused. Prompt size is bounded by `model.context_window` and history summarization.
+
 ### Added
 
 - Local Ollama prefix-cache knobs: `ollama-local` sends `keep_alive` (default 24h, `model.keep_alive`) and optional pinned `num_ctx` (`model.num_ctx`) via OpenAI-compat `extra_body`. YAML-only — not mapped from the runtime env. `model.context_window` is never mapped to `num_ctx`. `doctor` warns on `*-mlx` tags, default thinking on known reasoning tags, and huge `num_ctx`, and fails on unparseable/`<1` `num_ctx`. See `docs/ollama-local.md` and `examples/ollama/PrefixStable.Modelfile`.

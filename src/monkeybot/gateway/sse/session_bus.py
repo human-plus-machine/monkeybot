@@ -351,9 +351,7 @@ class SessionRegistry:
         """Drop a session bus and any auxiliary per-session state keyed by it.
 
         Cancels outstanding pending-response futures so awaiting callers don't
-        hang, then evicts the memory-curation cache entry for this thread id
-        so both structures share the
-        same lifecycle instead of growing unbounded for the life of the process.
+        hang.
 
         Does not run spill cleanup — use :meth:`remove_async` for that
         (DELETE /sessions and gateway shutdown).

@@ -802,7 +802,6 @@ class GatewayLoopPort:
                     todo_store=todo_store,
                     approvals_persist=approvals_persist,
                     config=cfg,
-                    enable_context_curation=env_flag(cfg, "CONTEXT_CURATION_ENABLED", default=True),
                 )
             except Exception as exc:
                 logger.exception("build_context failed")

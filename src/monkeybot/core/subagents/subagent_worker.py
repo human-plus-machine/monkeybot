@@ -184,8 +184,8 @@ async def _stream_run_loop_events(
 def _event_for_ndjson_pipe(evt: AgentEvent) -> AgentEvent:
     """Shrink live-only payloads before writing to the parent NDJSON pipe.
 
-    ``SystemPromptSnapshot.text`` includes the full memory INDEX when curation is
-    off for subagents. Emitting that verbatim used to blow asyncio's 64 KiB
+    ``SystemPromptSnapshot.text`` includes the full MemPalace wake-up block.
+    Emitting that verbatim used to blow asyncio's 64 KiB
     ``readline`` limit on the parent. Parent drain ignores the snapshot anyway.
     """
     if isinstance(evt, SystemPromptSnapshot):
@@ -417,7 +417,6 @@ async def _async_main() -> None:
             include_task_tool=False,
             workspace_root=ws,
             context_window_tokens=window_tokens,
-            enable_context_curation=False,
             extra_tools=extra_tools,
             config=cfg,
         )

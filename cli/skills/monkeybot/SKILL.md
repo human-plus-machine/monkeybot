@@ -160,7 +160,7 @@ Decision → config map:
 | "Run untrusted code" | `sandbox.enabled` + `SANDBOX_API_KEY` |
 | "Use specialist agents" | `subagents.personas` + `monkeybot_config/agents/*.md` |
 | "Connect external tools" | `mcp.json` (`mcpServers` object), then `validate --check-mcp` |
-| "Control cost / context size" | `model.*`, `context_curation.*` |
+| "Control cost / context size" | `model.*` |
 | "Restrict dangerous commands" | `tools.denied_patterns`, `command_allowlist.yaml` |
 | "Multiple environments" | top-level `includes:` fragments |
 

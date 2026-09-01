@@ -30,7 +30,6 @@ from monkeybot.core.config import (
 from monkeybot.core.config.runtime_env import (
     ENV_MAP,
     ENV_SPEC,
-    RETIRED_CONTEXT_CURATION_KEYS,
     RETIRED_TOOLS_KEYS,
     warn_retired_curation_keys,
     warn_retired_tools_keys,
@@ -618,18 +617,21 @@ class TestReadDefaultLinesFixed:
         assert result["end_line"] - result["start_line"] + 1 == 40
 
 
-class TestRetiredContextCurationKeys:
-    def test_curator_keys_retired_from_env_map(self) -> None:
-        assert "curator_model" in RETIRED_CONTEXT_CURATION_KEYS
-        assert "timeout_sec" in RETIRED_CONTEXT_CURATION_KEYS
-        assert ("context_curation", "curator_model") not in ENV_MAP
-        assert ("context_curation", "timeout_sec") not in ENV_MAP
+class TestRetiredContextCuration:
+    def test_section_retired_from_env_map(self) -> None:
+        assert not any(section == "context_curation" for section, _ in ENV_MAP)
 
-    def test_yaml_keys_warn_and_are_ignored(self) -> None:
+    def test_yaml_section_warns_once_and_is_ignored(self) -> None:
         found = warn_retired_curation_keys(
-            {"context_curation": {"curator_model": "x", "timeout_sec": 10, "enabled": True}}
+            {
+                "context_curation": {
+                    "enabled": True,
+                    "memory_window_lines": 12,
+                }
+            }
         )
-        assert found == ["curator_model", "timeout_sec"]
+        assert found == ["context_curation"]
+        assert warn_retired_curation_keys({}) == []
 
 
 class TestRealtimeConfig:

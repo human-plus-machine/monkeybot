@@ -133,8 +133,6 @@ memory:
   backend: chroma
   embedding_model: embeddinggemma-300m
 
-# context_curation is unused after MemPalace wake-up replaced INDEX.md + curator.
-
 emission:
   # Terse emission-style guidance injected into the cached harness prefix.
   # Two named modes:
