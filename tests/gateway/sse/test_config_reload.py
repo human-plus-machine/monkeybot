@@ -676,6 +676,22 @@ async def test_first_load_env_patch_keeps_operator_pins(
 
 
 @pytest.mark.asyncio
+async def test_first_load_stale_model_provider_returns_400(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _write_yaml(tmp_path, "runtime:\n  port: 8080\n")
+    monkeypatch.setenv("MODEL_PROVIDER", "aws_bedrock")
+    reset_runtime_env_state_for_tests()
+    with pytest.raises(APIError) as exc_info:
+        await run_config_reload(registry=SessionRegistry(), fastapi_app=None)
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.code == "INVALID_CONFIG"
+    assert "no model.provider" in exc_info.value.message
+    assert get_config_store().current_or_none() is None
+
+
+@pytest.mark.asyncio
 async def test_missing_allowlist_reload_rejects_when_policy_was_active(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -21,6 +22,7 @@ from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import TurnComplete, UsageTotals
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope
+from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.types import unwrap_tool_execution_result
 from tests.core.memory.helpers import make_memory_subsystem
@@ -105,7 +107,9 @@ def _make_executor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CoreToolE
 def _w3c_textmap() -> None:
     propagate.set_global_textmap(TraceContextTextMapPropagator())
     reset_runtime_env_state_for_tests()
+    cwd = Path.cwd()
     yield
+    os.chdir(cwd)
     reset_runtime_env_state_for_tests()
 
 
@@ -402,6 +406,12 @@ def _install_worker_mocks(
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("MEMORY_STORAGE_URI", mem_uri)
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
+    cfg = tmp_path / "monkeybot_config"
+    cfg.mkdir(exist_ok=True)
+    (cfg / "monkeybot.yaml").write_text(
+        "model:\n  provider: fake\n  name: fake\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
     monkeypatch.setenv(
         "MONKEYBOT_FAKE_PROVIDER_EVENTS",
         json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),
@@ -476,6 +486,7 @@ async def test_worker_linked_trace_fixture_or_harness(
     _install_worker_mocks(monkeypatch, tmp_path, envelope=envelope, otel_memory_exporter=otel_memory_exporter)
 
     await subagent_worker._async_main()
+    assert isinstance(subagent_worker._resolve_provider(), ScriptedFakeProvider)
 
     spans = otel_memory_exporter.get_finished_spans()  # type: ignore[attr-defined]
     sub = next(s for s in spans if s.name == "monkeybot.subagent")
@@ -507,6 +518,7 @@ async def test_malformed_traceparent_worker_starts_new_trace(
     _install_worker_mocks(monkeypatch, tmp_path, envelope=envelope, otel_memory_exporter=otel_memory_exporter)
 
     await subagent_worker._async_main()
+    assert isinstance(subagent_worker._resolve_provider(), ScriptedFakeProvider)
 
     warnings = [r.message.lower() for r in caplog.records if r.levelno >= logging.WARNING]
     assert any("traceparent" in msg or "malformed" in msg or "propagat" in msg for msg in warnings)
@@ -536,6 +548,7 @@ async def test_legacy_envelope_without_traceparent_starts_disjoint_trace(
     _install_worker_mocks(monkeypatch, tmp_path, envelope=envelope, otel_memory_exporter=otel_memory_exporter)
 
     await subagent_worker._async_main()
+    assert isinstance(subagent_worker._resolve_provider(), ScriptedFakeProvider)
 
     spans = otel_memory_exporter.get_finished_spans()  # type: ignore[attr-defined]
     assert spans
@@ -567,6 +580,12 @@ async def test_worker_completes_without_memory_uri(
     skills.mkdir()
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
+    cfg = tmp_path / "monkeybot_config"
+    cfg.mkdir(exist_ok=True)
+    (cfg / "monkeybot.yaml").write_text(
+        "model:\n  provider: fake\n  name: fake\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
     monkeypatch.setenv(
         "MONKEYBOT_FAKE_PROVIDER_EVENTS",
         json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),
@@ -623,5 +642,6 @@ async def test_worker_completes_without_memory_uri(
     monkeypatch.setattr(subagent_worker, "shutdown_observability", lambda: None)
 
     await subagent_worker._async_main()
+    assert isinstance(subagent_worker._resolve_provider(), ScriptedFakeProvider)
 
     assert seen_memory == [None]

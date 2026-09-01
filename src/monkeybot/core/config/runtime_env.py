@@ -306,11 +306,11 @@ def warn_retired_curation_keys(doc: Mapping[str, Any]) -> list[str]:
     return found
 
 
-def warn_yaml_only_model_env(merged: Mapping[str, Any] | None = None) -> list[str]:
-    """Warn once when process env still has retired model overlay keys.
+def check_yaml_only_model_env(merged: Mapping[str, Any] | None = None) -> list[str]:
+    """Ignore leftover YAML-only model env; fail load if provider is env-only.
 
-    Leftover ``MODEL_PROVIDER`` with no YAML ``model.provider`` raises
-    ``ConfigError`` instead of silently defaulting the provider.
+    Warns once when process env still has retired model overlay keys. Leftover
+    ``MODEL_PROVIDER`` with no YAML ``model.provider`` raises ``ConfigError``.
     """
     global _yaml_only_model_env_warned
     found = [name for name in sorted(YAML_ONLY_ENV_KEYS) if name in os.environ]

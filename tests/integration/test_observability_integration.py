@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import os
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -21,11 +22,13 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
 import monkeybot.observability as observability_pkg
+from monkeybot.core.config import reset_runtime_env_state_for_tests
 from monkeybot.core.context import TurnContext
 from monkeybot.core.llm.provider import Done, TextDelta, ToolCall
 from monkeybot.core.runtime.events import TurnComplete, UsageTotals
 from monkeybot.core.runtime.loop import run
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope
+from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from tests.core.test_loop import AllowInspector, FakeHistory, FakeProvider, _ctx, _ctx_with_task
 from tests.core.test_subagent_trace_propagation import (
@@ -50,6 +53,11 @@ def _reset_otel_globals() -> None:
 @pytest.fixture(autouse=True)
 def _w3c_textmap() -> None:
     propagate.set_global_textmap(TraceContextTextMapPropagator())
+    reset_runtime_env_state_for_tests()
+    cwd = Path.cwd()
+    yield
+    os.chdir(cwd)
+    reset_runtime_env_state_for_tests()
 
 
 @pytest.mark.integration
@@ -249,6 +257,12 @@ async def test_integrated_run_task_subagent_shares_parent_trace_id(
         monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
         monkeypatch.setenv("MEMORY_STORAGE_URI", envelope.memory_storage_uri)
         monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
+        cfg = tmp_path / "monkeybot_config"
+        cfg.mkdir(exist_ok=True)
+        (cfg / "monkeybot.yaml").write_text(
+            "model:\n  provider: fake\n  name: fake\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
         monkeypatch.setenv(
             "MONKEYBOT_FAKE_PROVIDER_EVENTS",
             json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),
@@ -311,6 +325,7 @@ async def test_integrated_run_task_subagent_shares_parent_trace_id(
         monkeypatch.setattr(subagent_worker, "shutdown_observability", lambda: None)
 
         await subagent_worker._async_main()
+        assert isinstance(subagent_worker._resolve_provider(), ScriptedFakeProvider)
         yield TurnComplete(
             request_id="req-1",
             usage=UsageTotals(
