@@ -8,7 +8,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Breaking
 
-- `model.provider`, `model.name`, `model.temperature`, `model.max_tokens`, `model.thinking_budget`, `model.context_window`, `model.summarization_model`, `model.max_turns`, and `model.cache_retention` are YAML-only. Process env `MODEL_PROVIDER`, `MODEL_NAME`, `MODEL_TEMPERATURE`, `MODEL_MAX_TOKENS`, `MODEL_THINKING_BUDGET`, `MODEL_CONTEXT_WINDOW`, `CONTEXT_SUMMARIZATION_MODEL`, `MAX_TURNS`, and `MODEL_CACHE_RETENTION` are ignored (a warning is logged). Set them under `model:` in `monkeybot.yaml`. Credentials (`GEMINI_API_KEY`, `NVIDIA_API_KEY`, …) stay in `.env`.
+- `model.provider`, `model.name`, `model.temperature`, `model.max_tokens`, `model.thinking_budget`, `model.context_window`, `model.summarization_model`, `model.max_turns`, and `model.cache_retention` are YAML-only. Process env `MODEL_PROVIDER`, `MODEL_NAME`, `MODEL_TEMPERATURE`, `MODEL_MAX_TOKENS`, `MODEL_THINKING_BUDGET`, `MODEL_CONTEXT_WINDOW`, `CONTEXT_SUMMARIZATION_MODEL`, `MAX_TURNS`, and `MODEL_CACHE_RETENTION` are ignored (a warning is logged once per process). If leftover `MODEL_PROVIDER` is set and `monkeybot.yaml` has no `model.provider`, startup fails instead of silently defaulting to `google_vertexai` / `gemini-2.5-flash`. Set them under `model:` in `monkeybot.yaml`. Credentials (`GEMINI_API_KEY`, `NVIDIA_API_KEY`, …) stay in `.env`.
 
 ### Added
 

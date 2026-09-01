@@ -42,7 +42,6 @@ Example JSON shape:
   "cwd": "/app",
   "env_check": {
     "AGENT_NAME": "set",
-    "MODEL_PROVIDER": "set",
     "VERTEX_AI_PROJECT_ID": "set",
     "SKILLS_DIR": "set"
   },

@@ -2,7 +2,8 @@
 
 Precedence: existing process environment (including ``.env`` via dotenv) wins
 for ``ENV_MAP`` keys except ``YAML_ONLY_ENV_KEYS`` (``model.*``), which are
-YAML-only — leftover process env is ignored (and warned) once a snapshot loads.
+YAML-only — leftover process env is ignored (and warned once). If leftover
+``MODEL_PROVIDER`` is set and YAML has no ``model.provider``, load fails.
 Discovery: ``MONKEYBOT_CONFIG`` if set, else the nearest parent directory with
 ``monkeybot_config/monkeybot.yaml``. Relative ``paths.*`` values are anchored
 at the agent root, never the process working directory.
@@ -107,19 +108,11 @@ ENV_MAP: dict[tuple[str, str], str] = {
 
 # Flattened into snapshot ``env_values`` but never pinned from process env and
 # never written back to ``os.environ``. Leftover values are warned and ignored.
+# Derived from ENV_MAP so a new model.* key cannot silently regain env override.
 YAML_ONLY_ENV_KEYS: frozenset[str] = frozenset(
-    {
-        "MODEL_PROVIDER",
-        "MODEL_NAME",
-        "MODEL_TEMPERATURE",
-        "MODEL_MAX_TOKENS",
-        "MODEL_THINKING_BUDGET",
-        "MODEL_CONTEXT_WINDOW",
-        "CONTEXT_SUMMARIZATION_MODEL",
-        "MAX_TURNS",
-        "MODEL_CACHE_RETENTION",
-    }
+    env for (section, _), env in ENV_MAP.items() if section == "model"
 )
+_yaml_only_model_env_warned = False
 
 # Backward-compatible alias for internal/tests.
 _ENV_MAP = ENV_MAP
@@ -313,10 +306,30 @@ def warn_retired_curation_keys(doc: Mapping[str, Any]) -> list[str]:
     return found
 
 
-def warn_yaml_only_model_env() -> list[str]:
-    """Warn when process env still has retired model overlay keys; return those found."""
+def warn_yaml_only_model_env(merged: Mapping[str, Any] | None = None) -> list[str]:
+    """Warn once when process env still has retired model overlay keys.
+
+    Leftover ``MODEL_PROVIDER`` with no YAML ``model.provider`` raises
+    ``ConfigError`` instead of silently defaulting the provider.
+    """
+    global _yaml_only_model_env_warned
     found = [name for name in sorted(YAML_ONLY_ENV_KEYS) if name in os.environ]
-    if found:
+    if not found:
+        return []
+    model = merged.get("model") if isinstance(merged, Mapping) else None
+    yaml_provider = model.get("provider") if isinstance(model, dict) else None
+    if "MODEL_PROVIDER" in found and not (
+        isinstance(yaml_provider, str) and yaml_provider.strip()
+    ):
+        from monkeybot.core.config.settings import ConfigError
+
+        raise ConfigError(
+            "YAML-only MODEL_PROVIDER is set but monkeybot.yaml has no model.provider. "
+            "Leftover MODEL_* env is ignored; set model.provider in monkeybot.yaml "
+            f"(also set: {', '.join(found)})."
+        )
+    if not _yaml_only_model_env_warned:
+        _yaml_only_model_env_warned = True
         logger.warning(
             "ignoring YAML-only model env: %s — set model.* in monkeybot.yaml instead",
             ",".join(found),
@@ -326,9 +339,11 @@ def warn_yaml_only_model_env() -> list[str]:
 
 def reset_runtime_env_state_for_tests() -> None:
     """Clear the process ConfigStore and pin capture (tests only)."""
+    global _yaml_only_model_env_warned
     from monkeybot.core.config.settings import reset_transcript_enabled_cache_for_tests
     from monkeybot.core.config.snapshot import reset_snapshot_state_for_tests
 
+    _yaml_only_model_env_warned = False
     reset_snapshot_state_for_tests()
     reset_transcript_enabled_cache_for_tests()
 

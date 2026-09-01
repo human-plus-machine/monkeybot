@@ -42,7 +42,7 @@ async def test_worker_resolves_relative_agent_md_from_project_root(
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("AGENT_MD", "./monkeybot_config/AGENT.md")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
-    monkeypatch.setenv("MODEL_PROVIDER", "fake")
+    (cfg / "monkeybot.yaml").write_text("model:\n  provider: fake\n", encoding="utf-8")
     monkeypatch.setenv(
         "MONKEYBOT_FAKE_PROVIDER_EVENTS",
         json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),
@@ -149,7 +149,7 @@ async def _run_worker_capturing_vertex_google_search(
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("AGENT_MD", "./monkeybot_config/AGENT.md")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
-    monkeypatch.setenv("MODEL_PROVIDER", "fake")
+    (cfg / "monkeybot.yaml").write_text("model:\n  provider: fake\n", encoding="utf-8")
     monkeypatch.setenv(
         "MONKEYBOT_FAKE_PROVIDER_EVENTS",
         json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),
@@ -292,7 +292,7 @@ async def _run_worker_capture_thread_id(
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("AGENT_MD", "./monkeybot_config/AGENT.md")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
-    monkeypatch.setenv("MODEL_PROVIDER", "fake")
+    (cfg / "monkeybot.yaml").write_text("model:\n  provider: fake\n", encoding="utf-8")
     monkeypatch.setenv(
         "MONKEYBOT_FAKE_PROVIDER_EVENTS",
         json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),

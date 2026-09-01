@@ -19,7 +19,6 @@ logger = logging.getLogger(__name__)
 # Environment variables to check (never log values, only presence)
 EXPECTED_ENV_VARS = [
     "AGENT_NAME",
-    "MODEL_PROVIDER",
     "VERTEX_AI_PROJECT_ID",
     "SKILLS_DIR",
 ]

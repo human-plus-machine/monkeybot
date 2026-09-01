@@ -57,7 +57,9 @@ def test_env_map_three_way_exhaustiveness(tmp_path: Path, monkeypatch: pytest.Mo
     assert len(ENV_MAP) == len(env_names)
     assert set(ENV_SPEC) == env_names
     assert set(ENV_TIERS) == env_names
-    assert env_names >= YAML_ONLY_ENV_KEYS
+    model_env_keys = {env for (section, _), env in ENV_MAP.items() if section == "model"}
+    assert model_env_keys == YAML_ONLY_ENV_KEYS
+    assert YAML_ONLY_ENV_KEYS
     cfg = build_runtime_config(agent_root=tmp_path)
     for env_name in sorted(env_names):
         tier, _path = ENV_SPEC[env_name]
@@ -70,7 +72,9 @@ def test_pinned_env_beats_yaml_on_build_and_reload(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    yaml_path = _write_yaml(tmp_path, "model:\n  name: from-yaml\nruntime:\n  port: 1111\n")
+    yaml_path = _write_yaml(
+        tmp_path, "model:\n  provider: fake\n  name: from-yaml\nruntime:\n  port: 1111\n"
+    )
     monkeypatch.setenv("MODEL_NAME", "from-env")
     monkeypatch.setenv("PORT", "2222")
 
@@ -87,7 +91,7 @@ def test_pinned_env_beats_yaml_on_build_and_reload(
     first_revision = first.revision
 
     yaml_path.write_text(
-        "model:\n  name: yaml-after-reload\nruntime:\n  port: 3333\n",
+        "model:\n  provider: fake\n  name: yaml-after-reload\nruntime:\n  port: 3333\n",
         encoding="utf-8",
     )
     reloaded, diff = store.reload()

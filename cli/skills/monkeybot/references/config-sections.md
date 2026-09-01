@@ -180,4 +180,4 @@ Validate check: `config.includes.resolve`.
 
 ## `fake_provider`
 
-Test-only. `events_json` feeds `MODEL_PROVIDER=fake` scripted runs (env `MONKEYBOT_FAKE_PROVIDER_EVENTS`). Not for production.
+Test-only. `events_json` feeds `model.provider: fake` scripted runs (env `MONKEYBOT_FAKE_PROVIDER_EVENTS`). Not for production.

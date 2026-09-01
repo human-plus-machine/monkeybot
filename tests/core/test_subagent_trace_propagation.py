@@ -398,7 +398,10 @@ def _install_worker_mocks(
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("MEMORY_STORAGE_URI", mem_uri)
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
-    monkeypatch.setenv("MODEL_PROVIDER", "fake")
+    (tmp_path / "monkeybot_config").mkdir(exist_ok=True)
+    (tmp_path / "monkeybot_config" / "monkeybot.yaml").write_text(
+        "model:\n  provider: fake\n", encoding="utf-8"
+    )
     monkeypatch.setenv(
         "MONKEYBOT_FAKE_PROVIDER_EVENTS",
         json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),
@@ -564,7 +567,10 @@ async def test_worker_completes_without_memory_uri(
     skills.mkdir()
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
-    monkeypatch.setenv("MODEL_PROVIDER", "fake")
+    (tmp_path / "monkeybot_config").mkdir(exist_ok=True)
+    (tmp_path / "monkeybot_config" / "monkeybot.yaml").write_text(
+        "model:\n  provider: fake\n", encoding="utf-8"
+    )
     monkeypatch.setenv(
         "MONKEYBOT_FAKE_PROVIDER_EVENTS",
         json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),
