@@ -158,7 +158,7 @@ async def test_delete_session_returns_200_and_removes_it(
     assert r.status_code == 200
     body = r.json()
     assert body["deleted"] is True
-    assert body["transcript_report_dir"] is None
+    assert body["transcript_dir"] is None
     assert registry.get(sid) is None
 
 
@@ -170,11 +170,11 @@ async def test_delete_unknown_session_is_idempotent_200(
     assert r.status_code == 200
     body = r.json()
     assert body["deleted"] is False
-    assert body["transcript_report_dir"] is None
+    assert body["transcript_dir"] is None
 
 
 @pytest.mark.asyncio
-async def test_delete_session_writes_transcript_report(
+async def test_delete_session_returns_transcript_dir(
     client: AsyncClient,
     registry: SessionRegistry,
     tmp_path,
@@ -196,14 +196,12 @@ async def test_delete_session_writes_transcript_report(
     assert r.status_code == 200
     body = r.json()
     assert body["deleted"] is True
-    assert body["transcript_report_dir"] is not None
-    report_dir = Path(body["transcript_report_dir"])
+    assert body["transcript_dir"] is not None
+    report_dir = Path(body["transcript_dir"])
     assert (report_dir / "transcript.ndjson").is_file()
-    assert (report_dir / "brief.md").is_file()
-    assert (report_dir / "report.json").is_file()
-    assert (report_dir / "meta.json").is_file()
-    brief = (report_dir / "brief.md").read_text(encoding="utf-8")
-    assert "## Session summary" in brief
+    assert not (report_dir / "brief.md").exists()
+    assert not (report_dir / "report.json").exists()
+    assert not (report_dir / "meta.json").exists()
 
 
 @pytest.mark.asyncio

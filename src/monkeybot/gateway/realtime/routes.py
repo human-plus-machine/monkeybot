@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.config.realtime_config import RealtimeConfig
+from monkeybot.core.config.settings import transcript_enabled_from_config
 from monkeybot.core.config.snapshot import (
     RuntimeConfig,
     context_window_tokens,
@@ -42,7 +43,10 @@ from monkeybot.core.llm.realtime_provider import (
 from monkeybot.core.llm.realtime_provider import RealtimeError as ProviderError
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import HistoryStore
-from monkeybot.core.persistence.transcript import TranscriptWriter, transcript_enabled_from_env
+from monkeybot.core.persistence.transcript import (
+    TranscriptWriter,
+    runtime_manifest_fields,
+)
 from monkeybot.core.runtime.events import (
     ActionRequiredEvent,
     ToolCallResult,
@@ -857,7 +861,7 @@ def create_realtime_router(
             except Exception as exc:
                 raise ProviderConnectionError(str(exc)) from exc
 
-            transcript_enabled = transcript_enabled_from_env()
+            transcript_enabled = transcript_enabled_from_config()
             state = RealtimeConnectionState(
                 session_id=session_id,
                 request_id=request_id,
@@ -879,13 +883,18 @@ def create_realtime_router(
 
             if transcript_enabled:
                 state.transcript_writer = TranscriptWriter(
-                    session_id, workspace_root=workspace_root
+                    session_id, workspace_root=workspace_root, provider_records=False
                 )
                 await state.transcript_writer.ensure_manifest(
-                    agent_md=str(AgentLayout.from_environment().agent_md_path),
-                    model=ctx.model,
-                    provider=provider.name,
-                    workspace_root=str(workspace_root),
+                    **runtime_manifest_fields(
+                        model=ctx.model,
+                        provider=provider.name,
+                        workspace_root=str(workspace_root),
+                        agent_md=str(AgentLayout.from_environment().agent_md_path),
+                        context_window_tokens=context_window_tokens(ctx.config),
+                        memory_on=deps.memory is not None,
+                        mcp_catalog=deps.mcp.catalog_names() if deps.mcp is not None else [],
+                    ),
                 )
 
             await _send_frame(

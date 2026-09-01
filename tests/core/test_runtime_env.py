@@ -437,3 +437,27 @@ def test_realtime_nested_keys_flattened_to_env(
     assert os.environ.get("MONKEYBOT_REALTIME_WS_PORT") == "9090"
     assert os.environ.get("MONKEYBOT_REALTIME_SESSION_MAX_DURATION_SEC") == "900"
     assert os.environ.get("MONKEYBOT_REALTIME_METRICS_EMIT_SUMMARY_ON_CLOSE") == "false"
+
+
+def test_retired_transcript_include_live_warns_and_is_not_mapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "runtime:\n  transcript_enabled: true\n  transcript_include_live: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MONKEYBOT_TRANSCRIPT_ENABLED", raising=False)
+    monkeypatch.delenv("MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE", raising=False)
+    with caplog.at_level("WARNING", logger="monkeybot.core.config.runtime_env"):
+        runtime_env.apply_monkeybot_runtime_env()
+    assert "transcript_include_live" in caplog.text
+    assert os.environ.get("MONKEYBOT_TRANSCRIPT_ENABLED") is None
+    assert os.environ.get("MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE") is None
+    assert ("runtime", "transcript_include_live") not in runtime_env.ENV_MAP
+    found = runtime_env.warn_retired_tools_keys(
+        {"runtime": {"transcript_include_live": True}}
+    )
+    assert found == ["transcript_include_live"]

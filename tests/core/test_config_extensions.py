@@ -22,12 +22,14 @@ from monkeybot.core.config import (
     normalize_model_provider,
     reset_runtime_env_state_for_tests,
     subagent_vertex_google_search_from_config,
+    transcript_enabled_from_config,
     validate_monkeybot_yaml_doc,
     validate_provider_env,
     vertex_google_search_enabled_from_config,
 )
 from monkeybot.core.config.runtime_env import (
     ENV_MAP,
+    ENV_SPEC,
     RETIRED_CONTEXT_CURATION_KEYS,
     RETIRED_TOOLS_KEYS,
     warn_retired_curation_keys,
@@ -463,6 +465,60 @@ class TestAutoSchemaConfig:
         assert ("paths", "auto_schema") not in ENV_MAP
 
 
+class TestTranscriptEnabledConfig:
+    def test_defaults_false_when_missing(self) -> None:
+        assert transcript_enabled_from_config("/nonexistent/monkeybot.yaml") is False
+
+    def test_reads_true_from_yaml(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("runtime:\n  transcript_enabled: true\n", encoding="utf-8")
+        assert transcript_enabled_from_config(str(config_path)) is True
+
+    def test_reads_false_from_yaml(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("runtime:\n  transcript_enabled: false\n", encoding="utf-8")
+        assert transcript_enabled_from_config(str(config_path)) is False
+
+    def test_env_var_does_not_enable(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("runtime:\n  transcript_enabled: false\n", encoding="utf-8")
+        monkeypatch.setenv("MONKEYBOT_TRANSCRIPT_ENABLED", "true")
+        assert transcript_enabled_from_config(str(config_path)) is False
+
+    def test_rejects_non_boolean(self, tmp_path: Path) -> None:
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("runtime:\n  transcript_enabled: 1\n", encoding="utf-8")
+        with pytest.raises(ConfigError, match="must be true or false"):
+            transcript_enabled_from_config(str(config_path))
+
+    def test_not_mapped_to_env(self) -> None:
+        assert ("runtime", "transcript_enabled") not in ENV_MAP
+        assert "MONKEYBOT_TRANSCRIPT_ENABLED" not in ENV_SPEC
+        assert "MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE" not in ENV_SPEC
+
+    def test_caches_yaml_until_mtime_changes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from monkeybot.core.config import settings as settings_mod
+
+        config_path = tmp_path / "monkeybot.yaml"
+        config_path.write_text("runtime:\n  transcript_enabled: true\n", encoding="utf-8")
+        assert transcript_enabled_from_config(str(config_path)) is True
+        calls = {"n": 0}
+        real = settings_mod.load_monkeybot_yaml_dict
+
+        def counted(*args: object, **kwargs: object) -> object:
+            calls["n"] += 1
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(settings_mod, "load_monkeybot_yaml_dict", counted)
+        assert transcript_enabled_from_config(str(config_path)) is True
+        assert calls["n"] == 0
+        config_path.write_text("runtime:\n  transcript_enabled: false\n", encoding="utf-8")
+        assert transcript_enabled_from_config(str(config_path)) is False
+        assert calls["n"] == 1
+
+
 class TestOllamaOptionsConfig:
     def test_defaults_none_when_missing(self) -> None:
         assert ollama_options_from_config("/nonexistent/monkeybot.yaml") == (None, None)
@@ -528,6 +584,10 @@ class TestReadDefaultLinesFixed:
     def test_retired_from_yaml(self) -> None:
         assert "read_default_lines" in RETIRED_TOOLS_KEYS
         assert ("tools", "read_default_lines") not in ENV_MAP
+        assert ("runtime", "transcript_include_live") not in ENV_MAP
+        assert ("runtime", "transcript_enabled") not in ENV_MAP
+        found = warn_retired_tools_keys({"runtime": {"transcript_include_live": True}})
+        assert found == ["transcript_include_live"]
 
     def test_yaml_key_warns_and_is_ignored(self) -> None:
         found = warn_retired_tools_keys({"tools": {"read_default_lines": 20000}})

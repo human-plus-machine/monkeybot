@@ -1849,6 +1849,16 @@ class CoreToolExecutor(ToolExecutorPort):
                     details,
                 ),
             )
+        except OSError as exc:
+            return (
+                None,
+                _built_in_tool_error(
+                    "runtime",
+                    str(exc),
+                    _RUNTIME_NO_IDENTICAL_RETRY_HINT,
+                    {"tool": "run_command", "command": cmd, "argv": list(argv)},
+                ),
+            )
         return (
             _j(
                 {

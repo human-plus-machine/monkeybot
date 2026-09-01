@@ -32,6 +32,7 @@ from monkeybot.core.config.settings import (
     get_provider_config,
     get_subagent_registry,
     normalize_model_provider,
+    transcript_enabled_from_config,
     vertex_google_search_enabled_from_config,
 )
 from monkeybot.core.config.snapshot import (
@@ -72,7 +73,10 @@ from monkeybot.core.persistence.backends import (
     UsageStore,
     create_storage_backend,
 )
-from monkeybot.core.persistence.transcript import TranscriptWriter
+from monkeybot.core.persistence.transcript import (
+    TranscriptWriter,
+    runtime_manifest_fields,
+)
 from monkeybot.core.runtime.events import AgentEvent, TurnComplete, UsageTotals, event_to_json
 from monkeybot.core.runtime.events import Error as AgentError
 from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
@@ -736,17 +740,22 @@ class GatewayLoopPort:
             workspace_root, skills_resolved, artifacts_resolved = _resolved_workspace_paths(cfg)
 
             transcript_writer: TranscriptWriter | None = None
-            if env_flag(cfg, "MONKEYBOT_TRANSCRIPT_ENABLED", default=False):
+            if transcript_enabled_from_config():
                 if bus.transcript_writer is None:
                     bus.transcript_writer = TranscriptWriter(
                         session_id, workspace_root=workspace_root
                     )
                 transcript_writer = bus.transcript_writer
                 await transcript_writer.ensure_manifest(
-                    agent_md=str(agent_path),
-                    model=model_name,
-                    provider=provider.name,
-                    workspace_root=str(workspace_root),
+                    **runtime_manifest_fields(
+                        model=model_name,
+                        provider=provider.name,
+                        workspace_root=str(workspace_root),
+                        agent_md=str(agent_path),
+                        context_window_tokens=_env_context_window_tokens(),
+                        memory_on=gateway_runtime.memory is not None,
+                        mcp_catalog=mcp.catalog_names() if mcp is not None else [],
+                    ),
                 )
 
             attachment_store: AttachmentStore | None = getattr(

@@ -30,6 +30,7 @@ from monkeybot.core.config.settings import (
     get_subagent_settings,
     normalize_model_provider,
     subagent_vertex_google_search_from_config,
+    transcript_enabled_from_config,
     vertex_google_search_enabled_from_config,
 )
 from monkeybot.core.config.snapshot import (
@@ -95,6 +96,7 @@ __all__ = [
     "get_realtime_config",
     "resolve_monkeybot_config_path",
     "subagent_vertex_google_search_from_config",
+    "transcript_enabled_from_config",
     "validate_monkeybot_yaml_doc",
     "validate_provider_env",
     "vertex_google_search_enabled_from_config",

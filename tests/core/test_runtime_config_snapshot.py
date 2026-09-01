@@ -714,10 +714,11 @@ def test_apply_reload_env_patch_captures_operator_pins_first(
     from monkeybot.core.config.snapshot import apply_reload_env_patch, pinned_env_names
 
     monkeypatch.setenv("MODEL_NAME", "flash")
-    apply_reload_env_patch({"MONKEYBOT_TRANSCRIPT_ENABLED": "true"})
+    monkeypatch.delenv("MONKEYBOT_COMPUTER_TOOLS", raising=False)
+    apply_reload_env_patch({"MONKEYBOT_COMPUTER_TOOLS": "true"})
     names = pinned_env_names()
     assert "MODEL_NAME" in names
-    assert "MONKEYBOT_TRANSCRIPT_ENABLED" in names
+    assert "MONKEYBOT_COMPUTER_TOOLS" in names
 
 
 def test_restore_reload_pins_preserves_operator_environ(
@@ -729,8 +730,8 @@ def test_restore_reload_pins_preserves_operator_environ(
         restore_reload_pins,
     )
 
-    monkeypatch.setenv("MONKEYBOT_TRANSCRIPT_ENABLED", "from-operator")
-    prev = capture_reload_pins(["MONKEYBOT_TRANSCRIPT_ENABLED"])
-    apply_reload_env_patch({"MONKEYBOT_TRANSCRIPT_ENABLED": "true"})
+    monkeypatch.setenv("MONKEYBOT_COMPUTER_TOOLS", "from-operator")
+    prev = capture_reload_pins(["MONKEYBOT_COMPUTER_TOOLS"])
+    apply_reload_env_patch({"MONKEYBOT_COMPUTER_TOOLS": "true"})
     restore_reload_pins(prev)
-    assert os.environ.get("MONKEYBOT_TRANSCRIPT_ENABLED") == "from-operator"
+    assert os.environ.get("MONKEYBOT_COMPUTER_TOOLS") == "from-operator"

@@ -216,7 +216,7 @@ async def test_assistant_boundary_writes_talk_transcript(
     state.buffer.mark_user_turn_boundary()
     state.buffer.add_assistant_text("hi")
     state.buffer.mark_assistant_turn_boundary()
-    writer = TranscriptWriter("s1", workspace_root=tmp_path)
+    writer = TranscriptWriter("s1", workspace_root=tmp_path, provider_records=False)
     await writer.ensure_manifest()
     state.transcript_writer = writer
 

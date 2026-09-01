@@ -80,8 +80,6 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("scheduler", "enabled"): "MONKEYBOT_SCHEDULER_ENABLED",
     ("fake_provider", "events_json"): "MONKEYBOT_FAKE_PROVIDER_EVENTS",
     ("emission", "style"): "MONKEYBOT_EMISSION_STYLE",
-    ("runtime", "transcript_enabled"): "MONKEYBOT_TRANSCRIPT_ENABLED",
-    ("runtime", "transcript_include_live"): "MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE",
     ("harness", "mode"): "MONKEYBOT_HARNESS_MODE",
     ("realtime", "websocket.enabled"): "MONKEYBOT_REALTIME_WS_ENABLED",
     ("realtime", "websocket.port"): "MONKEYBOT_REALTIME_WS_PORT",
@@ -137,8 +135,6 @@ ENV_SPEC: dict[str, tuple[ConfigTier, str]] = {
     "MONKEYBOT_TODO_LIST_ENABLED": (ConfigTier.HOT, "tools.todo_list_enabled"),
     "MONKEYBOT_TODO_LIST_MIRROR_TO_DISK": (ConfigTier.HOT, "tools.todo_list_mirror_to_disk"),
     "MONKEYBOT_EMISSION_STYLE": (ConfigTier.HOT, "gateway.emission_style"),
-    "MONKEYBOT_TRANSCRIPT_ENABLED": (ConfigTier.HOT, "gateway.transcript_enabled"),
-    "MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE": (ConfigTier.HOT, "gateway.transcript_include_live"),
     "LOG_LEVEL": (ConfigTier.HOT, "gateway.log_level"),
     "AGENT_MD": (ConfigTier.HOT, "paths.agent_md"),
     "SKILLS_PATH": (ConfigTier.HOT, "paths.skills_path"),
@@ -260,20 +256,25 @@ _RETIRED_TOOLS_WARNINGS_OVERRIDES: dict[str, str] = {
     ),
 }
 
-
 def warn_retired_tools_keys(doc: Mapping[str, Any]) -> list[str]:
-    """Log one warning per retired ``tools.*`` key; return the keys found."""
-    tools = doc.get("tools")
-    if not isinstance(tools, dict):
-        return []
+    """Log one warning per retired YAML key; return the keys found."""
     found: list[str] = []
-    for key in sorted(RETIRED_TOOLS_KEYS):
-        if key in tools:
-            found.append(key)
-            message = _RETIRED_TOOLS_WARNINGS_OVERRIDES.get(
-                key
-            ) or _SPILL_SIZING_RETIRED_MSG.format(key=key)
-            logger.warning(message)
+    tools = doc.get("tools")
+    if isinstance(tools, dict):
+        for key in sorted(RETIRED_TOOLS_KEYS):
+            if key in tools:
+                found.append(key)
+                message = _RETIRED_TOOLS_WARNINGS_OVERRIDES.get(
+                    key
+                ) or _SPILL_SIZING_RETIRED_MSG.format(key=key)
+                logger.warning(message)
+    runtime = doc.get("runtime")
+    if isinstance(runtime, dict) and "transcript_include_live" in runtime:
+        found.append("transcript_include_live")
+        logger.warning(
+            "runtime.transcript_include_live is retired and ignored — "
+            "transcript capture is runtime.transcript_enabled only"
+        )
     return found
 
 
@@ -296,9 +297,11 @@ def warn_retired_curation_keys(doc: Mapping[str, Any]) -> list[str]:
 
 def reset_runtime_env_state_for_tests() -> None:
     """Clear the process ConfigStore and pin capture (tests only)."""
+    from monkeybot.core.config.settings import reset_transcript_enabled_cache_for_tests
     from monkeybot.core.config.snapshot import reset_snapshot_state_for_tests
 
     reset_snapshot_state_for_tests()
+    reset_transcript_enabled_cache_for_tests()
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:

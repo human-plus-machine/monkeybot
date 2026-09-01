@@ -21,6 +21,7 @@ from monkeybot.core.runtime.events import (
     ImageBlock,
     QueuedInputAccepted,
     RedactedThinkingBlock,
+    SystemContextUpdated,
     SystemNotificationEvent,
     SystemPromptSnapshot,
     Thinking,
@@ -68,6 +69,47 @@ def test_agent_event_roundtrip_tool_call_result_no_error() -> None:
 def test_agent_event_roundtrip_tool_call_result_with_error() -> None:
     ev = ToolCallResult(request_id="r1", tool="t", result="partial", error="x", call_id="c9")
     assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_sse_omits_tool_call_started_debug_fields() -> None:
+    ev = ToolCallStarted(
+        request_id="r1",
+        tool="read_file",
+        label="read_file",
+        args={"path": "notes.md"},
+        call_id="c1",
+        inspector_decision="allow",
+        resource="notes.md",
+        resolved_path="notes.md",
+    )
+    payload = json.loads(event_to_json(ev))
+    assert "inspector_decision" not in payload
+    assert "resource" not in payload
+    assert "resolved_path" not in payload
+
+
+def test_sse_omits_tool_call_result_debug_fields() -> None:
+    ev = ToolCallResult(
+        request_id="r1",
+        tool="read_file",
+        result="ok",
+        error=None,
+        call_id="c1",
+        error_kind="runtime",
+        duration_ms=12,
+    )
+    payload = json.loads(event_to_json(ev))
+    assert "error_kind" not in payload
+    assert "ok" not in payload
+    assert "duration_ms" not in payload
+
+
+def test_sse_omits_system_context_updated_text() -> None:
+    ev = SystemContextUpdated(
+        request_id="r1", epoch_id=1, changed_sources=["current_request"], text="secret"
+    )
+    payload = json.loads(event_to_json(ev))
+    assert "text" not in payload
 
 
 def test_tool_call_started_without_call_id_defaults_empty() -> None:

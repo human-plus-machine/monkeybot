@@ -17,7 +17,6 @@ from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.config.snapshot import current_env
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.transcript import TranscriptWriter
-from monkeybot.core.persistence.transcript_analyzer import analyze_transcript
 from monkeybot.core.runtime.input_admission import InputAdmission
 from monkeybot.core.tools.permission import SessionApprovals
 from monkeybot.gateway.pending_response_bus import TERMINATED_PENDING_KEYS_MAXLEN
@@ -39,7 +38,7 @@ class RemoveResult:
     """Outcome of removing a session from the registry."""
 
     deleted: bool
-    transcript_report_dir: str | None = None
+    transcript_dir: str | None = None
 
 
 def _replay_maxlen_from_env() -> int:
@@ -235,7 +234,7 @@ class SessionBus:
     ) -> None:
         """Soft-cancel the in-flight turn, await it, then drain the transcript writer.
 
-        Analysis must not race late ``ToolCallResult`` / ``TurnComplete`` appends.
+        Teardown must not race late ``ToolCallResult`` / ``TurnComplete`` appends.
         """
         rid = self.current_request_id
         if rid is not None:
@@ -326,7 +325,7 @@ class SessionRegistry:
         return resolve_agent_workspace_root()
 
     def _detach(self, session_id: str) -> SessionBus | None:
-        """Pop a session and clear in-process auxiliaries; does not analyze transcripts or spill."""
+        """Pop a session and clear in-process auxiliaries; does not drain spill."""
         bus = self._sessions.pop(session_id, None)
         if bus is None:
             return None
@@ -348,20 +347,6 @@ class SessionRegistry:
                 exc_info=True,
             )
 
-    @staticmethod
-    def _report_dir_for_path(path: Path) -> str | None:
-        """Run offline transcript analysis; never raises."""
-        try:
-            out = analyze_transcript(path)
-        except Exception:
-            logger.warning(
-                "transcript analysis failed %s",
-                kv(path=path),
-                exc_info=True,
-            )
-            return None
-        return str(out) if out is not None else None
-
     def remove(self, session_id: str) -> RemoveResult:
         """Drop a session bus and any auxiliary per-session state keyed by it.
 
@@ -370,8 +355,8 @@ class SessionRegistry:
         so both structures share the
         same lifecycle instead of growing unbounded for the life of the process.
 
-        Does not run transcript analysis or spill cleanup — use
-        :meth:`remove_async` for that (DELETE /sessions and gateway shutdown).
+        Does not run spill cleanup — use :meth:`remove_async` for that
+        (DELETE /sessions and gateway shutdown).
         """
         bus = self._detach(session_id)
         if bus is None:
@@ -379,28 +364,28 @@ class SessionRegistry:
         return RemoveResult(deleted=True)
 
     async def remove_async(self, session_id: str) -> RemoveResult:
-        """Detach session, quiesce the turn, clean spill files, then analyze transcript."""
+        """Detach session, quiesce the turn, drain the transcript writer, clean spill."""
         bus = self._detach(session_id)
         if bus is None:
             return RemoveResult(deleted=False)
         try:
             # Quiesce before spill cleanup so an in-flight turn cannot rewrite or
-            # read spill dirs after we delete them.
+            # read spill dirs after we delete them. quiesce_active_turn drains
+            # the transcript writer.
             await bus.quiesce_active_turn()
         finally:
             await self._cleanup_spill(session_id)
         writer = bus.transcript_writer
         if writer is None:
             return RemoveResult(deleted=True)
-        report_dir = await asyncio.to_thread(self._report_dir_for_path, writer.path)
-        return RemoveResult(deleted=True, transcript_report_dir=report_dir)
+        return RemoveResult(deleted=True, transcript_dir=str(writer.session_dir))
 
     async def remove_all_async(self) -> None:
-        """Best-effort analyze + remove every remaining session (gateway shutdown).
+        """Best-effort remove every remaining session (gateway shutdown).
 
-        Session removals (including spill cleanup and transcript analysis) run
-        concurrently via ``asyncio.gather`` so shutdown time doesn't scale
-        linearly with the number of open sessions.
+        Session removals (including spill cleanup) run concurrently via
+        ``asyncio.gather`` so shutdown time doesn't scale linearly with the
+        number of open sessions.
         """
         results = await asyncio.gather(
             *(self.remove_async(sid) for sid in list(self._sessions)),
@@ -408,4 +393,4 @@ class SessionRegistry:
         )
         for result in results:
             if isinstance(result, Exception):
-                logger.warning("transcript analysis on shutdown failed", exc_info=result)
+                logger.warning("session remove on shutdown failed", exc_info=result)

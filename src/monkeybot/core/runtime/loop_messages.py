@@ -158,6 +158,7 @@ def _epoch_events(
             request_id=request_id,
             epoch_id=admit.epoch_id,
             changed_sources=list(admit.changed_sources),
+            text=admit.mid_conversation_update,
         )
     ]
 
