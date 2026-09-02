@@ -72,12 +72,12 @@ Use this table before adding features so PRs do not thicken the wrong layer: say
 
 ## Turn lifecycle
 
-One **user message** may span multiple **inner turns** (model → tools → model → …) until the model produces final assistant text or `MAX_TURNS` is reached.
+One **user message** may span multiple **inner turns** (model → tools → model → …) until the model produces final assistant text or `model.max_turns` is reached.
 
 ### Sequence (one user message)
 
 1. Append user message to history; fire `USER_MESSAGE` hook.
-2. **Inner turn loop** (up to `MAX_TURNS`, default 1000):
+2. **Inner turn loop** (up to `model.max_turns`, default 1000):
    - Drain **steer** queue (mid-turn user injections) into history; emit `UserSteered`.
    - Await hook **settlement** (fire-and-forget `POST_TOOL` / prior write-side hooks) with bounded timeout.
    - Refresh memory wake-up lines.
@@ -231,14 +231,14 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Loop synthesizes `AssistantTextStarted`/`AssistantTextEnded`/`ThinkingBlockStarted` from deltas via `ProviderStreamMapper`; Anthropic streams `ToolInputDelta` from `input_json_delta`. `AssistantTextEnded.text` carries the full settled block for durable replay.
 - `Done.truncated` is set when the vendor reports an output length limit (OpenAI `finish_reason=length`, Anthropic `stop_reason=max_tokens`, Gemini `MAX_TOKENS`). The text loop treats that as an unsafe tool batch. Gemini Live does not expose an equivalent signal, so realtime rejects incomplete tool batches via all-`parse_error` only.
 - `count_input_tokens()` must match the same payload shape as `stream()` (summarization triggers, tool budgets).
-- Provider resolution via `MODEL_PROVIDER` aliases (`gemini` → `google_vertexai`, `vertex-claude` → `vertex_anthropic`).
+- Provider resolution via `model.provider` aliases (`gemini` → `google_vertexai`, `vertex-claude` → `vertex_anthropic`).
 - Optional extras in `pyproject.toml`: `gemini`, `openai`, `claude`, `vertex-claude`, `bedrock`, `huggingface`, `ollama`, `nvidia`.
 - `ollama`, `huggingface`, and `nvidia` share the OpenAI-compatible streaming core (`providers/_openai_compat.py`) and only differ in base URL / auth. Prefer explicit ids: `ollama-cloud` always hits `https://ollama.com` and requires `OLLAMA_API_KEY`; `ollama-local` always uses the local/self-hosted host (`OLLAMA_BASE_URL`, default `http://localhost:11434`) and needs no API key. Local requests send `keep_alive` (default 24h, `model.keep_alive`) and optional pinned `num_ctx` (`model.num_ctx`) via `extra_body` so Ollama's in-memory KV prefix cache survives idle — see [Local Ollama prefix cache](ollama-local.md). Both knobs are YAML-only. Legacy `ollama` still auto-routes (a key with no URL means cloud; an explicit URL always wins). `nvidia` hits `https://integrate.api.nvidia.com/v1` and needs a free `NVIDIA_API_KEY` from build.nvidia.com.
-- `MODEL_PROVIDER=fake` is gateway/test-only; unit tests inject `ScriptedFakeProvider` directly.
+- `model.provider: fake` is gateway/test-only; unit tests inject `ScriptedFakeProvider` directly.
 - An `Image`/`File` block inside a `ToolResponse` reaches Anthropic-family, Bedrock, and Gemini models in place. The OpenAI-compat family instead promotes an `Image` into a synthetic user turn appended after the tool row (`providers/_openai_compat.py::messages_to_openai`) — `File` (PDF) results are never promoted, since Chat Completions has no document wire type.
 
 **Prompt-cache session hints (`ProviderCallHints`):**
-- Loop passes `session_id=thread_id` and `cache_retention` from `MODEL_CACHE_RETENTION` / `model.cache_retention` (`none` | `short` | `long`, default `short`).
+- Loop passes `session_id=thread_id` and `cache_retention` from `model.cache_retention` (`none` | `short` | `long`, default `short`).
 - Anthropic family: `cache_control` on stable system prefix + last tool when retention ≠ `none`; optional `x-session-affinity` header.
 - OpenAI: `x-session-affinity` when retention ≠ `none`; `prompt_cache_retention=24h` when `long`.
 - Gemini: relies on implicit prefix caching (epoch keeps stable baseline byte-identical); hints accepted as no-ops.
@@ -725,7 +725,7 @@ Use this when reviewing PRs or designing new features.
 | **Security** | `run_command` always allowlisted; path escape blocked |
 | **MCP** | `server__tool` naming; double underscore |
 | **Subagents** | No nested `task` |
-| **Config** | Env beats yaml; secrets in `.env` only |
+| **Config** | Env beats yaml except YAML-only `model.*`; secrets in `.env` only |
 | **Gateway** | Core stays gateway-agnostic |
 | **Providers** | `count_input_tokens` consistent with `stream` payload |
 | **Attachments** | Resolve before provider; freeze before destructive history ops |
@@ -739,9 +739,9 @@ Use this when reviewing PRs or designing new features.
 
 | Setting | Default | Env / config |
 |---------|---------|--------------|
-| Max inner turns | 50 | `MAX_TURNS` / `model.max_turns` |
+| Max inner turns | 50 | `model.max_turns` (YAML only) |
 | Doom-loop threshold | 3 (0 = off) | `DOOM_LOOP_THRESHOLD` |
-| Context window | 200000 (example yaml: 1M) | `MODEL_CONTEXT_WINDOW` |
+| Context window | 200000 (example yaml: 1M) | `model.context_window` (YAML only) |
 | Summarization trigger | ratio from compression config | `SUMMARY_TRIGGER_RATIO` |
 | Read max lines | 5000 | `tools.read_max_lines` (YAML only — no env override) |
 | Default read lines | 2000 | Harness-fixed (`AGENT_READ_DEFAULT_LINES`); pass `limit` to request more |

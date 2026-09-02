@@ -2,7 +2,9 @@
 #
 #   cp monkeybot_config/monkeybot.example.yaml monkeybot_config/monkeybot.yaml
 #
-# Precedence: environment variables (and optional root `.env`) win over values here.
+# Precedence: environment variables (and optional root `.env`) win over values here
+# except ``model.*`` (provider, name, temperature, max_tokens, thinking_budget,
+# context_window, summarization_model, max_turns, cache_retention) which are YAML-only.
 #
 # Secrets are not committed here. Create a `.env` in the repo root when you need keys or
 # machine-local paths, for example:
@@ -45,7 +47,7 @@ realtime:
   # Optional model override for the realtime session. Live-only models (e.g.
   # gemini-3.1-flash-live-preview) cannot be used for turn-based work, so the
   # realtime session can point to a different model than model.name. When omitted,
-  # the realtime session falls back to model.name and MODEL_PROVIDER.
+  # the realtime session falls back to model.name and model.provider.
   # model:
   #   name: gemini-3.1-flash-live-preview
   #   provider: google_genai
@@ -98,9 +100,9 @@ model:
   # Summarisation trigger (tokens). Also drives soft-spill / read_file char budgets.
   context_window: 1000000
   max_turns: 1000
-  # Prompt-cache session hints: none | short | long (env: MODEL_CACHE_RETENTION)
+  # Prompt-cache session hints: none | short | long (YAML-only)
   # cache_retention: short
-  # Optional cheaper model for sync history summarization (env: CONTEXT_SUMMARIZATION_MODEL); omit = main model
+  # Optional cheaper model for sync history summarization; omit = main model
   # summarization_model: gemini-3-flash
   # Ollama-local only (YAML). Default 24h so the KV prefix cache survives idle.
   # Set "0" to omit. Distinct from the Ollama daemon env OLLAMA_KEEP_ALIVE.
@@ -251,7 +253,7 @@ scheduler:
   # Env override: MONKEYBOT_SCHEDULER_ENABLED (1 | true | yes | on).
   enabled: false
 
-# Optional JSON for MODEL_PROVIDER=fake tests (env: MONKEYBOT_FAKE_PROVIDER_EVENTS)
+# Optional JSON for model.provider: fake tests (env: MONKEYBOT_FAKE_PROVIDER_EVENTS)
 # fake_provider:
 #   events_json: '[[]]'
 

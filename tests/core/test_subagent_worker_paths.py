@@ -12,7 +12,22 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from monkeybot.core.config import reset_runtime_env_state_for_tests
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope
+from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
+
+_FAKE_MODEL_YAML = "model:\n  provider: fake\n  name: fake\n"
+
+
+def _write_fake_model_yaml(cfg: Path) -> None:
+    (cfg / "monkeybot.yaml").write_text(_FAKE_MODEL_YAML, encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_config() -> None:
+    reset_runtime_env_state_for_tests()
+    yield
+    reset_runtime_env_state_for_tests()
 
 
 @pytest.mark.asyncio
@@ -26,6 +41,7 @@ async def test_worker_resolves_relative_agent_md_from_project_root(
     ws.mkdir()
     cfg = project / "monkeybot_config"
     cfg.mkdir()
+    _write_fake_model_yaml(cfg)
     agent_md = cfg / "AGENT.md"
     agent_md.write_text("# Subagent instructions\n", encoding="utf-8")
     skills = project / ".agents" / "skills"
@@ -42,7 +58,6 @@ async def test_worker_resolves_relative_agent_md_from_project_root(
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("AGENT_MD", "./monkeybot_config/AGENT.md")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
-    monkeypatch.setenv("MODEL_PROVIDER", "fake")
     monkeypatch.setenv(
         "MONKEYBOT_FAKE_PROVIDER_EVENTS",
         json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),
@@ -109,6 +124,7 @@ async def test_worker_resolves_relative_agent_md_from_project_root(
     original_cwd = Path.cwd()
     try:
         await subagent_worker._async_main()
+        assert isinstance(subagent_worker._resolve_provider(), ScriptedFakeProvider)
         assert captured == [agent_md.resolve()]
         assert Path.cwd().resolve() == ws.resolve()
     finally:
@@ -133,6 +149,7 @@ async def _run_worker_capturing_vertex_google_search(
     ws.mkdir()
     cfg = project / "monkeybot_config"
     cfg.mkdir()
+    _write_fake_model_yaml(cfg)
     agent_md = cfg / "AGENT.md"
     agent_md.write_text("# Subagent instructions\n", encoding="utf-8")
     skills = project / ".agents" / "skills"
@@ -149,7 +166,6 @@ async def _run_worker_capturing_vertex_google_search(
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("AGENT_MD", "./monkeybot_config/AGENT.md")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
-    monkeypatch.setenv("MODEL_PROVIDER", "fake")
     monkeypatch.setenv(
         "MONKEYBOT_FAKE_PROVIDER_EVENTS",
         json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),
@@ -232,6 +248,7 @@ async def _run_worker_capturing_vertex_google_search(
     original_cwd = Path.cwd()
     try:
         await subagent_worker._async_main()
+        assert isinstance(subagent_worker._resolve_provider(), ScriptedFakeProvider)
         return cast(bool, captured_kwargs["vertex_google_search"])
     finally:
         os.chdir(original_cwd)
@@ -283,6 +300,7 @@ async def _run_worker_capture_thread_id(
     ws.mkdir()
     cfg = project / "monkeybot_config"
     cfg.mkdir()
+    _write_fake_model_yaml(cfg)
     agent_md = cfg / "AGENT.md"
     agent_md.write_text("# Subagent instructions\n", encoding="utf-8")
     skills = project / ".agents" / "skills"
@@ -292,7 +310,6 @@ async def _run_worker_capture_thread_id(
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("AGENT_MD", "./monkeybot_config/AGENT.md")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
-    monkeypatch.setenv("MODEL_PROVIDER", "fake")
     monkeypatch.setenv(
         "MONKEYBOT_FAKE_PROVIDER_EVENTS",
         json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),
@@ -359,6 +376,7 @@ async def _run_worker_capture_thread_id(
     original_cwd = Path.cwd()
     try:
         await subagent_worker._async_main()
+        assert isinstance(subagent_worker._resolve_provider(), ScriptedFakeProvider)
         assert len(captured_thread_ids) == 1
         return captured_thread_ids[0]
     finally:

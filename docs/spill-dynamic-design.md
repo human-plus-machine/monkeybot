@@ -116,7 +116,7 @@ Spill and read policy live in harness code, derived from the window.
 | `MONKEYBOT_TOOL_RESULT_JSON_FIELD_MAX` | env only, no YAML key | **Deleted.** Fixed constant (512); it bounds denylisted blob fields, not context |
 | `tools.read_max_lines` / `MONKEYBOT_READ_MAX_LINES` | YAML + env | **YAML only.** Keep the key, drop the env read |
 | `tools.read_default_lines` / `MONKEYBOT_READ_DEFAULT_LINES` | YAML + env | **YAML only.** Keep the key, drop the env read |
-| `model.context_window` / `MODEL_CONTEXT_WINDOW` | YAML + env | **Unresolved — see below** |
+| `model.context_window` / `MODEL_CONTEXT_WINDOW` | YAML + env | **Settled (later):** YAML-only. Leftover `MODEL_CONTEXT_WINDOW` env is ignored. |
 
 Adjacent but out of scope (not sizing policy; leave alone unless you want the
 full sweep): `MONKEYBOT_TOOL_RESULT_SANITIZE` (behavior toggle),
@@ -139,6 +139,8 @@ test hygiene than shipping a production env var whose only consumer is the suite
 This also removes the awkward carve-out where invariant 1 did not hold.
 
 ### `MODEL_CONTEXT_WINDOW` is a real conflict
+
+**Settled:** `model.context_window` is YAML-only. Leftover `MODEL_CONTEXT_WINDOW` process env is ignored (and warned once). The notes below are the original conflict analysis.
 
 This one cannot be quietly converted, and the plan should not pretend otherwise.
 It is the **input** to every budget here, but:

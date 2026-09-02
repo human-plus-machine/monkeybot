@@ -64,8 +64,14 @@ async def gateway_client_disabled(
     monkeypatch.setenv("MONKEYBOT_OTEL_ENABLED", "false")
 
     db_file = tmp_path / "mb.db"
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "model:\n  provider: fake\n  name: fake\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DB_URL", f"sqlite:///{db_file}")
-    monkeypatch.setenv("MODEL_PROVIDER", "fake")
     monkeypatch.setenv("MCP_CONFIG", str(tmp_path / "no_mcp.json"))
     policy_file = tmp_path / "command_allowlist.yaml"
     policy_file.write_text(_tier_policy_yaml(), encoding="utf-8")
@@ -116,8 +122,14 @@ async def gateway_client_otel(
     monkeypatch.setenv("OTEL_LOGS_EXPORTER", "none")
 
     db_file = tmp_path / "mb.db"
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "model:\n  provider: fake\n  name: fake\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DB_URL", f"sqlite:///{db_file}")
-    monkeypatch.setenv("MODEL_PROVIDER", "fake")
     monkeypatch.setenv("MCP_CONFIG", str(tmp_path / "no_mcp.json"))
     policy_file = tmp_path / "command_allowlist.yaml"
     policy_file.write_text(_tier_policy_yaml(), encoding="utf-8")

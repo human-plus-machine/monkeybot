@@ -39,11 +39,13 @@ from monkeybot.core.config.runtime_env import (
     ENV_MAP,
     ENV_TIERS,
     SUBAGENTS_DIFF_KEY,
+    YAML_ONLY_ENV_KEYS,
     ConfigTier,
     _flatten_config,
     _load_yaml_file,
     _merge_with_includes,
     _resolve_config_path,
+    check_yaml_only_model_env,
     warn_retired_curation_keys,
     warn_retired_tools_keys,
 )
@@ -575,6 +577,7 @@ def build_runtime_config(
     source_path, merged = _load_merged_yaml(config_path=config_path, agent_root=agent_root)
     warn_retired_tools_keys(merged)
     warn_retired_curation_keys(merged)
+    check_yaml_only_model_env(merged)
     anchor = agent_root or resolve_agent_root(config_path=source_path)
     env_values = _effective_env(_flatten_config(merged), pinned, anchor)
     content = _content_digests(env_values, anchor)
@@ -636,6 +639,8 @@ def _capture_pins() -> dict[str, str]:
         return _PINNED_ENV
     pinned: dict[str, str] = {}
     for env_name in ENV_MAP.values():
+        if env_name in YAML_ONLY_ENV_KEYS:
+            continue
         if env_name in os.environ:
             pinned[env_name] = os.environ[env_name]
     for extra in _PINNED_EXTRA_KEYS:

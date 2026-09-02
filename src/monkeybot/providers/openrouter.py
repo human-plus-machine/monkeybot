@@ -9,9 +9,9 @@ Configuration (environment variables or ``monkeybot.yaml``):
   starts with ``sk-or-``
 - ``OPENROUTER_BASE_URL`` — OpenAI-compat base host (default:
   ``https://openrouter.ai/api/v1``)
-- ``MODEL_NAME`` — model id passed to the API (e.g. ``anthropic/claude-sonnet-4.5``)
-- ``MODEL_TEMPERATURE`` — sampling temperature (default: ``0.7``; set via ``monkeybot.yaml`` / constructor)
-- ``MODEL_MAX_TOKENS`` — max output tokens (default: ``60000``; set via ``monkeybot.yaml`` / constructor)
+- ``model.name`` — model id passed to the API (e.g. ``anthropic/claude-sonnet-4.5``)
+- ``model.temperature`` — sampling temperature (default: ``0.7``; YAML-only)
+- ``model.max_tokens`` — max output tokens (default: ``60000``; YAML-only)
 
 Install the required extra::
 

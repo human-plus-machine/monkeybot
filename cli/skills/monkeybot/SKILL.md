@@ -56,7 +56,7 @@ npx skills add human-plus-machine/monkeybot --skill monkeybot
   - `monkeybot_config/monkeybot.yaml` — non-secret settings (model, paths, gateway, behavior).
   - `.env` — secrets and machine-local paths (API keys, GCP project, DB URL).
   - sidecars: `monkeybot_config/AGENT.md` (system prompt), `mcp.json` (MCP servers), `command_allowlist.yaml`.
-- **Precedence — important:** environment variables and `.env` win over `monkeybot.yaml`. If a user edits YAML but nothing changes, suspect a stale `.env` shadowing it (the YAML→env mapping lives in `runtime_env.py:ENV_MAP`).
+- **Precedence — important:** environment variables and `.env` win over `monkeybot.yaml` except `model.*` (provider, name, sampling, context window, summarization model, max turns, cache retention), which is YAML-only. If a user edits YAML but nothing changes, suspect a stale `.env` shadowing it (the YAML→env mapping lives in `runtime_env.py:ENV_MAP`).
 - **Defaults are fine on day one.** Most first-time users only touch `model`, `.env` credentials, and `AGENT.md`.
 
 ## Running CLI commands
