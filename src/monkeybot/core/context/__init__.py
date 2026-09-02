@@ -118,8 +118,6 @@ class TurnContext:
     """Workspace root for tools and spill file paths (from ``paths.workspace_root``); optional for tests."""
     memory: MemorySubsystem | None = None
     """Memory subsystem for index refresh and search; optional when memory is disabled."""
-    context_curation_enabled: bool = True
-    """When True (parent agent), optional LLM curation may narrow memory in the system prompt."""
     sse_bus: PendingResponseBusPort | None = None
     """Gateway session bus for Story 5 pending UI responses; None for CLI / harness."""
     event_publisher: EventPublisherPort | None = None
@@ -855,7 +853,6 @@ async def build_context(
     cancelled: asyncio.Event | None = None,
     context_window_tokens: int = 200_000,
     workspace_root: Path | None = None,
-    enable_context_curation: bool = True,
     sse_bus: PendingResponseBusPort | None = None,
     event_publisher: EventPublisherPort | None = None,
     extra_tools: Sequence[CustomTool] | None = None,
@@ -884,7 +881,6 @@ async def build_context(
         cancelled: Optional cooperative-cancel handle for the parent turn (gateway / CLI).
         context_window_tokens: Model context budget for pre-flight and summarization triggers.
         workspace_root: Optional workspace root for tools/spill paths (``paths.workspace_root``).
-        enable_context_curation: When False (e.g. subagent), skip LLM context curation for prompts.
         sse_bus: Optional gateway bus for pending UI responses.
         event_publisher: Optional parent SSE publisher for nested subagent progress.
         extra_tools: Optional list of in-process :class:`CustomTool` implementations.
@@ -945,7 +941,6 @@ async def build_context(
         context_window_tokens=context_window_tokens,
         workspace_root=workspace_root,
         memory=memory,
-        context_curation_enabled=enable_context_curation,
         sse_bus=sse_bus,
         event_publisher=event_publisher,
         subagent_personas=personas,

@@ -28,14 +28,6 @@ gateway:
   sse_replay_max: 256
   graceful_shutdown_timeout_sec: 5
 
-context_curation:
-  enabled: true
-  memory_window_lines: 12
-  memory_index_cap: 200
-  memory_token_threshold: 2000
-  curator_model: thinkingmachines/inkling
-  timeout_sec: 10
-
 subagents:
   timeout_sec: 600
   max_turns: 25

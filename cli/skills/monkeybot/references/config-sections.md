@@ -75,22 +75,6 @@ Required when `memory_storage_uri` is `gcs://…` or `provider: vertex-claude` (
 | `graceful_shutdown_timeout_sec` | `5` | Allow longer drain on shutdown |
 | `cors_allow_origins` | `http://localhost:5173` | **Custom web UI** — set its origin, or `"*"` for any |
 
-## `context_curation`
-
-Trims memory injected into context. `enabled: true` by default.
-
-Recent window by default; LLM curator only when the index is token-heavy. On curator failure, falls back to the window.
-
-| Field | Default | Notes |
-|---|---|---|
-| `memory_window_lines` | `12` | Recent index lines injected; also caps curator-selected lines |
-| `memory_index_cap` | `200` | Organizer keeps this many INDEX.md entries; older rows move to `INDEX.archive.md` |
-| `memory_token_threshold` | `2000` | Call curator when estimated index tokens exceed this |
-| `curator_model` | `gemini-3-flash` | Separate small model; empty = main model |
-| `timeout_sec` | `10` | Curator call timeout |
-
-When the prompt shows fewer entries than exist, a structural confidence score triggers a `search_memory` nudge. Skill names are always shown in full in the prompt; use `list_skills` to get the skills root path.
-
 ## `memory`
 
 MemPalace capture, wake-up, and search teaching are on by default. Turn them off with `memory.enabled: false` or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`. The vector stack is the optional `monkeybot[memory]` extra — omit it (and set `enabled: false`) when you do not want chromadb/onnxruntime.

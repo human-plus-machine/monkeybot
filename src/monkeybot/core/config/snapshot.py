@@ -182,14 +182,6 @@ class MemoryConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class CurationConfig:
-    enabled: str | None = None
-    memory_window_lines: str | None = None
-    memory_index_cap: str | None = None
-    memory_token_threshold: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class ConfigDiff:
     """What changed between two snapshots. ``noop`` means digest was unchanged."""
 
@@ -219,7 +211,6 @@ class RuntimeConfig:
     gateway: GatewayConfig
     tools: ToolsConfig
     memory: MemoryConfig
-    curation: CurationConfig
     realtime: RealtimeConfig
     subagents: Mapping[str, SubagentConfig]
     subagent_settings: SubagentSettings
@@ -602,7 +593,6 @@ def build_runtime_config(
         gateway=_gateway_from_env(env_values),
         tools=_tools_from_env(env_values),
         memory=_memory_from_env(env_values),
-        curation=_curation_from_env(env_values),
         realtime=realtime_config_from_doc(merged, env_values),
         subagents=subagents,
         subagent_settings=subagent_settings,
@@ -835,7 +825,6 @@ def _snapshot_with_env(
         gateway=_gateway_from_env(merged),
         tools=_tools_from_env(merged),
         memory=_memory_from_env(merged),
-        curation=_curation_from_env(merged),
     )
 
 
@@ -936,15 +925,6 @@ def _memory_from_env(env: Mapping[str, str]) -> MemoryConfig:
     )
 
 
-def _curation_from_env(env: Mapping[str, str]) -> CurationConfig:
-    return CurationConfig(
-        enabled=env.get("CONTEXT_CURATION_ENABLED"),
-        memory_window_lines=env.get("CONTEXT_CURATION_MEMORY_WINDOW_LINES"),
-        memory_index_cap=env.get("MEMORY_INDEX_CAP"),
-        memory_token_threshold=env.get("CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD"),
-    )
-
-
 def _parse_subagents(
     doc: Mapping[str, Any],
 ) -> tuple[dict[str, SubagentConfig], SubagentSettings]:
@@ -971,7 +951,6 @@ __all__ = [
     "ConfigDiff",
     "ConfigStore",
     "ConfigTier",
-    "CurationConfig",
     "ENV_FIELD_PATHS",
     "GatewayConfig",
     "MemoryConfig",

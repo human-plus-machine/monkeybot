@@ -60,10 +60,6 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("gateway", "sse_nested_replay_max"): "SSE_NESTED_REPLAY_MAX",
     ("gateway", "graceful_shutdown_timeout_sec"): "GRACEFUL_SHUTDOWN_TIMEOUT_SEC",
     ("gateway", "cors_allow_origins"): "MONKEYBOT_CORS_ALLOW_ORIGINS",
-    ("context_curation", "enabled"): "CONTEXT_CURATION_ENABLED",
-    ("context_curation", "memory_window_lines"): "CONTEXT_CURATION_MEMORY_WINDOW_LINES",
-    ("context_curation", "memory_index_cap"): "MEMORY_INDEX_CAP",
-    ("context_curation", "memory_token_threshold"): "CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD",
     ("memory", "enabled"): "MONKEYBOT_MEMORY_HOOK_ENABLED",
     ("memory", "backend"): "MEMPALACE_BACKEND",
     ("memory", "embedding_model"): "MEMPALACE_EMBEDDING_MODEL",
@@ -113,6 +109,7 @@ YAML_ONLY_ENV_KEYS: frozenset[str] = frozenset(
     env for (section, _), env in ENV_MAP.items() if section == "model"
 )
 _yaml_only_model_env_warned = False
+_retired_curation_warned = False
 
 # Backward-compatible alias for internal/tests.
 _ENV_MAP = ENV_MAP
@@ -136,13 +133,6 @@ ENV_SPEC: dict[str, tuple[ConfigTier, str]] = {
     "MODEL_CONTEXT_WINDOW": (ConfigTier.HOT, "model.context_window"),
     "CONTEXT_SUMMARIZATION_MODEL": (ConfigTier.HOT, "model.summarization_model"),
     "MODEL_CACHE_RETENTION": (ConfigTier.HOT, "model.cache_retention"),
-    "CONTEXT_CURATION_ENABLED": (ConfigTier.HOT, "curation.enabled"),
-    "CONTEXT_CURATION_MEMORY_WINDOW_LINES": (ConfigTier.HOT, "curation.memory_window_lines"),
-    "MEMORY_INDEX_CAP": (ConfigTier.HOT, "curation.memory_index_cap"),
-    "CONTEXT_CURATION_MEMORY_TOKEN_THRESHOLD": (
-        ConfigTier.HOT,
-        "curation.memory_token_threshold",
-    ),
     "MONKEYBOT_TODO_LIST_ENABLED": (ConfigTier.HOT, "tools.todo_list_enabled"),
     "MONKEYBOT_TODO_LIST_MIRROR_TO_DISK": (ConfigTier.HOT, "tools.todo_list_mirror_to_disk"),
     "MONKEYBOT_EMISSION_STYLE": (ConfigTier.HOT, "gateway.emission_style"),
@@ -247,12 +237,6 @@ RETIRED_TOOLS_KEYS: frozenset[str] = frozenset(
         "read_default_lines",
     }
 )
-RETIRED_CONTEXT_CURATION_KEYS: frozenset[str] = frozenset(
-    {
-        "curator_model",
-        "timeout_sec",
-    }
-)
 
 _SPILL_SIZING_RETIRED_MSG = (
     "tools.{key} is retired and ignored — spill/read sizing is derived from "
@@ -289,21 +273,16 @@ def warn_retired_tools_keys(doc: Mapping[str, Any]) -> list[str]:
     return found
 
 
-def warn_retired_curation_keys(doc: Mapping[str, Any]) -> list[str]:
-    """Log one warning per retired ``context_curation.*`` key; return the keys found."""
-    section = doc.get("context_curation")
-    if not isinstance(section, dict):
-        return []
-    found: list[str] = []
-    for key in sorted(RETIRED_CONTEXT_CURATION_KEYS):
-        if key in section:
-            found.append(key)
-            logger.warning(
-                "context_curation.%s is retired and ignored — the LLM curator "
-                "was removed; window and token knobs still apply",
-                key,
-            )
-    return found
+def warn_retired_curation_keys(doc: Mapping[str, Any]) -> None:
+    """Warn once per process if a leftover ``context_curation:`` section is present."""
+    global _retired_curation_warned
+    if "context_curation" not in doc or _retired_curation_warned:
+        return
+    _retired_curation_warned = True
+    logger.warning(
+        "context_curation is retired and ignored — MemPalace wake-up replaced "
+        "INDEX.md + the LLM curator; leftover window/cap settings are unused"
+    )
 
 
 def check_yaml_only_model_env(merged: Mapping[str, Any] | None = None) -> list[str]:
@@ -339,11 +318,12 @@ def check_yaml_only_model_env(merged: Mapping[str, Any] | None = None) -> list[s
 
 def reset_runtime_env_state_for_tests() -> None:
     """Clear the process ConfigStore and pin capture (tests only)."""
-    global _yaml_only_model_env_warned
+    global _yaml_only_model_env_warned, _retired_curation_warned
     from monkeybot.core.config.settings import reset_transcript_enabled_cache_for_tests
     from monkeybot.core.config.snapshot import reset_snapshot_state_for_tests
 
     _yaml_only_model_env_warned = False
+    _retired_curation_warned = False
     reset_snapshot_state_for_tests()
     reset_transcript_enabled_cache_for_tests()
 

@@ -196,7 +196,6 @@ async def _build_realtime_context(
             model=model,
             context_window_tokens=context_window_tokens(cfg),
             workspace_root=workspace_root,
-            enable_context_curation=True,
             extra_tools=_parent_extra_tools(deps, todo_store),
             subagent_registry=live.subagent_registry,
             scheduled_loops_available=loops_available,
