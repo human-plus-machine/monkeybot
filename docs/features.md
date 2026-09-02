@@ -415,7 +415,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Storage URI:** `local://` only (object-store palaces are not supported in this release).
 
-**Wake-up:** `load_index()` calls MemPalace `wake_up` and stores lines on `TurnContext.memory_index`; prompt composition injects them under `## Memory wake-up`. There is no sliding window or LLM curator. Leftover `context_curation:` YAML is ignored (one warning). Prompt size is bounded by `model.context_window` and history summarization.
+**Wake-up:** `load_index()` calls MemPalace `wake_up` and stores lines on `TurnContext.memory_index`; prompt composition injects them under `## Memory wake-up`. There is no sliding window or LLM curator. Leftover `context_curation:` YAML is ignored (one warning per process). Wake-up size is whatever MemPalace L0+L1 returns; `model.context_window` still only bounds history summarization. Subagents include the same wake-up block as the parent.
 
 **Hook lifecycle:**
 

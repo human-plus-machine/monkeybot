@@ -109,6 +109,7 @@ YAML_ONLY_ENV_KEYS: frozenset[str] = frozenset(
     env for (section, _), env in ENV_MAP.items() if section == "model"
 )
 _yaml_only_model_env_warned = False
+_retired_curation_warned = False
 
 # Backward-compatible alias for internal/tests.
 _ENV_MAP = ENV_MAP
@@ -272,15 +273,16 @@ def warn_retired_tools_keys(doc: Mapping[str, Any]) -> list[str]:
     return found
 
 
-def warn_retired_curation_keys(doc: Mapping[str, Any]) -> list[str]:
-    """Warn once if a leftover ``context_curation:`` section is present."""
-    if "context_curation" not in doc:
-        return []
+def warn_retired_curation_keys(doc: Mapping[str, Any]) -> None:
+    """Warn once per process if a leftover ``context_curation:`` section is present."""
+    global _retired_curation_warned
+    if "context_curation" not in doc or _retired_curation_warned:
+        return
+    _retired_curation_warned = True
     logger.warning(
         "context_curation is retired and ignored — MemPalace wake-up replaced "
-        "INDEX.md + the LLM curator; prompt size is bounded by model.context_window"
+        "INDEX.md + the LLM curator; leftover window/cap settings are unused"
     )
-    return ["context_curation"]
 
 
 def check_yaml_only_model_env(merged: Mapping[str, Any] | None = None) -> list[str]:
@@ -316,11 +318,12 @@ def check_yaml_only_model_env(merged: Mapping[str, Any] | None = None) -> list[s
 
 def reset_runtime_env_state_for_tests() -> None:
     """Clear the process ConfigStore and pin capture (tests only)."""
-    global _yaml_only_model_env_warned
+    global _yaml_only_model_env_warned, _retired_curation_warned
     from monkeybot.core.config.settings import reset_transcript_enabled_cache_for_tests
     from monkeybot.core.config.snapshot import reset_snapshot_state_for_tests
 
     _yaml_only_model_env_warned = False
+    _retired_curation_warned = False
     reset_snapshot_state_for_tests()
     reset_transcript_enabled_cache_for_tests()
 

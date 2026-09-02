@@ -624,17 +624,21 @@ class TestRetiredContextCuration:
     def test_section_retired_from_env_map(self) -> None:
         assert not any(section == "context_curation" for section, _ in ENV_MAP)
 
-    def test_yaml_section_warns_once_and_is_ignored(self) -> None:
-        found = warn_retired_curation_keys(
-            {
-                "context_curation": {
-                    "enabled": True,
-                    "memory_window_lines": 12,
-                }
+    def test_yaml_section_warns_once_and_is_ignored(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        reset_runtime_env_state_for_tests()
+        leftover = {
+            "context_curation": {
+                "enabled": True,
+                "memory_window_lines": 12,
             }
-        )
-        assert found == ["context_curation"]
-        assert warn_retired_curation_keys({}) == []
+        }
+        with caplog.at_level("WARNING", logger="monkeybot.core.config.runtime_env"):
+            warn_retired_curation_keys(leftover)
+            warn_retired_curation_keys(leftover)
+            warn_retired_curation_keys({})
+        assert caplog.text.count("context_curation is retired and ignored") == 1
 
 
 class TestRealtimeConfig:
