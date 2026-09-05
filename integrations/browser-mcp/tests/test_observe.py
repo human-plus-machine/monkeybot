@@ -6,24 +6,24 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-from browser_mcp import dom_indexing, server
+from browser_mcp import dom_indexing, server, backend
 
 
 @pytest.fixture(autouse=True)
 def _reset() -> None:
-    original = server._bh
-    original_bound = server._bound_cdp
-    server._bh = None
-    server._bound_cdp = None
+    original = backend._bh
+    original_bound = backend._bound_cdp
+    backend._bh = None
+    backend._bound_cdp = None
     dom_indexing.clear_registered_targets()
     yield
-    server._bh = original
-    server._bound_cdp = original_bound
+    backend._bh = original
+    backend._bound_cdp = original_bound
     dom_indexing.clear_registered_targets()
 
 
 def _patch_harness(helpers: MagicMock):
-    return patch.object(server, "_browser_harness", return_value=(helpers, MagicMock()))
+    return patch.object(backend, "browser_harness", return_value=(helpers, MagicMock()))
 
 
 def _tab(tid: str, url: str, title: str = "t") -> dict:

@@ -10,27 +10,27 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from browser_mcp import dom_indexing, perf, server
+from browser_mcp import dom_indexing, perf, server, backend
 
 
 @pytest.fixture(autouse=True)
 def _reset_perf_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    original_bh = server._bh
-    original_bound = server._bound_cdp
-    server._bh = None
-    server._bound_cdp = None
+    original_bh = backend._bh
+    original_bound = backend._bound_cdp
+    backend._bh = None
+    backend._bound_cdp = None
     monkeypatch.delenv("BROWSER_MCP_PERF", raising=False)
     monkeypatch.delenv("BROWSER_MCP_PERF_LOG", raising=False)
     monkeypatch.delenv("BROWSER_BACKEND", raising=False)
     monkeypatch.delenv("BU_CDP_URL", raising=False)
     monkeypatch.delenv("BU_CDP_WS", raising=False)
     yield
-    server._bh = original_bh
-    server._bound_cdp = original_bound
+    backend._bh = original_bh
+    backend._bound_cdp = original_bound
 
 
 def _patch_harness(helpers: MagicMock):
-    return patch.object(server, "_browser_harness", return_value=(helpers, MagicMock()))
+    return patch.object(backend, "browser_harness", return_value=(helpers, MagicMock()))
 
 
 class _Helpers:
@@ -187,7 +187,7 @@ def test_harness_calls_counted_through_wrapped_helpers(
     tabs.registry()._tabs["aaa"] = state
     tabs.registry()._aliases["t1"] = "aaa"
     tabs.registry().set_focused("aaa")
-    with patch.object(server, "_browser_harness", return_value=(wrapped, MagicMock())):
+    with patch.object(backend, "browser_harness", return_value=(wrapped, MagicMock())):
         server.browser_page_info()
     rec = _read_records(log)[0]
     assert rec["tool"] == "browser_page_info"
@@ -205,13 +205,13 @@ def test_browser_harness_wraps_helpers_when_enabled(monkeypatch: pytest.MonkeyPa
     mod.helpers = helpers
     monkeypatch.setitem(sys.modules, "browser_harness", mod)
 
-    wrapped, got_admin = server._browser_harness()
+    wrapped, got_admin = backend.browser_harness()
 
     assert isinstance(wrapped, perf.CountingHelpers)
     assert perf.unwrap(wrapped) is helpers
     assert got_admin is admin
     # Cached binding stays unwrapped so identity tests without perf stay green.
-    assert server._bh == (helpers, admin)
+    assert backend._bh == (helpers, admin)
 
 
 def test_log_write_failure_does_not_fail_the_tool(

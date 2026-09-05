@@ -7,28 +7,28 @@ from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
-from browser_mcp import dom_indexing, server, tabs
+from browser_mcp import dom_indexing, server, tabs, backend, playbooks
 
 
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BROWSER_MCP_QUIET_MS", "1")
     monkeypatch.setenv("BROWSER_MCP_SETTLE_MS", "200")
-    original = server._bh
-    original_bound = server._bound_cdp
-    server._bh = None
-    server._bound_cdp = None
+    original = backend._bh
+    original_bound = backend._bound_cdp
+    backend._bh = None
+    backend._bound_cdp = None
     dom_indexing.clear_registered_targets()
     tabs.reset_registry()
     yield
-    server._bh = original
-    server._bound_cdp = original_bound
+    backend._bh = original
+    backend._bound_cdp = original_bound
     dom_indexing.clear_registered_targets()
     tabs.reset_registry()
 
 
 def _patch_harness(helpers: MagicMock):
-    return patch.object(server, "_browser_harness", return_value=(helpers, MagicMock()))
+    return patch.object(backend, "browser_harness", return_value=(helpers, MagicMock()))
 
 
 def _tab(tid: str, url: str, title: str = "t") -> dict:
@@ -80,7 +80,7 @@ def _action_ctx(helpers: MagicMock, trees: list[dict], *, navigated: bool = Fals
             return_value={"ok": True, "tagName": "input", "mode_used": "fast"},
         ),
         patch.object(dom_indexing, "select_option", return_value=True),
-        patch.object(server.playbooks, "list_playbook_names", return_value=[]),
+        patch.object(playbooks, "list_playbook_names", return_value=[]),
     ):
         yield
 

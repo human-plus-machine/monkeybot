@@ -168,9 +168,9 @@ def _run_spa_wait(base: str) -> None:
 
 
 def _run_compare_three(base: str) -> None:
-    from browser_mcp import server, tabs
+    from browser_mcp import backend, server, tab_ops, tabs
 
-    helpers, _ = server._browser_harness()
+    helpers, _ = backend.browser_harness()
     reg = tabs.registry()
     with contextlib.suppress(Exception):
         reg.refresh(helpers)
@@ -179,7 +179,7 @@ def _run_compare_three(base: str) -> None:
             if focused is None or state.target_id == focused.target_id:
                 continue
             with contextlib.suppress(Exception):
-                server._close_target(helpers, state.target_id)
+                tab_ops._close_target(helpers, state.target_id)
         reg.refresh(helpers)
 
     server.browser_goto(f"{base}/form.html")

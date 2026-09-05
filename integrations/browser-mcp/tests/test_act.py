@@ -6,28 +6,28 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-from browser_mcp import actions, dom_indexing, server, tabs
+from browser_mcp import actions, backend, dom_indexing, login, server, tabs
 
 
 @pytest.fixture(autouse=True)
 def _reset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BROWSER_MCP_QUIET_MS", "1")
     monkeypatch.setenv("BROWSER_MCP_SETTLE_MS", "200")
-    original = server._bh
-    original_bound = server._bound_cdp
-    server._bh = None
-    server._bound_cdp = None
+    original = backend._bh
+    original_bound = backend._bound_cdp
+    backend._bh = None
+    backend._bound_cdp = None
     dom_indexing.clear_registered_targets()
     tabs.reset_registry()
     yield
-    server._bh = original
-    server._bound_cdp = original_bound
+    backend._bh = original
+    backend._bound_cdp = original_bound
     dom_indexing.clear_registered_targets()
     tabs.reset_registry()
 
 
 def _patch_harness(helpers: MagicMock):
-    return patch.object(server, "_browser_harness", return_value=(helpers, MagicMock()))
+    return patch.object(backend, "browser_harness", return_value=(helpers, MagicMock()))
 
 
 def _helpers(*, url: str = "https://a.test/") -> MagicMock:
@@ -157,10 +157,10 @@ def test_act_login_calls_sealed_login() -> None:
     with (
         _patch_harness(helpers),
         patch.object(
-            server,
+            login,
             "_sealed_login",
             return_value={"ok": True, "loggedIn": True, "origin": "https://a.test"},
-        ) as login,
+        ) as sealed,
         patch.object(dom_indexing, "settle", return_value={"quiet": True, "navigated": False}),
         patch.object(dom_indexing, "get_elements") as get_elements,
     ):
@@ -172,7 +172,7 @@ def test_act_login_calls_sealed_login() -> None:
             )
         )
     assert result["ok"] is True
-    login.assert_called_once_with("ada", "https://a.test")
+    sealed.assert_called_once_with("ada", "https://a.test")
     get_elements.assert_not_called()
 
 

@@ -8,25 +8,25 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
-from browser_mcp import dom_indexing, server, tabs
+from browser_mcp import dom_indexing, server, tabs, backend, tab_ops
 from browser_mcp.tabs import TabRegistry, TabState, UnknownTabError, runtime_value
 
 
 @pytest.fixture(autouse=True)
 def _reset() -> None:
-    original = server._bh
-    original_bound = server._bound_cdp
-    server._bh = None
-    server._bound_cdp = None
+    original = backend._bh
+    original_bound = backend._bound_cdp
+    backend._bh = None
+    backend._bound_cdp = None
     dom_indexing.clear_registered_targets()
     yield
-    server._bh = original
-    server._bound_cdp = original_bound
+    backend._bh = original
+    backend._bound_cdp = original_bound
     dom_indexing.clear_registered_targets()
 
 
 def _patch_harness(helpers: MagicMock):
-    return patch.object(server, "_browser_harness", return_value=(helpers, MagicMock()))
+    return patch.object(backend, "browser_harness", return_value=(helpers, MagicMock()))
 
 
 def _tab(tid: str, url: str, title: str = "t") -> dict:
@@ -196,8 +196,8 @@ def test_browser_stop_closes_agent_opened_tabs_at_cap(
     rows = [_tab(f"id{i}", f"https://ex.test/{i}") for i in range(5)]
     helpers = _helpers(tabs_list=rows, focused="id0")
     helpers.close_tab = MagicMock()
-    server._bh = (helpers, MagicMock())
-    server._bound_cdp = "http://127.0.0.1:9222"
+    backend._bh = (helpers, MagicMock())
+    backend._bound_cdp = "http://127.0.0.1:9222"
     reg = tabs.registry()
     reg.refresh(helpers)
     for state in reg.tabs():
@@ -236,9 +236,9 @@ def test_for_action_switches_only_when_target_differs() -> None:
     helpers = _helpers(tabs_list=rows, focused="aaa")
     with _patch_harness(helpers):
         json.loads(server.browser_tabs())
-        server._for_action(helpers, "t1")
+        tab_ops._for_action(helpers, "t1")
         helpers.switch_tab.assert_not_called()
-        server._for_action(helpers, "t2")
+        tab_ops._for_action(helpers, "t2")
         helpers.switch_tab.assert_called_once_with("bbb")
 
 

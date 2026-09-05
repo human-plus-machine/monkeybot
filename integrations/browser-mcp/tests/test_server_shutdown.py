@@ -11,19 +11,19 @@ import signal
 from unittest.mock import MagicMock, patch
 
 import pytest
-from browser_mcp import server
+from browser_mcp import server, backend
 
 
 @pytest.fixture(autouse=True)
 def _reset_bh_state():
-    """Isolate ``server._bh`` module state across tests."""
-    original = server._bh
-    original_bound = server._bound_cdp
-    server._bh = None
-    server._bound_cdp = None
+    """Isolate ``backend._bh`` module state across tests."""
+    original = backend._bh
+    original_bound = backend._bound_cdp
+    backend._bh = None
+    backend._bound_cdp = None
     yield
-    server._bh = original
-    server._bound_cdp = original_bound
+    backend._bh = original
+    backend._bound_cdp = original_bound
 
 
 def test_stop_daemon_for_shutdown_still_stops_daemon_when_never_bound_here() -> None:
@@ -33,7 +33,7 @@ def test_stop_daemon_for_shutdown_still_stops_daemon_when_never_bound_here() -> 
     tell an external/leftover daemon (e.g. a still-billing Browser Use Cloud
     session from a prior process) apart from "nothing to stop" any other way.
     """
-    server._bh = None
+    backend._bh = None
     with patch("browser_harness.admin.restart_daemon") as mock_restart:
         server._stop_daemon_for_shutdown()
     mock_restart.assert_called_once()
@@ -41,19 +41,19 @@ def test_stop_daemon_for_shutdown_still_stops_daemon_when_never_bound_here() -> 
 
 def test_stop_daemon_for_shutdown_stops_running_daemon() -> None:
     """A started daemon gets ``restart_daemon()`` called and module state cleared."""
-    server._bh = (MagicMock(), MagicMock())
+    backend._bh = (MagicMock(), MagicMock())
     with patch("browser_harness.admin.restart_daemon") as mock_restart:
         server._stop_daemon_for_shutdown()
     mock_restart.assert_called_once()
-    assert server._bh is None
+    assert backend._bh is None
 
 
 def test_stop_daemon_for_shutdown_swallows_errors() -> None:
     """A failing restart_daemon() must not raise -- shutdown must always proceed."""
-    server._bh = (MagicMock(), MagicMock())
+    backend._bh = (MagicMock(), MagicMock())
     with patch("browser_harness.admin.restart_daemon", side_effect=RuntimeError("boom")):
         server._stop_daemon_for_shutdown()  # must not raise
-    assert server._bh is None
+    assert backend._bh is None
 
 
 def test_stop_daemon_for_shutdown_is_idempotent() -> None:
@@ -63,7 +63,7 @@ def test_stop_daemon_for_shutdown_is_idempotent() -> None:
     an already-stopped daemon), so it's called twice here, not once -- the
     guarantee is "safe", not "only ever touches the daemon once".
     """
-    server._bh = (MagicMock(), MagicMock())
+    backend._bh = (MagicMock(), MagicMock())
     with patch("browser_harness.admin.restart_daemon") as mock_restart:
         server._stop_daemon_for_shutdown()
         server._stop_daemon_for_shutdown()
@@ -85,7 +85,7 @@ def test_install_shutdown_handlers_registers_sigterm_and_sigint() -> None:
 
 def test_signal_handler_stops_daemon_and_exits_with_signal_code() -> None:
     """The installed handler stops the daemon then exits with the conventional 128+signum code."""
-    server._bh = (MagicMock(), MagicMock())
+    backend._bh = (MagicMock(), MagicMock())
     captured_handler = {}
 
     def _capture_signal(sig, handler):

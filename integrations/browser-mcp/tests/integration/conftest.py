@@ -124,19 +124,19 @@ def cdp_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
     monkeypatch.setenv("BROWSER_MCP_PERF", "1")
     monkeypatch.setenv("BROWSER_MCP_PERF_LOG", str(log))
     monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(tmp_path / "workspace"))
-    from browser_mcp import dom_indexing, server, tabs
+    from browser_mcp import backend, dom_indexing, server, tabs
 
-    server._bh = None
-    server._bound_cdp = None
+    backend._bh = None
+    backend._bound_cdp = None
     dom_indexing.clear_registered_targets()
     tabs.reset_registry()
     try:
         yield url
     finally:
         with contextlib.suppress(Exception):
-            server._teardown_bound_backend()
-        server._bh = None
-        server._bound_cdp = None
+            backend.teardown_bound_backend()
+        backend._bh = None
+        backend._bound_cdp = None
         dom_indexing.clear_registered_targets()
         tabs.reset_registry()
         browser.close()

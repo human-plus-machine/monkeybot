@@ -5,25 +5,25 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-from browser_mcp import dom_indexing, server, tabs
+from browser_mcp import dom_indexing, server, tabs, backend
 
 
 def setup_function() -> None:
-    server._bh = None
-    server._bound_cdp = None
+    backend._bh = None
+    backend._bound_cdp = None
     dom_indexing.clear_registered_targets()
     tabs.reset_registry()
 
 
 def teardown_function() -> None:
-    server._bh = None
-    server._bound_cdp = None
+    backend._bh = None
+    backend._bound_cdp = None
     dom_indexing.clear_registered_targets()
     tabs.reset_registry()
 
 
 def _patch_harness(helpers: MagicMock):
-    return patch.object(server, "_browser_harness", return_value=(helpers, MagicMock()))
+    return patch.object(backend, "browser_harness", return_value=(helpers, MagicMock()))
 
 
 def test_browser_wait_for_uses_one_js_call_not_wait_for_element() -> None:

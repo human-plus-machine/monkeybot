@@ -12,26 +12,26 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from browser_mcp import dom_indexing, server, tabs
+from browser_mcp import dom_indexing, server, tabs, backend, playbooks
 
 
 @pytest.fixture(autouse=True)
 def _reset_bh_state():
-    original = server._bh
-    original_bound = server._bound_cdp
-    server._bh = None
-    server._bound_cdp = None
+    original = backend._bh
+    original_bound = backend._bound_cdp
+    backend._bh = None
+    backend._bound_cdp = None
     dom_indexing.clear_registered_targets()
     tabs.reset_registry()
     yield
-    server._bh = original
-    server._bound_cdp = original_bound
+    backend._bh = original
+    backend._bound_cdp = original_bound
     dom_indexing.clear_registered_targets()
     tabs.reset_registry()
 
 
 def _patch_harness(helpers: MagicMock):
-    return patch.object(server, "_browser_harness", return_value=(helpers, MagicMock()))
+    return patch.object(backend, "browser_harness", return_value=(helpers, MagicMock()))
 
 
 def test_browser_click_by_index_success() -> None:
@@ -175,7 +175,7 @@ def test_browser_goto_reuses_real_tab() -> None:
     helpers.js.return_value = True
     with (
         _patch_harness(helpers),
-        patch.object(server.playbooks, "list_playbook_names", return_value=[]),
+        patch.object(playbooks, "list_playbook_names", return_value=[]),
         patch.object(dom_indexing, "settle", return_value={"quiet": True, "navigated": False}),
         patch.object(dom_indexing, "_register_driver_for_new_documents"),
     ):
@@ -194,7 +194,7 @@ def test_browser_goto_opens_tab_when_blank() -> None:
     helpers.js.return_value = True
     with (
         _patch_harness(helpers),
-        patch.object(server.playbooks, "list_playbook_names", return_value=[]),
+        patch.object(playbooks, "list_playbook_names", return_value=[]),
         patch.object(dom_indexing, "settle", return_value={"quiet": True}),
         patch.object(dom_indexing, "_register_driver_for_new_documents"),
     ):
@@ -214,7 +214,7 @@ def test_browser_goto_new_tab_flag_opens_tab() -> None:
     helpers.js.return_value = True
     with (
         _patch_harness(helpers),
-        patch.object(server.playbooks, "list_playbook_names", return_value=[]),
+        patch.object(playbooks, "list_playbook_names", return_value=[]),
         patch.object(dom_indexing, "settle", return_value={"quiet": True}),
         patch.object(dom_indexing, "_register_driver_for_new_documents"),
     ):

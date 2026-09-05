@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from browser_mcp import actions, dom_indexing, playbooks, server, tabs
+from browser_mcp import actions, dom_indexing, playbooks, server, tabs, backend
 
 _SIGNUP = """```playbook
 name: signup
@@ -27,21 +27,21 @@ def _isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("BROWSER_MCP_PLAYBOOKS_DIR", str(root))
     monkeypatch.setenv("BROWSER_MCP_QUIET_MS", "1")
     monkeypatch.setenv("BROWSER_MCP_SETTLE_MS", "200")
-    original = server._bh
-    original_bound = server._bound_cdp
-    server._bh = None
-    server._bound_cdp = None
+    original = backend._bh
+    original_bound = backend._bound_cdp
+    backend._bh = None
+    backend._bound_cdp = None
     dom_indexing.clear_registered_targets()
     tabs.reset_registry()
     yield root
-    server._bh = original
-    server._bound_cdp = original_bound
+    backend._bh = original
+    backend._bound_cdp = original_bound
     dom_indexing.clear_registered_targets()
     tabs.reset_registry()
 
 
 def _patch_harness(helpers: MagicMock):
-    return patch.object(server, "_browser_harness", return_value=(helpers, MagicMock()))
+    return patch.object(backend, "browser_harness", return_value=(helpers, MagicMock()))
 
 
 def _helpers(*, url: str = "https://a.test/form.html") -> MagicMock:

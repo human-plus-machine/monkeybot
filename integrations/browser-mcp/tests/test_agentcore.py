@@ -11,29 +11,29 @@ from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
-from browser_mcp import agentcore, playwright_helpers, server  # noqa: F401
+from browser_mcp import agentcore, backend, in_app_cdp, playwright_helpers, server  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
 def _reset_state(monkeypatch: pytest.MonkeyPatch):
-    original_bh = server._bh
-    original_bound = server._bound_cdp
-    original_admin = server._agentcore_admin
-    original_from_file = server._env_set_from_in_app_file
-    server._bh = None
-    server._bound_cdp = None
-    server._agentcore_admin = None
-    server._env_set_from_in_app_file = False
+    original_bh = backend._bh
+    original_bound = backend._bound_cdp
+    original_admin = backend._agentcore_admin
+    original_from_file = in_app_cdp._env_set_from_in_app_file
+    backend._bh = None
+    backend._bound_cdp = None
+    backend._agentcore_admin = None
+    in_app_cdp._env_set_from_in_app_file = False
     monkeypatch.delenv("BROWSER_BACKEND", raising=False)
     monkeypatch.delenv("BU_CDP_URL", raising=False)
     monkeypatch.delenv("BU_CDP_WS", raising=False)
-    monkeypatch.setattr(server, "_read_in_app_cdp_file", lambda: None)
-    monkeypatch.setattr(server, "_read_in_app_cdp_token", lambda: None)
+    monkeypatch.setattr(in_app_cdp, "_read_in_app_cdp_file", lambda: None)
+    monkeypatch.setattr(in_app_cdp, "_read_in_app_cdp_token", lambda: None)
     yield
-    server._bh = original_bh
-    server._bound_cdp = original_bound
-    server._agentcore_admin = original_admin
-    server._env_set_from_in_app_file = original_from_file
+    backend._bh = original_bh
+    backend._bound_cdp = original_bound
+    backend._agentcore_admin = original_admin
+    in_app_cdp._env_set_from_in_app_file = original_from_file
 
 
 # --- agentcore_backend_requested() ---
@@ -171,7 +171,7 @@ def test_stop_session_idempotent_before_and_after_start(monkeypatch: pytest.Monk
     cm.__exit__.assert_called_once()
 
 
-# --- server._browser_harness() dispatch ---
+# --- backend.browser_harness() dispatch ---
 
 
 def test_browser_harness_dispatches_to_agentcore(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -184,23 +184,23 @@ def test_browser_harness_dispatches_to_agentcore(monkeypatch: pytest.MonkeyPatch
         patch("browser_mcp.agentcore.AgentCoreAdmin", return_value=fake_admin),
         patch("browser_mcp.playwright_helpers", fake_playwright_helpers),
     ):
-        helpers, admin = server._browser_harness()
+        helpers, admin = backend.browser_harness()
 
     assert helpers is fake_playwright_helpers
     assert admin is fake_admin
     fake_admin.ensure_session.assert_called_once()
     fake_playwright_helpers.connect.assert_called_once_with("wss://example/ws", {"Authorization": "sig"})
-    assert server._bound_cdp == "agentcore"
+    assert backend._bound_cdp == "agentcore"
 
 
 def test_browser_harness_reuses_bound_agentcore_session(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BROWSER_BACKEND", "agentcore")
     fake_helpers = MagicMock()
     fake_admin = MagicMock()
-    server._bh = (fake_helpers, fake_admin)
-    server._bound_cdp = "agentcore"
+    backend._bh = (fake_helpers, fake_admin)
+    backend._bound_cdp = "agentcore"
 
-    helpers, admin = server._browser_harness()
+    helpers, admin = backend.browser_harness()
 
     assert (helpers, admin) == (fake_helpers, fake_admin)
     fake_admin.ensure_session.assert_not_called()
@@ -219,10 +219,10 @@ def test_explicit_cdp_still_wins_with_backend_agentcore_set(monkeypatch: pytest.
     mod.admin = admin
     mod.helpers = helpers
     with patch.dict("sys.modules", {"browser_harness": mod}):
-        result = server._browser_harness()
+        result = backend.browser_harness()
 
     assert result == (helpers, admin)
-    assert server._bound_cdp == "http://127.0.0.1:9222"
+    assert backend._bound_cdp == "http://127.0.0.1:9222"
 
 
 # --- browser_stop / shutdown teardown ---
@@ -231,22 +231,22 @@ def test_explicit_cdp_still_wins_with_backend_agentcore_set(monkeypatch: pytest.
 def test_browser_stop_calls_stop_session_for_agentcore() -> None:
     fake_admin = MagicMock()
     fake_playwright_helpers = MagicMock()
-    server._bh = (MagicMock(), fake_admin)
-    server._bound_cdp = "agentcore"
+    backend._bh = (MagicMock(), fake_admin)
+    backend._bound_cdp = "agentcore"
 
     with patch("browser_mcp.playwright_helpers", fake_playwright_helpers):
         server.browser_stop()
 
     fake_admin.stop_session.assert_called_once()
     fake_playwright_helpers.disconnect.assert_called_once()
-    assert server._bh is None
-    assert server._bound_cdp is None
+    assert backend._bh is None
+    assert backend._bound_cdp is None
 
 
 def test_browser_stop_does_not_call_stop_session_for_non_agentcore() -> None:
     fake_admin = MagicMock()
-    server._bh = (MagicMock(), fake_admin)
-    server._bound_cdp = "http://127.0.0.1:9222"
+    backend._bh = (MagicMock(), fake_admin)
+    backend._bound_cdp = "http://127.0.0.1:9222"
 
     with patch("browser_harness.admin.restart_daemon") as mock_restart:
         server.browser_stop()
@@ -262,7 +262,7 @@ def test_browser_stop_stops_leftover_daemon_when_never_bound_here() -> None:
     still-billing Browser Use Cloud session from a prior process) may be
     alive -- matching _browser_harness()'s own "Fresh process" comment.
     """
-    assert server._bh is None
+    assert backend._bh is None
     with patch("browser_harness.admin.restart_daemon") as mock_restart:
         result = server.browser_stop()
 
@@ -275,49 +275,49 @@ def test_browser_stop_returns_error_payload_on_failure() -> None:
     matching the convention every other browser_* tool follows on failure."""
     fake_admin = MagicMock()
     fake_admin.stop_session.side_effect = RuntimeError("boom")
-    server._bh = (MagicMock(), fake_admin)
-    server._bound_cdp = "agentcore"
+    backend._bh = (MagicMock(), fake_admin)
+    backend._bound_cdp = "agentcore"
 
     with patch("browser_mcp.playwright_helpers", MagicMock()):
         result = server.browser_stop()
 
     assert '"ok": false' in result.lower()
     assert "boom" in result
-    assert server._bound_cdp is None
+    assert backend._bound_cdp is None
 
 
 def test_shutdown_stops_agentcore_session() -> None:
     fake_admin = MagicMock()
     fake_playwright_helpers = MagicMock()
-    server._bh = (MagicMock(), fake_admin)
-    server._bound_cdp = "agentcore"
+    backend._bh = (MagicMock(), fake_admin)
+    backend._bound_cdp = "agentcore"
 
     with patch("browser_mcp.playwright_helpers", fake_playwright_helpers):
         server._stop_daemon_for_shutdown()
 
     fake_admin.stop_session.assert_called_once()
     fake_playwright_helpers.disconnect.assert_called_once()
-    assert server._bh is None
-    assert server._bound_cdp is None
+    assert backend._bh is None
+    assert backend._bound_cdp is None
 
 
 def test_shutdown_swallows_agentcore_stop_errors() -> None:
     fake_admin = MagicMock()
     fake_admin.stop_session.side_effect = RuntimeError("boom")
-    server._bh = (MagicMock(), fake_admin)
-    server._bound_cdp = "agentcore"
+    backend._bh = (MagicMock(), fake_admin)
+    backend._bound_cdp = "agentcore"
 
     server._stop_daemon_for_shutdown()  # must not raise
 
-    assert server._bh is None
-    assert server._bound_cdp is None
+    assert backend._bh is None
+    assert backend._bound_cdp is None
 
 
 def test_shutdown_stops_leftover_daemon_when_never_bound_here() -> None:
     """Same "fresh process, external daemon may be alive" safety net as
 
     browser_stop applies to the atexit/SIGTERM hook too."""
-    assert server._bh is None
+    assert backend._bh is None
     with patch("browser_harness.admin.restart_daemon") as mock_restart:
         server._stop_daemon_for_shutdown()
     mock_restart.assert_called_once()
@@ -329,9 +329,9 @@ def test_shutdown_stops_leftover_daemon_when_never_bound_here() -> None:
 def test_reconnect_agentcore_stops_and_restarts_session() -> None:
     fake_admin = MagicMock()
     fake_admin.ensure_session.return_value = ("wss://fresh/ws", {"Authorization": "sig2"})
-    server._agentcore_admin = fake_admin
+    backend._agentcore_admin = fake_admin
 
-    result = server._reconnect_agentcore()
+    result = backend._reconnect_agentcore()
 
     fake_admin.stop_session.assert_called_once()
     fake_admin.ensure_session.assert_called_once()
@@ -348,6 +348,6 @@ def test_agentcore_browser_harness_registers_reconnect_hook(monkeypatch: pytest.
         patch("browser_mcp.agentcore.AgentCoreAdmin", return_value=fake_admin),
         patch("browser_mcp.playwright_helpers", fake_playwright_helpers),
     ):
-        server._browser_harness()
+        backend.browser_harness()
 
-    fake_playwright_helpers.set_reconnect_hook.assert_called_once_with(server._reconnect_agentcore)
+    fake_playwright_helpers.set_reconnect_hook.assert_called_once_with(backend._reconnect_agentcore)
