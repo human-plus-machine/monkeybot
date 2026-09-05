@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Protocol
 
+from monkeybot.core.config.snapshot import current_env
 from monkeybot.core.persistence.backends import ScheduledLoopStore
 from monkeybot.core.persistence.scheduled_loops import ScheduledLoopRow, format_tick_prompt
 from monkeybot.core.types.content_blocks import ContentBlock, Text
@@ -87,7 +88,7 @@ def scheduler_settings() -> SchedulerSettings:
 
 
 def scheduler_enabled_from_env() -> bool:
-    raw = os.environ.get("MONKEYBOT_SCHEDULER_ENABLED", "").strip().lower()
+    raw = current_env("MONKEYBOT_SCHEDULER_ENABLED", "").strip().lower()
     return raw in {"1", "true", "yes", "on"}
 
 
@@ -203,16 +204,23 @@ async def _execute_claimed_tick(
     claim_heartbeat_interval_s: float,
 ) -> None:
     if row.skip_if_busy and await _session_is_busy(session_busy, row.session_id):
-        await store.defer_tick(
+        deferred = await store.defer_tick(
             row.loop_id,
             worker_id=worker_id,
             reason="session busy; deferred",
         )
-        logger.info(
-            "scheduler deferred tick loop_id=%s session_id=%s (busy)",
-            row.loop_id,
-            row.session_id,
-        )
+        if deferred:
+            logger.info(
+                "scheduler deferred tick loop_id=%s session_id=%s (busy)",
+                row.loop_id,
+                row.session_id,
+            )
+        else:
+            logger.warning(
+                "scheduler defer_tick no-op loop_id=%s session_id=%s (claim lost)",
+                row.loop_id,
+                row.session_id,
+            )
         return
 
     heartbeat_stop = asyncio.Event()
@@ -236,16 +244,23 @@ async def _execute_claimed_tick(
             [Text(text=tick_prompt)],
         )
         if result.status is TickInvokeStatus.SESSION_BUSY:
-            await store.defer_tick(
+            deferred = await store.defer_tick(
                 row.loop_id,
                 worker_id=worker_id,
                 reason="session busy; deferred",
             )
-            logger.info(
-                "scheduler deferred tick loop_id=%s session_id=%s (remote busy)",
-                row.loop_id,
-                row.session_id,
-            )
+            if deferred:
+                logger.info(
+                    "scheduler deferred tick loop_id=%s session_id=%s (remote busy)",
+                    row.loop_id,
+                    row.session_id,
+                )
+            else:
+                logger.warning(
+                    "scheduler defer_tick no-op loop_id=%s session_id=%s (claim lost)",
+                    row.loop_id,
+                    row.session_id,
+                )
             return
 
         error = result.error if result.status is TickInvokeStatus.ERROR else None

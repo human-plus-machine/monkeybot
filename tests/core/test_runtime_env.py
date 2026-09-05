@@ -20,6 +20,8 @@ def _reset_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # when the key is absent, so direct os.environ writes inside the tested function
     # would otherwise leak across tests.
     env_before = {k: os.environ.get(k) for k in runtime_env._ENV_MAP.values()}
+    for key in runtime_env.YAML_ONLY_ENV_KEYS:
+        os.environ.pop(key, None)
     yield
     runtime_env.reset_runtime_env_state_for_tests()
     for key, before_val in env_before.items():
@@ -41,11 +43,15 @@ def test_yaml_applies_when_env_unset(tmp_path: Path, monkeypatch: pytest.MonkeyP
     monkeypatch.delenv("MODEL_NAME", raising=False)
     runtime_env.apply_monkeybot_runtime_env()
     assert os.environ.get("PORT") == "9191"
-    assert os.environ.get("MODEL_NAME") == "test-model-x"
+    assert os.environ.get("MODEL_NAME") is None
+    from monkeybot.core.config.snapshot import get_config_store
+
+    assert get_config_store().current().model.name == "test-model-x"
 
 
 def test_scheduler_enabled_yaml_applies_and_enables_scheduler(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from monkeybot.scheduler.engine import scheduler_enabled_from_env
 
@@ -63,7 +69,8 @@ def test_scheduler_enabled_yaml_applies_and_enables_scheduler(
 
 
 def test_scheduler_enabled_explicit_env_wins_over_yaml(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from monkeybot.scheduler.engine import scheduler_enabled_from_env
 
@@ -81,14 +88,14 @@ def test_scheduler_enabled_explicit_env_wins_over_yaml(
 
 
 def test_google_cloud_project_wins_over_yaml_gcp_project_id(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
     (cfg_dir / "monkeybot.yaml").write_text(
-        "gcp:\n  project_id: yaml-placeholder\n"
-        "anthropic_vertex:\n  project_id: yaml-placeholder\n",
+        "gcp:\n  project_id: yaml-placeholder\nanthropic_vertex:\n  project_id: yaml-placeholder\n",
         encoding="utf-8",
     )
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "from-env")
@@ -112,6 +119,96 @@ def test_existing_env_wins_over_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert os.environ.get("PORT") == "2222"
 
 
+def test_model_env_is_ignored_and_warned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "model:\n  provider: fake\n  name: from-yaml\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MODEL_NAME", "from-env")
+    with caplog.at_level("WARNING", logger="monkeybot.core.config.runtime_env"):
+        runtime_env.apply_monkeybot_runtime_env()
+    from monkeybot.core.config.snapshot import get_config_store
+
+    assert get_config_store().current().model.name == "from-yaml"
+    assert os.environ.get("MODEL_NAME") == "from-env"
+    assert "ignoring YAML-only model env" in caplog.text
+    assert "MODEL_NAME" in caplog.text
+
+
+def test_model_env_without_yaml_provider_fails_startup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.settings import ConfigError
+
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text("runtime:\n  port: 8080\n", encoding="utf-8")
+    monkeypatch.setenv("MODEL_PROVIDER", "aws_bedrock")
+    with pytest.raises(ConfigError, match="no model.provider"):
+        runtime_env.apply_monkeybot_runtime_env()
+
+
+def test_leftover_model_name_without_yaml_provider_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text("runtime:\n  port: 8080\n", encoding="utf-8")
+    monkeypatch.setenv("MODEL_NAME", "from-env")
+    with caplog.at_level("WARNING", logger="monkeybot.core.config.runtime_env"):
+        runtime_env.apply_monkeybot_runtime_env()
+    from monkeybot.core.config.snapshot import get_config_store
+
+    assert get_config_store().current().model.provider is None
+    assert "ignoring YAML-only model env" in caplog.text
+    assert "MODEL_NAME" in caplog.text
+
+
+def test_yaml_only_model_env_warns_once_across_reloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    yaml_path = cfg_dir / "monkeybot.yaml"
+    yaml_path.write_text("model:\n  provider: fake\n  name: v1\n", encoding="utf-8")
+    monkeypatch.setenv("MODEL_NAME", "from-env")
+    with caplog.at_level("WARNING", logger="monkeybot.core.config.runtime_env"):
+        runtime_env.apply_monkeybot_runtime_env()
+        from monkeybot.core.config.snapshot import get_config_store
+
+        store = get_config_store()
+        yaml_path.write_text("model:\n  provider: fake\n  name: v2\n", encoding="utf-8")
+        store.reload()
+        yaml_path.write_text("model:\n  provider: fake\n  name: v3\n", encoding="utf-8")
+        store.reload()
+    assert caplog.text.count("ignoring YAML-only model env") == 1
+
+
+def test_ollama_keep_alive_and_num_ctx_not_copied_to_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "model:\n  keep_alive: 60m\n  num_ctx: 8192\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OLLAMA_REQUEST_KEEP_ALIVE", raising=False)
+    monkeypatch.delenv("OLLAMA_NUM_CTX", raising=False)
+    runtime_env.apply_monkeybot_runtime_env()
+    assert "OLLAMA_REQUEST_KEEP_ALIVE" not in os.environ
+    assert "OLLAMA_NUM_CTX" not in os.environ
+
+
 def test_monkeybot_config_explicit_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     y = tmp_path / "custom.yaml"
     y.write_text(
@@ -121,10 +218,15 @@ def test_monkeybot_config_explicit_path(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.setenv("MONKEYBOT_CONFIG", str(y))
     monkeypatch.delenv("MODEL_PROVIDER", raising=False)
     runtime_env.apply_monkeybot_runtime_env()
-    assert os.environ.get("MODEL_PROVIDER") == "fake"
+    assert os.environ.get("MODEL_PROVIDER") is None
+    from monkeybot.core.config.snapshot import get_config_store
+
+    assert get_config_store().current().model.provider == "fake"
 
 
-def test_custom_config_paths_anchor_at_its_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_custom_config_paths_anchor_at_its_parent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     config = tmp_path / "custom" / "agent.yaml"
     config.parent.mkdir()
     config.write_text(
@@ -160,7 +262,10 @@ def test_includes_merge_overrides_base(tmp_path: Path, monkeypatch: pytest.Monke
     )
     monkeypatch.delenv("MODEL_NAME", raising=False)
     runtime_env.apply_monkeybot_runtime_env()
-    assert os.environ.get("MODEL_NAME") == "from-include"
+    assert os.environ.get("MODEL_NAME") is None
+    from monkeybot.core.config.snapshot import get_config_store
+
+    assert get_config_store().current().model.name == "from-include"
 
 
 def test_gateway_cors_allow_origins(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -168,7 +273,7 @@ def test_gateway_cors_allow_origins(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
     (cfg_dir / "monkeybot.yaml").write_text(
-        "gateway:\n  cors_allow_origins: \"http://a.example,http://b.example\"\n",
+        'gateway:\n  cors_allow_origins: "http://a.example,http://b.example"\n',
         encoding="utf-8",
     )
     monkeypatch.delenv("MONKEYBOT_CORS_ALLOW_ORIGINS", raising=False)
@@ -212,7 +317,9 @@ def test_paths_approvals_config_env(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert os.environ.get("MONKEYBOT_APPROVALS_CONFIG") == "./monkeybot_config/approvals.json"
 
 
-def test_model_summarization_model_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_model_summarization_model_yaml_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
@@ -222,7 +329,10 @@ def test_model_summarization_model_env(tmp_path: Path, monkeypatch: pytest.Monke
     )
     monkeypatch.delenv("CONTEXT_SUMMARIZATION_MODEL", raising=False)
     runtime_env.apply_monkeybot_runtime_env()
-    assert os.environ.get("CONTEXT_SUMMARIZATION_MODEL") == "flash-lite"
+    assert os.environ.get("CONTEXT_SUMMARIZATION_MODEL") is None
+    from monkeybot.core.config.snapshot import get_config_store
+
+    assert get_config_store().current().model.summarization_model == "flash-lite"
 
 
 def test_paths_agent_id_sets_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -260,7 +370,8 @@ def test_memory_storage_uri_sets_env(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 def test_legacy_memory_path_still_sets_memory_path_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     cfg_dir = tmp_path / "monkeybot_config"
@@ -329,10 +440,7 @@ def test_compression_ratios_not_mapped_from_yaml(
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
     (cfg_dir / "monkeybot.yaml").write_text(
-        "compression:\n"
-        "  light_ratio: 0.1\n"
-        "  moderate_ratio: 0.2\n"
-        "  aggressive_ratio: 0.3\n",
+        "compression:\n  light_ratio: 0.1\n  moderate_ratio: 0.2\n  aggressive_ratio: 0.3\n",
         encoding="utf-8",
     )
     for key in (
@@ -390,7 +498,8 @@ def test_invalid_yaml_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_realtime_nested_keys_flattened_to_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
     cfg_dir = tmp_path / "monkeybot_config"
@@ -417,3 +526,27 @@ def test_realtime_nested_keys_flattened_to_env(
     assert os.environ.get("MONKEYBOT_REALTIME_WS_PORT") == "9090"
     assert os.environ.get("MONKEYBOT_REALTIME_SESSION_MAX_DURATION_SEC") == "900"
     assert os.environ.get("MONKEYBOT_REALTIME_METRICS_EMIT_SUMMARY_ON_CLOSE") == "false"
+
+
+def test_retired_transcript_include_live_warns_and_is_not_mapped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "runtime:\n  transcript_enabled: true\n  transcript_include_live: true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MONKEYBOT_TRANSCRIPT_ENABLED", raising=False)
+    monkeypatch.delenv("MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE", raising=False)
+    with caplog.at_level("WARNING", logger="monkeybot.core.config.runtime_env"):
+        runtime_env.apply_monkeybot_runtime_env()
+    assert "transcript_include_live" in caplog.text
+    assert os.environ.get("MONKEYBOT_TRANSCRIPT_ENABLED") is None
+    assert os.environ.get("MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE") is None
+    assert ("runtime", "transcript_include_live") not in runtime_env.ENV_MAP
+    found = runtime_env.warn_retired_tools_keys(
+        {"runtime": {"transcript_include_live": True}}
+    )
+    assert found == ["transcript_include_live"]

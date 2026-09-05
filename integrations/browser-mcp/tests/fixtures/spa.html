@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>SPA fixture</title>
+  <style>
+    body { font-family: sans-serif; margin: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>SPA</h1>
+  <div id="app"><p id="page-1">Page 1 content</p></div>
+  <p>
+    <button type="button" id="next">Next</button>
+  </p>
+  <script>
+    (function () {
+      const app = document.getElementById("app");
+      document.getElementById("next").addEventListener("click", function () {
+        setTimeout(function () {
+          fetch("/api.json")
+            .then(function (response) { return response.json(); })
+            .then(function (data) {
+              window.location.hash = "#page-2";
+              app.innerHTML =
+                '<p id="page-2">' + data.message + "</p>" +
+                '<p>' + data.page + "</p>" +
+                '<button type="button" id="back">Page 2 done</button>';
+            });
+        }, 300);
+      });
+    })();
+  </script>
+</body>
+</html>

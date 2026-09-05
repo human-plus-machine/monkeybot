@@ -5,7 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from monkeybot.core.llm.provider import Message
-from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import Image, Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
 
 CANONICAL_TOOL_DEFS: tuple[ToolDef, ...] = (
@@ -44,6 +44,33 @@ def typed_messages_four_turn() -> list[Message]:
             ],
         ),
         Message.text("assistant", "all set"),
+    ]
+
+
+def typed_messages_four_turn_image_tool_result() -> list[Message]:
+    """Same shape as typed_messages_four_turn, but the tool result carries an
+    Image block instead of Text — exercises native media (Anthropic/Bedrock/
+    Gemini) and promotion (OpenAI-compat) on the identical conversation shape."""
+    return [
+        Message.text("user", "what's on my screen?"),
+        Message(
+            role="assistant",
+            content=[
+                Text(text="ok"),
+                ToolRequest(id="c1", name="load_file", args={"path": "x.png"}),
+            ],
+        ),
+        Message(
+            role="user",
+            content=[
+                ToolResponse(
+                    id="c1",
+                    tool_name="load_file",
+                    result=[Image(mime_type="image/png", data="aW1n")],
+                ),
+            ],
+        ),
+        Message.text("assistant", "a screenshot"),
     ]
 
 

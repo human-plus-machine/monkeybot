@@ -13,8 +13,7 @@ Run real-provider smoke scenarios against a live monkeybot gateway, score them, 
 cd evals/smoke_agent
 uv sync
 export NVIDIA_API_KEY=…          # or another provider + matching monkeybot extra
-export MODEL_PROVIDER=nvidia
-export MODEL_NAME=thinkingmachines/inkling
+# model.provider / model.name come from monkeybot_config/monkeybot.yaml (YAML-only)
 export PORT=8787
 export SANDBOX_ENABLED=false
 uv run -m monkeybot.gateway.main

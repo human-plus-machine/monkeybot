@@ -6,6 +6,50 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [core v3.1.0] - 2026-09-05
+
+### Breaking
+
+- `context_curation` is retired. The section no longer maps to env or trims MemPalace wake-up lines. Leftover YAML still loads and logs one warning per process; `CONTEXT_CURATION_*` / `MEMORY_INDEX_CAP` process env is unused. Wake-up size is whatever MemPalace L0+L1 returns; `model.context_window` still only bounds history summarization. Subagents now include the same wake-up block as the parent (they previously received none of it).
+- `model.provider`, `model.name`, `model.temperature`, `model.max_tokens`, `model.thinking_budget`, `model.context_window`, `model.summarization_model`, `model.max_turns`, and `model.cache_retention` are YAML-only. Process env `MODEL_PROVIDER`, `MODEL_NAME`, `MODEL_TEMPERATURE`, `MODEL_MAX_TOKENS`, `MODEL_THINKING_BUDGET`, `MODEL_CONTEXT_WINDOW`, `CONTEXT_SUMMARIZATION_MODEL`, `MAX_TURNS`, and `MODEL_CACHE_RETENTION` are ignored (a warning is logged once per process). If leftover `MODEL_PROVIDER` is set and `monkeybot.yaml` has no `model.provider`, startup fails instead of silently defaulting to `google_vertexai` / `gemini-2.5-flash`. Set them under `model:` in `monkeybot.yaml`. Credentials (`GEMINI_API_KEY`, `NVIDIA_API_KEY`, …) stay in `.env`.
+
+### Added
+
+- Local Ollama prefix-cache knobs: `ollama-local` sends `keep_alive` (default 24h, `model.keep_alive`) and optional pinned `num_ctx` (`model.num_ctx`) via OpenAI-compat `extra_body`. YAML-only — not mapped from the runtime env. `model.context_window` is never mapped to `num_ctx`. See `docs/ollama-local.md` and `examples/ollama/PrefixStable.Modelfile`.
+
+### Fixed
+
+- An image inside a tool result (e.g. `load_file`) now reaches OpenAI-compatible models (OpenAI, Ollama, NVIDIA, HuggingFace, OpenRouter) as a real `image_url` promoted into a synthetic user turn after the tool row, instead of a text placeholder telling the model to guess at content it never saw. Anthropic-family, Bedrock, and Gemini already carried this media natively and are unaffected. Also fixes Gemini replaying a media-only tool result as an empty `functionResponse`, and fixes OpenAI-compat prompt-token counting tokenizing an image's base64 data URL as JSON text (a 1MB image previously counted as ~340K tokens and could trigger spurious compaction).
+- Subagent timeout/cancel now walks and kills the full process tree (including nested `run_command` sessions that use their own `start_new_session` process groups), not only the subagent leader's session. `process_group_id` returns `None` when the PID is gone instead of treating a recycled PID as a process group. The tree walk's non-`/proc` fallback (macOS) now uses `pgrep -P` instead of an invalid BSD `ps -P` invocation that silently returned no children. `stop_subagent_process` `killpg`s the spawn-time `pgid` even after the leader has been reaped, and skips the tree walk in that case so a recycled leader PID cannot be used as a `killpg` target.
+- Scheduled loops: a single malformed record — e.g. `interval_ms <= 0` from legacy/hand-edited data — is skipped and logged on Firestore, SQLite, and Postgres `get`/`list_all`/`list_due` instead of raising out of the mapper and stalling the scheduler (or 500ing the loops API).
+- Progressive MCP: harness catalog + `enable_mcp` schema no longer mention `mcp.json`, which sent models to `read_file` a control-plane file outside the workspace. Catalog names are now an `enable_mcp` enum; the tool is omitted when the catalog is empty.
+
+## [browser v0.5.0] - 2026-09-05
+
+### Added
+
+- Opt-in per-tool timing via `BROWSER_MCP_PERF=1` (JSONL to `BROWSER_MCP_PERF_LOG` or `<workspace>/browser/perf/tools.jsonl`). Never logs tool arguments. `scripts/perf_bench.py` records the Phase 0 baseline against static fixtures. See [browser-mcp-perf-baseline.md](docs/browser-mcp-perf-baseline.md).
+- The DOM driver is registered once per tab (`Page.addScriptToEvaluateOnNewDocument` / Playwright `add_init_script`) so `browser_get_elements` after navigation is one harness call. `browser_input_by_index` gains `mode` (`auto`/`keys`/`fast`) and returns `mode_used`; default override `BROWSER_MCP_FILL_MODE`. `browser_goto(url, new_tab=False)` reuses the current tab via `goto_url` and an in-page load/settle wait. `browser_click_by_index` adds `warning` when the target is covered by another element.
+- Tab registry with aliases (`t1`, `t2`, …), `tab=` on interaction tools (omitted = focused tab), `browser_open_tab` / `browser_close_tab` / `browser_read_tabs`, enriched `browser_tabs` (`{ok, focused, tabs}` instead of a raw list), alias-aware `browser_switch_tab`, five-tab cap (`BROWSER_MCP_MAX_TABS`, user chooses what to drop), and serialized tool execution. Reads never move focus; actions do. `browser_stop` closes agent-opened tabs.
+- `browser_screenshot` defaults to JPEG (`max_dim=1200`, `quality=60`) and returns `bytes` + `format`. `annotate=True` draws current `get_elements` index labels so the next action can still use `browser_click_by_index`. PNG remains available via `format="png"`. Inline MCP images (7b) are not included.
+- `browser_wait_for` waits with one in-page `MutationObserver` (chunked at 4s to stay under the harness IPC timeout) instead of polling `wait_for_element`. `browser_wait_idle` still uses network idle on the focused tab, then a DOM settle; `ok`/`idle` stay the network result and the response adds `quiet`/`navigated`.
+- `browser_get_elements` defaults to the viewport (`BROWSER_MCP_VIEWPORT_DEFAULT`), filters with `kind` / `contains` / `max_elements=150`, and returns `truncated` + `below_viewport`. Indices stay valid until navigation. `observe="diff"` diffs against the per-tab cached tree. New `browser_get_text` for readable body copy.
+- Action tools (`click`/`input`/`select`/`fill`/`press`/`scroll`/`switch_tab`) settle then return `{action, page, observation}` (diff by default, `BROWSER_MCP_OBSERVE_DEFAULT`; `observe="none"` keeps the legacy shape). `browser_goto` and focused `browser_open_tab` return a full observation. Timing: `BROWSER_MCP_SETTLE_MS` / `BROWSER_MCP_QUIET_MS`. Legacy top-level keys (`clicked`, `index`, `tagName`, `selected`) stay for this release.
+- `browser_act` runs up to 25 sequential steps in one turn (`fill_form` is a step, not a separate tool); `browser_click_text` clicks by visible text; `browser_extract` scrapes structured rows. Shared `do_*` helpers back both the single tools and the batch executor.
+- Optional `playbook` YAML fences in host markdown are executable via `browser_run_playbook`. `browser_list_playbooks` / `browser_goto` list `flows`. `browser_write_playbook` validates fences before save. Timeout: `BROWSER_MCP_PLAYBOOK_TIMEOUT_S` (default 120). Secrets are never flow params — use `{do: login, expected_origin}`.
+
+## [cli v0.6.0] - 2026-09-05
+
+### Added
+
+- `doctor` warns on local Ollama `*-mlx` tags, default thinking on known reasoning tags, and huge `num_ctx`, and fails on unparseable/`<1` `num_ctx`. See `docs/ollama-local.md`.
+
+### Changed
+
+- New-agent browser skill documents `fill_form` as a `browser_act` / playbook step.
+- Example YAML documents YAML-only `model.*` knobs and drops retired `context_curation`.
+- Declares `monkeybot[cli]>=3.1.0,<4` and `monkeybot-browser-mcp>=0.5.0,<1` so a global CLI install pulls this train.
+
 ## [browser v0.4.0] - 2026-08-29
 
 ### Added
@@ -71,6 +115,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Firestore scheduled-loop `defer_tick` and `release_stale_claims` now re-check claim ownership / lease freshness inside a transaction (matching SQL `WHERE` guards), so a stale worker cannot clear another worker's reclaimed tick and a renewed heartbeat cannot be wiped mid-release.
+- Inline `task` subagent timeout/cancel kills the process group (not only the direct child), matching the worker-pool path so nested shell descendants do not keep running after Stop. The inline subagent is detached from the parent process group (`start_new_session`), so a parent SIGKILL/crash no longer tears it down automatically — cleanup relies on timeout/cancel paths. Inline `task` has no `subagent.pid` reap path (unlike the worker pool); orphans after a hard parent crash are accepted on that path.
 - Stop during a tool confirmation now settles completed tool results into history (and synthesizes cancel envelopes for the rest) instead of escaping before abort settlement; the realtime confirm path does the same. Cancel after a finished provider stream also persists already-shown assistant text so follow-ups match what the user saw, and settles any finalized tool calls with cancel envelopes.
 - SQLite `history.reset` (compaction / load-max truncate) runs delete+reinsert in one transaction, matching Postgres, so a crash mid-reset cannot wipe or partially rewrite a thread.
 - Tool spill paths sanitize client `session_id` / `thread_id` components and refuse to write or delete outside `.monkeybot/spill`; `POST /sessions` rejects path-traversal session ids; session DELETE quiesces the active turn before removing spill dirs. The same path-component sanitizer also applies to transcript and attachment directories, so legacy ids containing glob metacharacters map to a sanitized on-disk folder (reads still find a pre-sanitization folder when it exists).

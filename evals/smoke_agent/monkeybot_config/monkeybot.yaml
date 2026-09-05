@@ -1,5 +1,5 @@
 # Live-eval smoke agent defaults (cwd: evals/smoke_agent/).
-# CI overrides MODEL_* / PORT via environment variables.
+# CI pins PORT via environment; model.provider / model.name are YAML-only.
 
 runtime:
   log_level: INFO
@@ -27,14 +27,6 @@ gateway:
   pending_response_timeout_sec: 300
   sse_replay_max: 256
   graceful_shutdown_timeout_sec: 5
-
-context_curation:
-  enabled: true
-  memory_window_lines: 12
-  memory_index_cap: 200
-  memory_token_threshold: 2000
-  curator_model: thinkingmachines/inkling
-  timeout_sec: 10
 
 subagents:
   timeout_sec: 600

@@ -1,0 +1,116 @@
+"""Unit tests for fill_form, click_text, and extract contracts."""
+
+from __future__ import annotations
+
+import json
+from unittest.mock import MagicMock, patch
+
+import pytest
+from browser_mcp import actions, dom_indexing, server, tabs, backend
+
+
+@pytest.fixture(autouse=True)
+def _reset() -> None:
+    original = backend._bh
+    original_bound = backend._bound_cdp
+    backend._bh = None
+    backend._bound_cdp = None
+    dom_indexing.clear_registered_targets()
+    tabs.reset_registry()
+    yield
+    backend._bh = original
+    backend._bound_cdp = original_bound
+    dom_indexing.clear_registered_targets()
+    tabs.reset_registry()
+
+
+def _patch_harness(helpers: MagicMock):
+    return patch.object(backend, "browser_harness", return_value=(helpers, MagicMock()))
+
+
+def _helpers() -> MagicMock:
+    helpers = MagicMock()
+    row = {
+        "targetId": "aaa",
+        "target_id": "aaa",
+        "url": "https://a.test/",
+        "title": "A",
+    }
+    helpers.list_tabs.return_value = [row]
+    helpers.current_tab.return_value = dict(row)
+    helpers.page_info.return_value = {"url": "https://a.test/", "title": "A"}
+    helpers.js.return_value = True
+    return helpers
+
+
+def test_fill_form_unresolved_is_not_error() -> None:
+    handle = MagicMock()
+    with patch.object(
+        actions,
+        "_fill_one_field",
+        side_effect=[
+            {"label": "Email", "index": 2, "how": "aria-label"},
+            None,
+        ],
+    ):
+        result = actions.do_fill_form(handle, {"Email": "a@b.test", "Promo code": "x"})
+    assert result["ok"] is True
+    assert result["unresolved"] == ["Promo code"]
+    assert result["filled"][0]["how"] == "aria-label"
+
+
+def test_fill_form_all_failed_is_error() -> None:
+    handle = MagicMock()
+    with patch.object(actions, "_fill_one_field", return_value=None):
+        result = actions.do_fill_form(handle, {"Nope": "x"})
+    assert result["ok"] is False
+    assert result["unresolved"] == ["Nope"]
+
+
+def test_click_text_near_miss_shape() -> None:
+    helpers = _helpers()
+    with (
+        _patch_harness(helpers),
+        patch.object(
+            actions,
+            "do_click_text",
+            return_value={
+                "ok": False,
+                "error": "no matching element for 'Nope'",
+                "did_you_mean": [
+                    {"text": "Submit", "role": "button", "tagName": "button"}
+                ],
+            },
+        ),
+    ):
+        json.loads(server.browser_tabs())
+        result = json.loads(server.browser_click_text("Nope", observe="none"))
+    assert result["ok"] is False
+    assert result["did_you_mean"][0]["text"] == "Submit"
+
+
+def test_extract_href_attribute() -> None:
+    helpers = _helpers()
+    with (
+        _patch_harness(helpers),
+        patch.object(
+            dom_indexing,
+            "extract_rows",
+            return_value={
+                "rows": [{"title": "Oak desk", "href": "/desk"}],
+                "truncated": False,
+            },
+        ) as extract_rows,
+    ):
+        json.loads(server.browser_tabs())
+        result = json.loads(
+            server.browser_extract(".card", {"title": "h2", "href": "a@href"})
+        )
+    assert result == {
+        "ok": True,
+        "rows": [{"title": "Oak desk", "href": "/desk"}],
+        "truncated": False,
+    }
+    extract_rows.assert_called_once()
+    assert extract_rows.call_args.args[1] == ".card"
+    assert extract_rows.call_args.args[2] == {"title": "h2", "href": "a@href"}

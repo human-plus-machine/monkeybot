@@ -25,6 +25,11 @@ def _free_port() -> int:
 def test_chat_repl_round_trip_with_fake_gateway(tmp_path: Path) -> None:
     port = _free_port()
     base = f"http://127.0.0.1:{port}"
+    (tmp_path / "monkeybot_config").mkdir()
+    (tmp_path / "monkeybot_config" / "monkeybot.yaml").write_text(
+        "model:\n  provider: fake\n  name: fake\n",
+        encoding="utf-8",
+    )
     agent = tmp_path / "AGENT.md"
     agent.write_text("# Test agent\nYou are a test assistant.\n", encoding="utf-8")
     policy = tmp_path / "command_allowlist.yaml"
@@ -40,7 +45,6 @@ def test_chat_repl_round_trip_with_fake_gateway(tmp_path: Path) -> None:
             "DB_URL": f"sqlite:///{tmp_path / 'mb.db'}",
             "MCP_CONFIG": str(tmp_path / "no_mcp.json"),
             "MEMORY_PATH": str(tmp_path / "memory"),
-            "MODEL_PROVIDER": "fake",
             "PORT": str(port),
             "SKILLS_PATH": str(tmp_path / "skills"),
             "MONKEYBOT_CHAT_PLAIN": "1",

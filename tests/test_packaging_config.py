@@ -80,5 +80,5 @@ def test_cli_wheel_includes_scaffold_defaults(tmp_path: Path) -> None:
             if line.startswith("Requires-Dist: monkeybot")
         ]
         assert any("monkeybot[cli]" in line for line in requires)
-        assert any(">=3.0.0" in line and "<4" in line for line in requires)
-        assert any("monkeybot-browser-mcp" in line for line in requires)
+        assert any(">=3.1.0" in line and "<4" in line for line in requires)
+        assert any("monkeybot-browser-mcp" in line and ">=0.5.0" in line for line in requires)

@@ -20,7 +20,7 @@ Optional:
                         explicitly below anyway so the requirement is obvious here.
   MONKEYBOT_MEMORY_HOOK_ENABLED — set to 0 to skip capture/wake-up (or omit monkeybot[memory])
 
-Model/provider: use MODEL_PROVIDER, MODEL_NAME, and provider secrets as in container deploys.
+Model/provider: set `model.provider` and `model.name` in `monkeybot.yaml`; keep provider secrets in the environment as in container deploys.
 
 Memory capture uses a durable SQLite outbox. ``run_pattern_bc_turn`` drains pending
 rows at the end of each invocation; ``HarnessDeps.close()`` drains again before

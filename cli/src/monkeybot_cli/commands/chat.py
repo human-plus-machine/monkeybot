@@ -626,9 +626,9 @@ async def _plain_chat_session(
             await controller.submit(user_line)
     finally:
         await controller.close()
-        if controller.transcript_report_dir:
+        if controller.transcript_dir:
             print(
-                f"{_DIM}Transcript report → {controller.transcript_report_dir}{_RESET}",
+                f"{_DIM}Transcript → {controller.transcript_dir}{_RESET}",
                 flush=True,
             )
         await renderer.stop_io_worker()
@@ -678,7 +678,6 @@ def _spawn_gateway(config_path: Path | None, agent_root: Path, port: int) -> _Sp
         env["MONKEYBOT_CONFIG"] = str(config_path)
     env["PORT"] = str(port)
     env.setdefault("LOG_LEVEL", "error")
-    env.setdefault("MONKEYBOT_TRANSCRIPT_ENABLED", "1")
     log_file = tempfile.NamedTemporaryFile(
         mode="w+",
         prefix="monkeybot-gateway-",

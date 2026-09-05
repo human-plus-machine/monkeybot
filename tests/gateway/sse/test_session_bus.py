@@ -106,7 +106,7 @@ def test_registry_remove_drops_session_and_returns_true() -> None:
 
     result = reg.remove("s1")
     assert result.deleted is True
-    assert result.transcript_report_dir is None
+    assert result.transcript_dir is None
     assert reg.get("s1") is None
 
 
@@ -166,7 +166,7 @@ async def test_registry_remove_cancels_pending_responses() -> None:
 
 
 @pytest.mark.asyncio
-async def test_registry_remove_async_analyzes_transcript(tmp_path: Path) -> None:
+async def test_registry_remove_async_returns_transcript_dir(tmp_path: Path) -> None:
     reg = SessionRegistry()
     bus = reg.create("s-tx", agent_md=None, created_at_ms=0)
     writer = TranscriptWriter("s-tx", workspace_root=tmp_path)
@@ -176,18 +176,19 @@ async def test_registry_remove_async_analyzes_transcript(tmp_path: Path) -> None
 
     result = await reg.remove_async("s-tx")
     assert result.deleted is True
-    assert result.transcript_report_dir is not None
-    report_dir = Path(result.transcript_report_dir)
-    assert (report_dir / "brief.md").is_file()
-    assert (report_dir / "report.json").is_file()
-    assert (report_dir / "meta.json").is_file()
+    assert result.transcript_dir is not None
+    report_dir = Path(result.transcript_dir)
+    assert (report_dir / "transcript.ndjson").is_file()
+    assert not (report_dir / "brief.md").exists()
+    assert not (report_dir / "report.json").exists()
+    assert not (report_dir / "meta.json").exists()
 
 
 @pytest.mark.asyncio
-async def test_registry_remove_async_awaits_active_turn_before_analysis(
+async def test_registry_remove_async_awaits_active_turn_before_returning(
     tmp_path: Path,
 ) -> None:
-    """DELETE during a running turn must not analyze until the turn finishes writing."""
+    """DELETE during a running turn must wait until the turn finishes writing."""
     import json
 
     from monkeybot.core.runtime.events import TurnComplete, UsageTotals
@@ -217,7 +218,7 @@ async def test_registry_remove_async_awaits_active_turn_before_analysis(
     result = await reg.remove_async("s-race")
     assert result.deleted is True
     assert wrote_late.is_set()
-    assert result.transcript_report_dir is not None
+    assert result.transcript_dir is not None
 
     lines = [
         json.loads(line)
@@ -226,9 +227,7 @@ async def test_registry_remove_async_awaits_active_turn_before_analysis(
     ]
     types = [line.get("type") for line in lines]
     assert "TurnComplete" in types
-    report = json.loads((Path(result.transcript_report_dir) / "report.json").read_text())
-    # Analysis ran after the late TurnComplete, so the turn is closed cleanly.
-    assert report["scorecard"]["turn_count"] >= 1
+    assert not (Path(result.transcript_dir) / "report.json").exists()
 
 
 def test_request_cancel_ignores_stale_request_id() -> None:

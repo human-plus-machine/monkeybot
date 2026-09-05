@@ -1763,6 +1763,52 @@ async def test_run_command_cwd_escape_returns_validation_envelope(
 
 
 @pytest.mark.asyncio
+async def test_run_command_file_not_found_envelope_includes_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import AsyncMock, MagicMock
+
+    monkeypatch.chdir(tmp_path)
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    terminal = MagicMock()
+    terminal.allowed_commands = ("python3",)
+    terminal.allowed_path_prefixes = ("./",)
+    terminal.execute = AsyncMock(
+        side_effect=FileNotFoundError(
+            "Executable 'python3' not found on PATH (python3). "
+            "For mempalace, the gateway Python must have the mempalace package."
+        )
+    )
+    terminal.aclose = AsyncMock()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        terminal=terminal,
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1",
+                name="run_command",
+                args={"argv": ["python3", "-c", "print(1)"]},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "runtime"
+    assert payload["details"]["command"] == "python3"
+    assert payload["details"]["argv"] == ["-c", "print(1)"]
+
+
+@pytest.mark.asyncio
 async def test_run_command_timeout_hint_rejects_timeout_bump_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2503,6 +2549,35 @@ class TestCoreToolExecutorSandboxSelection:
         monkeypatch.setenv("SANDBOX_ENABLED", "true")
         ex = _make_executor(tmp_path)
         assert isinstance(ex._terminal, SandboxExecutor)
+
+    def test_sandbox_follows_pinned_config_not_later_env(self, tmp_path, monkeypatch):
+        from monkeybot.core.config import reset_runtime_env_state_for_tests
+        from monkeybot.core.config.snapshot import build_runtime_config
+
+        reset_runtime_env_state_for_tests()
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("SANDBOX_ENABLED", raising=False)
+        cfg_dir = tmp_path / "monkeybot_config"
+        cfg_dir.mkdir(exist_ok=True)
+        (cfg_dir / "monkeybot.yaml").write_text(
+            "sandbox:\n  enabled: true\n",
+            encoding="utf-8",
+        )
+        cfg = build_runtime_config(agent_root=tmp_path)
+        monkeypatch.setenv("SANDBOX_ENABLED", "false")
+        mem = tmp_path / "mem"
+        mem.mkdir(exist_ok=True)
+        skills = tmp_path / "skills"
+        skills.mkdir(exist_ok=True)
+        ex = CoreToolExecutor(
+            workspace_root=tmp_path,
+            memory=_mem_sub(mem),
+            skills_path=skills,
+            mcp=_NoMCP(),
+            config=cfg,
+        )
+        assert isinstance(ex._terminal, SandboxExecutor)
+        reset_runtime_env_state_for_tests()
 
     def test_explicit_terminal_injection_bypasses_sandbox_env(self, tmp_path, monkeypatch):
         # Tests that inject a terminal= override must still work regardless of env.

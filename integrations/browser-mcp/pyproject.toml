@@ -4,12 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "monkeybot-browser-mcp"
-version = "0.4.0"
+version = "0.5.0"
 description = "monkeybot MCP server wrapping browser-harness for real-browser control and site playbooks."
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=1.0.0,<2",
     "browser-harness>=0.1.3",
+    "pillow>=10",
+    "pyyaml>=6",
 ]
 
 [project.optional-dependencies]

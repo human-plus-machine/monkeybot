@@ -29,12 +29,16 @@ import logging
 import os
 import shlex
 import shutil
-import signal
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from monkeybot.core.subprocess_groups import (
+    SUPPORTS_PROCESS_GROUPS,
+    kill_process_group,
+    process_group_id,
+)
 from monkeybot.core.tools.fs_isolation import (
     isolated_argv,
     isolation_failed,
@@ -278,40 +282,6 @@ async def _wait_for_exit(process: asyncio.subprocess.Process, timeout: float) ->
                 await wait_task
 
 
-_SUPPORTS_PROCESS_GROUPS = sys.platform != "win32"
-
-
-def _process_group_id(pid: int | None) -> int | None:
-    if pid is None or not _SUPPORTS_PROCESS_GROUPS:
-        return None
-    try:
-        return os.getpgid(pid)
-    except ProcessLookupError:
-        return pid
-    except OSError:
-        return None
-
-
-def _kill_process_group(
-    pgid: int | None,
-    process: asyncio.subprocess.Process,
-) -> None:
-    """SIGKILL ``pgid`` when known so pipe-holding descendants die too.
-
-    ``pgid`` must be captured before the direct child is reaped — after
-    ``wait()`` the PID may be gone and ``getpgid`` will fail.
-    """
-    if pgid is not None and _SUPPORTS_PROCESS_GROUPS:
-        try:
-            os.killpg(pgid, signal.SIGKILL)
-            return
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-    if process.returncode is None:
-        with contextlib.suppress(ProcessLookupError):
-            process.kill()
-
-
 class TerminalExecutor:
     """
     Secure terminal command executor with allowlist-based security.
@@ -525,7 +495,7 @@ class TerminalExecutor:
                 stderr=asyncio.subprocess.PIPE,
                 cwd=exec_cwd,
                 env=env,
-                start_new_session=_SUPPORTS_PROCESS_GROUPS,
+                start_new_session=SUPPORTS_PROCESS_GROUPS,
             )
         except FileNotFoundError as exc:
             raise FileNotFoundError(
@@ -533,7 +503,7 @@ class TerminalExecutor:
                 "For mempalace, the gateway Python must have the mempalace package."
             ) from exc
         assert process.stdout is not None and process.stderr is not None
-        pgid = _process_group_id(process.pid)
+        pgid = process_group_id(process.pid)
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
         stdout_task = asyncio.create_task(_pump_stream(process.stdout, stdout_chunks))
@@ -541,7 +511,7 @@ class TerminalExecutor:
         timed_out = False
         if await _wait_for_exit(process, timeout):
             timed_out = True
-            _kill_process_group(pgid, process)
+            kill_process_group(pgid, process)
             # Reap the direct child if it is still listed; ignore if already gone.
             with contextlib.suppress(ProcessLookupError):
                 await _wait_for_exit(process, _STREAM_DRAIN_TIMEOUT_SEC)
@@ -549,7 +519,7 @@ class TerminalExecutor:
         drained_clean = await _drain_pumps(stdout_task, stderr_task)
         if not drained_clean:
             # Orphans may still hold the capture pipes open after the child exits.
-            _kill_process_group(pgid, process)
+            kill_process_group(pgid, process)
 
         stdout_raw = self._truncate_output(b"".join(stdout_chunks), "stdout")
         stderr_raw = self._truncate_output(b"".join(stderr_chunks), "stderr")

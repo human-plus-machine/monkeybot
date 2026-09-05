@@ -89,10 +89,7 @@ def _current_request_block(chat_messages: Sequence[Message] | None) -> str:
 def _session_attachments_block(catalog: Sequence[AttachmentRecord] | None) -> str:
     if not catalog:
         return ""
-    lines = [
-        f"- {r.attachment_id} ({r.filename}, {r.mime_type}): {r.description}"
-        for r in catalog
-    ]
+    lines = [f"- {r.attachment_id} ({r.filename}, {r.mime_type}): {r.description}" for r in catalog]
     return "\n\n## Session attachments\n" + "\n".join(lines)
 
 
@@ -106,8 +103,7 @@ def _current_date_block() -> str:
 
 
 def _memory_block(ctx: TurnContext) -> str:
-    mem_lines = list(ctx.memory_index)
-    memory_text = "\n".join(mem_lines) if mem_lines else ""
+    memory_text = "\n".join(ctx.memory_index) if ctx.memory_index else ""
     mem_block = f"{MEMORY_INDEX_HEADING}{memory_text}" if memory_text else ""
     return mem_block
 
@@ -133,9 +129,9 @@ def _harness_text(ctx: TurnContext) -> str:
         memory_on=ctx.memory is not None,
         workspace_root=str(ctx.workspace_root) if ctx.workspace_root is not None else "(not set)",
         memory_storage_uri=ctx.memory.uri if ctx.memory is not None else "(not set)",
-        run_command_opensandbox=SandboxConfig.from_env().enabled,
+        run_command_opensandbox=SandboxConfig.from_env(ctx.config).enabled,
         subagent_personas=ctx.subagent_personas,
-        emission_style=emission_style_terse_from_env(),
+        emission_style=emission_style_terse_from_env(ctx.config),
         catalog_mcp_servers=ctx.catalog_mcp_servers,
     )
 
@@ -157,9 +153,7 @@ def compose_volatile_tail(
     chat_messages: Sequence[Message] | None = None,
 ) -> str:
     """Volatile tail: current date + memory index + skills + current-request anchor."""
-    return "".join(
-        compose_volatile_tail_parts(ctx, chat_messages=chat_messages).values()
-    )
+    return "".join(compose_volatile_tail_parts(ctx, chat_messages=chat_messages).values())
 
 
 def compose_volatile_tail_parts(

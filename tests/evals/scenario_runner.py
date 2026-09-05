@@ -137,7 +137,6 @@ def _make_turn_context(scenario: Scenario) -> TurnContext:
         user_id=None,
         parent_run_id=None,
         model="gemini-2.5-flash",
-        context_curation_enabled=False,
     )
 
 

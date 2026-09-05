@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -15,11 +16,13 @@ import pytest
 from opentelemetry import propagate, trace
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 
+from monkeybot.core.config import reset_runtime_env_state_for_tests
 from monkeybot.core.context import TurnContext
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import TurnComplete, UsageTotals
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope
+from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.types import unwrap_tool_execution_result
 from tests.core.memory.helpers import make_memory_subsystem
@@ -103,6 +106,11 @@ def _make_executor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CoreToolE
 @pytest.fixture(autouse=True)
 def _w3c_textmap() -> None:
     propagate.set_global_textmap(TraceContextTextMapPropagator())
+    reset_runtime_env_state_for_tests()
+    cwd = Path.cwd()
+    yield
+    os.chdir(cwd)
+    reset_runtime_env_state_for_tests()
 
 
 @pytest.mark.asyncio
@@ -226,6 +234,74 @@ async def test_tool_task_sets_subagent_otel_service_name_in_child_env(
 
 
 @pytest.mark.asyncio
+async def test_tool_task_spawns_in_new_session_for_process_group_kill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inline task must start_new_session so timeout/cancel can killpg descendants."""
+    captured_kwargs: dict[str, object] = {}
+
+    async def fake_create_subprocess_exec(
+        *cmd: str | bytes,
+        env: dict[str, str] | None = None,
+        **kwargs: object,
+    ) -> asyncio.subprocess.Process:
+        del cmd, env
+        captured_kwargs.update(kwargs)
+        proc = MagicMock()
+        proc.pid = 4242
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.returncode = 0
+        proc.wait = AsyncMock(return_value=0)
+        return proc
+
+    async def fake_spawn(
+        script: str,
+        envelope: SubagentEnvelope,
+        *,
+        scratch_dir: object,
+        subprocess_exec: object | None = None,
+        on_event: object | None = None,
+    ):
+        del script, scratch_dir, on_event, envelope
+        if subprocess_exec is not None:
+            await subprocess_exec(sys.executable, "-c", "pass")
+        yield TurnComplete(
+            request_id="req-1",
+            usage=UsageTotals(
+                input_tokens=1,
+                output_tokens=1,
+                cached_tokens=0,
+                cost_usd=0.0,
+                duration_ms=1,
+                estimated_prompt_tokens=0,
+            ),
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
+    monkeypatch.setattr(
+        "monkeybot.core.subprocess_groups.SUPPORTS_PROCESS_GROUPS",
+        True,
+    )
+    monkeypatch.setattr(
+        "monkeybot.core.subprocess_groups.process_group_id",
+        lambda pid: pid,
+    )
+    ex = _make_executor(tmp_path, monkeypatch)
+    ctx = _ctx()
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="c1", name="task", args={"task": "do work", "context": ""}),
+            ctx=ctx,
+        )
+    )
+    assert err is None and out is not None
+    assert captured_kwargs.get("start_new_session") is True
+
+
+@pytest.mark.asyncio
 async def test_tool_task_stdin_omits_traceparent_without_active_span(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -330,7 +406,12 @@ def _install_worker_mocks(
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("MEMORY_STORAGE_URI", mem_uri)
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
-    monkeypatch.setenv("MODEL_PROVIDER", "fake")
+    cfg = tmp_path / "monkeybot_config"
+    cfg.mkdir(exist_ok=True)
+    (cfg / "monkeybot.yaml").write_text(
+        "model:\n  provider: fake\n  name: fake\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
     monkeypatch.setenv(
         "MONKEYBOT_FAKE_PROVIDER_EVENTS",
         json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),
@@ -405,6 +486,7 @@ async def test_worker_linked_trace_fixture_or_harness(
     _install_worker_mocks(monkeypatch, tmp_path, envelope=envelope, otel_memory_exporter=otel_memory_exporter)
 
     await subagent_worker._async_main()
+    assert isinstance(subagent_worker._resolve_provider(), ScriptedFakeProvider)
 
     spans = otel_memory_exporter.get_finished_spans()  # type: ignore[attr-defined]
     sub = next(s for s in spans if s.name == "monkeybot.subagent")
@@ -436,6 +518,7 @@ async def test_malformed_traceparent_worker_starts_new_trace(
     _install_worker_mocks(monkeypatch, tmp_path, envelope=envelope, otel_memory_exporter=otel_memory_exporter)
 
     await subagent_worker._async_main()
+    assert isinstance(subagent_worker._resolve_provider(), ScriptedFakeProvider)
 
     warnings = [r.message.lower() for r in caplog.records if r.levelno >= logging.WARNING]
     assert any("traceparent" in msg or "malformed" in msg or "propagat" in msg for msg in warnings)
@@ -465,6 +548,7 @@ async def test_legacy_envelope_without_traceparent_starts_disjoint_trace(
     _install_worker_mocks(monkeypatch, tmp_path, envelope=envelope, otel_memory_exporter=otel_memory_exporter)
 
     await subagent_worker._async_main()
+    assert isinstance(subagent_worker._resolve_provider(), ScriptedFakeProvider)
 
     spans = otel_memory_exporter.get_finished_spans()  # type: ignore[attr-defined]
     assert spans
@@ -496,7 +580,12 @@ async def test_worker_completes_without_memory_uri(
     skills.mkdir()
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_WORKSPACE", str(ws))
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SKILLS_PATH", str(skills))
-    monkeypatch.setenv("MODEL_PROVIDER", "fake")
+    cfg = tmp_path / "monkeybot_config"
+    cfg.mkdir(exist_ok=True)
+    (cfg / "monkeybot.yaml").write_text(
+        "model:\n  provider: fake\n  name: fake\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
     monkeypatch.setenv(
         "MONKEYBOT_FAKE_PROVIDER_EVENTS",
         json.dumps([[{"kind": "text_delta", "text": "ok"}, {"kind": "done"}]]),
@@ -553,5 +642,6 @@ async def test_worker_completes_without_memory_uri(
     monkeypatch.setattr(subagent_worker, "shutdown_observability", lambda: None)
 
     await subagent_worker._async_main()
+    assert isinstance(subagent_worker._resolve_provider(), ScriptedFakeProvider)
 
     assert seen_memory == [None]

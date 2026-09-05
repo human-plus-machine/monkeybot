@@ -1680,8 +1680,8 @@ class ChatApp(App[int]):
         src = session_dir / "transcript.ndjson"
         if not src.is_file():
             self._mount_system(
-                "No trace file found — enable transcript capture on the gateway and restart "
-                "(external gateways need MONKEYBOT_TRANSCRIPT_ENABLED=1)",
+                "No trace file found — set runtime.transcript_enabled: true in monkeybot.yaml "
+                "and restart the gateway",
                 error=True,
             )
             return
@@ -1829,10 +1829,10 @@ class ChatApp(App[int]):
     async def _close_session_and_exit(self) -> None:
         # Must not be named `_shutdown` — that shadows Textual.App._shutdown.
         await self._controller.close()
-        report_dir = getattr(self._controller, "transcript_report_dir", None)
+        report_dir = getattr(self._controller, "transcript_dir", None)
         if isinstance(report_dir, str) and report_dir:
-            self._mount_system(f"Transcript report → {report_dir}")
-            print(f"Transcript report → {report_dir}", flush=True)
+            self._mount_system(f"Transcript → {report_dir}")
+            print(f"Transcript → {report_dir}", flush=True)
         self._exit_code = 1 if self._controller.stream_error else self._exit_code
         self.exit(self._exit_code)
 

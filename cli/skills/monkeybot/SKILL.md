@@ -56,7 +56,7 @@ npx skills add human-plus-machine/monkeybot --skill monkeybot
   - `monkeybot_config/monkeybot.yaml` — non-secret settings (model, paths, gateway, behavior).
   - `.env` — secrets and machine-local paths (API keys, GCP project, DB URL).
   - sidecars: `monkeybot_config/AGENT.md` (system prompt), `mcp.json` (MCP servers), `command_allowlist.yaml`.
-- **Precedence — important:** environment variables and `.env` win over `monkeybot.yaml`. If a user edits YAML but nothing changes, suspect a stale `.env` shadowing it (the YAML→env mapping lives in `runtime_env.py:ENV_MAP`).
+- **Precedence — important:** environment variables and `.env` win over `monkeybot.yaml` except `model.*` (provider, name, sampling, context window, summarization model, max turns, cache retention), which is YAML-only. If a user edits YAML but nothing changes, suspect a stale `.env` shadowing it (the YAML→env mapping lives in `runtime_env.py:ENV_MAP`).
 - **Defaults are fine on day one.** Most first-time users only touch `model`, `.env` credentials, and `AGENT.md`.
 
 ## Running CLI commands
@@ -112,7 +112,7 @@ uv sync
 | `aws_bedrock` | `AWS_ACCESS_KEY_ID` / `AWS_PROFILE` + `AWS_REGION` | `monkeybot[bedrock]` |
 | `huggingface` | `HF_TOKEN` (or `HUGGINGFACE_API_KEY`) | `monkeybot[huggingface]` |
 | `ollama-cloud` | `OLLAMA_API_KEY` | `monkeybot[ollama]` |
-| `ollama-local` | None required — `OLLAMA_BASE_URL` (default `http://localhost:11434`) | `monkeybot[ollama]` |
+| `ollama-local` | None required — `OLLAMA_BASE_URL` (default `http://localhost:11434`). Requests send `keep_alive` 24h so prefix KV cache survives idle. | `monkeybot[ollama]` |
 | `ollama` | Legacy auto-route (key + blank URL = cloud; explicit URL wins) | `monkeybot[ollama]` |
 
 **Agent-first dependencies.** The CLI is thin — it does **not** install provider/storage extras globally. `monkeybot new` scaffolds a `pyproject.toml` with the selected provider (and any `--with` extras). Run plain `uv sync` in the agent directory. `monkeybot run` / `chat` spawn the gateway from that project's interpreter (`.venv/bin/python`, else `uv run python`), and `doctor` checks extras in that same interpreter. For a config-only tree (just `monkeybot_config/`, no `pyproject.toml`) the gateway uses the CLI's interpreter when it already has MonkeyBot 3.x (and MemPalace if memory is on). If memory is enabled and that interpreter cannot import MemPalace, `run` / `chat` provision a cached CLI-managed venv under `~/.cache/monkeybot/runtimes/` holding `monkeybot[memory]` pinned to the running core (never rewrites a `pyproject.toml`). `doctor` reuses that cache when it is already present. Otherwise extras must be installed in the CLI env (`uv tool install --with 'monkeybot[<extra>]' monkeybot-cli`).
@@ -160,7 +160,7 @@ Decision → config map:
 | "Run untrusted code" | `sandbox.enabled` + `SANDBOX_API_KEY` |
 | "Use specialist agents" | `subagents.personas` + `monkeybot_config/agents/*.md` |
 | "Connect external tools" | `mcp.json` (`mcpServers` object), then `validate --check-mcp` |
-| "Control cost / context size" | `model.*`, `context_curation.*` |
+| "Control cost / context size" | `model.*` |
 | "Restrict dangerous commands" | `tools.denied_patterns`, `command_allowlist.yaml` |
 | "Multiple environments" | top-level `includes:` fragments |
 

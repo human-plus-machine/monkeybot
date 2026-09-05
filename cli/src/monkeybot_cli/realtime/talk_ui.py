@@ -78,7 +78,6 @@ def _spawn_combined_gateway(
         env["MONKEYBOT_CONFIG"] = str(config_path)
     env["PORT"] = str(port)
     env.setdefault("LOG_LEVEL", "error")
-    env.setdefault("MONKEYBOT_TRANSCRIPT_ENABLED", "1")
     log_file = tempfile.NamedTemporaryFile(
         mode="w+",
         prefix="monkeybot-gateway-",

@@ -70,8 +70,6 @@ Minimum for bootstrap examples:
 | `AGENT_MD_PATH` | Path to `AGENT.md` |
 | `SKILLS_PATH` | Skills root (each subfolder needs `SKILL.md`) |
 | `MONKEYBOT_WORKSPACE_ROOT` | Absolute writable workspace override (legacy `WORKSPACE_ROOT` remains an alias). |
-| `MODEL_PROVIDER` | e.g. `aws_bedrock` with `monkeybot[bedrock]` |
-| `MODEL_NAME` | Bedrock model id |
 | `COMMAND_ALLOWLIST_CONFIG` | Optional; path to `command_allowlist.yaml` |
 
 Set `LOG_LEVEL` to `INFO` or `info` (case-insensitive).
@@ -91,10 +89,16 @@ workspace is ephemeral unless you opt into [AgentCore filesystem mounts](https:/
 
 ## Model provider
 
+Set provider and model id in `monkeybot.yaml` (YAML-only — not env):
+
+```yaml
+model:
+  provider: aws_bedrock
+  name: anthropic.claude-sonnet-4-20250514-v1:0   # example; use your account id
+```
+
 ```bash
 pip install "monkeybot[bedrock,postgres,aws]"
-export MODEL_PROVIDER=aws_bedrock
-export MODEL_NAME=anthropic.claude-sonnet-4-20250514-v1:0   # example; use your account id
 export AWS_REGION=us-east-1
 ```
 

@@ -6,7 +6,6 @@ import base64
 import binascii
 import json
 import logging
-import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -84,16 +83,18 @@ def _vertex_project_and_location(model_param: str) -> tuple[str, str]:
     endpoints like ``us-central1``; Vertex serves them from ``global`` unless you override
     ``VERTEX_AI_LOCATION`` / ``GOOGLE_CLOUD_LOCATION``.
     """
+    from monkeybot.core.config.snapshot import current_env
+
     project = (
-        os.environ.get("GCP_PROJECT_ID")
-        or os.environ.get("VERTEX_AI_PROJECT_ID")
-        or os.environ.get("GOOGLE_CLOUD_PROJECT")
+        current_env("GCP_PROJECT_ID")
+        or current_env("VERTEX_AI_PROJECT_ID")
+        or current_env("GOOGLE_CLOUD_PROJECT")
     )
     if not project or not str(project).strip():
         raise LLMError(
             "Set VERTEX_AI_PROJECT_ID, GCP_PROJECT_ID, or GOOGLE_CLOUD_PROJECT for Vertex Gemini."
         )
-    explicit = os.environ.get("VERTEX_AI_LOCATION") or os.environ.get("GOOGLE_CLOUD_LOCATION")
+    explicit = current_env("VERTEX_AI_LOCATION") or current_env("GOOGLE_CLOUD_LOCATION")
     if explicit and str(explicit).strip():
         return str(project).strip(), str(explicit).strip()
 
@@ -151,7 +152,9 @@ def _resolve_thinking_budget(
     elif configured is not None:
         thinking_budget = int(configured)
     else:
-        thinking_budget = int(os.environ.get("MODEL_THINKING_BUDGET", "-1"))
+        from monkeybot.core.config.snapshot import current_env
+
+        thinking_budget = int(current_env("MODEL_THINKING_BUDGET", "-1"))
     if _suppress_thinking_for_auxiliary_call(messages, tools):
         return _THINKING_DISABLED
     return thinking_budget
@@ -172,17 +175,25 @@ def _split_system_and_rest(messages: Sequence[Message]) -> tuple[str, list[Messa
 
 def _flatten_tool_response_result(block: ToolResponse) -> str:
     parts: list[str] = []
+    has_media = False
     for b in block.result:
         if isinstance(b, Text):
             parts.append(b.text)
         elif isinstance(b, (Image, File)):
+            has_media = True
             continue
         else:
             raise LLMError(
-                "Cannot replay tool result to Vertex: unsupported result block "
-                f"{type(b).__name__}"
+                f"Cannot replay tool result to Vertex: unsupported result block {type(b).__name__}"
             )
-    return "".join(parts)
+    text = "".join(parts)
+    if text:
+        return text
+    # A media-only result (e.g. load_file on an image) must not surface as a
+    # nameless empty functionResponse — the pixels arrive as sibling
+    # inline_data parts (see _media_parts_from_blocks), but the model still
+    # needs the functionResponse itself to say something happened.
+    return "(see attached image)" if has_media else "(no output)"
 
 
 def _media_parts_from_blocks(blocks: Sequence[object]) -> list[Any]:
@@ -516,7 +527,11 @@ class GeminiProvider:
         :meth:`count_input_tokens` (Gemini-only; the runtime loop passes it only
         when ``provider.name == \"gemini\"``).
         """
-        if max_output_tokens is not None and max_tokens is not None and max_output_tokens != max_tokens:
+        if (
+            max_output_tokens is not None
+            and max_tokens is not None
+            and max_output_tokens != max_tokens
+        ):
             raise ValueError("pass only one of max_tokens or max_output_tokens")
         effective_max_tokens = max_tokens if max_tokens is not None else max_output_tokens
         self._supports_streaming = supports_streaming

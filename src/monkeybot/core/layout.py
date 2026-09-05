@@ -265,6 +265,9 @@ class AgentLayout:
             values["MEMPALACE_BACKEND"] = os.environ.get("MEMPALACE_BACKEND", "chroma")
         for key, value in values.items():
             os.environ[key] = value
+        from monkeybot.core.config.snapshot import overlay_env_values
+
+        overlay_env_values(values)
 
 
 def bootstrap_agent_layout(

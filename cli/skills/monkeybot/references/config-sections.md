@@ -2,7 +2,7 @@
 
 Deep reference for every `monkeybot.yaml` section. Load this only when a user needs to customize beyond Tier 1. The canonical, fully-commented template lives at `cli/src/monkeybot_cli/scaffold_defaults/monkeybot.example.yaml` in the monkeybot repo (copied to `monkeybot_config/monkeybot.example.yaml` when you scaffold); this file adds the **"when would I change this?"** context the comments don't.
 
-**Precedence:** env vars and `.env` win over YAML. The YAML→env mapping is `ENV_MAP` in `src/monkeybot/core/config/runtime_env.py`. If a YAML edit has no effect, check for a shadowing env var.
+**Precedence:** env vars and `.env` win over YAML for `ENV_MAP` keys. `model.*` (provider, name, temperature, max_tokens, thinking_budget, context_window, summarization_model, max_turns, cache_retention) is YAML-only — leftover `MODEL_*` env vars are ignored. The YAML→env mapping is `ENV_MAP` in `src/monkeybot/core/config/runtime_env.py`. If a YAML edit has no effect, check for a shadowing env var (except `model.*`).
 
 ---
 
@@ -34,6 +34,8 @@ Validate check ids: `paths.agent_md.exists`, `paths.skills_path.exists`, `paths.
 
 ## `model`
 
+YAML-only for provider, name, sampling, context window, summarization model, max turns, and cache retention. Leftover `MODEL_*` / `MAX_TURNS` / `CONTEXT_SUMMARIZATION_MODEL` env vars are ignored.
+
 | Field | Default | When to change |
 |---|---|---|
 | `provider` | `gemini` | Switch LLM vendor (see provider table in SKILL.md) |
@@ -41,9 +43,11 @@ Validate check ids: `paths.agent_md.exists`, `paths.skills_path.exists`, `paths.
 | `temperature` | `0.7` | Lower for deterministic output, higher for creative |
 | `max_tokens` | `60000` | Cap per-response length |
 | `thinking_budget` | `-1` | Gemini: `-1` model default, `0` off, `N` token budget. Ollama reasoning models: `-1` server default, `0` off (`reasoning_effort: none`) |
-| `context_window` | `1000000` | Summarization trigger (tokens); also drives soft-spill / `read_file` char budgets |
+| `context_window` | `1000000` | Summarization trigger (tokens); also drives soft-spill / `read_file` char budgets. **Not** Ollama `num_ctx` |
+| `keep_alive` | `24h` (ollama-local only) | How long local Ollama keeps the model (and KV prefix cache) loaded. YAML only. Set `"0"` to omit. See `docs/ollama-local.md` |
+| `num_ctx` | (unset) | Optional pinned Ollama `num_ctx`. YAML only. Omit = server default. Do not copy `context_window` |
 | `max_turns` | `1000` | Hard cap on turns per run |
-| `summarization_model` | (main model) | Cheaper model for history summarization (env `CONTEXT_SUMMARIZATION_MODEL`) |
+| `summarization_model` | (main model) | Cheaper model for history summarization (YAML-only)
 
 Validate check ids: `model.provider.supported`, `model.name.present`. Supported YAML providers: `gemini`/`vertex`, `openai`, `anthropic`, `vertex-claude`, `huggingface`, `ollama-cloud`, `ollama-local`, `ollama`, `aws_bedrock`, `fake`.
 
@@ -70,22 +74,6 @@ Required when `memory_storage_uri` is `gcs://…` or `provider: vertex-claude` (
 | `sse_replay_max` | `256` | Tune SSE replay buffer |
 | `graceful_shutdown_timeout_sec` | `5` | Allow longer drain on shutdown |
 | `cors_allow_origins` | `http://localhost:5173` | **Custom web UI** — set its origin, or `"*"` for any |
-
-## `context_curation`
-
-Trims memory injected into context. `enabled: true` by default.
-
-Recent window by default; LLM curator only when the index is token-heavy. On curator failure, falls back to the window.
-
-| Field | Default | Notes |
-|---|---|---|
-| `memory_window_lines` | `12` | Recent index lines injected; also caps curator-selected lines |
-| `memory_index_cap` | `200` | Organizer keeps this many INDEX.md entries; older rows move to `INDEX.archive.md` |
-| `memory_token_threshold` | `2000` | Call curator when estimated index tokens exceed this |
-| `curator_model` | `gemini-3-flash` | Separate small model; empty = main model |
-| `timeout_sec` | `10` | Curator call timeout |
-
-When the prompt shows fewer entries than exist, a structural confidence score triggers a `search_memory` nudge. Skill names are always shown in full in the prompt; use `list_skills` to get the skills root path.
 
 ## `memory`
 
@@ -176,4 +164,4 @@ Validate check: `config.includes.resolve`.
 
 ## `fake_provider`
 
-Test-only. `events_json` feeds `MODEL_PROVIDER=fake` scripted runs (env `MONKEYBOT_FAKE_PROVIDER_EVENTS`). Not for production.
+Test-only. `events_json` feeds `model.provider: fake` scripted runs (env `MONKEYBOT_FAKE_PROVIDER_EVENTS`). Not for production.

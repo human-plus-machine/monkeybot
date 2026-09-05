@@ -72,9 +72,9 @@ class DeleteSessionResponse(BaseModel):
     """DELETE /sessions/{id} response (200)."""
 
     deleted: bool
-    transcript_report_dir: str | None = Field(
+    transcript_dir: str | None = Field(
         default=None,
-        description="Absolute path to the session transcript folder when analysis ran.",
+        description="Absolute path to the session transcript folder when capture was enabled.",
     )
 
 

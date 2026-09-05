@@ -13,9 +13,8 @@ not a sandbox: allowlisted shell commands can still reach a palace on disk.
 
 from __future__ import annotations
 
-import os
-
 from monkeybot.core.config.settings import ConfigError
+from monkeybot.core.config.snapshot import current_env_or_none
 from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
 
 _FALSE = frozenset({"0", "false", "no", "off"})
@@ -36,7 +35,7 @@ def _parse_bool(raw: object, *, field: str) -> bool:
 
 def memory_enabled_from_config(config_path: str | None = None) -> bool:
     """Whether MemPalace capture, recall, and search teaching are enabled."""
-    env = os.environ.get("MONKEYBOT_MEMORY_HOOK_ENABLED", "").strip().lower()
+    env = (current_env_or_none("MONKEYBOT_MEMORY_HOOK_ENABLED") or "").strip().lower()
     if env in _FALSE:
         return False
     if env in _TRUE:

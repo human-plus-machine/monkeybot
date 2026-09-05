@@ -2,7 +2,7 @@
 
 This document anchors the **monkeybot harness** — the runtime that owns turn semantics, tool dispatch, prompt composition, memory, and persistence. Use it when adding or modifying features so new work stays compatible with existing behavior and invariants.
 
-**Related docs:** [Getting Started](getting-started.md) · [SSE Gateway](sse-gateway-ui.md) · [MCP](mcp.md) · [Skills](skills.md) · [Cloud deployment](cloud-deployment-design.md)
+**Related docs:** [Getting Started](getting-started.md) · [Local Ollama](ollama-local.md) · [SSE Gateway](sse-gateway-ui.md) · [MCP](mcp.md) · [Skills](skills.md) · [Cloud deployment](cloud-deployment-design.md)
 
 ---
 
@@ -27,12 +27,12 @@ Client (CLI / chat UI / serverless handler)
 |-------|----------|------|
 | **Gateway** | `src/monkeybot/gateway/sse/` | HTTP/SSE transport, session bus, CORS, pending UI responses |
 | **Harness loop** | `src/monkeybot/core/runtime/` (`loop.py` facade; `turn_loop.py`, `tool_dispatch.py`, helpers) | Turn semantics, streaming, tool batching, hooks, summarization |
-| **Context** | `src/monkeybot/core/context/` | Per-turn `TurnContext`, tool defs, curation, output budgeting |
+| **Context** | `src/monkeybot/core/context/` | Per-turn `TurnContext`, tool defs, output budgeting |
 | **Prompts** | `src/monkeybot/core/prompts/` | System prompt composition (operator + harness + volatile tail) |
 | **Providers** | `src/monkeybot/providers/` | Vendor LLM adapters (Gemini, OpenAI, Claude, Bedrock, …) |
 | **Tools** | `src/monkeybot/core/tools/` | Built-in tools, inspectors, sandbox routing |
 | **MCP** | `src/monkeybot/core/mcp/` | MCP client, stdio/HTTP servers, runtime add/remove |
-| **Memory** | `src/monkeybot/core/memory/` | Durable markdown memory, hook, organizer |
+| **Memory** | `src/monkeybot/core/memory/` | MemPalace wake-up, outbox writer, drawer recall |
 | **Persistence** | `src/monkeybot/core/persistence/` | History, usage, durable subagent runs |
 | **Bootstrap** | `src/monkeybot/core/bootstrap.py` | Library/FaaS embed pattern (Pattern B/C) |
 
@@ -72,15 +72,15 @@ Use this table before adding features so PRs do not thicken the wrong layer: say
 
 ## Turn lifecycle
 
-One **user message** may span multiple **inner turns** (model → tools → model → …) until the model produces final assistant text or `MAX_TURNS` is reached.
+One **user message** may span multiple **inner turns** (model → tools → model → …) until the model produces final assistant text or `model.max_turns` is reached.
 
 ### Sequence (one user message)
 
 1. Append user message to history; fire `USER_MESSAGE` hook.
-2. **Inner turn loop** (up to `MAX_TURNS`, default 1000):
+2. **Inner turn loop** (up to `model.max_turns`, default 1000):
    - Drain **steer** queue (mid-turn user injections) into history; emit `UserSteered`.
    - Await hook **settlement** (fire-and-forget `POST_TOOL` / prior write-side hooks) with bounded timeout.
-   - Refresh memory index; optional context curation (turn 1 only).
+   - Refresh memory wake-up lines.
    - Compose system prompt; resolve attachments; preflight token count.
    - Optionally summarize history or shape tool outputs under context pressure.
    - Stream provider; accumulate tool calls until `Done`.
@@ -109,7 +109,6 @@ Do **not** conflate with HITL `ToolConfirmationRequest`. Cancel clears pending s
 | Steer drain | Start of each inner turn | `core/runtime/input_admission.py`, `turn_loop.py` |
 | Hook settlement | Before provider call / `TurnComplete` | `core/hooks/`, `loop_hooks.py` |
 | Hooks (`PRE_TURN`) | Turn 1 of user message | `core/hooks/` |
-| Context curation | Turn 1, if enabled + thresholds met | `core/context/curator.py` |
 | System prompt build | Every inner turn | `core/prompts/prompt.py`, `loop_messages.py` |
 | Attachment resolve | Before provider call | `core/attachments/resolve.py` |
 | Preflight tokens | Before provider call | `core/runtime/context_budget.py`, `loop_usage.py` |
@@ -220,8 +219,9 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 | `anthropic` | — | anthropic-messages | `cache_control` + `x-session-affinity` |
 | `vertex_anthropic` | vertex-claude | anthropic-messages | `cache_control` |
 | `aws_bedrock` | — | anthropic-messages | `cache_control` |
-| `huggingface` / `nvidia` / `ollama` | — | openai-compat | none |
-| `ollama-cloud` / `ollama-local` | ollama_cloud, ollama_local | openai-compat | none |
+| `huggingface` / `nvidia` / `ollama` | — | openai-compat | none (legacy `ollama` auto-route: local gets keep_alive) |
+| `ollama-cloud` | ollama_cloud | openai-compat | none |
+| `ollama-local` | ollama_local | openai-compat | `keep_alive` (default 24h) + optional `num_ctx`; no Anthropic `cache_control` |
 | `fake` | — | fake | gateway/test only |
 
 **Auth:** see CLI `monkeybot doctor` and `cli/.../providers.py` (`PROVIDER_SPECS`).
@@ -231,16 +231,18 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Loop synthesizes `AssistantTextStarted`/`AssistantTextEnded`/`ThinkingBlockStarted` from deltas via `ProviderStreamMapper`; Anthropic streams `ToolInputDelta` from `input_json_delta`. `AssistantTextEnded.text` carries the full settled block for durable replay.
 - `Done.truncated` is set when the vendor reports an output length limit (OpenAI `finish_reason=length`, Anthropic `stop_reason=max_tokens`, Gemini `MAX_TOKENS`). The text loop treats that as an unsafe tool batch. Gemini Live does not expose an equivalent signal, so realtime rejects incomplete tool batches via all-`parse_error` only.
 - `count_input_tokens()` must match the same payload shape as `stream()` (summarization triggers, tool budgets).
-- Provider resolution via `MODEL_PROVIDER` aliases (`gemini` → `google_vertexai`, `vertex-claude` → `vertex_anthropic`).
+- Provider resolution via `model.provider` aliases (`gemini` → `google_vertexai`, `vertex-claude` → `vertex_anthropic`).
 - Optional extras in `pyproject.toml`: `gemini`, `openai`, `claude`, `vertex-claude`, `bedrock`, `huggingface`, `ollama`, `nvidia`.
-- `ollama`, `huggingface`, and `nvidia` share the OpenAI-compatible streaming core (`providers/_openai_compat.py`) and only differ in base URL / auth. Prefer explicit ids: `ollama-cloud` always hits `https://ollama.com` and requires `OLLAMA_API_KEY`; `ollama-local` always uses the local/self-hosted host (`OLLAMA_BASE_URL`, default `http://localhost:11434`) and needs no API key. Legacy `ollama` still auto-routes (a key with no URL means cloud; an explicit URL always wins). `nvidia` hits `https://integrate.api.nvidia.com/v1` and needs a free `NVIDIA_API_KEY` from build.nvidia.com.
-- `MODEL_PROVIDER=fake` is gateway/test-only; unit tests inject `ScriptedFakeProvider` directly.
+- `ollama`, `huggingface`, and `nvidia` share the OpenAI-compatible streaming core (`providers/_openai_compat.py`) and only differ in base URL / auth. Prefer explicit ids: `ollama-cloud` always hits `https://ollama.com` and requires `OLLAMA_API_KEY`; `ollama-local` always uses the local/self-hosted host (`OLLAMA_BASE_URL`, default `http://localhost:11434`) and needs no API key. Local requests send `keep_alive` (default 24h, `model.keep_alive`) and optional pinned `num_ctx` (`model.num_ctx`) via `extra_body` so Ollama's in-memory KV prefix cache survives idle — see [Local Ollama prefix cache](ollama-local.md). Both knobs are YAML-only. Legacy `ollama` still auto-routes (a key with no URL means cloud; an explicit URL always wins). `nvidia` hits `https://integrate.api.nvidia.com/v1` and needs a free `NVIDIA_API_KEY` from build.nvidia.com.
+- `model.provider: fake` is gateway/test-only; unit tests inject `ScriptedFakeProvider` directly.
+- An `Image`/`File` block inside a `ToolResponse` reaches Anthropic-family, Bedrock, and Gemini models in place. The OpenAI-compat family instead promotes an `Image` into a synthetic user turn appended after the tool row (`providers/_openai_compat.py::messages_to_openai`) — `File` (PDF) results are never promoted, since Chat Completions has no document wire type.
 
 **Prompt-cache session hints (`ProviderCallHints`):**
-- Loop passes `session_id=thread_id` and `cache_retention` from `MODEL_CACHE_RETENTION` / `model.cache_retention` (`none` | `short` | `long`, default `short`).
+- Loop passes `session_id=thread_id` and `cache_retention` from `model.cache_retention` (`none` | `short` | `long`, default `short`).
 - Anthropic family: `cache_control` on stable system prefix + last tool when retention ≠ `none`; optional `x-session-affinity` header.
 - OpenAI: `x-session-affinity` when retention ≠ `none`; `prompt_cache_retention=24h` when `long`.
 - Gemini: relies on implicit prefix caching (epoch keeps stable baseline byte-identical); hints accepted as no-ops.
+- Ollama local: `keep_alive` + optional `num_ctx` on `/v1` `extra_body` (not Anthropic `cache_control`). `model.context_window` is never mapped to `num_ctx`.
 
 **Depends on:** `ToolDef`, `ContentBlock` serialization per adapter.
 
@@ -369,29 +371,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 ---
 
-### 8. Context curation
-
-**Purpose:** Bound memory-index prompt size via sliding window, optional LLM curator, and search nudges.
-
-**Key files:** `core/context/curator.py`, `core/memory/index_format.py`, `core/memory/organizer.py`, `monkeybot.yaml` `context_curation:`
-
-**How it works:**
-- **Organizer** appends INDEX.md entries in recency order and archives overflow to `INDEX.archive.md` (`memory_index_cap`, default 200).
-- **Default path:** recent `memory_window_lines` (default 12). LLM curator runs only when the full index is token-heavy (`memory_token_threshold`).
-- Runs when `CONTEXT_CURATION_ENABLED` and the index exceeds the window (by line count) or the token threshold.
-- **Coverage/confidence** are structural (`injected/total`); when truncated, prompt nudges `search_memory`.
-- Curator uses numbered `memory_line_indices`; fails open to the recency window.
-- Curator skipped when index fingerprint unchanged for the thread (cache).
-
-**Depends on:** Curator provider (token-heavy path), memory index.
-
-**Invariants:**
-- Subagents disable curation (`enable_context_curation=False`).
-- Skill names are always injected in full from `ctx.skills` (use `list_skills` for the skills root, `read_file` for full `SKILL.md` procedure).
-
----
-
-### 9. Conversation history
+### 8. Conversation history
 
 **Purpose:** Persist `Message` rows (typed `ContentBlock` JSON) per `thread_id`.
 
@@ -407,7 +387,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
   - Durable boundaries: `ToolCallStarted`, `ToolCallResult`, `TurnComplete`, `Error`, `ContextSummarized`, `AssistantTextEnded` (with `text`), `ThinkingBlockComplete`, epoch/steer admissions, etc.
   - Live-only: streaming deltas (`AssistantDelta`, `ToolInputDelta`, `ThinkingBlockDelta`, …), progress heartbeats, playground snapshots.
 - **Tool settlement:** live `ToolCallResult` mirrors durable `ToolResponse` blocks appended after the tool batch (one user row per model tool-call turn, call-order preserved). Crash between assistant `ToolRequest` append and batched responses is repaired in-memory on load (`tool_integrity`).
-- **Optional NDJSON transcript** (`MONKEYBOT_TRANSCRIPT_ENABLED`): writes durable events by default; set `MONKEYBOT_TRANSCRIPT_INCLUDE_LIVE=1` for full SSE fidelity. CLI-spawned `chat` and `talk` gateways enable it by default for `/export-trace`; an explicit `MONKEYBOT_TRANSCRIPT_ENABLED=0` still disables capture.
+- **Optional NDJSON transcript** (`runtime.transcript_enabled` in monkeybot.yaml, default off, YAML-only): writes durable events plus provider request/response records into `transcript.ndjson`. Repeated tool schemas and `toolResponse` bodies are stubbed by reference (`schema_seq` / `result_seq`). The scaffold example yaml enables it so `/export-trace` works without extra setup.
 
 **Invariants:**
 - Lazy backend imports.
@@ -417,7 +397,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 ---
 
-### 10. Usage accounting
+### 9. Usage accounting
 
 **Purpose:** Per-turn token/cost rollup; exposed via `GET /sessions/{id}/usage`.
 
@@ -427,13 +407,15 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 ---
 
-### 11. Memory subsystem
+### 10. Memory subsystem
 
 **Purpose:** Per-agent MemPalace drawers with durable outbox ingest (SQLite, Postgres, or Firestore) and wake-up + L2 recall in the prompt.
 
-**Key files:** `core/memory/subsystem.py`, `hook.py`, `outbox.py`, `palace.py`, `writer.py`, `ingest.py`, `core/persistence/{sqlite,postgres,firestore}.py`, `core/tools/fs_isolation.py`
+**Key files:** `core/memory/subsystem.py` (`load_index`), `hook.py`, `outbox.py`, `palace.py`, `writer.py`, `ingest.py`, `core/prompts/prompt.py` (`_memory_block`), `core/prompts/headings.py` (`MEMORY_INDEX_HEADING`), `core/persistence/{sqlite,postgres,firestore}.py`, `core/tools/fs_isolation.py`
 
 **Storage URI:** `local://` only (object-store palaces are not supported in this release).
+
+**Wake-up:** `load_index()` calls MemPalace `wake_up` and stores lines on `TurnContext.memory_index`; prompt composition injects them under `## Memory wake-up`. There is no sliding window or LLM curator. Leftover `context_curation:` YAML is ignored (one warning per process). Wake-up size is whatever MemPalace L0+L1 returns; `model.context_window` still only bounds history summarization. Subagents include the same wake-up block as the parent.
 
 **Hook lifecycle:**
 
@@ -455,7 +437,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 ---
 
-### 12. Session attachments
+### 11. Session attachments
 
 **Purpose:** User-uploaded files referenced in conversation; frozen into history.
 
@@ -469,7 +451,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 ---
 
-### 13. Subagents (`task` tool)
+### 12. Subagents (`task` tool)
 
 **Purpose:** Delegate work to isolated subprocess with same workspace/memory/MCP.
 
@@ -489,7 +471,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 ---
 
-### 14. Durable subagent runs (task queue)
+### 13. Durable subagent runs (task queue)
 
 **Purpose:** Optional async subagent execution via `RunStore`.
 
@@ -515,7 +497,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 ---
 
-### 15. Configuration (`monkeybot.yaml`)
+### 14. Configuration (`monkeybot.yaml`)
 
 **Purpose:** Declarative agent config; secrets in `.env`.
 
@@ -531,7 +513,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 directory that contains `monkeybot_config/`. The discovered agent root loads
 its `.env` before YAML values fill still-unset environment variables.
 
-**Major sections:** `runtime`, `paths`, `model`, `gateway`, `context_curation`, `memory`, `subagents`, `tools`, `compression`, `web_search`, `sandbox`, `emission`, `fake_provider`, `includes`.
+**Major sections:** `runtime`, `paths`, `model`, `gateway`, `memory`, `subagents`, `tools`, `compression`, `web_search`, `sandbox`, `emission`, `fake_provider`, `includes`.
 
 **Invariants:**
 - Secrets never belong in yaml.
@@ -542,7 +524,7 @@ its `.env` before YAML values fill still-unset environment variables.
 
 ---
 
-### 16. CLI
+### 15. CLI
 
 **Purpose:** Scaffold, validate, doctor, run gateway, chat REPL.
 
@@ -579,7 +561,7 @@ Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.
 
 ---
 
-### 17. Hooks
+### 16. Hooks
 
 **Purpose:** Lifecycle extensibility without modifying the loop.
 
@@ -607,7 +589,7 @@ Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.
 
 ---
 
-### 18. Skills
+### 17. Skills
 
 **Purpose:** Doc-driven procedural knowledge; skill names are always in the system prompt (`## Skills`), agent gets the root path via `list_skills` and full procedure via `read_file` on `SKILL.md`.
 
@@ -617,7 +599,7 @@ Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.
 
 ---
 
-### 19. Web search
+### 18. Web search
 
 **Purpose:** Optional `web_search` custom tool.
 
@@ -627,7 +609,7 @@ Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.
 
 ---
 
-### 20. Observability
+### 19. Observability
 
 **Purpose:** OpenTelemetry spans for loop and gateway.
 
@@ -637,7 +619,7 @@ Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.
 
 ---
 
-### 21. Emission style (terse output guidance)
+### 20. Emission style (terse output guidance)
 
 **Purpose:** Cut model *emission* volume (generated code and prose) — the side of the token budget that tool-output shaping (§7) does not cover. Adapted from the "honey" writing-style skill, trimmed to rules + safety carve-outs, and made always-on + cached rather than on-demand.
 
@@ -662,7 +644,7 @@ Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.
 
 ---
 
-### 22. Computer control (desktop-only)
+### 21. Computer control (desktop-only)
 
 **Purpose:** Nine `computer_*` custom tools that act on the local machine on the user's behalf — open/reveal a file or folder, launch an app, open a URL, read/write the clipboard, list/find files, move/rename, trash. Built for the Monkeybot desktop app ("open my Downloads folder"); irrelevant to server/Cloud Run deployments.
 
@@ -743,7 +725,7 @@ Use this when reviewing PRs or designing new features.
 | **Security** | `run_command` always allowlisted; path escape blocked |
 | **MCP** | `server__tool` naming; double underscore |
 | **Subagents** | No nested `task` |
-| **Config** | Env beats yaml; secrets in `.env` only |
+| **Config** | Env beats yaml except YAML-only `model.*`; secrets in `.env` only |
 | **Gateway** | Core stays gateway-agnostic |
 | **Providers** | `count_input_tokens` consistent with `stream` payload |
 | **Attachments** | Resolve before provider; freeze before destructive history ops |
@@ -757,14 +739,13 @@ Use this when reviewing PRs or designing new features.
 
 | Setting | Default | Env / config |
 |---------|---------|--------------|
-| Max inner turns | 50 | `MAX_TURNS` / `model.max_turns` |
+| Max inner turns | 50 | `model.max_turns` (YAML only) |
 | Doom-loop threshold | 3 (0 = off) | `DOOM_LOOP_THRESHOLD` |
-| Context window | 200000 (example yaml: 1M) | `MODEL_CONTEXT_WINDOW` |
+| Context window | 200000 (example yaml: 1M) | `model.context_window` (YAML only) |
 | Summarization trigger | ratio from compression config | `SUMMARY_TRIGGER_RATIO` |
 | Read max lines | 5000 | `tools.read_max_lines` (YAML only — no env override) |
 | Default read lines | 2000 | Harness-fixed (`AGENT_READ_DEFAULT_LINES`); pass `limit` to request more |
 | Spill threshold / inline / read char budgets | derived from `model.context_window` | not configurable (no YAML, no env) |
-| Context curation timeout | 10s | `context_curation.timeout_sec` |
 | Current request cap | 8000 chars | code constant |
 | Emission style | off | `MONKEYBOT_EMISSION_STYLE` / `emission.style` |
 | Pending response timeout | 300s | `gateway.pending_response_timeout_sec` |

@@ -12,7 +12,7 @@ from monkeybot.core.context.epoch import ContextEpochTracker, EpochAdmit, finger
 from monkeybot.core.context.tool_result_ingress import summarize_tool_result_text
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.messages import transform_context
+from monkeybot.core.messages.transform_context import transform_context
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.prompts.headings import RUNTIME_NOTES_HEADING
 from monkeybot.core.prompts.prompt import (
@@ -158,6 +158,7 @@ def _epoch_events(
             request_id=request_id,
             epoch_id=admit.epoch_id,
             changed_sources=list(admit.changed_sources),
+            text=admit.mid_conversation_update,
         )
     ]
 
