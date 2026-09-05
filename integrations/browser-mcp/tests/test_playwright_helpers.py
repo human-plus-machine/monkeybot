@@ -143,3 +143,43 @@ def test_run_does_not_retry_non_connection_errors() -> None:
     with pytest.raises(RuntimeError, match="element not found"):
         ph._run(boom)
     hook.assert_not_called()
+
+
+def test_goto_url_navigates_current_page() -> None:
+    page = MagicMock()
+    page.url = "https://example.test/next"
+    ph._state["page"] = page
+
+    result = ph.goto_url("https://example.test/next")
+
+    page.goto.assert_called_once_with("https://example.test/next")
+    assert result == "https://example.test/next"
+
+
+def test_current_tab_returns_page_ids() -> None:
+    page = MagicMock()
+    page.url = "https://example.test/"
+    page.title.return_value = "Example"
+    ph._state["page"] = page
+
+    result = ph.current_tab()
+
+    assert result == {
+        "targetId": str(id(page)),
+        "target_id": str(id(page)),
+        "url": "https://example.test/",
+        "title": "Example",
+    }
+
+
+def test_add_init_script_requires_connection() -> None:
+    ph._state["context"] = None
+    with pytest.raises(RuntimeError, match="not connected"):
+        ph.add_init_script("window.x = 1")
+
+
+def test_add_init_script_registers_on_context() -> None:
+    context = MagicMock()
+    ph._state["context"] = context
+    ph.add_init_script("window.__bmcp = {}")
+    context.add_init_script.assert_called_once_with("window.__bmcp = {}")

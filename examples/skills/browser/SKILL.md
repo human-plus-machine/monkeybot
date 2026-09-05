@@ -19,6 +19,8 @@ Do **not** start with screenshots. Use the indexed element tree:
 2. Act with `browser_click_by_index(index)`, `browser_input_by_index(index, text)`, or `browser_select_by_index(index, option_text)`
 3. Call `browser_get_elements()` again after navigation or any action that may have changed the DOM — indices are only valid for the tree they came from
 
+`browser_input_by_index` fills in-page by default. If a field ignores the typed value (search-as-you-type, autocomplete comboboxes, or sites that only listen to `keydown`), pass `mode="keys"`.
+
 This is the default workflow: no image tokens, no pixel guessing, and clicks resolve through the live DOM.
 
 ## Before acting on a site

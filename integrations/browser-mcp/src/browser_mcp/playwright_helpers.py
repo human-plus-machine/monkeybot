@@ -3,8 +3,10 @@
 Exposes the same free-function surface browser_harness.helpers does (new_tab,
 wait_for_load, page_info, click_at_xy, fill_input, press_key, scroll, js,
 wait_for_element, wait_for_network_idle, list_tabs, switch_tab, upload_file,
-capture_screenshot) so ``_bh = (playwright_helpers, admin)`` slots into every
-existing ``helpers, _ = _browser_harness()`` call in server.py / dom_indexing.py
+capture_screenshot, goto_url, current_tab) plus add_init_script (Playwright's
+stand-in for Page.addScriptToEvaluateOnNewDocument) so
+``_bh = (playwright_helpers, admin)`` slots into every existing
+``helpers, _ = _browser_harness()`` call in server.py / dom_indexing.py
 unchanged.
 
 Playwright's sync API is thread-affine: every object it creates must be used
@@ -174,6 +176,30 @@ def new_tab(url: str = "about:blank") -> str:
     if url and url != "about:blank":
         page.goto(url)
     return page.url
+
+
+@_marshalled
+def goto_url(url: str) -> str:
+    """Navigate the current page in place (does not open a tab)."""
+    page = _page()
+    page.goto(url)
+    return page.url
+
+
+@_marshalled
+def current_tab() -> dict:
+    page = _page()
+    tid = str(id(page))
+    return {"targetId": tid, "target_id": tid, "url": page.url, "title": page.title()}
+
+
+@_marshalled
+def add_init_script(source: str) -> None:
+    """Register source to run on every new document in this context."""
+    context = _state["context"]
+    if context is None:
+        raise RuntimeError("playwright_helpers: not connected -- call connect() first")
+    context.add_init_script(source)
 
 
 @_marshalled

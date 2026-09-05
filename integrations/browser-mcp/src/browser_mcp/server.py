@@ -305,6 +305,7 @@ def _teardown_bound_backend() -> None:
     _, admin = _bh
     is_agentcore = _bound_cdp == "agentcore"
     _bh = None
+    dom_indexing.clear_registered_targets()
     if is_agentcore:
         admin.stop_session()
         from browser_mcp import playwright_helpers
@@ -396,13 +397,64 @@ def _json_text(payload: object) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
+_LOAD_WAIT_JS = (
+    "document.readyState==='complete' ? true : new Promise((resolve) => {"
+    "const t = setTimeout(() => resolve(false), 15000);"
+    "addEventListener('load', () => { clearTimeout(t); resolve(true); }, {once:true});"
+    "})"
+)
+
+_FILL_MODES = frozenset({"auto", "keys", "fast"})
+
+
+def _is_blank_url(url: str) -> bool:
+    url = url or ""
+    return url in ("", "about:blank") or url.startswith("about:blank#")
+
+
+def _can_goto_in_place(helpers: Any) -> bool:
+    if not callable(getattr(helpers, "goto_url", None)):
+        return False
+    url = ""
+    if callable(getattr(helpers, "current_tab", None)):
+        try:
+            tab = helpers.current_tab()
+        except Exception:
+            tab = None
+        if isinstance(tab, dict):
+            url = str(tab.get("url") or "")
+    if not url and callable(getattr(helpers, "page_info", None)):
+        try:
+            info = helpers.page_info() or {}
+            url = str(info.get("url") or "")
+        except Exception:
+            url = ""
+    return not _is_blank_url(url)
+
+
+def _resolve_fill_mode(mode: str) -> str:
+    raw = (mode or "auto").strip().lower()
+    if raw == "auto":
+        raw = (os.environ.get("BROWSER_MCP_FILL_MODE") or "auto").strip().lower()
+    return raw if raw in _FILL_MODES else "auto"
+
+
 @mcp.tool()
 @_public_tool
-def browser_goto(url: str) -> str:
-    """Navigate to a URL in the browser (opens or reuses a tab). Returns page info and matching playbook filenames."""
+def browser_goto(url: str, new_tab: bool = False) -> str:
+    """Navigate to a URL in the current tab (or a new tab if new_tab=True / current is blank).
+
+    Returns page info and matching playbook filenames.
+    """
     helpers, _ = _browser_harness()
-    helpers.new_tab(url)
-    helpers.wait_for_load()
+    if new_tab or not _can_goto_in_place(helpers):
+        helpers.new_tab(url)
+        dom_indexing.mark_driver_stale()
+    else:
+        helpers.goto_url(url)
+    helpers.js(_LOAD_WAIT_JS)
+    dom_indexing._register_driver_for_new_documents(helpers)
+    dom_indexing.settle(helpers)
     info = helpers.page_info()
     names = playbooks.list_playbook_names(url)
     return _json_text({**info, "playbooks": names})
@@ -425,7 +477,8 @@ def browser_get_elements(viewport_only: bool = False) -> str:
     """
     helpers, _ = _browser_harness()
     result = dom_indexing.get_elements(helpers, viewport_only)
-    return _json_text({"ok": True, **result})
+    ok = not result.get("error")
+    return _json_text({"ok": ok, **result})
 
 
 @mcp.tool()
@@ -439,23 +492,41 @@ def browser_click_by_index(index: int) -> str:
     except dom_indexing.ElementNotFoundError as exc:
         return _json_text({"ok": False, "error": str(exc)})
     helpers.click_at_xy(rect["x"], rect["y"])
-    return _json_text({"ok": True, "clicked": rect})
+    payload: dict[str, Any] = {"ok": True, "clicked": rect}
+    obscured = rect.get("obscuredBy")
+    if obscured:
+        payload["warning"] = f"target obscured by {obscured}"
+    return _json_text(payload)
 
 
 @mcp.tool()
 @_public_tool
-def browser_input_by_index(index: int, text: str, clear_first: bool = True) -> str:
+def browser_input_by_index(
+    index: int, text: str, clear_first: bool = True, mode: str = "auto"
+) -> str:
     """Click and type text into an indexed input/textarea/contenteditable element from
-    browser_get_elements. Prefer this over screenshot + coordinate typing."""
+    browser_get_elements. Prefer this over screenshot + coordinate typing.
+
+    mode: ``auto`` (default) tries an in-page value set and falls back to real key
+    events; ``keys`` always types; ``fast`` never falls back. Pass ``keys`` for
+    comboboxes and fields that only listen to keydown. Override the default with
+    BROWSER_MCP_FILL_MODE.
+    """
     helpers, _ = _browser_harness()
     try:
-        info = dom_indexing.get_input_info(helpers, index)
+        result = dom_indexing.fill(
+            helpers, index, text, clear_first=clear_first, mode=_resolve_fill_mode(mode)
+        )
     except dom_indexing.ElementNotFoundError as exc:
         return _json_text({"ok": False, "error": str(exc)})
-    # fill_input drives real key events through framework-controlled inputs (React/Vue),
-    # matching browser_fill's behavior instead of a hand-rolled clear+type loop here.
-    helpers.fill_input(info["selector"], text, clear_first=clear_first)
-    return _json_text({"ok": True, "index": index, "tagName": info.get("tagName")})
+    return _json_text(
+        {
+            "ok": True,
+            "index": index,
+            "tagName": result.get("tagName"),
+            "mode_used": result.get("mode_used"),
+        }
+    )
 
 
 @mcp.tool()
@@ -597,6 +668,8 @@ def browser_switch_tab(target_id: str) -> str:
     """Switch to a tab by target_id (from browser_tabs)."""
     helpers, _ = _browser_harness()
     sid = helpers.switch_tab(target_id)
+    dom_indexing.mark_driver_stale()
+    dom_indexing._register_driver_for_new_documents(helpers)
     return _json_text({"ok": True, "session_id": sid})
 
 

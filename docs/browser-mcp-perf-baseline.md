@@ -62,3 +62,47 @@ result chars**.
 Later phases quote acceptance against these numbers (form tool-calls 11, long_list
 `get_elements` 9 harness calls / 21073 chars, `input_by_index` wall ~14 ms for a
 10-char `fill_input`).
+
+---
+
+## Phase 1 (2026-09-04)
+
+Same machine and Chrome 152 headed, `BU_CDP_URL=http://127.0.0.1:9334`.
+Command: `BROWSER_MCP_PERF=1 BU_CDP_URL=http://127.0.0.1:9334 uv run python scripts/perf_bench.py`
+from `integrations/browser-mcp/`. Three runs per scenario; table values are medians.
+
+### form.html
+
+| tool | median_wall_ms | harness_calls | result_chars |
+|---|---:|---:|---:|
+| browser_goto | 12.0 | 5.0 | 148 |
+| browser_get_elements | 0.8 | 1.0 | 1301 |
+| browser_input_by_index | 0.6 | 1.0 | 65 |
+| browser_click_by_index | 2.4 | 2.0 | 154 |
+
+- tool_calls_per_scenario: **11** (unchanged; act-then-observe is Phase 4)
+- total_scenario_ms (median of 3): **22.3** (−91 % vs Phase 0 255.9)
+
+### long_list.html
+
+| tool | median_wall_ms | harness_calls | result_chars |
+|---|---:|---:|---:|
+| browser_goto | 12.9 | 5.0 | 152 |
+| browser_get_elements | 6.1 | 1.0 | 21073 |
+
+- tool_calls_per_scenario: **2**
+- total_scenario_ms (median of 3): **20.2**
+
+After-navigation `get_elements`: **9 → 1** harness calls.
+
+### spa.html
+
+| tool | median_wall_ms | harness_calls | result_chars |
+|---|---:|---:|---:|
+| browser_goto | 9.3 | 5.0 | 147 |
+| browser_get_elements | 0.7 | 1.0 | 170 |
+| browser_click_by_index | 1.5 | 2.0 | 152 |
+
+- tool_calls_per_scenario: **4**
+- total_scenario_ms (median of 3): **13.4**
+

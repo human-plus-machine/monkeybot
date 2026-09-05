@@ -4,9 +4,9 @@
  * Driver glue injected alongside dom_tree.js (window.__bmcpBuildDomTree). Ported
  * from PageController's flatTreeToString/getSelectorMap/click/input logic, trimmed
  * to what browser-mcp needs: build an indexed text tree once, then act on indices
- * via CDP-driven clicks/typing from the Python side (no in-page event simulation).
+ * via CDP-driven clicks/typing from the Python side, plus in-page fill/settle.
  *
- * Exposes window.__bmcp = { getTree, getRect, getInputInfo, selectOption }
+ * Exposes window.__bmcp = { getTree, getRect, getRects, getInputInfo, selectOption, fill, settle }
  */
 ;(function () {
 	const DEFAULT_INCLUDE_ATTRIBUTES = [
@@ -167,13 +167,31 @@
 		const el = elementByIndex(index)
 		el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' })
 		const rect = el.getBoundingClientRect()
+		const x = rect.left + rect.width / 2
+		const y = rect.top + rect.height / 2
+		const top = document.elementFromPoint(x, y)
+		const covered = top && top !== el && !el.contains(top)
 		return {
-			x: rect.left + rect.width / 2,
-			y: rect.top + rect.height / 2,
+			x,
+			y,
 			width: rect.width,
 			height: rect.height,
 			tagName: el.tagName.toLowerCase(),
+			visible: rect.width > 0 && rect.height > 0,
+			obscuredBy: covered ? top.tagName.toLowerCase() : null,
 		}
+	}
+
+	function getRects(indices) {
+		const map = window.__bmcpSelectorMap || {}
+		const keys = indices == null ? Object.keys(map).map(Number) : indices
+		const out = {}
+		for (const i of keys) {
+			try {
+				out[i] = getRect(i)
+			} catch (e) { /* skip missing indices */ }
+		}
+		return out
 	}
 
 	/**
@@ -205,5 +223,91 @@
 		return true
 	}
 
-	window.__bmcp = { getTree, getRect, getInputInfo, selectOption }
+	function needsKeyEvents(el) {
+		if (el.hasAttribute('data-bmcp-keys')) return true
+		if ((el.getAttribute('role') || '').toLowerCase() === 'combobox') return true
+		if (el.getAttribute('aria-autocomplete')) return true
+		return false
+	}
+
+	function setNativeValue(el, value) {
+		const tag = el.tagName.toLowerCase()
+		const proto = tag === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
+		const desc = Object.getOwnPropertyDescriptor(proto, 'value')
+		if (desc && desc.set) desc.set.call(el, value)
+		else el.value = value
+	}
+
+	function fill(index, text, opts) {
+		const el = elementByIndex(index)
+		const tag = el.tagName.toLowerCase()
+		const clear = !opts || opts.clear !== false
+		const isTextLike = tag === 'input' || tag === 'textarea' || el.isContentEditable
+		if (!isTextLike) throw new Error(`Element at index ${index} (${tag}) is not a text input`)
+		el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' })
+		el.focus()
+		if (el.isContentEditable) {
+			if (clear) {
+				const sel = window.getSelection()
+				const range = document.createRange()
+				range.selectNodeContents(el)
+				sel.removeAllRanges()
+				sel.addRange(range)
+			}
+			document.execCommand('insertText', false, text)
+		} else {
+			const next = clear ? text : String(el.value || '') + text
+			setNativeValue(el, next)
+			el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }))
+			el.dispatchEvent(new Event('change', { bubbles: true }))
+		}
+		return {
+			ok: true,
+			value: el.value != null && !el.isContentEditable ? el.value : (el.textContent || ''),
+			tagName: tag,
+			needsKeys: needsKeyEvents(el),
+		}
+	}
+
+	let lastMutation = performance.now()
+	let mutationCount = 0
+	if (!window.__bmcpSettleObserver) {
+		const observer = new MutationObserver(function () {
+			lastMutation = performance.now()
+			mutationCount += 1
+		})
+		observer.observe(document, { subtree: true, childList: true, attributes: true, characterData: true })
+		window.__bmcpSettleObserver = observer
+	}
+
+	function settle(quietMs, maxMs) {
+		const quiet = quietMs == null ? 150 : quietMs
+		const max = maxMs == null ? 1500 : maxMs
+		const start = performance.now()
+		const baseline = mutationCount
+		return new Promise(function (resolve) {
+			let done = false
+			function finish(isQuiet) {
+				if (done) return
+				done = true
+				resolve({ quiet: isQuiet, mutations: mutationCount - baseline })
+			}
+			function check() {
+				if (done) return
+				const now = performance.now()
+				if (mutationCount === baseline || now - lastMutation >= quiet) {
+					finish(true)
+					return
+				}
+				if (now - start >= max) {
+					finish(false)
+					return
+				}
+				setTimeout(check, 50)
+			}
+			setTimeout(check, 0)
+		})
+	}
+
+	window.__bmcp = { getTree, getRect, getRects, getInputInfo, selectOption, fill, settle }
 })();

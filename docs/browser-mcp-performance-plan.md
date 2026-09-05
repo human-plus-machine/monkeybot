@@ -1,6 +1,6 @@
 # Browser MCP — Performance Plan
 
-**Status:** Phase 0 complete — later phases not implemented  
+**Status:** Phase 0–1 complete — later phases not implemented  
 **Audience:** implementer (human or model) working in `integrations/browser-mcp/`  
 **Related:** [browser-mcp.md](browser-mcp.md) · [browser-mcp-perf-baseline.md](browser-mcp-perf-baseline.md) · `integrations/browser-mcp/src/browser_mcp/` · `examples/skills/browser/SKILL.md` · upstream [browser-use/browser-harness](https://github.com/browser-use/browser-harness) (pinned `browser-harness==0.1.5` in `.venv`)  
 **Baseline:** Phase 0 numbers in [browser-mcp-perf-baseline.md](browser-mcp-perf-baseline.md), `monkeybot-browser-mcp` 0.5.0  
@@ -73,7 +73,9 @@ Three layers, in decreasing cost:
 
 ---
 
-### Phase 1 — Inject the driver once, do compound work in-page
+### Phase 1 — Inject the driver once, do compound work in-page — **completed**
+
+**Status.** Done. Driver persists across navigations; in-page fill/settle and in-place `browser_goto` are in tree.
 
 **Goal.** Cut harness round trips per tool by 5–20× without touching browser-harness.
 
@@ -105,7 +107,7 @@ Three layers, in decreasing cost:
 - Unit: `fill` auto mode falls back to `helpers.fill_input` on value mismatch; `mode="keys"` skips in-page fill.
 - Integration (`BROWSER_MCP_INTEGRATION=1`): on `form.html`, the controlled input keeps its value after fast fill; the submit button becomes enabled; navigation to a second page still has `window.__bmcp` without re-injection (assert harness call count for `get_elements` after navigation is exactly 1).
 
-**Acceptance (vs Phase 0 baseline).** Harness calls: `get_elements` after navigation 6 → 1; `input_by_index` for a 30-char string ≈100 → 2; `goto` ≈ 6–50 (polling) → 3. Wall time of the form scenario down ≥ 60 %.
+**Acceptance (vs Phase 0 baseline).** **Met** — [Phase 1 numbers](browser-mcp-perf-baseline.md). `get_elements` after navigation 9 → 1; `input_by_index` wall 14.0 → 0.6 ms (1 harness call); `goto` 133 → 12 ms / 5 harness calls (`current_tab` + `goto_url` + load + settle + `page_info`; polling gone). Form scenario 255.9 → 22.3 ms (−91 %).
 
 **Risks.** Sites with strict CSP block `eval` — same failure mode as today, now surfaced with an explicit error. `addScriptToEvaluateOnNewDocument` runs in every frame; the presence guard handles that. In-page fill can defeat sites that validate on `keydown`; the auto-fallback plus `mode="keys"` covers it, and the SKILL text must tell the model when to use it.
 

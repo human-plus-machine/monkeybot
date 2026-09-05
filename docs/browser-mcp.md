@@ -210,6 +210,8 @@ Workflow:
 2. `browser_click_by_index(35)` / `browser_input_by_index(12, "user@example.com")` / `browser_select_by_index(index, "Option text")`
 3. Call `browser_get_elements()` again after navigation or any action that may have changed the DOM — indices are only valid for the tree they came from.
 
+`browser_goto(url)` navigates the current tab in place; pass `new_tab=True` to open a second tab. `browser_input_by_index` defaults to an in-page fill (`mode="auto"`) and falls back to real key events when the framework reverts the value; pass `mode="keys"` for comboboxes and fields that only listen to `keydown` (or set `BROWSER_MCP_FILL_MODE=keys`). `browser_click_by_index` still clicks when another element covers the target and includes `"warning": "target obscured by <tag>"`.
+
 This is the default, preferred workflow: no image tokens, no coordinate-guessing, and clicks are resilient to layout shifts since they resolve through the live DOM rather than a fixed pixel position.
 
 ### Fallback: screenshots + coordinates

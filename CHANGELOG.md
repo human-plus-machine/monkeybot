@@ -14,6 +14,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Browser MCP (`monkeybot-browser-mcp` 0.5.0): opt-in per-tool timing via `BROWSER_MCP_PERF=1` (JSONL to `BROWSER_MCP_PERF_LOG` or `<workspace>/browser/perf/tools.jsonl`). Never logs tool arguments. `scripts/perf_bench.py` records the Phase 0 baseline against static fixtures. See [browser-mcp-perf-baseline.md](docs/browser-mcp-perf-baseline.md).
+- Browser MCP Phase 1: the DOM driver is registered once per tab (`Page.addScriptToEvaluateOnNewDocument` / Playwright `add_init_script`) so `browser_get_elements` after navigation is one harness call. `browser_input_by_index` gains `mode` (`auto`/`keys`/`fast`) and returns `mode_used`; default override `BROWSER_MCP_FILL_MODE`. `browser_goto(url, new_tab=False)` reuses the current tab via `goto_url` and an in-page load/settle wait. `browser_click_by_index` adds `warning` when the target is covered by another element.
 - Local Ollama prefix-cache knobs: `ollama-local` sends `keep_alive` (default 24h, `model.keep_alive`) and optional pinned `num_ctx` (`model.num_ctx`) via OpenAI-compat `extra_body`. YAML-only — not mapped from the runtime env. `model.context_window` is never mapped to `num_ctx`. `doctor` warns on `*-mlx` tags, default thinking on known reasoning tags, and huge `num_ctx`, and fails on unparseable/`<1` `num_ctx`. See `docs/ollama-local.md` and `examples/ollama/PrefixStable.Modelfile`.
 
 ### Fixed
