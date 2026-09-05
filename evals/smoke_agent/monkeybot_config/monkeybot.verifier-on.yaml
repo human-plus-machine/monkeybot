@@ -1,5 +1,7 @@
-# Live-eval smoke agent defaults (cwd: evals/smoke_agent/).
-# CI pins PORT via environment; model.provider / model.name are YAML-only.
+# Live-eval smoke agent with verifier observe-only flags on.
+# Identical to monkeybot.yaml except for the verifier: block.
+# Selected at gateway boot via MONKEYBOT_CONFIG (bootstrap pointer, not a
+# config value). See docs/live-evals.md.
 
 runtime:
   log_level: INFO
@@ -38,3 +40,14 @@ web_search:
 
 sandbox:
   enabled: false
+
+verifier:
+  enabled: true
+  ledger:
+    enabled: true
+  tracker:
+    enabled: true
+  judge:
+    enabled: false
+  escalation:
+    max_severity: none

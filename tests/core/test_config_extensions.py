@@ -19,6 +19,7 @@ from monkeybot.core.config import (
     get_subagent_configs,
     get_subagent_registry,
     get_subagent_settings,
+    get_verifier_config,
     normalize_model_provider,
     reset_runtime_env_state_for_tests,
     subagent_vertex_google_search_from_config,
@@ -299,6 +300,80 @@ class TestSubagentSettings:
         )
         with pytest.raises(ConfigError, match="subagents.agent_md was removed"):
             get_subagent_settings()
+
+
+class TestVerifierConfig:
+    def _write_config(self, tmp_path: Path, yaml_text: str) -> Path:
+        cfg_dir = tmp_path / "monkeybot_config"
+        cfg_dir.mkdir(parents=True)
+        path = cfg_dir / "monkeybot.yaml"
+        path.write_text(yaml_text, encoding="utf-8")
+        return path
+
+    def test_defaults_when_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._write_config(tmp_path, "model:\n  provider: gemini\n  name: test\n")
+        cfg = get_verifier_config()
+        assert cfg.enabled is False
+        assert cfg.ledger.enabled is False
+        assert cfg.tracker.enabled is False
+        assert cfg.judge.enabled is False
+        assert cfg.escalation.max_severity == "nudge"
+
+    def test_reads_nested_yaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._write_config(
+            tmp_path,
+            "verifier:\n"
+            "  enabled: true\n"
+            "  ledger:\n"
+            "    enabled: true\n"
+            "    model: gemini-2.5-flash\n"
+            "    max_entries_per_thread: 32\n"
+            "  tracker:\n"
+            "    enabled: true\n"
+            "    suspicion_threshold: 4\n"
+            "    min_turn_before_verdict: 2\n"
+            "  judge:\n"
+            "    enabled: true\n"
+            "    max_verdicts_per_message: 1\n"
+            "    min_turns_between_verdicts: 3\n"
+            "    max_spend_ratio: 0.1\n"
+            "    tail_grace_s: 1.5\n"
+            "  escalation:\n"
+            "    max_severity: replan\n",
+        )
+        cfg = get_verifier_config()
+        assert cfg.enabled is True
+        assert cfg.ledger.enabled is True
+        assert cfg.ledger.max_entries_per_thread == 32
+        assert cfg.tracker.suspicion_threshold == 4
+        assert cfg.judge.tail_grace_s == 1.5
+        assert cfg.escalation.max_severity == "replan"
+
+    def test_rejects_non_boolean_enabled(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._write_config(tmp_path, "verifier:\n  enabled: 1\n")
+        with pytest.raises(ConfigError, match="verifier.enabled must be true or false"):
+            get_verifier_config()
+
+    def test_rejects_unknown_severity(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._write_config(tmp_path, "verifier:\n  escalation:\n    max_severity: yell\n")
+        with pytest.raises(ConfigError, match="max_severity must be one of"):
+            get_verifier_config()
+
+    def test_not_mapped_to_env(self) -> None:
+        assert ("verifier", "enabled") not in ENV_MAP
+        assert ("verifier", "ledger.enabled") not in ENV_MAP
+        assert ("verifier", "tracker.enabled") not in ENV_MAP
+        assert ("verifier", "judge.enabled") not in ENV_MAP
+        assert ("verifier", "judge.model") not in ENV_MAP
+        assert "MONKEYBOT_VERIFIER_ENABLED" not in ENV_SPEC
 
 
 class TestGetSubagentConfigs:

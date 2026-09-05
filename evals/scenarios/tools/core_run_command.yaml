@@ -9,3 +9,4 @@ assertions:
   metrics: [response_relevancy, faithfulness]
   required_tools: [run_command]
   max_tool_errors: 0
+  max_verdicts: 0

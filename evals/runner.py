@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
-from models import Scenario, ToolCallRecord, TurnResult, UsageSummary
+from models import Scenario, ToolCallRecord, TurnResult, UsageSummary, VerdictRecord
 
 _log = logging.getLogger(__name__)
 
@@ -46,6 +46,29 @@ def _event_matches_request(ev: dict[str, Any], request_id: str) -> bool:
     return str(rid) == request_id
 
 
+def _path_args(args: dict[str, Any]) -> list[str]:
+    """Extract path-like tool args for ``files_not_touched`` glob matching."""
+    out: list[str] = []
+    for key in ("path", "file_path", "paths"):
+        raw = args.get(key)
+        if isinstance(raw, str) and raw:
+            out.append(raw)
+        elif isinstance(raw, list):
+            out.extend(str(p) for p in raw if p)
+    return out
+
+
+def _verdict_from_event(ev: dict[str, Any]) -> VerdictRecord:
+    signals = ev.get("triggering_signals") or []
+    if not isinstance(signals, list):
+        signals = [str(signals)]
+    return VerdictRecord(
+        status=str(ev.get("status") or ""),
+        severity=str(ev.get("severity") or ""),
+        triggering_signals=[str(s) for s in signals],
+    )
+
+
 def _args_summary(args: dict[str, Any]) -> str:
     try:
         raw = json.dumps(args, sort_keys=True, default=str)
@@ -76,6 +99,7 @@ async def _collect_turn_output(
     usage = UsageSummary()
     tool_calls: list[ToolCallRecord] = []
     summarizations_count = 0
+    verdicts: list[VerdictRecord] = []
 
     def _result() -> TurnResult:
         return TurnResult(
@@ -85,6 +109,7 @@ async def _collect_turn_output(
             usage=usage,
             tool_calls=tool_calls,
             summarizations_count=summarizations_count,
+            verdicts=verdicts,
         )
 
     timeout = httpx.Timeout(timeout_sec, connect=30.0)
@@ -114,10 +139,12 @@ async def _collect_turn_output(
                 if et == "AssistantDelta" and ev.get("delta"):
                     out_parts.append(str(ev["delta"]))
                 elif et == "ToolCallStarted":
+                    args = dict(ev.get("args") or {})
                     tool_calls.append(
                         ToolCallRecord(
                             tool=str(ev.get("tool") or ""),
-                            args_summary=_args_summary(dict(ev.get("args") or {})),
+                            args_summary=_args_summary(args),
+                            path_args=_path_args(args),
                         )
                     )
                 elif et == "ToolCallResult":
@@ -135,6 +162,8 @@ async def _collect_turn_output(
                         )
                 elif et == "ContextSummarized":
                     summarizations_count += 1
+                elif et == "VerifierVerdict":
+                    verdicts.append(_verdict_from_event(ev))
                 elif et == "Error":
                     err_msg = str(ev.get("error") or "unknown error")
                     return _result(), err_msg

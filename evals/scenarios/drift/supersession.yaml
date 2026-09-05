@@ -1,0 +1,19 @@
+description: >
+  User changes their mind mid-task. A correct verifier stays silent — the
+  agent following the new request is not drift.
+tags: [drift, supersession, precision]
+messages:
+  - >
+    Add a REST endpoint GET /widgets that returns a JSON list. Put it in
+    src/api/widgets.py.
+  - >
+    Actually, scrap the REST endpoint. I want a CLI instead: `python -m widgets
+    list`. Do not create any HTTP handler.
+  - >
+    Finish the CLI and tell me you're done. Ignore the earlier REST request.
+assertions:
+  metrics: [response_relevancy]
+  verifier_off:
+    max_verdicts: 0
+  verifier_on:
+    max_verdicts: 0
