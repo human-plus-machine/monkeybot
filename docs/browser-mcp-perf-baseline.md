@@ -108,6 +108,46 @@ After-navigation `get_elements`: **9 → 1** harness calls.
 
 ---
 
+## Phase 2 (2026-09-05)
+
+Same machine and Chrome 152 headed, `BU_CDP_URL=http://127.0.0.1:9334`.
+Command: `BROWSER_MCP_PERF=1 BU_CDP_URL=http://127.0.0.1:9334 uv run python scripts/perf_bench.py`
+from `integrations/browser-mcp/`. Three runs per scenario; table values are medians.
+
+`compare_three` is `goto(form.html)` → `open_tab(long_list.html)` →
+`open_tab(spa.html)` → `read_tabs()` = **4 tool calls**. Extra tabs from prior
+runs are closed via internals so they do not inflate the perf log or hit the
+five-tab cap. Single-tab scenarios omit `tab=` and keep the Phase 1 shape.
+
+### compare_three
+
+| tool | median_wall_ms | harness_calls | result_chars |
+|---|---:|---:|---:|
+| browser_goto | 10.8 | 5.0 | 146 |
+| browser_open_tab | 34.9 | 25.0 | 126 |
+| browser_read_tabs | 4.9 | 10.0 | 3304 |
+
+- tool_calls_per_scenario: **4**
+- total_scenario_ms (median of 3): **95.6**
+- Background `get_elements(tab=...)` does not call `switch_tab`.
+
+`open_tab` harness_calls includes create/attach/enable/navigate/page_info (two
+opens per run; table is the median of those six samples). `read_tabs` is
+sequential session evaluates with no `switch_tab`.
+
+### Single-tab scenarios (no `tab=`) vs Phase 1
+
+| scenario | tool_calls | total_ms Phase 1 | total_ms Phase 2 | get_elements harness_calls |
+|---|---:|---:|---:|---:|
+| form.html | 11 | 22.3 | 27.4 | 1.0 |
+| long_list.html | 2 | 20.2 | 20.7 | 1.0 |
+| spa.html | 4 | 13.4 | 14.6 | 1.0 |
+
+Tool-call counts and per-tool harness_calls match Phase 1. Wall-time deltas are
+noise (same headed Chrome, new session).
+
+---
+
 ## Phase 7a (2026-09-05)
 
 Same machine, Chrome 152 headed on `BU_CDP_URL=http://127.0.0.1:9222`.
@@ -130,4 +170,24 @@ from `integrations/browser-mcp/`. Three runs; table values are medians. The new
 - screenshot_jpeg_bytes (max_dim=1200, q=60): **40486** (−74 % vs PNG 1800)
 
 JPEG default meets the ≥ 70 % size cut. Tool JSON stays metadata-only (`result_chars` ~485); image bytes are the file on disk, not the tool result. 7b (inline MCP images) is deferred.
+
+---
+
+## Phase 8 (2026-09-05)
+
+Playwright Chromium 151 headless (same stack as `BROWSER_MCP_INTEGRATION=1`).
+`spa_wait` scenario: `goto spa.html` → `get_elements` → `click_by_index(Next)` → `browser_wait_for("#page-2")`.
+Three runs; table values are medians. `#page-2` is injected after a 300 ms timeout plus a local `fetch`.
+
+### spa_wait
+
+| tool | median_wall_ms | harness_calls | result_chars |
+|---|---:|---:|---:|
+| browser_wait_for | 304.4 | 1.0 | 27 |
+
+- tool_calls_per_scenario: **4**
+- `wait_for("#page-2")` harness calls: **1** (was ≈ timeout/0.3 with `helpers.wait_for_element`)
+- wall time matches the fixture delay (~300 ms), not a 300 ms poll loop
+
+Acceptance met. `browser_wait_idle` now runs network idle then DOM `settle` (not in this bench).
 

@@ -498,7 +498,7 @@ def _for_action(helpers: Any, tab: str | None) -> tabs.TabHandle:
         sid = helpers.switch_tab(state.target_id)
         reg.set_focused(state.target_id)
     handle = reg.focused_handle(helpers, state)
-    handle.switch_session_id = sid if isinstance(sid, str) else sid
+    handle.switch_session_id = sid if isinstance(sid, str) else None
     reg.mark_used(state)
     return handle
 

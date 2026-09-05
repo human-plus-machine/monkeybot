@@ -163,7 +163,7 @@ Three layers, in decreasing cost:
 - Integration (`BROWSER_MCP_INTEGRATION=1`): open `form.html` in `t1` and `long_list.html` in `t2` (background); `get_elements(tab="t2")` returns the list without changing the focused tab (assert `browser_tabs().focused == "t1"`); `click_by_index(..., tab="t2")` focuses `t2`; `read_tabs()` returns both; closing `t2` refocuses `t1`.
 - Playwright backend: the same unit tests against `playwright_helpers` with a fake page map.
 
-**Acceptance.** Reading a background tab costs 1 harness call and 0 focus changes. The cap is enforced at five with the user-facing error shape above, and no code path closes a tab without either the user's choice or `browser_stop`. A "compare three pages" scenario in `perf_bench.py` (open three fixtures, `read_tabs`) is 4 tool calls total. No regression in the single-tab scenarios (they never pass `tab`).
+**Acceptance.** **Met** — background reads do not call `switch_tab`; the five-tab cap returns `tab_limit_reached` without creating or auto-closing; `perf_bench.py` `compare_three` is 4 tool calls (`goto` + 2× `open_tab` + `read_tabs`). Single-tab scenarios omit `tab`.
 
 **Risks.**
 - **Background throttling.** Headed Chrome throttles timers to 1 Hz and pauses rendering in background tabs, and freezes them after ~5 min. Reads (`Runtime.evaluate`, layout queries) are fine; anything that needs timers or paint is not, which is why actions focus first. Document this so the model does not expect a background SPA to finish loading.
@@ -324,7 +324,9 @@ Backward compatibility: the old top-level keys (`clicked`, `index`, `tagName`, `
 
 ---
 
-### Phase 8 — Event-driven waits
+### Phase 8 — Event-driven waits — **completed**
+
+**Status.** Done. `browser_wait_for` uses an in-page MutationObserver (4s IPC chunks); `browser_wait_idle` is network idle then DOM settle. Item 4 (post-action network-aware settle) waits for Phase 4 `_observe_after`.
 
 **Goal.** Remove polling from every remaining wait.
 
@@ -337,7 +339,7 @@ Backward compatibility: the old top-level keys (`clicked`, `index`, `tagName`, `
 
 **Tests.** Integration on `spa.html`: `wait_for("#page-2")` returns in ≈300 ms (element appears after the timeout) with exactly 1 harness call.
 
-**Acceptance.** Harness calls for waits: ≈ timeout/0.3 → 1.
+**Acceptance.** **Met** — [Phase 8 numbers](browser-mcp-perf-baseline.md). `wait_for("#page-2")` on `spa.html` is 1 harness call / ~304 ms (the fixture's 300 ms delay).
 
 ---
 

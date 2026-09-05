@@ -481,3 +481,4 @@ def wait_for_selector(
         remaining -= chunk_s
         if remaining <= 0:
             return last
+

@@ -11,7 +11,7 @@ from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
-from browser_mcp import agentcore, server
+from browser_mcp import agentcore, playwright_helpers, server  # noqa: F401
 
 
 @pytest.fixture(autouse=True)
@@ -19,16 +19,21 @@ def _reset_state(monkeypatch: pytest.MonkeyPatch):
     original_bh = server._bh
     original_bound = server._bound_cdp
     original_admin = server._agentcore_admin
+    original_from_file = server._env_set_from_in_app_file
     server._bh = None
     server._bound_cdp = None
     server._agentcore_admin = None
+    server._env_set_from_in_app_file = False
     monkeypatch.delenv("BROWSER_BACKEND", raising=False)
     monkeypatch.delenv("BU_CDP_URL", raising=False)
     monkeypatch.delenv("BU_CDP_WS", raising=False)
+    monkeypatch.setattr(server, "_read_in_app_cdp_file", lambda: None)
+    monkeypatch.setattr(server, "_read_in_app_cdp_token", lambda: None)
     yield
     server._bh = original_bh
     server._bound_cdp = original_bound
     server._agentcore_admin = original_admin
+    server._env_set_from_in_app_file = original_from_file
 
 
 # --- agentcore_backend_requested() ---
