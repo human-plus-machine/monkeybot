@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.evals.scenario_runner import load_scenario, run_scenario, tool_category
+from tests.evals.scenario_runner import check_assertions, load_scenario, run_scenario
 
 SCENARIO_DIR = Path(__file__).parent / "scenarios"
 
@@ -35,14 +35,27 @@ async def test_scenario(scenario_file: str) -> None:
     path = SCENARIO_DIR / scenario_file
     scenario = load_scenario(path)
     record = await run_scenario(scenario)
-    a = scenario.assertions
+    check_assertions(record, scenario.assertions)
 
-    if a.turn_completed is True:
-        assert record.completed
-    if a.no_errors is True:
-        assert record.errors == []
-    if a.tool_categories_used:
-        cats = {tool_category(name) for name in record.tool_calls}
-        assert cats.intersection(set(a.tool_categories_used))
-    if a.memory_injected is True:
-        assert len(record.memory_injected_lines) > 0
+
+def test_check_assertions_system_prompt_contains_once() -> None:
+    from tests.evals.eval_hook import EvalRecord
+    from tests.evals.scenario_runner import ScenarioAssertions, check_assertions
+
+    record = EvalRecord(completed=True, system_texts=["hello world", "other"])
+    check_assertions(record, ScenarioAssertions(system_prompt_contains_once="hello"))
+    with pytest.raises(AssertionError, match="appeared 2 times"):
+        check_assertions(
+            EvalRecord(system_texts=["hello", "hello"]),
+            ScenarioAssertions(system_prompt_contains_once="hello"),
+        )
+
+
+def test_check_assertions_tools_empty_on_turn() -> None:
+    from tests.evals.eval_hook import EvalRecord
+    from tests.evals.scenario_runner import ScenarioAssertions, check_assertions
+
+    record = EvalRecord(tool_counts=[4, 0, 4])
+    check_assertions(record, ScenarioAssertions(tools_empty_on_turn=2))
+    with pytest.raises(AssertionError, match="had 4 tools"):
+        check_assertions(record, ScenarioAssertions(tools_empty_on_turn=1))

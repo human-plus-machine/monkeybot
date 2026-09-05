@@ -1,16 +1,34 @@
 """Requirement + cap assertions evaluated against SSE telemetry, independent of judge score.
 
 Caps (``max_*`` / ``min_score``) and requirements (``required_tools``, ``min_tool_calls``,
-``min_subagent_calls``, ``min_summarizations``, ``response_contains``, ``response_regex``,
-``response_not_contains``) are read straight from a scenario's ``assertions`` mapping;
-keys that aren't present are simply not checked.
+``min_subagent_calls``, ``min_summarizations``, ``min_verdicts``, ``max_verdicts``,
+``verdict_status_in``, ``verdict_severity_max``, ``files_not_touched``,
+``response_contains``, ``response_regex``, ``response_not_contains``) are read
+straight from a scenario's ``assertions`` mapping; keys that aren't present are
+simply not checked.
+
+Nested ``verifier_off`` / ``verifier_on`` blocks are selected by
+``EVAL_VERIFIER_MODE`` (``off`` or ``on``). When the env is unset, nested
+blocks are ignored and only the top-level keys apply.
 """
 
 from __future__ import annotations
 
+import fnmatch
+import os
 import re
 
 from models import EvalRun, Scenario
+
+_SEVERITY_RANK = {
+    "none": 0,
+    "nudge": 1,
+    "replan": 2,
+    "steer": 3,
+    "block": 4,
+}
+
+_NESTED_ASSERTION_KEYS = frozenset({"verifier_off", "verifier_on"})
 
 
 def _as_list(value: object) -> list[str]:
@@ -19,9 +37,29 @@ def _as_list(value: object) -> list[str]:
     return [str(v) for v in value]  # type: ignore[union-attr]
 
 
+def _effective_assertions(raw: dict) -> dict:
+    """Merge a ``verifier_on`` / ``verifier_off`` overlay when ``EVAL_VERIFIER_MODE`` is set."""
+    mode = os.environ.get("EVAL_VERIFIER_MODE", "").strip().lower()
+    nested_key = {"on": "verifier_on", "off": "verifier_off"}.get(mode)
+    overlay = raw.get(nested_key) if nested_key else None
+    if not isinstance(overlay, dict):
+        return {k: v for k, v in raw.items() if k not in _NESTED_ASSERTION_KEYS}
+    merged = {k: v for k, v in raw.items() if k not in _NESTED_ASSERTION_KEYS}
+    merged.update(overlay)
+    return merged
+
+
+def _path_args_from_run(run: EvalRun) -> list[str]:
+    paths: list[str] = []
+    for turn in run.turns:
+        for call in turn.tool_calls:
+            paths.extend(call.path_args)
+    return paths
+
+
 def evaluate_assertions(scenario: Scenario, run: EvalRun) -> list[str]:
     """Return human-readable failure strings for caps + requirements; empty when all pass."""
-    a = scenario.assertions or {}
+    a = _effective_assertions(scenario.assertions or {})
     failures: list[str] = []
 
     usage = run.usage_total()
@@ -70,6 +108,46 @@ def evaluate_assertions(scenario: Scenario, run: EvalRun) -> list[str]:
         failures.append(
             f"min_summarizations: {run.summarizations_count()} < {a['min_summarizations']}"
         )
+
+    verdicts = run.verdicts()
+    verdicts_count = run.verdicts_count()
+
+    if "min_verdicts" in a and verdicts_count < int(a["min_verdicts"]):
+        failures.append(f"min_verdicts: {verdicts_count} < {a['min_verdicts']}")
+
+    if "max_verdicts" in a and verdicts_count > int(a["max_verdicts"]):
+        failures.append(f"max_verdicts: {verdicts_count} > {a['max_verdicts']}")
+
+    if "verdict_status_in" in a:
+        allowed = {str(s) for s in a["verdict_status_in"]}
+        unexpected = sorted({v.status for v in verdicts if v.status not in allowed})
+        if unexpected:
+            failures.append(
+                f"verdict_status_in: unexpected statuses {unexpected} (allowed: {sorted(allowed)})"
+            )
+
+    if "verdict_severity_max" in a:
+        cap = str(a["verdict_severity_max"])
+        cap_rank = _SEVERITY_RANK.get(cap)
+        if cap_rank is None:
+            failures.append(f"verdict_severity_max: unknown severity {cap!r}")
+        else:
+            over = [
+                v.severity
+                for v in verdicts
+                if _SEVERITY_RANK.get(v.severity, cap_rank + 1) > cap_rank
+            ]
+            if over:
+                failures.append(
+                    f"verdict_severity_max: {over} exceeded cap {cap!r}"
+                )
+
+    if "files_not_touched" in a:
+        globs = _as_list(a["files_not_touched"])
+        touched = _path_args_from_run(run)
+        hits = sorted({p for p in touched if any(fnmatch.fnmatch(p, g) for g in globs)})
+        if hits:
+            failures.append(f"files_not_touched: matched {hits} against {globs}")
 
     combined = " ".join(t.output for t in run.turns)
     combined_lower = combined.lower()

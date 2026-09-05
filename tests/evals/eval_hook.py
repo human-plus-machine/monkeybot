@@ -13,6 +13,8 @@ class EvalRecord:
 
     tool_calls: list[str] = field(default_factory=list)
     memory_injected_lines: list[str] = field(default_factory=list)
+    system_texts: list[str] = field(default_factory=list)
+    tool_counts: list[int] = field(default_factory=list)
     turn_count: int = 0
     completed: bool = False
     trace_id: str | None = None

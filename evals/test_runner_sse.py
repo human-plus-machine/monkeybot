@@ -43,6 +43,13 @@ def _make_transport(request_id_holder: list[str]) -> httpx.MockTransport:
                 },
                 {"type": "ToolCallResult", "request_id": rid, "tool": "read_file", "result": "ok"},
                 {"type": "ContextSummarized", "request_id": rid, "turns_summarized": 3},
+                {
+                    "type": "VerifierVerdict",
+                    "request_id": rid,
+                    "status": "on_track",
+                    "severity": "none",
+                    "triggering_signals": ["budget_burn"],
+                },
                 {"type": "AssistantDelta", "request_id": rid, "delta": "world"},
                 {
                     "type": "TurnComplete",
@@ -92,6 +99,11 @@ def test_single_session_telemetry() -> None:
     assert len(t.tool_calls) == 1
     assert t.tool_calls[0].tool == "read_file"
     assert t.tool_calls[0].error is None
+    assert t.tool_calls[0].path_args == ["AGENT.md"]
+    assert len(t.verdicts) == 1
+    assert t.verdicts[0].status == "on_track"
+    assert t.verdicts[0].severity == "none"
+    assert t.verdicts[0].triggering_signals == ["budget_burn"]
 
 
 def test_cross_session_opens_two_sessions() -> None:
