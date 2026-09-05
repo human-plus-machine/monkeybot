@@ -31,15 +31,17 @@ This is the default workflow: no image tokens, no pixel guessing, and clicks res
 
 ## Fallback: screenshots + coordinates (last resort)
 
-If `browser_get_elements` returns an error, retry once (or with `viewport_only: false`) before giving up — do **not** immediately screenshot. Use `browser_screenshot` + `browser_click(x, y)` **only** when the indexed tree truly cannot help: canvas apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering.
+If `browser_get_elements` returns an error, retry once (or with `viewport_only: false`) before giving up — do **not** immediately screenshot. Use `browser_screenshot` **only** when the indexed tree truly cannot help: canvas apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering.
 
-`browser_screenshot` saves PNGs under **`./browser/Screenshots/`**. The tool response includes:
+`browser_screenshot` saves JPEGs under **`./browser/Screenshots/`** (`max_dim=1200`, quality 60; pass `format="png"` if you need PNG). The tool response includes:
 
-- `path` — workspace-relative path (e.g. `./browser/Screenshots/shot-….png`)
+- `path` — workspace-relative path (e.g. `./browser/Screenshots/shot-….jpg`)
+- `bytes` / `format` — file size and `jpeg` or `png`
 - `screenshots_dir` — always `./browser/Screenshots`
 - `viewport` — width/height for coordinate clicks
+- `annotated` / `labeled` — present when `annotate=True`
 
-On vision models, after a fallback screenshot call **`load_file`** with the returned `path`, then `browser_click(x, y)`. Do not screenshot after every ordinary click when indexed tools work.
+On vision models, after a fallback screenshot call **`load_file`** with the returned `path`. Prefer `annotate=True` then `browser_click_by_index`; use `browser_click(x, y)` only when there is no useful index. Do not screenshot after every ordinary click when indexed tools work.
 
 Text-only models should never rely on screenshots for page understanding — use `browser_get_elements` or `browser_js(...)`.
 
@@ -48,9 +50,15 @@ Text-only models should never rely on screenshots for page understanding — use
 - First navigation: `browser_goto(url)` — response includes matching playbook filenames when present.
 - After navigation: `browser_wait_for` or `browser_wait_idle` as needed.
 - Clicking / typing (default): `browser_get_elements` → `browser_click_by_index` / `browser_input_by_index` / `browser_select_by_index` → `browser_get_elements` again if the page changed.
-- Clicking (fallback only): `browser_screenshot` → `load_file(path)` → `browser_click(x, y)`.
+- Clicking (fallback only): `browser_screenshot(annotate=True)` → `load_file(path)` → `browser_click_by_index`. Use `browser_click(x, y)` only when there is no useful index.
 - Ad hoc DOM extraction: `browser_js(expression)` when you need custom page text or attributes.
 - Login walls: if the user asked to sign in on the Spaces in-app browser, call `browser_login(expected_origin="https://the-site.com")` (optionally with `username`). It uses a saved password and returns `{ok, loggedIn, origin}` only — never read or type the password yourself. Always pass `expected_origin`: the login targets the tab the user has focused, which is not necessarily the tab your other `browser_*` calls address, so this is what stops a login landing on the wrong site. Check the returned `origin` before reporting success. If it returns `this password is not allowed for agent use` or `focused tab is on a different origin`, stop and ask the user. Still stop for MFA, consent, or a password the user must type themselves.
+
+## Tabs
+
+Tabs have short aliases (`t1`, `t2`, …) or a name you pass to `browser_open_tab(alias=...)`. **Reads never move focus** (`browser_get_elements(tab=...)`, `browser_page_info`, `browser_js`, `browser_wait_for`, `browser_read_tabs`). **Actions do** (click, input, select, fill, screenshot, …) because headed Chrome throttles timers and pauses painting in background tabs.
+
+Open a second tab to compare pages, keep a form while reading docs, or fan out with `browser_read_tabs`. At most five agent-controlled tabs (`BROWSER_MCP_MAX_TABS`). If you hit the cap, relay the returned list (aliases, titles, last-used) to the user, ask which to close, then `browser_close_tab` and retry — never close a tab without their confirmation. Close tabs you opened when done. Do not expect a background SPA to finish loading while unfocused. `browser_login` still targets the tab the **user** has focused, not `tab=`.
 
 ## After learning something non-obvious
 

@@ -155,33 +155,62 @@ def _page() -> Any:
     return page
 
 
+def _page_for(target_id: str | None = None) -> Any:
+    if target_id is None:
+        return _page()
+    try:
+        key = int(target_id)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(f"unknown target_id {target_id!r}") from exc
+    page = _tab_ids.get(key)
+    if page is None:
+        raise RuntimeError(f"unknown target_id {target_id!r}")
+    return page
+
+
 # --- navigation / page ---
 
 
 @_marshalled
-def new_tab(url: str = "about:blank") -> str:
+def new_tab(url: str = "about:blank", background: bool = False) -> str:
     """Navigate the current tab if it's still blank, else open a new one --
     mirrors browser_harness.helpers.new_tab's reuse-if-blank semantics, so
     repeated browser_goto calls don't pile up tabs from a fresh session but
-    do open a new tab when the current one already has real content."""
+    do open a new tab when the current one already has real content.
+
+    ``background=True`` creates the page without bringing it to the front or
+    replacing the focused ``_state["page"]``.
+    """
     context = _state["context"]
     if context is None:
         raise RuntimeError("playwright_helpers: not connected -- call connect() first")
     page = _state["page"]
     blank = page is None or page.url in ("", "about:blank") or page.url.startswith("about:blank#")
-    if page is None or (url != "about:blank" and not blank):
-        page = context.new_page()
-        _state["page"] = page
+    # Background opens always create a page so we never steal the focused tab.
+    reuse = (
+        not background
+        and page is not None
+        and not (url != "about:blank" and not blank)
+    )
+    if not reuse:
+        try:
+            page = context.new_page()
+        except Exception as exc:
+            raise RuntimeError("this browser backend supports a single tab") from exc
         _tab_ids[id(page)] = page
+        if not background:
+            _state["page"] = page
+    elif not background:
+        _state["page"] = page
     if url and url != "about:blank":
         page.goto(url)
-    return page.url
+    return str(id(page))
 
 
 @_marshalled
-def goto_url(url: str) -> str:
-    """Navigate the current page in place (does not open a tab)."""
-    page = _page()
+def goto_url(url: str, target_id: str | None = None) -> str:
+    """Navigate a page in place (does not open a tab)."""
+    page = _page_for(target_id)
     page.goto(url)
     return page.url
 
@@ -212,8 +241,8 @@ def wait_for_load() -> bool:
 
 
 @_marshalled
-def page_info() -> dict:
-    page = _page()
+def page_info(target_id: str | None = None) -> dict:
+    page = _page_for(target_id)
     expression = (
         "JSON.stringify({url:location.href,title:document.title,w:innerWidth,"
         "h:innerHeight,sx:scrollX,sy:scrollY,"
@@ -283,15 +312,17 @@ def scroll(x: float, y: float, dy: float = -300, dx: float = 0) -> None:
 
 
 @_marshalled
-def js(expression: str) -> Any:
-    from playwright.sync_api import Error as PlaywrightError
-
+def js(expression: str, target_id: str | None = None) -> Any:
     try:
-        return _page().evaluate(expression)
-    except PlaywrightError as exc:
-        # Re-raise as RuntimeError so dom_indexing.py's existing
-        # `except RuntimeError` message-sniffing keeps working unchanged.
-        raise RuntimeError(str(exc)) from exc
+        return _page_for(target_id).evaluate(expression)
+    except Exception as exc:
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+        except ImportError:
+            raise
+        if isinstance(exc, PlaywrightError):
+            raise RuntimeError(str(exc)) from exc
+        raise
 
 
 @_marshalled
@@ -348,6 +379,18 @@ def switch_tab(target_id: str) -> str:
 
 
 @_marshalled
+def close_tab(target_id: str) -> None:
+    page = _page_for(target_id)
+    was_current = _state["page"] is page
+    page.close()
+    _tab_ids.pop(id(page), None)
+    if was_current:
+        context = _state["context"]
+        remaining = list(context.pages) if context is not None else []
+        _state["page"] = remaining[0] if remaining else None
+
+
+@_marshalled
 def upload_file(selector: str, path: str) -> None:
     _page().set_input_files(selector, path)
 
@@ -356,8 +399,13 @@ def upload_file(selector: str, path: str) -> None:
 
 
 @_marshalled
-def capture_screenshot(path: str | None = None, full: bool = False, max_dim: int | None = None) -> str:
-    page = _page()
+def capture_screenshot(
+    path: str | None = None,
+    full: bool = False,
+    max_dim: int | None = None,
+    target_id: str | None = None,
+) -> str:
+    page = _page_for(target_id)
     path = path or "shot.png"
     page.screenshot(path=path, full_page=full)
     if max_dim:

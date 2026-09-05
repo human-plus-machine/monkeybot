@@ -44,6 +44,13 @@ def _fake_helpers(*, present: bool = False, tree: dict | None = None):
             return tree if tree is not None else {"tree": "", "elementCount": 0}
         if expression.startswith("window.__bmcp.getRect("):
             return {"x": 10, "y": 20}
+        if expression.startswith("window.__bmcp.getRects("):
+            return {
+                "rects": {"1": {"x": 0, "y": 0, "width": 10, "height": 10}},
+                "cssWidth": 800,
+                "cssHeight": 600,
+                "dpr": 1,
+            }
         if expression.startswith("window.__bmcp.getInputInfo("):
             return {"selector": '[data-bmcp-idx="12"]', "tagName": "input"}
         if expression.startswith("window.__bmcp.selectOption("):
@@ -156,6 +163,46 @@ def test_get_rect_sends_short_followup_without_reinjecting_driver() -> None:
     assert "__bmcpChunks" not in expression
     assert "window.__bmcp.getRect(35)" in expression
     assert result == {"x": 10, "y": 20}
+
+
+def test_get_rects_defaults_to_no_scroll() -> None:
+    helpers = MagicMock(spec=["js"])
+    payload = {
+        "rects": {"1": {"x": 4, "y": 8, "width": 10, "height": 12}},
+        "cssWidth": 800,
+        "cssHeight": 600,
+        "dpr": 2,
+    }
+    helpers.js.return_value = payload
+    result = dom_indexing.get_rects(helpers)
+    (expression,), _ = helpers.js.call_args
+    assert "__bmcpChunks" not in expression
+    assert "window.__bmcp.getRects(null, " in expression
+    assert '"scroll": false' in expression
+    assert '"full": false' in expression
+    assert result == payload
+
+
+def test_get_rects_passes_indices_scroll_and_full() -> None:
+    helpers = MagicMock(spec=["js"])
+    helpers.js.return_value = {
+        "rects": {},
+        "cssWidth": 100,
+        "cssHeight": 200,
+        "dpr": 1,
+    }
+    dom_indexing.get_rects(helpers, [3, 5], scroll=True, full=True)
+    (expression,), _ = helpers.js.call_args
+    assert "window.__bmcp.getRects([3, 5], " in expression
+    assert '"scroll": true' in expression
+    assert '"full": true' in expression
+
+
+def test_get_rects_normalizes_unexpected_payload() -> None:
+    helpers = MagicMock(spec=["js"])
+    helpers.js.return_value = {"1": {"x": 0, "y": 0}}
+    result = dom_indexing.get_rects(helpers)
+    assert result == {"rects": {}, "cssWidth": 0, "cssHeight": 0, "dpr": 1}
 
 
 def test_get_input_info_passes_index_without_reinjecting_driver() -> None:

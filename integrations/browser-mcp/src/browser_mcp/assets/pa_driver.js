@@ -182,16 +182,52 @@
 		}
 	}
 
-	function getRects(indices) {
+	function getRects(indices, opts) {
+		const options = opts || {}
+		const doScroll = !!options.scroll
+		const full = !!options.full
 		const map = window.__bmcpSelectorMap || {}
 		const keys = indices == null ? Object.keys(map).map(Number) : indices
+		const vw = window.innerWidth
+		const vh = window.innerHeight
+		const scrollX = window.scrollX || window.pageXOffset || 0
+		const scrollY = window.scrollY || window.pageYOffset || 0
 		const out = {}
 		for (const i of keys) {
+			const el = map[i]
+			if (!el) continue
 			try {
-				out[i] = getRect(i)
+				if (doScroll) {
+					el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' })
+				}
+				const rect = el.getBoundingClientRect()
+				if (rect.width <= 0 || rect.height <= 0) continue
+				if (!doScroll && !full) {
+					if (rect.bottom <= 0 || rect.right <= 0 || rect.top >= vh || rect.left >= vw) continue
+				}
+				out[i] = {
+					x: full ? rect.left + scrollX : rect.left,
+					y: full ? rect.top + scrollY : rect.top,
+					width: rect.width,
+					height: rect.height,
+					tagName: el.tagName.toLowerCase(),
+				}
 			} catch (e) { /* skip missing indices */ }
 		}
-		return out
+		let cssWidth = vw
+		let cssHeight = vh
+		if (full) {
+			const doc = document.documentElement
+			const body = document.body
+			cssWidth = Math.max(doc.scrollWidth, body ? body.scrollWidth : 0, vw)
+			cssHeight = Math.max(doc.scrollHeight, body ? body.scrollHeight : 0, vh)
+		}
+		return {
+			rects: out,
+			cssWidth,
+			cssHeight,
+			dpr: window.devicePixelRatio || 1,
+		}
 	}
 
 	/**

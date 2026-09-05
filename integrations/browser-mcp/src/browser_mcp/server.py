@@ -11,6 +11,7 @@ import os
 import re
 import signal
 import sys
+import threading
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -20,7 +21,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from mcp.server.fastmcp import FastMCP
 
-from browser_mcp import agentcore, dom_indexing, perf, playbooks, screenshots
+from browser_mcp import agentcore, dom_indexing, perf, playbooks, screenshots, tabs
 
 logger = logging.getLogger(__name__)
 
@@ -54,17 +55,31 @@ mcp = FastMCP(
         "page (navigation, dynamic content, modal opened) — indices are only valid for the "
         "tree they came from.\n"
         "\n"
-        "browser_screenshot + browser_click(x, y) is a LAST-RESORT FALLBACK only — use it "
-        "when browser_get_elements returns nothing useful for what you need (canvas apps, "
-        "heavily shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering). "
-        "Do not default to screenshots for ordinary clicking/typing.\n"
+        "browser_screenshot is a LAST-RESORT FALLBACK only — use it when "
+        "browser_get_elements returns nothing useful (canvas apps, heavily shadow-DOM "
+        "UIs, drag-and-drop, or visually confirming layout/rendering). Prefer "
+        "browser_screenshot(annotate=True) then browser_click_by_index when indices "
+        "are available; browser_click(x, y) is last-resort after that. Do not default "
+        "to screenshots for ordinary clicking/typing.\n"
         "\n"
         "Check browser_list_playbooks / browser_read_playbook before improvising on a site; "
         "call browser_write_playbook after learning non-obvious flows. "
         "If the user asked to sign in on the Spaces in-app browser and a saved "
         "password exists, call browser_login(expected_origin=...) — never read or "
         "type the password yourself, and check the returned origin. "
-        "Call browser_stop when done with remote/cloud sessions."
+        "Call browser_stop when done with remote/cloud sessions.\n"
+        "\n"
+        "Tabs: each tab has a short alias (t1, t2, …) or a name you pass to "
+        "browser_open_tab(alias=...). Reads (get_elements, page_info, js, wait_for, "
+        "read_tabs) never move focus — pass tab= to address a background tab. "
+        "Actions (click, input, select, fill, screenshot, …) focus the tab first "
+        "because background tabs throttle timers and pause painting. Open a second "
+        "tab to compare pages, keep a form while reading docs, or fan out with "
+        "browser_read_tabs. At most five agent-controlled tabs; if you hit the cap, "
+        "relay the returned tab list to the user, ask which to close, then "
+        "browser_close_tab and retry — never close a tab without their confirmation. "
+        "Close tabs you opened when done. Do not expect a background SPA to finish "
+        "loading while unfocused."
     ),
 )
 
@@ -100,6 +115,10 @@ _LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 _LOGIN_TIMEOUT_S = 90
 _TOKEN_QUERY_RE = re.compile(r"([?&]token=)[^&\s]*", re.IGNORECASE)
 _P = ParamSpec("_P")
+_TOOL_LOCK = threading.RLock()
+_WAIT_IDLE_NOTE = (
+    "network idle is only available on the focused tab; DOM settle was used"
+)
 
 
 def _read_in_app_cdp_file() -> str | None:
@@ -239,14 +258,15 @@ def _public_tool(fn: Callable[_P, str]) -> Callable[_P, str]:
 
     @functools.wraps(fn)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> str:
-        with perf.timed_tool(fn.__name__) as rec:
-            try:
-                result = fn(*args, **kwargs)
-                rec.observe(result)
-                return result
-            except Exception as exc:
-                rec.fail()
-                _reraise_public_harness_error(exc)
+        with _TOOL_LOCK:
+            with perf.timed_tool(fn.__name__) as rec:
+                try:
+                    result = fn(*args, **kwargs)
+                    rec.observe(result)
+                    return result
+                except Exception as exc:
+                    rec.fail()
+                    _reraise_public_harness_error(exc)
 
     return wrapper
 
@@ -302,8 +322,10 @@ def _teardown_bound_backend() -> None:
     global _bh
     if _bh is None:
         return
-    _, admin = _bh
+    helpers, admin = _bh
     is_agentcore = _bound_cdp == "agentcore"
+    with contextlib.suppress(Exception):
+        tabs.registry().detach_all(helpers)
     _bh = None
     dom_indexing.clear_registered_targets()
     if is_agentcore:
@@ -439,15 +461,180 @@ def _resolve_fill_mode(mode: str) -> str:
     return raw if raw in _FILL_MODES else "auto"
 
 
+def _unknown_tab_result(exc: tabs.UnknownTabError) -> str:
+    return _json_text({"ok": False, "error": str(exc)})
+
+
+def _for_read(helpers: Any, tab: str | None) -> tabs.TabHandle:
+    """Resolve a tab for a read. Never calls switch_tab."""
+    reg = tabs.registry()
+    if tab is None:
+        focused = reg.focused()
+        if focused is not None:
+            reg.mark_used(focused)
+            return reg.focused_handle(helpers, focused)
+        return tabs.TabHandle(helpers, None, focused=True)
+    reg.refresh(helpers)
+    state = reg.resolve(tab)
+    focused = state.target_id == reg.focused_id
+    handle = reg.handle(helpers, state, focused=focused)
+    reg.mark_used(state)
+    return handle
+
+
+def _for_action(helpers: Any, tab: str | None) -> tabs.TabHandle:
+    """Resolve a tab for an action. Focuses it first when it is not already focused."""
+    reg = tabs.registry()
+    if tab is None:
+        focused = reg.focused()
+        if focused is not None:
+            reg.mark_used(focused)
+            return reg.focused_handle(helpers, focused)
+        return tabs.TabHandle(helpers, None, focused=True)
+    reg.refresh(helpers)
+    state = reg.resolve(tab)
+    sid = None
+    if state.target_id != reg.focused_id:
+        sid = helpers.switch_tab(state.target_id)
+        reg.set_focused(state.target_id)
+    handle = reg.focused_handle(helpers, state)
+    handle.switch_session_id = sid if isinstance(sid, str) else sid
+    reg.mark_used(state)
+    return handle
+
+
+def _close_target(helpers: Any, target_id: str) -> None:
+    if callable(getattr(helpers, "close_tab", None)):
+        helpers.close_tab(target_id)
+        return
+    if callable(getattr(helpers, "cdp", None)):
+        helpers.cdp("Target.closeTarget", targetId=target_id)
+        return
+    raise tabs.SingleTabBackendError()
+
+
+def _create_blank_target(helpers: Any, *, focus: bool, url: str = "about:blank") -> bool:
+    """Create a tab. Returns True if ``url`` was already loaded by the helper."""
+    if callable(getattr(helpers, "cdp", None)):
+        try:
+            result = helpers.cdp(
+                "Target.createTarget", url="about:blank", background=not focus
+            )
+        except TypeError:
+            result = helpers.cdp("Target.createTarget", url="about:blank")
+        except Exception as exc:
+            if tabs.is_single_tab_error(exc):
+                raise tabs.SingleTabBackendError() from exc
+            try:
+                result = helpers.cdp("Target.createTarget", url="about:blank")
+            except Exception as inner:
+                if tabs.is_single_tab_error(inner):
+                    raise tabs.SingleTabBackendError() from inner
+                raise
+        if not isinstance(result, dict) or not result.get("targetId"):
+            raise tabs.SingleTabBackendError()
+        tid = str(result["targetId"])
+        if focus:
+            helpers.switch_tab(tid)
+        return False
+    if callable(getattr(helpers, "new_tab", None)):
+        try:
+            helpers.new_tab(url, background=not focus)
+        except TypeError:
+            helpers.new_tab(url)
+        except Exception as exc:
+            if tabs.is_single_tab_error(exc):
+                raise tabs.SingleTabBackendError() from exc
+            raise
+        return True
+    raise tabs.SingleTabBackendError()
+
+
+def _open_tab(
+    helpers: Any,
+    url: str,
+    *,
+    alias: str | None,
+    focus: bool,
+    opened_by_agent: bool = True,
+) -> dict[str, Any]:
+    reg = tabs.registry()
+    reg.refresh(helpers)
+    if reg.would_exceed_cap():
+        return reg.cap_error_payload()
+    try:
+        already_at_url = _create_blank_target(helpers, focus=focus, url=url)
+    except tabs.SingleTabBackendError as exc:
+        return {"ok": False, "error": str(exc)}
+    state = reg.remember_created(helpers, opened_by_agent=opened_by_agent, alias=alias)
+    handle = _for_action(helpers, state.tab) if focus else _for_read(helpers, state.tab)
+    if url and url != "about:blank" and not already_at_url:
+        handle.navigate(url)
+    if url and url != "about:blank":
+        handle.evaluate(_LOAD_WAIT_JS)
+    dom_indexing._register_driver_for_new_documents(handle)
+    dom_indexing.settle(handle)
+    info = handle.page_info()
+    state.url = str(info.get("url") or state.url)
+    state.title = str(info.get("title") or state.title)
+    state.last_url = state.url
+    return {
+        "ok": True,
+        "tab": state.tab,
+        "alias": state.alias,
+        "url": state.url,
+        "title": state.title,
+        "focused": state.target_id == tabs.registry().focused_id,
+    }
+
+
+def _close_agent_opened_tabs(helpers: Any) -> None:
+    reg = tabs.registry()
+    with contextlib.suppress(Exception):
+        reg.refresh(helpers)
+    for state in list(reg.agent_opened()):
+        with contextlib.suppress(Exception):
+            _close_target(helpers, state.target_id)
+    with contextlib.suppress(Exception):
+        reg.refresh(helpers)
+
+
 @mcp.tool()
 @_public_tool
-def browser_goto(url: str, new_tab: bool = False) -> str:
+def browser_goto(url: str, new_tab: bool = False, tab: str | None = None) -> str:
     """Navigate to a URL in the current tab (or a new tab if new_tab=True / current is blank).
+
+    Pass tab= to navigate a specific tab in place without focusing it. new_tab=True
+    opens a new tab and focuses it (same as browser_open_tab with focus=True).
 
     Returns page info and matching playbook filenames.
     """
     helpers, _ = _browser_harness()
-    if new_tab or not _can_goto_in_place(helpers):
+    if new_tab:
+        opened = _open_tab(helpers, url, alias=None, focus=True)
+        if not opened.get("ok"):
+            return _json_text(opened)
+        info = {
+            "url": opened.get("url"),
+            "title": opened.get("title"),
+            "tab": opened.get("tab"),
+            "alias": opened.get("alias"),
+        }
+        names = playbooks.list_playbook_names(url)
+        return _json_text({**info, "playbooks": names})
+    if tab is not None:
+        try:
+            handle = _for_read(helpers, tab)
+        except tabs.UnknownTabError as exc:
+            return _unknown_tab_result(exc)
+        handle.navigate(url)
+        handle.evaluate(_LOAD_WAIT_JS)
+        dom_indexing._register_driver_for_new_documents(handle)
+        dom_indexing.settle(handle)
+        info = handle.page_info()
+        names = playbooks.list_playbook_names(url)
+        return _json_text({**info, "playbooks": names})
+    if not _can_goto_in_place(helpers):
         helpers.new_tab(url)
         dom_indexing.mark_driver_stale()
     else:
@@ -462,7 +649,7 @@ def browser_goto(url: str, new_tab: bool = False) -> str:
 
 @mcp.tool()
 @_public_tool
-def browser_get_elements(viewport_only: bool = False) -> str:
+def browser_get_elements(viewport_only: bool = False, tab: str | None = None) -> str:
     """Return interactive elements as an indexed text tree — the default way to see the page.
 
     Prefer this over browser_screenshot for locating things to click/type into. Injects a
@@ -473,22 +660,31 @@ def browser_get_elements(viewport_only: bool = False) -> str:
 
     Set viewport_only=True to restrict to the visible viewport (default scans the full page).
     Re-call this after navigation or any action that may have changed the DOM — indices are
-    only valid for the tree they came from.
+    only valid for the tree they came from. Pass tab= to read a background tab without
+    moving focus.
     """
     helpers, _ = _browser_harness()
-    result = dom_indexing.get_elements(helpers, viewport_only)
+    try:
+        handle = _for_read(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
+    result = dom_indexing.get_elements(handle, viewport_only)
     ok = not result.get("error")
     return _json_text({"ok": ok, **result})
 
 
 @mcp.tool()
 @_public_tool
-def browser_click_by_index(index: int) -> str:
+def browser_click_by_index(index: int, tab: str | None = None) -> str:
     """Click an interactive element by index from browser_get_elements. Prefer this over
     browser_click(x, y) — no pixel-guessing, resilient to layout shifts."""
     helpers, _ = _browser_harness()
     try:
-        rect = dom_indexing.get_rect(helpers, index)
+        handle = _for_action(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
+    try:
+        rect = dom_indexing.get_rect(handle, index)
     except dom_indexing.ElementNotFoundError as exc:
         return _json_text({"ok": False, "error": str(exc)})
     helpers.click_at_xy(rect["x"], rect["y"])
@@ -502,7 +698,7 @@ def browser_click_by_index(index: int) -> str:
 @mcp.tool()
 @_public_tool
 def browser_input_by_index(
-    index: int, text: str, clear_first: bool = True, mode: str = "auto"
+    index: int, text: str, clear_first: bool = True, mode: str = "auto", tab: str | None = None
 ) -> str:
     """Click and type text into an indexed input/textarea/contenteditable element from
     browser_get_elements. Prefer this over screenshot + coordinate typing.
@@ -514,8 +710,12 @@ def browser_input_by_index(
     """
     helpers, _ = _browser_harness()
     try:
+        handle = _for_action(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
+    try:
         result = dom_indexing.fill(
-            helpers, index, text, clear_first=clear_first, mode=_resolve_fill_mode(mode)
+            handle, index, text, clear_first=clear_first, mode=_resolve_fill_mode(mode)
         )
     except dom_indexing.ElementNotFoundError as exc:
         return _json_text({"ok": False, "error": str(exc)})
@@ -531,12 +731,16 @@ def browser_input_by_index(
 
 @mcp.tool()
 @_public_tool
-def browser_select_by_index(index: int, text: str) -> str:
+def browser_select_by_index(index: int, text: str, tab: str | None = None) -> str:
     """Select a <select> dropdown option by visible text, using the index from
     browser_get_elements."""
     helpers, _ = _browser_harness()
     try:
-        dom_indexing.select_option(helpers, index, text)
+        handle = _for_action(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
+    try:
+        dom_indexing.select_option(handle, index, text)
     except dom_indexing.ElementNotFoundError as exc:
         return _json_text({"ok": False, "error": str(exc)})
     return _json_text({"ok": True, "index": index, "selected": text})
@@ -544,42 +748,120 @@ def browser_select_by_index(index: int, text: str) -> str:
 
 @mcp.tool()
 @_public_tool
-def browser_screenshot(full: bool = False, max_dim: int | None = 1800) -> str:
-    """Capture a PNG of the current viewport.
+def browser_screenshot(
+    full: bool = False,
+    max_dim: int | None = 1200,
+    format: str = "jpeg",
+    quality: int = 60,
+    annotate: bool = False,
+    tab: str | None = None,
+) -> str:
+    """Capture the current viewport as a JPEG (PNG available).
 
     LAST-RESORT FALLBACK: use browser_get_elements + browser_click_by_index /
     browser_input_by_index for ordinary clicking and typing instead — it's cheaper (no
     image tokens) and more reliable (indexed elements vs. guessed pixels). Reach for
     this tool only when browser_get_elements doesn't surface what you need: canvas-based
     apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming rendering/layout.
+    Pass ``annotate=True`` to draw current index labels so the next click can still
+    use browser_click_by_index.
 
     Returns JSON with a workspace-relative path under ``./browser/Screenshots/`` (for
-    ``load_file`` on vision models) plus page metadata — not inline image bytes.
+    ``load_file`` on vision models), ``bytes`` (file size), and ``format`` — not inline
+    image bytes.
     """
+    fmt = (format or "jpeg").strip().lower()
+    if fmt in {"jpg", "jpeg"}:
+        fmt = "jpeg"
+    elif fmt != "png":
+        return _json_text({"ok": False, "error": "format must be jpeg or png"})
+    try:
+        q = int(quality)
+    except (TypeError, ValueError):
+        return _json_text({"ok": False, "error": "quality must be 1–95"})
+    if q < 1 or q > 95:
+        return _json_text({"ok": False, "error": "quality must be 1–95"})
+
     helpers, _ = _browser_harness()
-    abs_path, rel_path = screenshots.allocate_screenshot_path()
-    helpers.capture_screenshot(path=str(abs_path), full=full, max_dim=max_dim)
-    info = helpers.page_info()
-    return _json_text(
-        {
-            "ok": True,
-            "path": rel_path,
-            "screenshots_dir": "./browser/Screenshots",
-            "url": info.get("url"),
-            "title": info.get("title"),
-            "viewport": {"w": info.get("w"), "h": info.get("h")},
-            "note": (
-                "Screenshot saved under the agent workspace. Vision models: call load_file "
-                "with path. Text-only models: use browser_get_elements instead of this tool. "
-                "Coordinate clicks use viewport metadata from this capture."
-            ),
-        }
+    try:
+        handle = _for_action(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
+
+    dest, rel_path = screenshots.allocate_screenshot_path(fmt)
+    native = dest.with_name(f"{dest.stem}-native.png")
+    annotated_img = None
+    labeled = 0
+    try:
+        handle.capture_screenshot(path=str(native), full=full, max_dim=None)
+        if annotate:
+            map_len = 0
+            try:
+                raw = handle.evaluate("Object.keys(window.__bmcpSelectorMap || {}).length")
+                map_len = int(raw or 0)
+            except (TypeError, ValueError):
+                map_len = 0
+            except Exception:
+                map_len = 0
+            if not map_len:
+                dom_indexing.get_elements(handle, viewport_only=not full)
+            payload = dom_indexing.get_rects(handle, scroll=False, full=full)
+            from PIL import Image
+
+            with Image.open(native) as captured:
+                annotated_img, labeled = screenshots.draw_index_labels(
+                    captured,
+                    payload.get("rects") or {},
+                    css_width=float(payload.get("cssWidth") or 0),
+                    css_height=float(payload.get("cssHeight") or 0),
+                )
+        screenshots.encode_screenshot(
+            native,
+            dest,
+            fmt=fmt,
+            quality=q,
+            max_dim=max_dim,
+            image=annotated_img,
+        )
+    finally:
+        native.unlink(missing_ok=True)
+        if annotated_img is not None:
+            annotated_img.close()
+
+    info = handle.page_info()
+    note = (
+        "Screenshot saved under the agent workspace. Vision models: call load_file "
+        "with path. Text-only models: use browser_get_elements instead of this tool. "
+        "Coordinate clicks use viewport metadata from this capture."
     )
+    if annotate:
+        note = (
+            "Labels correspond to the current get_elements indices. Vision models: "
+            "call load_file with path, then browser_click_by_index. Text-only models: "
+            "use browser_get_elements instead of this tool."
+        )
+    payload = {
+        "ok": True,
+        "path": rel_path,
+        "screenshots_dir": "./browser/Screenshots",
+        "url": info.get("url"),
+        "title": info.get("title"),
+        "viewport": {"w": info.get("w"), "h": info.get("h")},
+        "bytes": dest.stat().st_size,
+        "format": fmt,
+        "note": note,
+    }
+    if annotate:
+        payload["annotated"] = True
+        payload["labeled"] = labeled
+    return _json_text(payload)
 
 
 @mcp.tool()
 @_public_tool
-def browser_click(x: float, y: float, button: str = "left", clicks: int = 1) -> str:
+def browser_click(
+    x: float, y: float, button: str = "left", clicks: int = 1, tab: str | None = None
+) -> str:
     """Click at viewport coordinates (x, y).
 
     LAST-RESORT FALLBACK: prefer browser_get_elements + browser_click_by_index for
@@ -588,89 +870,305 @@ def browser_click(x: float, y: float, button: str = "left", clicks: int = 1) -> 
     browser_screenshot.
     """
     helpers, _ = _browser_harness()
+    try:
+        _for_action(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
     helpers.click_at_xy(x, y, button=button, clicks=clicks)
     return _json_text({"ok": True})
 
 
 @mcp.tool()
 @_public_tool
-def browser_fill(selector: str, text: str, clear_first: bool = True, timeout: float = 0.0) -> str:
+def browser_fill(
+    selector: str,
+    text: str,
+    clear_first: bool = True,
+    timeout: float = 0.0,
+    tab: str | None = None,
+) -> str:
     """Fill a form input (works with React/Vue controlled inputs)."""
     helpers, _ = _browser_harness()
+    try:
+        _for_action(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
     helpers.fill_input(selector, text, clear_first=clear_first, timeout=timeout)
     return _json_text({"ok": True})
 
 
 @mcp.tool()
 @_public_tool
-def browser_press_key(key: str, modifiers: int = 0) -> str:
+def browser_press_key(key: str, modifiers: int = 0, tab: str | None = None) -> str:
     """Press a key. Modifiers bitfield: 1=Alt, 2=Ctrl, 4=Meta(Cmd), 8=Shift."""
     helpers, _ = _browser_harness()
+    try:
+        _for_action(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
     helpers.press_key(key, modifiers=modifiers)
     return _json_text({"ok": True})
 
 
 @mcp.tool()
 @_public_tool
-def browser_scroll(x: float, y: float, dy: float = -300, dx: float = 0) -> str:
+def browser_scroll(
+    x: float, y: float, dy: float = -300, dx: float = 0, tab: str | None = None
+) -> str:
     """Scroll the page at viewport position (x, y)."""
     helpers, _ = _browser_harness()
+    try:
+        _for_action(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
     helpers.scroll(x, y, dy=dy, dx=dx)
     return _json_text({"ok": True})
 
 
 @mcp.tool()
 @_public_tool
-def browser_js(expression: str) -> str:
+def browser_js(expression: str, tab: str | None = None) -> str:
     """Evaluate JavaScript in the attached tab and return the result (DOM read/extraction)."""
     helpers, _ = _browser_harness()
-    result = helpers.js(expression)
+    try:
+        handle = _for_read(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
+    result = handle.evaluate(expression)
     return _json_text({"ok": True, "result": result})
 
 
 @mcp.tool()
 @_public_tool
-def browser_wait_for(selector: str, visible: bool = False, timeout: float = 10.0) -> str:
+def browser_wait_for(
+    selector: str, visible: bool = False, timeout: float = 10.0, tab: str | None = None
+) -> str:
     """Wait until an element matching selector exists (optionally visible)."""
     helpers, _ = _browser_harness()
-    found = helpers.wait_for_element(selector, timeout=timeout, visible=visible)
+    try:
+        handle = _for_read(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
+    result = dom_indexing.wait_for_selector(
+        handle, selector, visible=visible, timeout=timeout
+    )
+    found = bool(result.get("found"))
     return _json_text({"ok": found, "found": found})
 
 
 @mcp.tool()
 @_public_tool
-def browser_wait_idle(timeout: float = 10.0, idle_ms: float = 500) -> str:
-    """Wait until network activity is idle (useful after SPA navigation or form submit)."""
+def browser_wait_idle(
+    timeout: float = 10.0, idle_ms: float = 500, tab: str | None = None
+) -> str:
+    """Wait until network activity is idle, then until the DOM is quiet.
+
+    Network idle is only available on the focused tab. On another tab this falls
+    back to a DOM settle and reports idle as null.
+    """
     helpers, _ = _browser_harness()
-    idle = helpers.wait_for_network_idle(timeout=timeout, idle_ms=idle_ms)
-    return _json_text({"ok": idle, "idle": idle})
+    try:
+        handle = _for_read(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
+    if not handle.focused:
+        settled = dom_indexing.settle(handle)
+        return _json_text(
+            {
+                "ok": True,
+                "idle": None,
+                "quiet": bool(settled.get("quiet", True)),
+                "navigated": bool(settled.get("navigated", False)),
+                "note": _WAIT_IDLE_NOTE,
+            }
+        )
+    wait_idle = getattr(helpers, "wait_for_network_idle", None)
+    if not callable(wait_idle):
+        settled = dom_indexing.settle(handle)
+        return _json_text(
+            {
+                "ok": True,
+                "idle": None,
+                "quiet": bool(settled.get("quiet", True)),
+                "navigated": bool(settled.get("navigated", False)),
+                "note": "network idle is not available on this backend; DOM settle was used",
+            }
+        )
+    idle = bool(wait_idle(timeout=timeout, idle_ms=idle_ms))
+    if not idle:
+        return _json_text(
+            {"ok": False, "idle": False, "quiet": False, "navigated": False}
+        )
+    settled = dom_indexing.settle(handle)
+    return _json_text(
+        {
+            "ok": True,
+            "idle": True,
+            "quiet": bool(settled.get("quiet", True)),
+            "navigated": bool(settled.get("navigated", False)),
+        }
+    )
 
 
 @mcp.tool()
 @_public_tool
-def browser_page_info() -> str:
+def browser_page_info(tab: str | None = None) -> str:
     """Return current page url, title, viewport size, and scroll position."""
     helpers, _ = _browser_harness()
-    return _json_text(helpers.page_info())
+    try:
+        handle = _for_read(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
+    return _json_text(handle.page_info())
 
 
 @mcp.tool()
 @_public_tool
 def browser_tabs() -> str:
-    """List open browser tabs."""
+    """List open browser tabs with aliases, focus, and last-used times."""
     helpers, _ = _browser_harness()
-    return _json_text(helpers.list_tabs(include_chrome=False))
+    reg = tabs.registry()
+    reg.refresh(helpers)
+    return _json_text(reg.list_payload())
 
 
 @mcp.tool()
 @_public_tool
 def browser_switch_tab(target_id: str) -> str:
-    """Switch to a tab by target_id (from browser_tabs)."""
+    """Switch to a tab by alias or target_id (from browser_tabs)."""
     helpers, _ = _browser_harness()
-    sid = helpers.switch_tab(target_id)
-    dom_indexing.mark_driver_stale()
-    dom_indexing._register_driver_for_new_documents(helpers)
+    try:
+        handle = _for_action(helpers, target_id)
+    except tabs.UnknownTabError:
+        sid = helpers.switch_tab(target_id)
+        dom_indexing.mark_driver_stale()
+        dom_indexing._register_driver_for_new_documents(helpers)
+        return _json_text({"ok": True, "session_id": sid})
+    sid = handle.switch_session_id
+    if sid is None and handle.state is not None:
+        sid = helpers.switch_tab(handle.state.target_id)
+    dom_indexing._register_driver_for_new_documents(handle)
     return _json_text({"ok": True, "session_id": sid})
+
+
+@mcp.tool()
+@_public_tool
+def browser_open_tab(url: str, alias: str | None = None, focus: bool = False) -> str:
+    """Open a URL in a new tab. Defaults to the background (does not steal focus).
+
+    alias must match [a-z][a-z0-9_-]{0,23}. At most five agent-controlled tabs;
+    on the cap this returns tab_limit_reached and does not open or close anything.
+    """
+    helpers, _ = _browser_harness()
+    try:
+        return _json_text(_open_tab(helpers, url, alias=alias, focus=focus))
+    except (ValueError, tabs.UnknownTabError) as exc:
+        return _json_text({"ok": False, "error": str(exc)})
+
+
+@mcp.tool()
+@_public_tool
+def browser_close_tab(tab: str) -> str:
+    """Close a tab by alias or target id.
+
+    Refuses to close the last tab (navigates it to about:blank instead). If the
+    closed tab was focused, focuses the most recently used remaining tab.
+    """
+    helpers, _ = _browser_harness()
+    reg = tabs.registry()
+    try:
+        reg.refresh(helpers)
+        state = reg.resolve(tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
+    was_focused = state.target_id == reg.focused_id
+    remaining = [s for s in reg.tabs() if s.target_id != state.target_id]
+    if not remaining:
+        handle = _for_action(helpers, state.tab)
+        handle.navigate("about:blank")
+        state.url = "about:blank"
+        state.title = ""
+        return _json_text(
+            {
+                "ok": True,
+                "closed": False,
+                "blanked": state.tab,
+                "focused": state.tab,
+                "note": "last tab was navigated to about:blank instead of closed",
+            }
+        )
+    _close_target(helpers, state.target_id)
+    closed = state.tab
+    reg.refresh(helpers)
+    focused_tab = None
+    if was_focused:
+        nxt = reg.most_recently_used()
+        if nxt is not None:
+            helpers.switch_tab(nxt.target_id)
+            reg.set_focused(nxt.target_id)
+            focused_tab = nxt.tab
+            dom_indexing._register_driver_for_new_documents(reg.focused_handle(helpers, nxt))
+    else:
+        focused = reg.focused()
+        focused_tab = focused.tab if focused else None
+    return _json_text({"ok": True, "closed": closed, "focused": focused_tab})
+
+
+@mcp.tool()
+@_public_tool
+def browser_read_tabs(
+    tabs: list[str] | None = None,
+    mode: str = "text",
+    max_chars: int = 3000,
+) -> str:
+    """Fan-out read over tabs without changing focus.
+
+    ``tabs`` defaults to agent-opened tabs. mode is ``text`` (readable body) or
+    ``tree`` (indexed element tree). Sequential; one IPC call per tab.
+    """
+    selected = tabs
+    helpers, _ = _browser_harness()
+    from browser_mcp.tabs import UnknownTabError, registry as get_registry
+
+    reg = get_registry()
+    reg.refresh(helpers)
+    if selected:
+        try:
+            states = [reg.resolve(name) for name in selected]
+        except UnknownTabError as exc:
+            return _unknown_tab_result(exc)
+    else:
+        states = reg.agent_opened()
+    out: list[dict[str, Any]] = []
+    mode_norm = (mode or "text").strip().lower()
+    cap = max(1, int(max_chars))
+    for state in states:
+        handle = _for_read(helpers, state.tab)
+        info = handle.page_info()
+        entry: dict[str, Any] = {
+            "tab": state.tab,
+            "alias": state.alias,
+            "url": info.get("url") or state.url,
+            "title": info.get("title") or state.title,
+            "truncated": False,
+        }
+        if mode_norm == "tree":
+            tree = dom_indexing.get_elements(handle, viewport_only=True)
+            text = str(tree.get("tree") or "")
+            if len(text) > cap:
+                entry["tree"] = text[:cap]
+                entry["truncated"] = True
+            else:
+                entry["tree"] = text
+        else:
+            text = handle.readable_text()
+            if len(text) > cap:
+                entry["text"] = text[:cap]
+                entry["truncated"] = True
+            else:
+                entry["text"] = text
+        out.append(entry)
+    return _json_text({"ok": True, "tabs": out})
 
 
 def _format_loopback_host(hostname: str) -> str:
@@ -799,9 +1297,13 @@ def browser_login(username: str | None = None, expected_origin: str | None = Non
 
 @mcp.tool()
 @_public_tool
-def browser_upload(selector: str, path: str) -> str:
+def browser_upload(selector: str, path: str, tab: str | None = None) -> str:
     """Set files on a file input. path must be an absolute filepath on the host."""
     helpers, _ = _browser_harness()
+    try:
+        _for_action(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
     helpers.upload_file(selector, path)
     return _json_text({"ok": True})
 
@@ -854,8 +1356,16 @@ def _stop_active_backend_best_effort() -> None:
     """
     global _bh
     if _bound_cdp == "agentcore":
+        if _bh is not None:
+            helpers, _ = _bh
+            with contextlib.suppress(Exception):
+                _close_agent_opened_tabs(helpers)
         _teardown_bound_backend()
         return
+    if _bh is not None:
+        helpers, _ = _bh
+        with contextlib.suppress(Exception):
+            _close_agent_opened_tabs(helpers)
     _bh = None
     from browser_harness import admin
 

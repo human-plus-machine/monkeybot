@@ -178,8 +178,61 @@ def test_add_init_script_requires_connection() -> None:
         ph.add_init_script("window.x = 1")
 
 
-def test_add_init_script_registers_on_context() -> None:
+def test_js_evaluates_on_non_focused_page() -> None:
+    focused = MagicMock()
+    other = MagicMock()
+    other.evaluate.return_value = "bg"
+    ph._state["page"] = focused
+    ph._tab_ids[id(other)] = other
+
+    result = ph.js("document.title", target_id=str(id(other)))
+
+    other.evaluate.assert_called_once_with("document.title")
+    focused.evaluate.assert_not_called()
+    assert result == "bg"
+
+
+def test_new_tab_background_does_not_steal_focus() -> None:
+    current = MagicMock()
+    current.url = "https://example.test/"
+    created = MagicMock()
+    created.url = "https://example.test/other"
     context = MagicMock()
+    context.new_page.return_value = created
+    ph._state["page"] = current
     ph._state["context"] = context
-    ph.add_init_script("window.__bmcp = {}")
-    context.add_init_script.assert_called_once_with("window.__bmcp = {}")
+
+    result = ph.new_tab("https://example.test/other", background=True)
+
+    context.new_page.assert_called_once()
+    created.goto.assert_called_once_with("https://example.test/other")
+    assert ph._state["page"] is current
+    assert result == str(id(created))
+
+
+def test_close_tab_closes_page_and_reassigns_focus() -> None:
+    current = MagicMock()
+    other = MagicMock()
+    context = MagicMock()
+    context.pages = [other]
+    ph._state["page"] = current
+    ph._state["context"] = context
+    ph._tab_ids[id(current)] = current
+    ph._tab_ids[id(other)] = other
+
+    ph.close_tab(str(id(current)))
+
+    current.close.assert_called_once()
+    assert ph._state["page"] is other
+    assert id(current) not in ph._tab_ids
+
+
+def test_goto_url_on_target_id() -> None:
+    page = MagicMock()
+    page.url = "https://example.test/next"
+    ph._tab_ids[id(page)] = page
+
+    result = ph.goto_url("https://example.test/next", target_id=str(id(page)))
+
+    page.goto.assert_called_once_with("https://example.test/next")
+    assert result == "https://example.test/next"

@@ -106,3 +106,28 @@ After-navigation `get_elements`: **9 → 1** harness calls.
 - tool_calls_per_scenario: **4**
 - total_scenario_ms (median of 3): **13.4**
 
+---
+
+## Phase 7a (2026-09-05)
+
+Same machine, Chrome 152 headed on `BU_CDP_URL=http://127.0.0.1:9222`.
+Command: `BROWSER_MCP_PERF=1 BU_CDP_URL=http://127.0.0.1:9222 uv run python scripts/perf_bench.py`
+from `integrations/browser-mcp/`. Three runs; table values are medians. The new
+`screenshot (long_list.html)` scenario is `goto` → `get_elements` →
+`screenshot(format="png", max_dim=1800)` → `screenshot()` (JPEG defaults).
+
+### screenshot (long_list.html)
+
+| tool | median_wall_ms | harness_calls | result_chars |
+|---|---:|---:|---:|
+| browser_goto | 43.5 | 5.0 | 152 |
+| browser_get_elements | 24.1 | 1.0 | 21073 |
+| browser_screenshot | 99.6 | 2.0 | 485 |
+
+- tool_calls_per_scenario: **4**
+- total_scenario_ms (median of 3): **282.0**
+- screenshot_png_bytes (max_dim=1800): **156343**
+- screenshot_jpeg_bytes (max_dim=1200, q=60): **40486** (−74 % vs PNG 1800)
+
+JPEG default meets the ≥ 70 % size cut. Tool JSON stays metadata-only (`result_chars` ~485); image bytes are the file on disk, not the tool result. 7b (inline MCP images) is deferred.
+

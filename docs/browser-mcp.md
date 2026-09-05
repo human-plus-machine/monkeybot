@@ -210,13 +210,31 @@ Workflow:
 2. `browser_click_by_index(35)` / `browser_input_by_index(12, "user@example.com")` / `browser_select_by_index(index, "Option text")`
 3. Call `browser_get_elements()` again after navigation or any action that may have changed the DOM — indices are only valid for the tree they came from.
 
-`browser_goto(url)` navigates the current tab in place; pass `new_tab=True` to open a second tab. `browser_input_by_index` defaults to an in-page fill (`mode="auto"`) and falls back to real key events when the framework reverts the value; pass `mode="keys"` for comboboxes and fields that only listen to `keydown` (or set `BROWSER_MCP_FILL_MODE=keys`). `browser_click_by_index` still clicks when another element covers the target and includes `"warning": "target obscured by <tag>"`.
+`browser_goto(url)` navigates the current tab in place; pass `new_tab=True` to open a second tab (focused), or `tab=` to navigate a specific tab without focusing it. `browser_input_by_index` defaults to an in-page fill (`mode="auto"`) and falls back to real key events when the framework reverts the value; pass `mode="keys"` for comboboxes and fields that only listen to `keydown` (or set `BROWSER_MCP_FILL_MODE=keys`). `browser_click_by_index` still clicks when another element covers the target and includes `"warning": "target obscured by <tag>"`.
+
+### Tabs
+
+The server owns a tab registry with short aliases (`t1`, `t2`, …, or a name from `browser_open_tab(alias=...)`). Every interaction tool accepts `tab=` as its last parameter; omitted means the focused tab (same behavior as before).
+
+- **Reads never move focus:** `browser_get_elements`, `browser_page_info`, `browser_js`, `browser_wait_for`, `browser_read_tabs`.
+- **Actions focus first:** click/input/select/fill/press/scroll/upload/screenshot. Headed Chrome throttles timers and pauses painting in background tabs, so clicking or capturing there is unreliable.
+- `browser_open_tab(url, alias=None, focus=False)` opens in the background by default. `browser_close_tab(tab)` refuses to close the last tab (navigates it to `about:blank` instead) and, if it was focused, focuses the most recently used remaining tab.
+- `browser_tabs()` returns `{ok, focused, tabs: [{tab, alias, url, title, focused, opened_by_agent, last_used}, ...]}` with the focused tab first. `browser_switch_tab(target_id)` accepts aliases or raw target ids.
+- `browser_read_tabs(tabs=None, mode="text", max_chars=3000)` fans out over agent-opened tabs (or the listed aliases) without changing focus.
+- Cap: at most `BROWSER_MCP_MAX_TABS` (default 5) **agent-controlled** tabs (opened or addressed by the agent). User-opened tabs the agent never touched do not count. Hitting the cap returns `{ok: false, error: "tab_limit_reached", limit, tabs, action_required}` — the agent must ask the user which to close, then `browser_close_tab`, then retry. Nothing auto-closes a tab except `browser_stop` (agent-opened tabs) or an explicit `browser_close_tab`.
+- `browser_wait_idle` on a non-focused tab falls back to DOM settle and returns `idle: null` with a note. Network idle stays on the focused tab only.
+- In-app Spaces may not support `Target.createTarget`; that surfaces as `{ok: false, error: "this browser backend supports a single tab"}`.
+- `browser_login` still targets the tab the **user** has focused, not `tab=`.
 
 This is the default, preferred workflow: no image tokens, no coordinate-guessing, and clicks are resilient to layout shifts since they resolve through the live DOM rather than a fixed pixel position.
 
+### Waits
+
+`browser_wait_for(selector, visible=False, timeout=10)` waits in-page with a `MutationObserver` (one harness call for waits under 4s; longer timeouts are split to stay under the 5s IPC read timeout) instead of polling every 300 ms. `browser_wait_idle` waits for network idle on the focused tab, then for the DOM to go quiet (`settle`). On a background tab, or a backend without network events, it settle-only and returns `"idle": null` with a note. Prefer these over `browser_js` polling loops.
+
 ### Fallback: screenshots + coordinates
 
-`browser_screenshot` + `browser_click(x, y)` is a **last-resort fallback**, for cases `browser_get_elements` can't handle: canvas-based apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering. `browser_screenshot` saves a PNG under **`workspace/browser/Screenshots/`** and returns JSON with a workspace-relative `path` (for `load_file` on vision models), `screenshots_dir`, url, title, and viewport — not inline base64 image bytes. This keeps tool results small for text-only models (Ollama) and avoids context-window blowups. Text-only models should use `browser_get_elements` (or `browser_js` for ad hoc extraction) instead of screenshots entirely, since they can't view images.
+`browser_screenshot` is a **last-resort fallback**, for cases `browser_get_elements` can't handle: canvas-based apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering. It saves a **JPEG** (quality 60, `max_dim=1200`) under **`workspace/browser/Screenshots/`** and returns JSON with a workspace-relative `path` (for `load_file` on vision models), `bytes` (file size), `format`, `screenshots_dir`, url, title, and viewport — not inline image bytes. Pass `format="png"` for a PNG. `annotate=True` draws the current indexed-element labels onto the image so the next click can still use `browser_click_by_index`; `browser_click(x, y)` remains last-resort after that. This keeps tool results small for text-only models (Ollama) and avoids context-window blowups. Text-only models should use `browser_get_elements` (or `browser_js` for ad hoc extraction) instead of screenshots entirely, since they can't view images.
 
 `browser-harness` is imported lazily on first browser tool call so listing MCP tools does not require Chrome to be running.
 

@@ -9,8 +9,9 @@ When browser tools are needed, call `enable_mcp("browser")` first. Use the
 name from the harness MCP catalog — do not read config files. Progressive
 disclosure still requires `enable_mcp` before `browser__*` schemas are advertised.
 
-Use indexed DOM tools before screenshots. Browser screenshots and agent-written
-playbooks are workspace data: `browser/Screenshots/` and `browser/playbooks/`.
+Use indexed DOM tools before screenshots. Browser screenshots (JPEG under
+`browser/Screenshots/`) and agent-written playbooks are workspace data:
+`browser/Screenshots/` and `browser/playbooks/`.
 They are not trusted skills and may be discarded with an ephemeral workspace.
 
 `browser_input_by_index` fills in-page by default; pass `mode="keys"` for
@@ -20,5 +21,10 @@ When the user asked to sign in on the Spaces in-app browser, call
 `browser_login` instead of typing a password. It returns `{ok, loggedIn, origin}`
 only. Pass `expected_origin` so a login cannot land on the wrong site, and check
 the returned `origin` before reporting success.
+
+Tabs use aliases (`t1`, `t2`, …). Reads (`get_elements`, `page_info`, `js`,
+`read_tabs`) never move focus; actions do. At most five agent-controlled tabs —
+if you hit the cap, ask the user which to close, then `browser_close_tab`. Close
+tabs you opened. `browser_login` still targets the tab the user has focused.
 
 Finish browser sessions with `browser_stop`.

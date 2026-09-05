@@ -1,6 +1,6 @@
 # Browser MCP — Performance Plan
 
-**Status:** Phase 0–1 complete — later phases not implemented  
+**Status:** Phase 0–2, 7a, and 8 complete — 7b and later phases not implemented  
 **Audience:** implementer (human or model) working in `integrations/browser-mcp/`  
 **Related:** [browser-mcp.md](browser-mcp.md) · [browser-mcp-perf-baseline.md](browser-mcp-perf-baseline.md) · `integrations/browser-mcp/src/browser_mcp/` · `examples/skills/browser/SKILL.md` · upstream [browser-use/browser-harness](https://github.com/browser-use/browser-harness) (pinned `browser-harness==0.1.5` in `.venv`)  
 **Baseline:** Phase 0 numbers in [browser-mcp-perf-baseline.md](browser-mcp-perf-baseline.md), `monkeybot-browser-mcp` 0.5.0  
@@ -113,7 +113,7 @@ Three layers, in decreasing cost:
 
 ---
 
-### Phase 2 — Multi-tab control
+### Phase 2 — Multi-tab control — **completed**
 
 **Goal.** Let the agent hold several tabs open and address any of them from any tool, so it can compare pages, keep a reference page while filling a form elsewhere, or fan out reads across N result pages in one call.
 
@@ -305,7 +305,9 @@ Backward compatibility: the old top-level keys (`clicked`, `index`, `tagName`, `
 
 ---
 
-### Phase 7 — Cheaper visual fallback
+### Phase 7 — Cheaper visual fallback — **7a completed**
+
+**Status.** 7a done (JPEG default, `max_dim=1200`, `annotate`, `bytes`/`format`). 7b (inline MCP images) deferred.
 
 **Goal.** When a screenshot is unavoidable, make it cheap and make it actionable in one step.
 
@@ -318,7 +320,7 @@ Backward compatibility: the old top-level keys (`clicked`, `index`, `tagName`, `
 
 **Tests.** Unit: JPEG path writes a JPEG under the size cap; annotate draws N labels (assert via PIL pixel sampling on a synthetic rect list). Core PR: an MCP result with one text and one image block yields a text block and an `Image` block.
 
-**Acceptance.** Screenshot bytes down ≥ 70 % on `long_list.html`; with 7b, screenshot-to-click is one turn.
+**Acceptance.** **7a met** — JPEG default on `long_list.html` is ≥ 70 % smaller than PNG `max_dim=1800`; see [Phase 7 numbers](browser-mcp-perf-baseline.md). 7b (screenshot-to-click in one turn, no `load_file`) is deferred.
 
 ---
 
@@ -400,7 +402,7 @@ Backward compatibility: the old top-level keys (`clicked`, `index`, `tagName`, `
 |---|---|---|
 | 0 Instrumentation (completed) | S | — |
 | 1 Driver once + in-page fill/settle | M | 0 |
-| 2 Multi-tab control | M | 1 |
+| 2 Multi-tab control (completed) | M | 1 |
 | 3 Observation diet | M | 1, 2 (settle, driver, registry) |
 | 4 Act then observe | S | 1, 3 |
 | 5 Batch + intent tools | M | 4 |

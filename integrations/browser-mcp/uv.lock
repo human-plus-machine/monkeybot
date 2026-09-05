@@ -489,6 +489,7 @@ source = { editable = "." }
 dependencies = [
     { name = "browser-harness" },
     { name = "mcp" },
+    { name = "pillow" },
 ]
 
 [package.optional-dependencies]
@@ -509,6 +510,7 @@ requires-dist = [
     { name = "boto3", marker = "extra == 'agentcore'" },
     { name = "browser-harness", specifier = ">=0.1.3" },
     { name = "mcp", specifier = ">=1.0.0,<2" },
+    { name = "pillow", specifier = ">=10" },
     { name = "playwright", marker = "extra == 'agentcore'" },
 ]
 provides-extras = ["agentcore"]

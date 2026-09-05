@@ -124,6 +124,43 @@ def _run_spa(base: str) -> None:
     server.browser_get_elements()
 
 
+def _run_spa_wait(base: str) -> None:
+    from browser_mcp import server
+
+    server.browser_goto(f"{base}/spa.html")
+    payload = _parse(server.browser_get_elements())
+    tree = str(payload.get("tree") or "")
+    server.browser_click_by_index(_tree_index(tree, "Next", prefer_tags=("button",)))
+    server.browser_wait_for("#page-2")
+
+
+def _run_compare_three(base: str) -> None:
+    from browser_mcp import server
+
+    server.browser_goto(f"{base}/form.html")
+    server.browser_open_tab(f"{base}/long_list.html", focus=False)
+    server.browser_open_tab(f"{base}/spa.html", focus=False)
+    payload = _parse(server.browser_read_tabs())
+    if not payload.get("ok"):
+        raise RuntimeError(f"read_tabs failed: {payload}")
+    if len(payload.get("tabs") or []) < 2:
+        raise RuntimeError(f"expected at least 2 tabs in read_tabs, got {payload}")
+
+
+_shot_bytes: dict[str, int] = {}
+
+
+def _run_screenshot(base: str) -> None:
+    from browser_mcp import server
+
+    server.browser_goto(f"{base}/long_list.html")
+    server.browser_get_elements()
+    png = _parse(server.browser_screenshot(format="png", max_dim=1800))
+    jpg = _parse(server.browser_screenshot())
+    _shot_bytes["png"] = int(png.get("bytes") or 0)
+    _shot_bytes["jpeg"] = int(jpg.get("bytes") or 0)
+
+
 def _median(values: list[float]) -> float:
     return float(statistics.median(values)) if values else 0.0
 
@@ -171,6 +208,9 @@ def main() -> int:
         ("form.html", _run_form),
         ("long_list.html", _run_long_list),
         ("spa.html", _run_spa),
+        ("spa_wait", _run_spa_wait),
+        ("compare_three", _run_compare_three),
+        ("screenshot (long_list.html)", _run_screenshot),
     ]
     try:
         offset = 0
@@ -193,6 +233,15 @@ def main() -> int:
                     return 1
                 runs.append((records, elapsed_ms))
             _print_scenario(name, runs)
+            if name == "screenshot (long_list.html)":
+                png_b = _shot_bytes.get("png") or 0
+                jpg_b = _shot_bytes.get("jpeg") or 0
+                pct = (1 - jpg_b / png_b) * 100 if png_b else 0
+                print(f"screenshot_png_bytes (max_dim=1800): {png_b}")
+                print(
+                    f"screenshot_jpeg_bytes (max_dim=1200, q=60): {jpg_b}  (−{pct:.0f} %)"
+                )
+                print()
     finally:
         httpd.shutdown()
         httpd.server_close()

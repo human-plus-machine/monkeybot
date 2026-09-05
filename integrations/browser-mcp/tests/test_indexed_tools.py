@@ -8,10 +8,11 @@ not propagate a raw exception through the MCP boundary.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from browser_mcp import dom_indexing, server
+from browser_mcp import dom_indexing, server, tabs
 
 
 @pytest.fixture(autouse=True)
@@ -21,10 +22,12 @@ def _reset_bh_state():
     server._bh = None
     server._bound_cdp = None
     dom_indexing.clear_registered_targets()
+    tabs.reset_registry()
     yield
     server._bh = original
     server._bound_cdp = original_bound
     dom_indexing.clear_registered_targets()
+    tabs.reset_registry()
 
 
 def _patch_harness(helpers: MagicMock):
@@ -94,9 +97,10 @@ def test_browser_input_by_index_uses_fill() -> None:
         "tagName": "input",
         "mode_used": "fast",
     }
-    fill.assert_called_once_with(
-        helpers, 12, "hello@example.com", clear_first=True, mode="auto"
-    )
+    fill.assert_called_once()
+    args, kwargs = fill.call_args
+    assert args[1:] == (12, "hello@example.com")
+    assert kwargs == {"clear_first": True, "mode": "auto"}
     helpers.press_key.assert_not_called()
 
 
@@ -114,9 +118,10 @@ def test_browser_input_by_index_env_default_mode(
         ) as fill,
     ):
         json.loads(server.browser_input_by_index(12, "hello"))
-    fill.assert_called_once_with(
-        helpers, 12, "hello", clear_first=True, mode="keys"
-    )
+    fill.assert_called_once()
+    args, kwargs = fill.call_args
+    assert args[1:] == (12, "hello")
+    assert kwargs == {"clear_first": True, "mode": "keys"}
 
 
 def test_browser_input_by_index_returns_error_on_stale_index() -> None:
@@ -215,7 +220,7 @@ def test_browser_goto_new_tab_flag_opens_tab() -> None:
     ):
         server.browser_goto("https://example.test/other", new_tab=True)
 
-    helpers.new_tab.assert_called_once_with("https://example.test/other")
+    helpers.new_tab.assert_called_once_with("https://example.test/other", background=False)
     helpers.goto_url.assert_not_called()
 
 
@@ -230,3 +235,92 @@ def test_browser_switch_tab_registers_driver() -> None:
 
     assert result == {"ok": True, "session_id": "sid"}
     register.assert_called_once_with(helpers)
+
+
+def _write_png(path: str | None = None, full: bool = False, max_dim: int | None = None) -> str:
+    from PIL import Image
+
+    dest = str(path)
+    Image.new("RGB", (40, 30), (10, 20, 30)).save(dest, "PNG")
+    return dest
+
+
+def test_browser_screenshot_defaults_to_jpeg(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    helpers = MagicMock(spec=["capture_screenshot", "page_info", "js"])
+    helpers.capture_screenshot.side_effect = _write_png
+    helpers.page_info.return_value = {
+        "url": "https://example.test/",
+        "title": "t",
+        "w": 40,
+        "h": 30,
+    }
+    with _patch_harness(helpers):
+        result = json.loads(server.browser_screenshot())
+
+    assert result["ok"] is True
+    assert result["format"] == "jpeg"
+    assert result["path"].endswith(".jpg")
+    assert isinstance(result["bytes"], int) and result["bytes"] > 0
+    helpers.capture_screenshot.assert_called_once()
+    assert helpers.capture_screenshot.call_args.kwargs["max_dim"] is None
+    saved = tmp_path / "workspace" / result["path"].removeprefix("./")
+    assert saved.read_bytes()[:2] == b"\xff\xd8"
+
+
+def test_browser_screenshot_png_keeps_png_suffix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    helpers = MagicMock(spec=["capture_screenshot", "page_info", "js"])
+    helpers.capture_screenshot.side_effect = _write_png
+    helpers.page_info.return_value = {
+        "url": "https://example.test/",
+        "title": "t",
+        "w": 40,
+        "h": 30,
+    }
+    with _patch_harness(helpers):
+        result = json.loads(server.browser_screenshot(format="png"))
+
+    assert result["ok"] is True
+    assert result["format"] == "png"
+    assert result["path"].endswith(".png")
+
+
+def test_browser_screenshot_annotate_uses_get_rects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(tmp_path / "workspace"))
+    helpers = MagicMock(spec=["capture_screenshot", "page_info", "js"])
+    helpers.capture_screenshot.side_effect = _write_png
+    helpers.page_info.return_value = {
+        "url": "https://example.test/",
+        "title": "t",
+        "w": 40,
+        "h": 30,
+    }
+    helpers.js.return_value = 2
+    rects = {
+        "rects": {"1": {"x": 0, "y": 0, "width": 10, "height": 10}},
+        "cssWidth": 40,
+        "cssHeight": 30,
+        "dpr": 1,
+    }
+    with (
+        _patch_harness(helpers),
+        patch.object(dom_indexing, "get_rects", return_value=rects) as get_rects,
+        patch.object(dom_indexing, "get_elements") as get_elements,
+    ):
+        result = json.loads(server.browser_screenshot(annotate=True))
+
+    assert result["ok"] is True
+    assert result["annotated"] is True
+    assert result["labeled"] == 1
+    get_elements.assert_not_called()
+    get_rects.assert_called_once()
+    assert get_rects.call_args.kwargs["scroll"] is False
+    js_exprs = [str(c.args[0]) for c in helpers.js.call_args_list if c.args]
+    assert not any("getRect(" in expr and "getRects" not in expr for expr in js_exprs)
