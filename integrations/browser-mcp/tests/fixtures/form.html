@@ -5,29 +5,29 @@
   <title>Signup form</title>
   <style>
     body { font-family: sans-serif; margin: 1rem; max-width: 32rem; }
-    label { display: block; margin-top: 0.6rem; }
+    label, .row { display: block; margin-top: 0.6rem; }
     input, select, textarea { width: 100%; box-sizing: border-box; }
     textarea { min-height: 4rem; }
+    input[type=checkbox] { width: auto; }
     button[disabled] { opacity: 0.5; }
   </style>
 </head>
 <body>
   <h1>Signup</h1>
-  <form id="signup" action="#done" method="get">
+  <h2>Submit</h2>
+  <p><a href="#docs">Submit</a></p>
+  <form id="signup" action="#done" method="get" novalidate>
     <label for="full-name">Full name</label>
-    <input id="full-name" name="full-name" placeholder="Full name">
+    <input id="full-name" name="full-name" placeholder="Your name">
 
-    <label for="email">Email</label>
-    <input id="email" name="email" type="email" placeholder="Email">
+    <input aria-label="Email" type="email">
 
-    <label for="phone">Phone</label>
-    <input id="phone" name="phone" type="tel" placeholder="Phone">
+    <span id="phone-lbl">Phone</span>
+    <input aria-labelledby="phone-lbl" type="tel">
 
-    <label for="address">Address</label>
-    <input id="address" name="address" placeholder="Address">
+    <input placeholder="Address">
 
-    <label for="city">City</label>
-    <input id="city" name="city" placeholder="City">
+    <input name="City">
 
     <label for="country">Country</label>
     <select id="country" name="country">
@@ -37,20 +37,26 @@
       <option value="gb">United Kingdom</option>
     </select>
 
-    <label for="zip">Zip</label>
-    <input id="zip" name="zip" placeholder="Zip">
+    <input id="zip">
 
-    <label for="company">Company</label>
-    <input id="company" name="company" placeholder="Company">
+    <div class="row">
+      <span>Company</span>
+      <input>
+    </div>
 
     <label for="role">Role</label>
-    <input id="role" name="role" placeholder="Role">
+    <input id="role" name="role">
 
     <label for="website">Website</label>
-    <input id="website" name="website" type="url" placeholder="Website">
+    <input id="website" name="website" type="url">
 
     <label for="comments">Comments</label>
-    <textarea id="comments" name="comments" placeholder="Comments"></textarea>
+    <textarea id="comments" name="comments"></textarea>
+
+    <label for="subscribe">Subscribe</label>
+    <input id="subscribe" name="subscribe" type="checkbox">
+
+    <input>
 
     <label for="nickname">Nickname</label>
     <input id="nickname" name="nickname" placeholder="Nickname">

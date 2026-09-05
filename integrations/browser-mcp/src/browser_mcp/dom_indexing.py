@@ -11,7 +11,8 @@ Vendored assets (MIT licensed, see NOTICE.md):
   assignment so it can run as a raw CDP-injected script (no bundler/module loader
   available on the target page).
 - assets/pa_driver.js - glue that flattens the tree to text and exposes
-  window.__bmcp.{getTree,getRect,getRects,getInputInfo,selectOption,fill,settle},
+  window.__bmcp.{getTree,getRect,getRects,getInputInfo,selectOption,fill,settle,
+  resolveField,setChecked,findByText,findFormSubmit,extract},
   ported from page-agent's packages/page-controller/src/dom/index.ts
   (flatTreeToString, getSelectorMap) and actions.ts (selectOptionElement).
 
@@ -558,3 +559,71 @@ def wait_for_selector(
         if remaining <= 0:
             return last
 
+
+def _ensure_call(target: Any, expression: str) -> Any:
+    handle = as_handle(target)
+    _ensure_driver(handle)
+    return _call(handle, expression)
+
+
+def resolve_field(target: Any, label: str) -> dict:
+    """Resolve a form field by label-like text. Misses return ``index: None``."""
+    result = _ensure_call(target, f"window.__bmcp.resolveField({json.dumps(label)})")
+    if isinstance(result, dict):
+        return result
+    return {"index": None, "how": None}
+
+
+def set_checked(target: Any, index: int, on: bool) -> dict:
+    """Check or uncheck an indexed checkbox/radio."""
+    result = _ensure_call(
+        target, f"window.__bmcp.setChecked({json.dumps(index)}, {json.dumps(bool(on))})"
+    )
+    if isinstance(result, dict):
+        return result
+    return {"ok": True, "index": index, "checked": bool(on)}
+
+
+def find_by_text(
+    target: Any,
+    text: str,
+    *,
+    role: str | None = None,
+    exact: bool = False,
+    nth: int = 0,
+) -> dict:
+    """Find an interactive element by visible text or aria-label."""
+    opts = {"role": role, "exact": bool(exact), "nth": int(nth)}
+    result = _ensure_call(
+        target, f"window.__bmcp.findByText({json.dumps(text)}, {json.dumps(opts)})"
+    )
+    if isinstance(result, dict):
+        return result
+    return {"ok": False, "nearMisses": []}
+
+
+def find_form_submit(target: Any, index: int) -> dict:
+    """Submit control in the same form as an indexed field, if any."""
+    result = _ensure_call(target, f"window.__bmcp.findFormSubmit({json.dumps(index)})")
+    if isinstance(result, dict):
+        return result
+    return {"ok": False}
+
+
+def extract_rows(
+    target: Any,
+    selector: str,
+    fields: dict[str, str],
+    limit: int = 50,
+) -> dict:
+    """Evaluate field sub-selectors under each ``selector`` match."""
+    lim = max(1, int(limit))
+    result = _ensure_call(
+        target,
+        f"window.__bmcp.extract({json.dumps(selector)}, {json.dumps(fields)}, {json.dumps(lim)})",
+    )
+    if isinstance(result, dict):
+        result.setdefault("rows", [])
+        result.setdefault("truncated", False)
+        return result
+    return {"rows": [], "truncated": False}

@@ -9,10 +9,18 @@ When browser tools are needed, call `enable_mcp("browser")` first. Use the
 name from the harness MCP catalog — do not read config files. Progressive
 disclosure still requires `enable_mcp` before `browser__*` schemas are advertised.
 
-Use indexed DOM tools before screenshots. Browser screenshots (JPEG under
+Use indexed DOM tools before screenshots. Prefer `browser_fill_form` for
+multi-field forms, `browser_click_text` when the visible label is known,
+`browser_act` for a batch of steps, and `browser_extract` for structured
+scraping. Browser screenshots (JPEG under
 `browser/Screenshots/`) and agent-written playbooks are workspace data:
 `browser/Screenshots/` and `browser/playbooks/`.
 They are not trusted skills and may be discarded with an ephemeral workspace.
+
+If `browser_list_playbooks` returns `flows`, call `browser_run_playbook` instead of
+re-planning. On `failed_step`, continue by hand and append a corrected
+`playbook` YAML fence. Secrets only via `{do: login, expected_origin}`.
+`browser_recent_actions` drafts from what actually worked.
 
 `browser_input_by_index` fills in-page by default; pass `mode="keys"` for
 comboboxes and fields that only listen to keydown. `browser_get_elements`

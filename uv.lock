@@ -2587,6 +2587,7 @@ dependencies = [
     { name = "browser-harness" },
     { name = "mcp" },
     { name = "pillow" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
@@ -2597,6 +2598,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.0.0,<2" },
     { name = "pillow", specifier = ">=10" },
     { name = "playwright", marker = "extra == 'agentcore'" },
+    { name = "pyyaml", specifier = ">=6" },
 ]
 provides-extras = ["agentcore"]
 

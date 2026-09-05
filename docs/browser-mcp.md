@@ -180,6 +180,7 @@ AWS_PROFILE=... AWS_REGION=us-east-1 BROWSER_BACKEND=agentcore \
 | `BROWSER_MCP_QUIET_MS` | DOM-quiet window for post-action settle (default 150) |
 | `BROWSER_MCP_FILL_MODE` | Default fill mode for `browser_input_by_index` (`auto`, `keys`, or `fast`) |
 | `BROWSER_MCP_MAX_TABS` | Cap on agent-controlled tabs (default 5) |
+| `BROWSER_MCP_PLAYBOOK_TIMEOUT_S` | Wall-time cap for `browser_run_playbook` (default 120) |
 
 All `BU_*` vars are passed through to `browser-harness` unchanged.
 
@@ -190,7 +191,7 @@ synchronization layer.
 
 ## Tools
 
-Navigation, interaction, screenshots, tabs, waits, playbooks (`browser_list_playbooks`, `browser_read_playbook`, `browser_write_playbook`), `browser_login` for Spaces-saved passwords (returns `{ok, loggedIn, origin}` — never the password), and `browser_stop` for daemon cleanup.
+Navigation, interaction, screenshots, tabs, waits, playbooks (`browser_list_playbooks`, `browser_read_playbook`, `browser_write_playbook`, `browser_run_playbook`, `browser_recent_actions`), `browser_login` for Spaces-saved passwords (returns `{ok, loggedIn, origin}` — never the password), and `browser_stop` for daemon cleanup.
 
 ### `browser_login` targets the focused tab
 
@@ -208,13 +209,18 @@ Errors raised by browser tools are scrubbed of `?token=` values before they reac
 
 Workflow:
 
-1. `browser_get_elements()` — returns an indexed text tree of the **viewport** by default (footer reports how many interactive elements are below; pass `viewport_only=false` or scroll). Filter with `kind=` (`inputs` / `buttons` / `links`) or `contains=`; `max_elements` defaults to 150. `observe="diff"` returns `{added, removed, unchanged}` vs the last tree for that tab (full tree after navigation or with no cache). Example:
+1. Prefer intent tools when the labels or the multi-step flow are already known:
+   - `browser_fill_form({Email: "...", Password: "..."}, submit=True)` — resolves fields by label[for], aria-label, aria-labelledby, placeholder, name, id, then nearest preceding row text. Checkboxes take `"true"`/`"false"`. Unresolved labels are listed (`how` says which strategy matched) and are not an error unless every field failed.
+   - `browser_click_text("Continue", role="button")` — click by visible text / aria-label. On a miss, `did_you_mean` lists near-misses so you do not need another `get_elements`.
+   - `browser_act(steps)` — up to 25 sequential steps (`click`, `input`, `select`, `press`, `click_text`, `wait_for`, `wait_idle`, `goto`, `scroll`, `settle`, `tab`, `open_tab`). One observation at the end. On failure: `{ok:false, completed, failed_step, error, observation}`.
+   - `browser_extract(selector, fields)` — structured rows instead of `browser_js` scraping. Field values are relative sub-selectors; `a@href` reads an attribute.
+2. Otherwise `browser_get_elements()` — returns an indexed text tree of the **viewport** by default (footer reports how many interactive elements are below; pass `viewport_only=false` or scroll). Filter with `kind=` (`inputs` / `buttons` / `links`) or `contains=`; `max_elements` defaults to 150. `observe="diff"` returns `{added, removed, unchanged}` vs the last tree for that tab (full tree after navigation or with no cache). Example:
    ```
    [12]<input placeholder='Email' />
    [35]<button aria-label='Submit form'>Submit</button>
    ```
-2. `browser_click_by_index(35)` / `browser_input_by_index(12, "user@example.com")` / `browser_select_by_index(index, "Option text")` — each action waits for the DOM to settle and returns `{ok, action, page, observation}` plus the legacy top-level keys (`clicked`, `index`, `tagName`, `selected`). Default `observation` is a `diff` vs the last tree (`BROWSER_MCP_OBSERVE_DEFAULT`; pass `observe="full"` or `observe="none"`).
-3. Read the observation in the action response. Only call `browser_get_elements` again when you need a different filter, the whole tree, or after navigation if the snapshot is not enough. Use `browser_get_text` to read page copy (`<main>` / `<article>` / `[role=main]`, else `body`; strips nav/footer/aside/script/style) instead of `browser_js("document.body.innerText")`.
+3. `browser_click_by_index(35)` / `browser_input_by_index(12, "user@example.com")` / `browser_select_by_index(index, "Option text")` — each action waits for the DOM to settle and returns `{ok, action, page, observation}` plus the legacy top-level keys (`clicked`, `index`, `tagName`, `selected`). Default `observation` is a `diff` vs the last tree (`BROWSER_MCP_OBSERVE_DEFAULT`; pass `observe="full"` or `observe="none"`).
+4. Read the observation in the action response. Only call `browser_get_elements` again when you need a different filter, the whole tree, or after navigation if the snapshot is not enough. Use `browser_get_text` to read page copy (`<main>` / `<article>` / `[role=main]`, else `body`; strips nav/footer/aside/script/style) instead of `browser_js("document.body.innerText")`.
 
 `browser_goto(url)` navigates the current tab in place and returns a **full** observation by default (new document — no meaningful diff); pass `new_tab=True` to open a second tab (focused), or `tab=` to navigate a specific tab without focusing it. `browser_open_tab(..., focus=True)` also includes a full observation. `browser_input_by_index` defaults to an in-page fill (`mode="auto"`) and falls back to real key events when the framework reverts the value; pass `mode="keys"` for comboboxes and fields that only listen to `keydown` (or set `BROWSER_MCP_FILL_MODE=keys`). `browser_click_by_index` still clicks when another element covers the target and includes `"warning": "target obscured by <tag>"`. A huge diff (`added+removed` over 60 % of the tree) is replaced with `mode: "full"`. Pages that never go quiet hit `BROWSER_MCP_SETTLE_MS` and report `settled: false`.
 
@@ -222,8 +228,8 @@ Workflow:
 
 The server owns a tab registry with short aliases (`t1`, `t2`, …, or a name from `browser_open_tab(alias=...)`). Every interaction tool accepts `tab=` as its last parameter; omitted means the focused tab (same behavior as before).
 
-- **Reads never move focus:** `browser_get_elements`, `browser_get_text`, `browser_page_info`, `browser_js`, `browser_wait_for`, `browser_read_tabs`.
-- **Actions focus first:** click/input/select/fill/press/scroll/upload/screenshot. Headed Chrome throttles timers and pauses painting in background tabs, so clicking or capturing there is unreliable.
+- **Reads never move focus:** `browser_get_elements`, `browser_get_text`, `browser_page_info`, `browser_js`, `browser_wait_for`, `browser_read_tabs`, `browser_extract`.
+- **Actions focus first:** click/input/select/fill/press/scroll/upload/screenshot/`fill_form`/`click_text`/`act`. Headed Chrome throttles timers and pauses painting in background tabs, so clicking or capturing there is unreliable.
 - `browser_open_tab(url, alias=None, focus=False)` opens in the background by default. `browser_close_tab(tab)` refuses to close the last tab (navigates it to `about:blank` instead) and, if it was focused, focuses the most recently used remaining tab.
 - `browser_tabs()` returns `{ok, focused, tabs: [{tab, alias, url, title, focused, opened_by_agent, last_used}, ...]}` with the focused tab first. `browser_switch_tab(target_id)` accepts aliases or raw target ids.
 - `browser_read_tabs(tabs=None, mode="text", max_chars=3000)` fans out over agent-opened tabs (or the listed aliases) without changing focus.
@@ -234,13 +240,37 @@ The server owns a tab registry with short aliases (`t1`, `t2`, …, or a name fr
 
 This is the default, preferred workflow: no image tokens, no coordinate-guessing, and clicks are resilient to layout shifts since they resolve through the live DOM rather than a fixed pixel position.
 
+### Executable playbooks
+
+Host files at `workspace/browser/playbooks/<host>.md` remain free-form markdown notes. Optional fenced YAML blocks are **executable flows** the server can run without a model turn per step:
+
+````markdown
+```playbook
+name: signup
+params: [nickname]
+steps:
+  - {do: goto, url: "https://example.com/signup"}
+  - {do: fill_form, fields: {Nickname: "{{nickname}}"}, submit: true}
+expect:
+  text: "Thanks"
+```
+````
+
+- **Discovery.** `browser_list_playbooks` returns `{playbooks, flows: [{host, name, params}]}`. `browser_goto` includes matching `playbooks` filenames and `flows`. Prefer `browser_run_playbook(host, name, params)` when a named flow exists; `browser_read_playbook` is for notes.
+- **Run.** `browser_run_playbook` substitutes `{{param}}` into string fields only, executes steps through the `browser_act` executor, then checks `expect` (`url_contains`, `selector`, `text`). Success: `{ok, name, completed, observation}`. A failed step or failed expect returns `{ok: false, name, completed, failed_step?, error, observation}` so the model can continue by hand.
+- **Allowed `do` values.** The same set as `browser_act`: `click`, `input`, `select`, `press`, `click_text`, `wait_for`, `wait_idle`, `goto`, `scroll`, `settle`, `tab`, `open_tab`, `fill_form`, `login`. No `js`, `upload`, or `extract` steps — playbooks are untrusted workspace data.
+- **Params.** Declared in `params:`; missing, extra, or unknown `{{placeholders}}` fail before any step runs. Names `password`, `secret`, and `token` are rejected at parse time. A flow that needs a saved password uses `{do: login, expected_origin: "https://example.com"}` which maps to `browser_login` (still the **user-focused** tab).
+- **Write.** `browser_write_playbook` validates every `playbook` fence in the composed document (including `append: true`) and returns the parse error without writing if a fence is invalid. Notes-only markdown still writes.
+- **Drafting.** `browser_recent_actions(host)` returns the last 50 successful actions for that host (action type, index, resolved labels, typed-text **lengths** — never contents) so a flow can be drafted from what actually worked. On divergence, continue by hand and `browser_write_playbook(..., append=true)` with a corrected fence.
+- **Timeout.** `BROWSER_MCP_PLAYBOOK_TIMEOUT_S` (default 120) is checked before each step.
+
 ### Waits
 
 `browser_wait_for(selector, visible=False, timeout=10)` waits in-page with a `MutationObserver` (one harness call for waits under 4s; longer timeouts are split to stay under the 5s IPC read timeout) instead of polling every 300 ms. `browser_wait_idle` waits for network idle on the focused tab, then for the DOM to go quiet (`settle`). On a background tab, or a backend without network events, it settle-only and returns `"idle": null` with a note. Prefer these over `browser_js` polling loops.
 
 ### Fallback: screenshots + coordinates
 
-`browser_screenshot` is a **last-resort fallback**, for cases `browser_get_elements` can't handle: canvas-based apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering. It saves a **JPEG** (quality 60, `max_dim=1200`) under **`workspace/browser/Screenshots/`** and returns JSON with a workspace-relative `path` (for `load_file` on vision models), `bytes` (file size), `format`, `screenshots_dir`, url, title, and viewport — not inline image bytes. Pass `format="png"` for a PNG. `annotate=True` draws the current indexed-element labels onto the image so the next click can still use `browser_click_by_index`; `browser_click(x, y)` remains last-resort after that. This keeps tool results small for text-only models (Ollama) and avoids context-window blowups. Text-only models should use `browser_get_elements` (or `browser_js` for ad hoc extraction) instead of screenshots entirely, since they can't view images.
+`browser_screenshot` is a **last-resort fallback**, for cases `browser_get_elements` can't handle: canvas-based apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering. It saves a **JPEG** (quality 60, `max_dim=1200`) under **`workspace/browser/Screenshots/`** and returns JSON with a workspace-relative `path` (for `load_file` on vision models), `bytes` (file size), `format`, `screenshots_dir`, url, title, and viewport — not inline image bytes. Pass `format="png"` for a PNG. `annotate=True` draws the current indexed-element labels onto the image so the next click can still use `browser_click_by_index`; `browser_click(x, y)` remains last-resort after that. This keeps tool results small for text-only models (Ollama) and avoids context-window blowups. Text-only models should use `browser_get_elements` (or `browser_extract` / `browser_js` for ad hoc extraction) instead of screenshots entirely, since they can't view images.
 
 `browser-harness` is imported lazily on first browser tool call so listing MCP tools does not require Chrome to be running.
 

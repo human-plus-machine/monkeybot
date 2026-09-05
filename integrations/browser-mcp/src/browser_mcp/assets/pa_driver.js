@@ -6,7 +6,8 @@
  * to what browser-mcp needs: build an indexed text tree once, then act on indices
  * via CDP-driven clicks/typing from the Python side, plus in-page fill/settle.
  *
- * Exposes window.__bmcp = { getTree, getRect, getRects, getInputInfo, selectOption, fill, settle }
+ * Exposes window.__bmcp = { getTree, getRect, getRects, getInputInfo, selectOption,
+ * fill, settle, resolveField, setChecked, findByText, findFormSubmit, extract }
  *
  * Indices are stable for the lifetime of the document (never recycled). Call
  * getTree again after navigation; the same element keeps its index across
@@ -569,6 +570,323 @@
 		}
 	}
 
+	const FIELD_SEL = 'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]),select,textarea,[contenteditable=""],[contenteditable=true]'
+	const INTERACTIVE_SEL = 'a[href],button,input,select,textarea,summary,[role=button],[role=link],[role=tab],[role=menuitem],[role=checkbox],[role=radio],[role=option],[contenteditable=""],[contenteditable=true]'
+	const CLICK_ROLES = {
+		button: { tags: ['button'], roles: ['button'], inputTypes: ['submit', 'button', 'reset'] },
+		link: { tags: ['a'], roles: ['link'] },
+		tab: { roles: ['tab'] },
+		menuitem: { roles: ['menuitem'] },
+		checkbox: { roles: ['checkbox'], inputTypes: ['checkbox'] },
+		radio: { roles: ['radio'], inputTypes: ['radio'] },
+		option: { tags: ['option'], roles: ['option'] },
+	}
+
+	function registerIndex(el) {
+		const index = assignStableIndex(el)
+		const map = window.__bmcpSelectorMap || {}
+		map[index] = el
+		window.__bmcpSelectorMap = map
+		return index
+	}
+
+	function uniqueHits(candidates, needle, getText) {
+		const n = collapseWs(needle).toLowerCase()
+		if (!n) return []
+		const exact = []
+		const sub = []
+		for (let i = 0; i < candidates.length; i++) {
+			const t = collapseWs(getText(candidates[i])).toLowerCase()
+			if (!t) continue
+			if (t === n) exact.push(candidates[i])
+			else if (t.indexOf(n) !== -1) sub.push(candidates[i])
+		}
+		if (exact.length === 1) return exact
+		if (exact.length > 1) return exact
+		if (sub.length === 1) return sub
+		return []
+	}
+
+	function uniqueOne(candidates, needle, getText) {
+		const hits = uniqueHits(candidates, needle, getText)
+		return hits.length === 1 ? hits[0] : null
+	}
+
+	function fieldResult(el, how) {
+		if (!el) return { index: null, how: null }
+		return {
+			index: registerIndex(el),
+			how: how,
+			tagName: el.tagName.toLowerCase(),
+			type: (el.getAttribute('type') || '').toLowerCase(),
+		}
+	}
+
+	function labelledByText(el) {
+		const ids = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+		if (!ids.length) return ''
+		let out = ''
+		for (let i = 0; i < ids.length; i++) {
+			const n = document.getElementById(ids[i])
+			if (n) out += ' ' + (n.textContent || '')
+		}
+		return out
+	}
+
+	function precedingText(el) {
+		let sib = el.previousElementSibling
+		while (sib) {
+			const tag = sib.tagName.toLowerCase()
+			if (tag === 'label' || tag === 'span' || tag === 'div' || tag === 'p' || tag === 'th' || tag === 'td') {
+				const t = collapseWs(sib.textContent)
+				if (t) return t
+			}
+			sib = sib.previousElementSibling
+		}
+		const parent = el.parentElement
+		if (!parent) return ''
+		const own = []
+		const kids = parent.childNodes
+		for (let i = 0; i < kids.length; i++) {
+			if (kids[i] === el) break
+			if (kids[i].nodeType === 3) own.push(kids[i].textContent || '')
+			else if (kids[i].nodeType === 1) {
+				const tag = kids[i].tagName.toLowerCase()
+				if (tag === 'label' || tag === 'span' || tag === 'div' || tag === 'p' || tag === 'th' || tag === 'td') {
+					own.push(kids[i].textContent || '')
+				}
+			}
+		}
+		return collapseWs(own.join(' '))
+	}
+
+	function resolveField(label) {
+		const needle = collapseWs(label)
+		if (!needle) return { index: null, how: null }
+		const fields = Array.from(document.querySelectorAll(FIELD_SEL))
+		const labels = Array.from(document.querySelectorAll('label[for]'))
+		const lab = uniqueOne(labels, needle, function (el) { return el.textContent })
+		if (lab) {
+			const el = document.getElementById(lab.getAttribute('for') || '')
+			if (el) return fieldResult(el, 'label_for')
+		}
+		const aria = uniqueOne(fields, needle, function (el) { return el.getAttribute('aria-label') })
+		if (aria) return fieldResult(aria, 'aria-label')
+		const labelled = uniqueOne(fields, needle, labelledByText)
+		if (labelled) return fieldResult(labelled, 'aria-labelledby')
+		const ph = uniqueOne(fields, needle, function (el) { return el.getAttribute('placeholder') })
+		if (ph) return fieldResult(ph, 'placeholder')
+		const byName = uniqueOne(fields, needle, function (el) { return el.getAttribute('name') })
+		if (byName) return fieldResult(byName, 'name')
+		const byId = uniqueOne(fields, needle, function (el) { return el.id })
+		if (byId) return fieldResult(byId, 'id')
+		const byRow = uniqueOne(fields, needle, precedingText)
+		if (byRow) return fieldResult(byRow, 'preceding_text')
+		return { index: null, how: null }
+	}
+
+	function setChecked(index, on) {
+		const el = elementByIndex(index)
+		const tag = el.tagName.toLowerCase()
+		const type = (el.getAttribute('type') || '').toLowerCase()
+		if (tag !== 'input' || (type !== 'checkbox' && type !== 'radio')) {
+			throw new Error('Element at index ' + index + ' is not a checkbox or radio')
+		}
+		const want = !!on
+		if (el.checked !== want) {
+			el.checked = want
+			el.dispatchEvent(new Event('input', { bubbles: true }))
+			el.dispatchEvent(new Event('change', { bubbles: true }))
+		}
+		return { ok: true, index: index, checked: el.checked, tagName: tag, type: type }
+	}
+
+	function implicitRole(el) {
+		const explicit = (el.getAttribute('role') || '').toLowerCase()
+		if (explicit) return explicit
+		const tag = el.tagName.toLowerCase()
+		const type = (el.getAttribute('type') || '').toLowerCase()
+		if (tag === 'a') return 'link'
+		if (tag === 'button') return 'button'
+		if (tag === 'input') {
+			if (type === 'checkbox') return 'checkbox'
+			if (type === 'radio') return 'radio'
+			if (type === 'submit' || type === 'button' || type === 'reset') return 'button'
+			return 'textbox'
+		}
+		if (tag === 'select') return 'combobox'
+		if (tag === 'textarea') return 'textbox'
+		if (tag === 'option') return 'option'
+		return ''
+	}
+
+	function matchesRole(el, role) {
+		if (!role) return true
+		const spec = CLICK_ROLES[role]
+		if (!spec) return false
+		const tag = el.tagName.toLowerCase()
+		const r = (el.getAttribute('role') || '').toLowerCase()
+		const type = (el.getAttribute('type') || '').toLowerCase()
+		if (spec.tags && spec.tags.indexOf(tag) !== -1) return true
+		if (spec.roles && spec.roles.indexOf(r) !== -1) return true
+		if (spec.inputTypes && tag === 'input' && spec.inputTypes.indexOf(type) !== -1) return true
+		return false
+	}
+
+	function isVisibleEl(el) {
+		if (!el || typeof el.getBoundingClientRect !== 'function') return false
+		const r = el.getBoundingClientRect()
+		if (r.width <= 0 || r.height <= 0) return false
+		const s = getComputedStyle(el)
+		return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0'
+	}
+
+	function isTopEl(el) {
+		const r = el.getBoundingClientRect()
+		const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+		return !!(top && (top === el || el.contains(top)))
+	}
+
+	function candidateLabel(el) {
+		const aria = collapseWs(el.getAttribute('aria-label') || '')
+		if (aria) return aria
+		if (el.tagName.toLowerCase() === 'input') {
+			const value = collapseWs(el.getAttribute('value') || el.value || '')
+			const ph = collapseWs(el.getAttribute('placeholder') || '')
+			return value || ph
+		}
+		return collapseWs(el.innerText || el.textContent || '')
+	}
+
+	function rectPayload(el, index) {
+		el.scrollIntoView({ behavior: 'auto', block: 'center', inline: 'nearest' })
+		const rect = el.getBoundingClientRect()
+		const x = rect.left + rect.width / 2
+		const y = rect.top + rect.height / 2
+		const top = document.elementFromPoint(x, y)
+		const covered = top && top !== el && !el.contains(top)
+		return {
+			ok: true,
+			index: index,
+			x: x,
+			y: y,
+			width: rect.width,
+			height: rect.height,
+			tagName: el.tagName.toLowerCase(),
+			visible: rect.width > 0 && rect.height > 0,
+			obscuredBy: covered ? top.tagName.toLowerCase() : null,
+		}
+	}
+
+	function findByText(text, opts) {
+		opts = opts || {}
+		const needle = collapseWs(text)
+		const n = needle.toLowerCase()
+		const exact = !!opts.exact
+		const nth = opts.nth | 0
+		const role = opts.role || null
+		const nodes = Array.from(document.querySelectorAll(INTERACTIVE_SEL))
+		const scored = []
+		const near = []
+		for (let i = 0; i < nodes.length; i++) {
+			const el = nodes[i]
+			const label = candidateLabel(el)
+			const l = label.toLowerCase()
+			if (!l) continue
+			const hit = exact ? l === n : (l === n || l.indexOf(n) !== -1)
+			const entry = {
+				el: el,
+				text: label,
+				role: implicitRole(el),
+				tagName: el.tagName.toLowerCase(),
+				exact: l === n,
+			}
+			if (!hit || !matchesRole(el, role)) {
+				near.push(entry)
+				continue
+			}
+			scored.push(entry)
+		}
+		scored.sort(function (a, b) {
+			if (a.exact !== b.exact) return a.exact ? -1 : 1
+			const vis = (isVisibleEl(b.el) ? 1 : 0) - (isVisibleEl(a.el) ? 1 : 0)
+			if (vis) return vis
+			const vp = (inViewport(b.el) ? 1 : 0) - (inViewport(a.el) ? 1 : 0)
+			if (vp) return vp
+			return (isTopEl(b.el) ? 1 : 0) - (isTopEl(a.el) ? 1 : 0)
+		})
+		if (nth < 0 || nth >= scored.length) {
+			const pool = scored.concat(near)
+			const nearMisses = []
+			for (let i = 0; i < pool.length && nearMisses.length < 5; i++) {
+				nearMisses.push({
+					text: pool[i].text.slice(0, 80),
+					role: pool[i].role,
+					tagName: pool[i].tagName,
+				})
+			}
+			return { ok: false, nearMisses: nearMisses }
+		}
+		const chosen = scored[nth]
+		return rectPayload(chosen.el, registerIndex(chosen.el))
+	}
+
+	function findFormSubmit(index) {
+		const el = elementByIndex(index)
+		const form = el.form || el.closest('form')
+		if (!form) return { ok: false }
+		const btn = form.querySelector('button[type=submit], input[type=submit], button:not([type])')
+		if (!btn) return { ok: false }
+		const payload = rectPayload(btn, registerIndex(btn))
+		payload.disabled = !!btn.disabled
+		return payload
+	}
+
+	function fieldValue(root, spec) {
+		const s = String(spec || '')
+		let sel = s
+		let attr = null
+		if (s.charAt(0) === '@') {
+			sel = ''
+			attr = s.slice(1)
+		} else {
+			const at = s.lastIndexOf('@')
+			if (at > 0) {
+				sel = s.slice(0, at)
+				attr = s.slice(at + 1)
+			}
+		}
+		let node = root
+		if (sel) {
+			try { node = root.querySelector(sel) } catch (e) { return null }
+		}
+		if (!node) return null
+		if (attr) return node.getAttribute(attr)
+		return collapseWs(node.textContent || '')
+	}
+
+	function extract(selector, fields, limit) {
+		const lim = limit == null ? 50 : Math.max(1, limit | 0)
+		let nodes
+		try {
+			nodes = document.querySelectorAll(selector)
+		} catch (e) {
+			return { rows: [], truncated: false, error: 'invalid selector' }
+		}
+		const truncated = nodes.length > lim
+		const rows = []
+		const n = Math.min(nodes.length, lim)
+		const keys = Object.keys(fields || {})
+		for (let i = 0; i < n; i++) {
+			const row = {}
+			for (let k = 0; k < keys.length; k++) {
+				row[keys[k]] = fieldValue(nodes[i], fields[keys[k]])
+			}
+			rows.push(row)
+		}
+		return { rows: rows, truncated: truncated }
+	}
+
 	let lastMutation = performance.now()
 	let mutationCount = 0
 	if (!window.__bmcpSettleObserver) {
@@ -610,5 +928,8 @@
 		})
 	}
 
-	window.__bmcp = { getTree, getRect, getRects, getInputInfo, selectOption, fill, settle }
+	window.__bmcp = {
+		getTree, getRect, getRects, getInputInfo, selectOption, fill, settle,
+		resolveField, setChecked, findByText, findFormSubmit, extract,
+	}
 })();

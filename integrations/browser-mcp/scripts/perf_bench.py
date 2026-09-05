@@ -109,24 +109,33 @@ def _run_form(base: str) -> None:
     from browser_mcp import server
 
     server.browser_goto(f"{base}/form.html")
-    payload = _parse(server.browser_get_elements(viewport_only=False))
-    tree = str(payload.get("tree") or "")
-    last_obs: dict[str, Any] = {}
-    for label in _FORM_FIELDS:
-        idx = _tree_index(tree, label, prefer_tags=("input", "textarea"))
-        last_obs = _parse(server.browser_input_by_index(idx, "benchvalue"))
-    obs_tree = _payload_tree(last_obs)
-    try:
-        submit = _tree_index(obs_tree, "Submit", prefer_tags=("button",))
-    except RuntimeError:
-        submit_tree = str(
-            _parse(server.browser_get_elements(viewport_only=False, contains="Submit")).get(
-                "tree"
-            )
-            or ""
-        )
-        submit = _tree_index(submit_tree, "Submit", prefer_tags=("button",))
-    server.browser_click_by_index(submit)
+    server.browser_fill_form(
+        {label: "benchvalue" for label in _FORM_FIELDS},
+        submit=True,
+    )
+
+
+def _run_form_playbook(base: str) -> None:
+    from browser_mcp import server
+
+    payload = _parse(server.browser_run_playbook("127.0.0.1", "signup"))
+    if not payload.get("ok"):
+        raise RuntimeError(f"form playbook failed: {payload}")
+
+
+def _prepare_form_playbook(base: str) -> None:
+    from browser_mcp import playbooks
+
+    md = f"""```playbook
+name: signup
+steps:
+  - {{do: goto, url: "{base}/form.html"}}
+  - {{do: fill_form, fields: {{Nickname: "benchvalue"}}, submit: true}}
+expect:
+  text: "Thanks, form submitted."
+```
+"""
+    playbooks.write_playbook("127.0.0.1", md)
 
 
 def _run_long_list(base: str) -> None:
@@ -240,8 +249,10 @@ def main() -> int:
     os.environ.setdefault("MONKEYBOT_WORKSPACE_ROOT", str(log_dir / "workspace"))
 
     httpd, base = _start_server()
+    _prepare_form_playbook(base)
     scenarios: list[tuple[str, Callable[[str], None]]] = [
         ("form.html", _run_form),
+        ("form_playbook", _run_form_playbook),
         ("long_list.html", _run_long_list),
         ("spa.html", _run_spa),
         ("spa_wait", _run_spa_wait),

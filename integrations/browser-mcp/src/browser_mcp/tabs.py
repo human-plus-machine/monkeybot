@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -19,6 +20,7 @@ from typing import Any
 _ALIAS_RE = re.compile(r"^[a-z][a-z0-9_-]{0,23}$")
 _CHROME_INTERNAL = ("chrome://", "chrome-untrusted://", "devtools://", "chrome-extension://")
 _SESSION_LOST = "session with given id not found"
+MAX_RECENT_ACTIONS = 50
 _SINGLE_TAB_MARKERS = (
     "not allowed",
     "not supported",
@@ -300,6 +302,7 @@ class TabRegistry:
         self._retired: set[str] = set()
         self._focused_id: str | None = None
         self.init_script_registered: bool = False
+        self._recent: dict[str, deque[dict[str, Any]]] = {}
 
     def reset(self) -> None:
         self._tabs.clear()
@@ -308,6 +311,7 @@ class TabRegistry:
         self._retired.clear()
         self._focused_id = None
         self.init_script_registered = False
+        self._recent.clear()
 
     @property
     def focused_id(self) -> str | None:
@@ -558,6 +562,21 @@ class TabRegistry:
         if alias:
             self.set_alias(state.tab, alias)
         return state
+
+    def record_action(self, host: str, action: dict[str, Any]) -> None:
+        if not host:
+            return
+        ring = self._recent.get(host)
+        if ring is None:
+            ring = deque(maxlen=MAX_RECENT_ACTIONS)
+            self._recent[host] = ring
+        ring.append(dict(action))
+
+    def recent_actions(self, host: str) -> list[dict[str, Any]]:
+        ring = self._recent.get(host)
+        if not ring:
+            return []
+        return [dict(item) for item in ring]
 
 
 _registry = TabRegistry()

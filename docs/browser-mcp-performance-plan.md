@@ -1,6 +1,6 @@
 # Browser MCP — Performance Plan
 
-**Status:** Phase 0–4, 7a, and 8 complete — 7b and later phases not implemented  
+**Status:** Phase 0–6, 7a, and 8 complete — 7b and Phase 9 not implemented  
 **Audience:** implementer (human or model) working in `integrations/browser-mcp/`  
 **Related:** [browser-mcp.md](browser-mcp.md) · [browser-mcp-perf-baseline.md](browser-mcp-perf-baseline.md) · `integrations/browser-mcp/src/browser_mcp/` · `examples/skills/browser/SKILL.md` · upstream [browser-use/browser-harness](https://github.com/browser-use/browser-harness) (pinned `browser-harness==0.1.5` in `.venv`)  
 **Baseline:** Phase 0 numbers in [browser-mcp-perf-baseline.md](browser-mcp-perf-baseline.md), `monkeybot-browser-mcp` 0.5.0  
@@ -241,7 +241,9 @@ Backward compatibility: the old top-level keys (`clicked`, `index`, `tagName`, `
 
 ---
 
-### Phase 5 — Batch and intent-level tools
+### Phase 5 — Batch and intent-level tools — **completed**
+
+**Status.** Done. `browser_act`, `browser_fill_form`, `browser_click_text`, and `browser_extract` are in tree. Acceptance: [Phase 5 numbers](browser-mcp-perf-baseline.md).
 
 **Goal.** Multi-step interactions (forms, login, pagination) in one turn.
 
@@ -263,13 +265,15 @@ Backward compatibility: the old top-level keys (`clicked`, `index`, `tagName`, `
 - Unit: `browser_act` validation, stop-on-error, shared implementation used by single tools (assert the refactored `_do_*` functions are called).
 - Integration on `form.html`: `fill_form` resolves all 12 labels via distinct strategies; a deliberately unlabeled field lands in `unresolved`; `click_text("Submit", role="button")` clicks the right one of two "Submit" texts.
 
-**Acceptance.** Form scenario in `perf_bench.py`: tool calls 9 → 2 (`goto`, `fill_form`).
+**Acceptance.** Form scenario in `perf_bench.py`: tool calls 9 → 2 (`goto`, `fill_form`). **Met** — see [Phase 5 numbers](browser-mcp-perf-baseline.md).
 
 **Risks.** Label resolution heuristics can pick the wrong field on dense forms; the response's `how` field and `unresolved` list give the model a way to correct with an index. Keep resolver deterministic and documented in the tool docstring.
 
 ---
 
-### Phase 6 — Executable playbooks
+### Phase 6 — Executable playbooks — **completed**
+
+**Status.** Done. `parse_flows` / `browser_run_playbook` / `browser_recent_actions` are in tree. Acceptance: [Phase 6 numbers](browser-mcp-perf-baseline.md).
 
 **Goal.** Repeat visits to a known site run with zero model turns until something diverges.
 
@@ -303,7 +307,7 @@ Backward compatibility: the old top-level keys (`clicked`, `index`, `tagName`, `
 - Unit: parse/render round trip; unknown `do`; param substitution refuses unknown names; password-looking params (`password`, `secret`, `token`) are rejected at parse time.
 - Integration: a flow against `form.html` runs end to end; a flow with a stale selector returns `failed_step` and an observation.
 
-**Acceptance.** Second run of the login scenario against the fixture: 1 tool call.
+**Acceptance.** Second run of the login scenario against the fixture: 1 tool call. **Met** — `perf_bench.py` `form_playbook` is 1 tool call (`browser_run_playbook`). See [Phase 6 numbers](browser-mcp-perf-baseline.md).
 
 **Risks.** Playbooks are workspace data written by the agent; treat them as untrusted input (no shell, no file paths, no arbitrary JS steps — do **not** add a `js` step type).
 
@@ -411,8 +415,8 @@ Backward compatibility: the old top-level keys (`clicked`, `index`, `tagName`, `
 | 2 Multi-tab control (completed) | M | 1 |
 | 3 Observation diet (completed) | M | 1, 2 (settle, driver, registry) |
 | 4 Act then observe | S | 1, 3 |
-| 5 Batch + intent tools | M | 4 |
-| 6 Executable playbooks | M | 5 |
+| 5 Batch + intent tools (completed) | M | 4 |
+| 6 Executable playbooks (completed) | M | 5 |
 | 7 Visual fallback (7b touches core) | S / M | 1 |
 | 8 Event-driven waits | S | 1 |
 | 9 Harness IPC | M, external | — (independent) |

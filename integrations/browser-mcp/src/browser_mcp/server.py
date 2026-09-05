@@ -22,7 +22,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from mcp.server.fastmcp import FastMCP
 
-from browser_mcp import agentcore, dom_indexing, perf, playbooks, screenshots, tabs
+from browser_mcp import actions, agentcore, dom_indexing, perf, playbooks, screenshots, tabs
 
 logger = logging.getLogger(__name__)
 
@@ -48,17 +48,21 @@ mcp = FastMCP(
         "Real-browser control via CDP (browser-harness). Use browser_* tools for web tasks.\n"
         "\n"
         "Default workflow — text-based, indexed DOM interaction:\n"
-        "1. browser_get_elements() once to see the indexed tree (viewport by default). "
-        "Use kind=/contains= to narrow, viewport_only=false or scroll when the footer "
-        "says more are below, and browser_get_text for readable page text.\n"
-        "2. browser_click_by_index / browser_input_by_index / browser_select_by_index "
+        "1. Prefer intent tools when you already know the labels or the multi-step "
+        "flow: browser_fill_form for forms, browser_click_text when the visible label "
+        "is known, browser_act for a batch of clicks/inputs/waits (cap 25 steps), "
+        "browser_extract for structured scraping instead of browser_js.\n"
+        "2. Otherwise browser_get_elements() once to see the indexed tree (viewport "
+        "by default). Use kind=/contains= to narrow, viewport_only=false or scroll "
+        "when the footer says more are below, and browser_get_text for readable page "
+        "text.\n"
+        "3. browser_click_by_index / browser_input_by_index / browser_select_by_index "
         "to act. Each action settles and returns observation (diff by default) — read "
         "that instead of calling get_elements again. Indices remain valid until "
         "navigation. Pass observe=\"none\" to skip the snapshot, observe=\"full\" for "
-        "the whole viewport tree.\n"
-        "3. Only call browser_get_elements again when you need a different filter, "
-        "the whole tree, or after navigation if the action observation is not enough. "
-        "browser_goto returns a full observation by default.\n"
+        "the whole viewport tree. Only call browser_get_elements again when you need "
+        "a different filter, the whole tree, or after navigation if the observation "
+        "is not enough. browser_goto returns a full observation by default.\n"
         "\n"
         "browser_screenshot is a LAST-RESORT FALLBACK only — use it when "
         "browser_get_elements returns nothing useful (canvas apps, heavily shadow-DOM "
@@ -67,8 +71,11 @@ mcp = FastMCP(
         "are available; browser_click(x, y) is last-resort after that. Do not default "
         "to screenshots for ordinary clicking/typing.\n"
         "\n"
-        "Check browser_list_playbooks / browser_read_playbook before improvising on a site; "
-        "call browser_write_playbook after learning non-obvious flows. "
+        "Check browser_list_playbooks before improvising on a site. If flows are listed, "
+        "call browser_run_playbook(host, name, params) instead of re-planning. "
+        "Read markdown playbooks only for notes. On a failed_step, continue by hand and "
+        "browser_write_playbook(..., append=true) with a corrected ```playbook fence. "
+        "browser_recent_actions(host) lists what actually worked (labels and lengths, not typed text). "
         "If the user asked to sign in on the Spaces in-app browser and a saved "
         "password exists, call browser_login(expected_origin=...) — never read or "
         "type the password yourself, and check the returned origin. "
@@ -77,7 +84,7 @@ mcp = FastMCP(
         "Tabs: each tab has a short alias (t1, t2, …) or a name you pass to "
         "browser_open_tab(alias=...). Reads (get_elements, get_text, page_info, js, wait_for, "
         "read_tabs) never move focus — pass tab= to address a background tab. "
-        "Actions (click, input, select, fill, screenshot, …) focus the tab first "
+        "Actions (click, input, select, fill, fill_form, click_text, act, screenshot, …) focus the tab first "
         "because background tabs throttle timers and pause painting. Open a second "
         "tab to compare pages, keep a form while reading docs, or fan out with "
         "browser_read_tabs. At most five agent-controlled tabs; if you hit the cap, "
@@ -121,9 +128,6 @@ _LOGIN_TIMEOUT_S = 90
 _TOKEN_QUERY_RE = re.compile(r"([?&]token=)[^&\s]*", re.IGNORECASE)
 _P = ParamSpec("_P")
 _TOOL_LOCK = threading.RLock()
-_WAIT_IDLE_NOTE = (
-    "network idle is only available on the focused tab; DOM settle was used"
-)
 
 
 def _read_in_app_cdp_file() -> str | None:
@@ -424,14 +428,7 @@ def _json_text(payload: object) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
-_LOAD_WAIT_JS = (
-    "document.readyState==='complete' ? true : new Promise((resolve) => {"
-    "const t = setTimeout(() => resolve(false), 15000);"
-    "addEventListener('load', () => { clearTimeout(t); resolve(true); }, {once:true});"
-    "})"
-)
-
-_FILL_MODES = frozenset({"auto", "keys", "fast"})
+_LOAD_WAIT_JS = actions.LOAD_WAIT_JS
 _ELEMENT_KINDS = frozenset({"inputs", "buttons", "links", "all"})
 _OBSERVE_MODES = frozenset({"full", "diff"})
 _ACTION_OBSERVE_MODES = frozenset({"full", "diff", "none"})
@@ -446,38 +443,6 @@ _NETWORK_ENDED = frozenset(
         "Network.loadingCancelled",
     }
 )
-
-
-def _is_blank_url(url: str) -> bool:
-    url = url or ""
-    return url in ("", "about:blank") or url.startswith("about:blank#")
-
-
-def _can_goto_in_place(helpers: Any) -> bool:
-    if not callable(getattr(helpers, "goto_url", None)):
-        return False
-    url = ""
-    if callable(getattr(helpers, "current_tab", None)):
-        try:
-            tab = helpers.current_tab()
-        except Exception:
-            tab = None
-        if isinstance(tab, dict):
-            url = str(tab.get("url") or "")
-    if not url and callable(getattr(helpers, "page_info", None)):
-        try:
-            info = helpers.page_info() or {}
-            url = str(info.get("url") or "")
-        except Exception:
-            url = ""
-    return not _is_blank_url(url)
-
-
-def _resolve_fill_mode(mode: str) -> str:
-    raw = (mode or "auto").strip().lower()
-    if raw == "auto":
-        raw = (os.environ.get("BROWSER_MCP_FILL_MODE") or "auto").strip().lower()
-    return raw if raw in _FILL_MODES else "auto"
 
 
 def _resolve_viewport_only(value: bool | None) -> bool:
@@ -1024,6 +989,40 @@ def _goto_observation(
     return _json_text(_with_observation(payload, wrapped))
 
 
+def _playbook_hints(url: str | None) -> dict[str, Any]:
+    key = url or ""
+    try:
+        return {
+            "playbooks": playbooks.list_playbook_names(key) if key else playbooks.list_playbook_names(),
+            "flows": playbooks.list_flows(key) if key else playbooks.list_flows(),
+        }
+    except playbooks.PlaybookError:
+        return {"playbooks": [], "flows": []}
+
+
+def _playbook_timeout_s() -> float:
+    raw = (os.environ.get("BROWSER_MCP_PLAYBOOK_TIMEOUT_S") or "").strip()
+    if not raw:
+        return 120.0
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 120.0
+
+
+def _act_context(helpers: Any, handle: tabs.TabHandle) -> actions.ActContext:
+    def _open(url: str, *, alias: str | None = None, focus: bool = False) -> dict[str, Any]:
+        return _open_tab(helpers, url, alias=alias, focus=focus)
+
+    return actions.ActContext(
+        helpers=helpers,
+        handle=handle,
+        for_action=lambda name: _for_action(helpers, name),
+        open_tab=_open,
+        login=_sealed_login,
+    )
+
+
 @mcp.tool()
 @_public_tool
 def browser_goto(
@@ -1034,8 +1033,8 @@ def browser_goto(
     Pass tab= to navigate a specific tab in place without focusing it. new_tab=True
     opens a new tab and focuses it (same as browser_open_tab with focus=True).
 
-    Returns page info, matching playbook filenames, and a full observation by default
-    (observe=\"diff\" / \"none\" to change that).
+    Returns page info, matching playbook filenames and executable flows, and a
+    full observation by default (observe=\"diff\" / \"none\" to change that).
     """
     mode = _resolve_action_observe(observe, default="full")
     if mode not in _ACTION_OBSERVE_MODES:
@@ -1051,33 +1050,19 @@ def browser_goto(
             "tab": opened.get("tab"),
             "alias": opened.get("alias"),
         }
-        names = playbooks.list_playbook_names(url)
         handle = _for_action(helpers, opened.get("tab"))
-        return _goto_observation(handle, url, mode, {**info, "playbooks": names})
+        return _goto_observation(handle, url, mode, {**info, **_playbook_hints(url)})
     if tab is not None:
         try:
             handle = _for_read(helpers, tab)
         except tabs.UnknownTabError as exc:
             return _unknown_tab_result(exc)
-        handle.navigate(url)
-        handle.evaluate(_LOAD_WAIT_JS)
-        dom_indexing._register_driver_for_new_documents(handle)
-        dom_indexing.settle(handle)
-        info = handle.page_info()
-        names = playbooks.list_playbook_names(url)
-        return _goto_observation(handle, url, mode, {**info, "playbooks": names})
-    if not _can_goto_in_place(helpers):
-        helpers.new_tab(url)
-        dom_indexing.mark_driver_stale()
-    else:
-        helpers.goto_url(url)
-    helpers.js(_LOAD_WAIT_JS)
-    dom_indexing._register_driver_for_new_documents(helpers)
-    dom_indexing.settle(helpers)
+        result = actions.do_goto(handle, url)
+        return _goto_observation(handle, url, mode, {**result, **_playbook_hints(url)})
+    actions.do_goto(_for_action(helpers, None), url)
     handle = _for_action(helpers, None)
     info = handle.page_info()
-    names = playbooks.list_playbook_names(url)
-    return _goto_observation(handle, url, mode, {**info, "playbooks": names})
+    return _goto_observation(handle, url, mode, {**info, **_playbook_hints(url)})
 
 
 @mcp.tool()
@@ -1206,18 +1191,13 @@ def browser_click_by_index(
         handle = _for_action(helpers, tab)
     except tabs.UnknownTabError as exc:
         return _unknown_tab_result(exc)
+    before_url = str(handle.page_info().get("url") or "")
     try:
-        rect = dom_indexing.get_rect(handle, index)
+        payload = actions.do_click_by_index(handle, index)
     except dom_indexing.ElementNotFoundError as exc:
         return _json_text({"ok": False, "error": str(exc)})
-    before_url = str(handle.page_info().get("url") or "")
-    helpers.click_at_xy(rect["x"], rect["y"])
-    payload: dict[str, Any] = {"ok": True, "clicked": rect}
-    obscured = rect.get("obscuredBy")
-    if obscured:
-        payload["warning"] = f"target obscured by {obscured}"
-    action: dict[str, Any] = {"type": "click", "index": index, "clicked": rect}
-    if obscured:
+    action: dict[str, Any] = {"type": "click", "index": index, "clicked": payload["clicked"]}
+    if payload.get("warning"):
         action["warning"] = payload["warning"]
     wrapped = _observe_after(
         handle, mode, action, before_url=before_url, retry_until_change=True
@@ -1254,25 +1234,19 @@ def browser_input_by_index(
     except tabs.UnknownTabError as exc:
         return _unknown_tab_result(exc)
     try:
-        result = dom_indexing.fill(
-            handle, index, text, clear_first=clear_first, mode=_resolve_fill_mode(mode)
+        payload = actions.do_input_by_index(
+            handle, index, text, clear_first=clear_first, mode=mode
         )
     except dom_indexing.ElementNotFoundError as exc:
         return _json_text({"ok": False, "error": str(exc)})
-    payload = {
-        "ok": True,
-        "index": index,
-        "tagName": result.get("tagName"),
-        "mode_used": result.get("mode_used"),
-    }
     wrapped = _observe_after(
         handle,
         observe_mode,
         {
             "type": "input",
             "index": index,
-            "tagName": result.get("tagName"),
-            "mode_used": result.get("mode_used"),
+            "tagName": payload.get("tagName"),
+            "mode_used": payload.get("mode_used"),
         },
         before_url=str(handle.page_info().get("url") or ""),
     )
@@ -1295,10 +1269,9 @@ def browser_select_by_index(
     except tabs.UnknownTabError as exc:
         return _unknown_tab_result(exc)
     try:
-        dom_indexing.select_option(handle, index, text)
+        payload = actions.do_select_by_index(handle, index, text)
     except dom_indexing.ElementNotFoundError as exc:
         return _json_text({"ok": False, "error": str(exc)})
-    payload = {"ok": True, "index": index, "selected": text}
     wrapped = _observe_after(
         handle,
         mode,
@@ -1445,7 +1418,7 @@ def browser_click(
     except tabs.UnknownTabError as exc:
         return _unknown_tab_result(exc)
     before_url = str(handle.page_info().get("url") or "")
-    helpers.click_at_xy(x, y, button=button, clicks=clicks)
+    actions.do_click_xy(handle, x, y, button=button, clicks=clicks)
     wrapped = _observe_after(
         handle,
         mode,
@@ -1475,7 +1448,9 @@ def browser_fill(
         handle = _for_action(helpers, tab)
     except tabs.UnknownTabError as exc:
         return _unknown_tab_result(exc)
-    helpers.fill_input(selector, text, clear_first=clear_first, timeout=timeout)
+    actions.do_fill_selector(
+        handle, selector, text, clear_first=clear_first, timeout=timeout
+    )
     wrapped = _observe_after(
         handle,
         mode,
@@ -1499,7 +1474,7 @@ def browser_press_key(
         handle = _for_action(helpers, tab)
     except tabs.UnknownTabError as exc:
         return _unknown_tab_result(exc)
-    helpers.press_key(key, modifiers=modifiers)
+    actions.do_press(handle, key, modifiers)
     wrapped = _observe_after(
         handle,
         mode,
@@ -1529,7 +1504,7 @@ def browser_scroll(
         handle = _for_action(helpers, tab)
     except tabs.UnknownTabError as exc:
         return _unknown_tab_result(exc)
-    helpers.scroll(x, y, dy=dy, dx=dx)
+    actions.do_scroll(handle, x, y, dy=dy, dx=dx)
     wrapped = _observe_after(
         handle,
         mode,
@@ -1564,11 +1539,9 @@ def browser_wait_for(
         handle = _for_read(helpers, tab)
     except tabs.UnknownTabError as exc:
         return _unknown_tab_result(exc)
-    result = dom_indexing.wait_for_selector(
-        handle, selector, visible=visible, timeout=timeout
+    return _json_text(
+        actions.do_wait_for(handle, selector, visible=visible, timeout=timeout)
     )
-    found = bool(result.get("found"))
-    return _json_text({"ok": found, "found": found})
 
 
 @mcp.tool()
@@ -1586,41 +1559,175 @@ def browser_wait_idle(
         handle = _for_read(helpers, tab)
     except tabs.UnknownTabError as exc:
         return _unknown_tab_result(exc)
-    if not handle.focused:
-        settled = dom_indexing.settle(handle)
-        return _json_text(
-            {
-                "ok": True,
-                "idle": None,
-                "quiet": bool(settled.get("quiet", True)),
-                "navigated": bool(settled.get("navigated", False)),
-                "note": _WAIT_IDLE_NOTE,
-            }
+    return _json_text(actions.do_wait_idle(handle, timeout=timeout, idle_ms=idle_ms))
+
+
+@mcp.tool()
+@_public_tool
+def browser_act(
+    steps: list[dict[str, Any]],
+    observe: str | None = None,
+    stop_on_error: bool = True,
+    tab: str | None = None,
+) -> str:
+    """Run up to 25 sequential browser steps in one turn.
+
+    Each step is ``{do, ...}``. Allowed do values: click, input, select, press,
+    click_text, wait_for, wait_idle, goto, scroll, settle, tab, open_tab,
+    fill_form, login. After each action the page settles; one observation is
+    returned at the end for the focused tab. On the first failure
+    (stop_on_error=True, default) returns completed steps, failed_step, error,
+    and the current observation so you can resume. login maps to browser_login
+    (user-focused tab; always pass expected_origin).
+    """
+    mode = _resolve_action_observe(observe)
+    if mode not in _ACTION_OBSERVE_MODES:
+        return _observe_error(observe if observe is not None else mode, _ACTION_OBSERVE_MODES)
+    validated = actions.validate_steps(steps)
+    if isinstance(validated, dict):
+        return _json_text(validated)
+    helpers, _ = _browser_harness()
+    try:
+        handle = _for_action(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
+
+    ctx = _act_context(helpers, handle)
+    before_url = str(handle.page_info().get("url") or "")
+    executed = actions.execute_steps(ctx, validated, stop_on_error=stop_on_error)
+    handle = executed.pop("handle", ctx.handle)
+    wrapped = _observe_after(
+        handle,
+        mode,
+        {"type": "act", "steps": len(validated)},
+        before_url=before_url,
+    )
+    payload = {k: v for k, v in executed.items() if k != "handle"}
+    return _json_text(_with_observation(payload, wrapped))
+
+
+@mcp.tool()
+@_public_tool
+def browser_fill_form(
+    fields: dict[str, str],
+    submit: bool = False,
+    mode: str = "auto",
+    observe: str | None = None,
+    tab: str | None = None,
+) -> str:
+    """Fill a form by field label in one call.
+
+    Resolves each key with label[for], aria-label, aria-labelledby, placeholder,
+    name, id, then nearest preceding row text (case-insensitive, unique
+    substring). Selects for <select>; checks/unchecks checkboxes when the value
+    is \"true\"/\"false\". Unresolved labels are listed and are not an error
+    unless every field failed. submit=True clicks the form's submit button if
+    one exists and is enabled, otherwise presses Enter in the last field.
+    The ``how`` field on each filled entry says which strategy matched.
+    """
+    observe_mode = _resolve_action_observe(observe)
+    if observe_mode not in _ACTION_OBSERVE_MODES:
+        return _observe_error(
+            observe if observe is not None else observe_mode, _ACTION_OBSERVE_MODES
         )
-    wait_idle = getattr(helpers, "wait_for_network_idle", None)
-    if not callable(wait_idle):
-        settled = dom_indexing.settle(handle)
-        return _json_text(
-            {
-                "ok": True,
-                "idle": None,
-                "quiet": bool(settled.get("quiet", True)),
-                "navigated": bool(settled.get("navigated", False)),
-                "note": "network idle is not available on this backend; DOM settle was used",
-            }
-        )
-    idle = bool(wait_idle(timeout=timeout, idle_ms=idle_ms))
-    if not idle:
-        return _json_text(
-            {"ok": False, "idle": False, "quiet": False, "navigated": False}
-        )
-    settled = dom_indexing.settle(handle)
+    if not isinstance(fields, dict):
+        return _json_text({"ok": False, "error": "fields must be an object of label → value"})
+    helpers, _ = _browser_harness()
+    try:
+        handle = _for_action(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
+    before_url = str(handle.page_info().get("url") or "")
+    payload = actions.do_fill_form(handle, fields, submit=submit, mode=mode)
+    wrapped = _observe_after(
+        handle,
+        observe_mode,
+        {"type": "fill_form", "filled": len(payload.get("filled") or [])},
+        before_url=before_url,
+    )
+    return _json_text(_with_observation(payload, wrapped))
+
+
+@mcp.tool()
+@_public_tool
+def browser_click_text(
+    text: str,
+    role: str | None = None,
+    exact: bool = False,
+    nth: int = 0,
+    observe: str | None = None,
+    tab: str | None = None,
+) -> str:
+    """Click the interactive element whose visible text or aria-label matches.
+
+    role restricts to button|link|tab|menuitem|checkbox|radio|option. exact
+    toggles equality vs substring. Prefers visible, in-viewport, top elements.
+    On a miss, returns did_you_mean with up to five near-misses.
+    """
+    mode = _resolve_action_observe(observe)
+    if mode not in _ACTION_OBSERVE_MODES:
+        return _observe_error(observe if observe is not None else mode, _ACTION_OBSERVE_MODES)
+    if role is not None and str(role).strip():
+        role_norm = str(role).strip().lower()
+        if role_norm not in actions.CLICK_TEXT_ROLES:
+            names = ", ".join(sorted(actions.CLICK_TEXT_ROLES))
+            return _json_text({"ok": False, "error": f"unknown role {role!r}; expected {names}"})
+    else:
+        role_norm = None
+    helpers, _ = _browser_harness()
+    try:
+        handle = _for_action(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
+    before_url = str(handle.page_info().get("url") or "")
+    payload = actions.do_click_text(
+        handle, text, role=role_norm, exact=exact, nth=int(nth)
+    )
+    if not payload.get("ok"):
+        return _json_text(payload)
+    wrapped = _observe_after(
+        handle,
+        mode,
+        {"type": "click_text", "text": text, "index": payload.get("index")},
+        before_url=before_url,
+        retry_until_change=True,
+    )
+    return _json_text(_with_observation(payload, wrapped))
+
+
+@mcp.tool()
+@_public_tool
+def browser_extract(
+    selector: str,
+    fields: dict[str, str],
+    limit: int = 50,
+    tab: str | None = None,
+) -> str:
+    """Extract structured rows from elements matching ``selector``.
+
+    Each field is a relative sub-selector (``\"title\": \"h2\"``). Append
+    ``@attr`` for an attribute (``\"href\": \"a@href\"``). Missing nodes are
+    null. Use this instead of ad-hoc ``browser_js`` scraping.
+    """
+    if not isinstance(fields, dict) or not fields:
+        return _json_text({"ok": False, "error": "fields must be a non-empty object of name → selector"})
+    try:
+        cap = max(1, int(limit))
+    except (TypeError, ValueError):
+        return _json_text({"ok": False, "error": "limit must be an integer"})
+    helpers, _ = _browser_harness()
+    try:
+        handle = _for_read(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
+    result = dom_indexing.extract_rows(handle, selector, fields, limit=cap)
+    if result.get("error"):
+        return _json_text({"ok": False, "error": result["error"]})
     return _json_text(
         {
             "ok": True,
-            "idle": True,
-            "quiet": bool(settled.get("quiet", True)),
-            "navigated": bool(settled.get("navigated", False)),
+            "rows": result.get("rows") or [],
+            "truncated": bool(result.get("truncated")),
         }
     )
 
@@ -1965,12 +2072,16 @@ def browser_upload(selector: str, path: str, tab: str | None = None) -> str:
 @mcp.tool()
 @_public_tool
 def browser_list_playbooks(host: str | None = None) -> str:
-    """List playbook markdown filenames, optionally filtered by host or URL."""
+    """List playbook markdown filenames and executable flows, optionally filtered by host."""
+    try:
+        hints = _playbook_hints(host)
+    except playbooks.PlaybookError as exc:
+        return _json_text({"ok": False, "error": str(exc)})
     return _json_text(
         {
             "ok": True,
             "playbooks_dir": str(playbooks.playbooks_dir()),
-            "playbooks": playbooks.list_playbook_names(host),
+            **hints,
         }
     )
 
@@ -1990,13 +2101,86 @@ def browser_read_playbook(host: str) -> str:
 @mcp.tool()
 @_public_tool
 def browser_write_playbook(host: str, content: str, append: bool = False) -> str:
-    """Write or append a site playbook under the playbooks directory only (host slug filename)."""
+    """Write or append a site playbook. ```playbook fences are validated before save."""
     try:
         result = playbooks.write_playbook(host, content, append=append)
     except playbooks.PlaybookError as exc:
         logger.warning("browser_write_playbook failed for host=%r: %s", host, exc)
         return _json_text({"ok": False, "error": str(exc)})
     return _json_text(result)
+
+
+@mcp.tool()
+@_public_tool
+def browser_run_playbook(
+    host: str,
+    name: str,
+    params: dict[str, str] | None = None,
+    observe: str | None = None,
+    tab: str | None = None,
+) -> str:
+    """Execute a named ```playbook flow from the host markdown file.
+
+    Substitutes {{param}} into string fields, runs steps via browser_act, then
+    checks expect (url_contains, selector, text). On failure returns failed_step
+    plus an observation so you can continue by hand. Secrets are never params —
+    use {do: login, expected_origin: ...} which maps to browser_login (the
+    user-focused tab). Capped by BROWSER_MCP_PLAYBOOK_TIMEOUT_S (default 120).
+    """
+    mode = _resolve_action_observe(observe)
+    if mode not in _ACTION_OBSERVE_MODES:
+        return _observe_error(observe if observe is not None else mode, _ACTION_OBSERVE_MODES)
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        return _json_text({"ok": False, "error": "params must be an object"})
+    try:
+        flow = playbooks.load_flow(host, name)
+        steps = playbooks.substitute_params(flow, params)
+    except playbooks.PlaybookError as exc:
+        return _json_text({"ok": False, "error": str(exc), "name": name})
+    helpers, _ = _browser_harness()
+    try:
+        handle = _for_action(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
+    ctx = _act_context(helpers, handle)
+    before_url = str(handle.page_info().get("url") or "")
+    deadline = time.monotonic() + _playbook_timeout_s()
+    executed = actions.execute_steps(ctx, steps, stop_on_error=True, deadline=deadline)
+    handle = executed.pop("handle", ctx.handle)
+    wrapped = _observe_after(
+        handle,
+        mode,
+        {"type": "run_playbook", "name": name, "steps": len(steps)},
+        before_url=before_url,
+    )
+    payload = {k: v for k, v in executed.items() if k != "handle"}
+    payload["name"] = name
+    if payload.get("ok"):
+        payload["completed"] = payload.pop("steps", [])
+        expect_error = playbooks.check_expect(handle, flow.expect)
+        if expect_error:
+            payload["ok"] = False
+            payload["error"] = expect_error
+    return _json_text(_with_observation(payload, wrapped))
+
+
+@mcp.tool()
+@_public_tool
+def browser_recent_actions(host: str) -> str:
+    """Return the last 50 successful actions for a host (labels and lengths, not typed text)."""
+    try:
+        slug = playbooks.host_slug(host)
+    except playbooks.PlaybookError as exc:
+        return _json_text({"ok": False, "error": str(exc)})
+    return _json_text(
+        {
+            "ok": True,
+            "host": slug,
+            "actions": tabs.registry().recent_actions(slug),
+        }
+    )
 
 
 def _stop_active_backend_best_effort() -> None:

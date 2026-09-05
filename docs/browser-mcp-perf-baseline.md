@@ -276,3 +276,40 @@ follow-up `get_elements` or `wait_for`.
 
 Acceptance met (spa tool-calls 4 → 2, form 11 → 9).
 
+---
+
+## Phase 5 (2026-09-05)
+
+Playwright Chromium headless on the same machine (fast fill; no `fill_input` key-event hang). Form scenario is `goto` + `browser_fill_form(..., submit=True)` for the six labeled bench fields including Nickname.
+
+### form.html
+
+| tool | median_wall_ms | harness_calls | result_chars |
+|---|---:|---:|---:|
+| browser_goto | 330.5 | 9.0 | 1226 |
+| browser_fill_form | 172.7 | 18.0 | 1125 |
+
+- tool_calls_per_scenario: **2** (Phase 0: 11; Phase 4: 9; −82 % vs Phase 0)
+- total_scenario_ms (median of 3): **503.9**
+
+Acceptance met (form tool-calls 9 → 2).
+
+---
+
+## Phase 6 (2026-09-05)
+
+Playwright Chromium 151 headless (same stack as `BROWSER_MCP_INTEGRATION=1`).
+The `form_playbook` scenario writes a signup flow once, then each timed run is
+only `browser_run_playbook("127.0.0.1", "signup")` against `form.html`.
+
+### form_playbook
+
+| tool | median_wall_ms | harness_calls | result_chars |
+|---|---:|---:|---:|
+| browser_run_playbook | 768.7 | 45.0 | 1467 |
+
+- tool_calls_per_scenario: **1** (Phase 0: 11; Phase 5: 2)
+- First-run wall ms: **768.7** (goto + fill_form + expect + observation inside one tool)
+
+Acceptance met (second visit is 1 tool call).
+
