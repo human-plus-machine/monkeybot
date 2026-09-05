@@ -48,12 +48,14 @@ mcp = FastMCP(
         "\n"
         "Default workflow — text-based, indexed DOM interaction:\n"
         "1. browser_get_elements() to see interactive elements as an indexed text tree "
-        "(no image tokens, no pixel-guessing).\n"
+        "(viewport by default; no image tokens, no pixel-guessing). Use kind=/contains= "
+        "to narrow, viewport_only=false or scroll when the footer says more are below, "
+        "and browser_get_text for readable page text.\n"
         "2. browser_click_by_index(index) / browser_input_by_index(index, text) / "
-        "browser_select_by_index(index, text) to act on them.\n"
-        "3. Call browser_get_elements() again after any action that may have changed the "
-        "page (navigation, dynamic content, modal opened) — indices are only valid for the "
-        "tree they came from.\n"
+        "browser_select_by_index(index, text) to act on them. Indices remain valid "
+        "until navigation.\n"
+        "3. After navigation call browser_get_elements() again. Pass observe=\"diff\" "
+        "to see only added/removed lines when the DOM mutated in place.\n"
         "\n"
         "browser_screenshot is a LAST-RESORT FALLBACK only — use it when "
         "browser_get_elements returns nothing useful (canvas apps, heavily shadow-DOM "
@@ -70,7 +72,7 @@ mcp = FastMCP(
         "Call browser_stop when done with remote/cloud sessions.\n"
         "\n"
         "Tabs: each tab has a short alias (t1, t2, …) or a name you pass to "
-        "browser_open_tab(alias=...). Reads (get_elements, page_info, js, wait_for, "
+        "browser_open_tab(alias=...). Reads (get_elements, get_text, page_info, js, wait_for, "
         "read_tabs) never move focus — pass tab= to address a background tab. "
         "Actions (click, input, select, fill, screenshot, …) focus the tab first "
         "because background tabs throttle timers and pause painting. Open a second "
@@ -427,6 +429,10 @@ _LOAD_WAIT_JS = (
 )
 
 _FILL_MODES = frozenset({"auto", "keys", "fast"})
+_ELEMENT_KINDS = frozenset({"inputs", "buttons", "links", "all"})
+_OBSERVE_MODES = frozenset({"full", "diff"})
+_VIEWPORT_OFF = frozenset({"0", "false", "no", "off"})
+_VIEWPORT_ON = frozenset({"1", "true", "yes", "on"})
 
 
 def _is_blank_url(url: str) -> bool:
@@ -459,6 +465,26 @@ def _resolve_fill_mode(mode: str) -> str:
     if raw == "auto":
         raw = (os.environ.get("BROWSER_MCP_FILL_MODE") or "auto").strip().lower()
     return raw if raw in _FILL_MODES else "auto"
+
+
+def _resolve_viewport_only(value: bool | None) -> bool:
+    if value is not None:
+        return bool(value)
+    raw = (os.environ.get("BROWSER_MCP_VIEWPORT_DEFAULT") or "1").strip().lower()
+    if raw in _VIEWPORT_OFF:
+        return False
+    if raw in _VIEWPORT_ON:
+        return True
+    return True
+
+
+def _cache_tree(handle: tabs.TabHandle, url: str | None, lines: list[str]) -> None:
+    state = handle.state
+    if state is None:
+        return
+    state.last_tree = list(lines)
+    if url:
+        state.last_url = url
 
 
 def _unknown_tab_result(exc: tabs.UnknownTabError) -> str:
@@ -649,7 +675,14 @@ def browser_goto(url: str, new_tab: bool = False, tab: str | None = None) -> str
 
 @mcp.tool()
 @_public_tool
-def browser_get_elements(viewport_only: bool = False, tab: str | None = None) -> str:
+def browser_get_elements(
+    viewport_only: bool | None = None,
+    kind: str | None = None,
+    contains: str | None = None,
+    max_elements: int = 150,
+    observe: str = "full",
+    tab: str | None = None,
+) -> str:
     """Return interactive elements as an indexed text tree — the default way to see the page.
 
     Prefer this over browser_screenshot for locating things to click/type into. Injects a
@@ -658,19 +691,140 @@ def browser_get_elements(viewport_only: bool = False, tab: str | None = None) ->
     indentation shows parent/child nesting. Use the numeric index with browser_click_by_index /
     browser_input_by_index / browser_select_by_index — no coordinates needed.
 
-    Set viewport_only=True to restrict to the visible viewport (default scans the full page).
-    Re-call this after navigation or any action that may have changed the DOM — indices are
-    only valid for the tree they came from. Pass tab= to read a background tab without
-    moving focus.
+    Defaults to the visible viewport (override with viewport_only=false or
+    BROWSER_MCP_VIEWPORT_DEFAULT=0). kind is inputs/buttons/links/all; contains is a
+    case-insensitive substring on the rendered line (searches the whole page, including
+    below the fold); max_elements (default 150) truncates with a footer. Indices remain
+    valid until navigation — re-call after navigation, or when the footer says to scroll.
+    observe="diff" returns added/removed lines vs the last tree for this tab (falls back
+    to a full tree after navigation or with no cache). Pass tab= to read a background tab
+    without moving focus.
     """
+    kind_norm: str | None = None
+    if kind is not None and str(kind).strip():
+        kind_norm = str(kind).strip().lower()
+        if kind_norm not in _ELEMENT_KINDS:
+            return _json_text(
+                {
+                    "ok": False,
+                    "error": (
+                        f"unknown kind {kind!r}; expected inputs, buttons, links, or all"
+                    ),
+                }
+            )
+        if kind_norm == "all":
+            kind_norm = None
+    observe_norm = (observe or "full").strip().lower()
+    if observe_norm not in _OBSERVE_MODES:
+        return _json_text(
+            {"ok": False, "error": f"unknown observe {observe!r}; expected full or diff"}
+        )
+    try:
+        cap = max(1, int(max_elements))
+    except (TypeError, ValueError):
+        return _json_text({"ok": False, "error": "max_elements must be an integer"})
+    viewport = _resolve_viewport_only(viewport_only)
     helpers, _ = _browser_harness()
     try:
         handle = _for_read(helpers, tab)
     except tabs.UnknownTabError as exc:
         return _unknown_tab_result(exc)
-    result = dom_indexing.get_elements(handle, viewport_only)
-    ok = not result.get("error")
-    return _json_text({"ok": ok, **result})
+    result = dom_indexing.get_elements(
+        handle,
+        viewport,
+        kind=kind_norm,
+        contains=contains,
+        max_elements=cap,
+    )
+    if result.get("error"):
+        return _json_text({"ok": False, **result})
+    raw_tree = str(result.get("tree") or "")
+    lines = dom_indexing.tree_lines(raw_tree)
+    truncated = bool(result.get("truncated"))
+    below_viewport = int(result.get("below_viewport") or 0)
+    omitted = int(result.get("omitted") or 0)
+    url = str(result.get("url") or "")
+    title = str(result.get("title") or "")
+    element_count = int(result.get("elementCount") or 0)
+    searching = bool(contains and str(contains).strip())
+    tree = dom_indexing.attach_tree_footers(
+        raw_tree,
+        viewport_only=viewport and not searching,
+        below_viewport=below_viewport,
+        truncated=truncated,
+        omitted=omitted,
+    )
+    navigated = bool(handle.state and handle.state.last_url and url and handle.state.last_url != url)
+    use_diff = observe_norm == "diff"
+    previous = handle.state.last_tree if handle.state is not None else None
+    if use_diff and previous is not None and not navigated:
+        diff = dom_indexing.diff_tree_lines(previous, lines)
+        _cache_tree(handle, url, lines)
+        return _json_text(
+            {
+                "ok": True,
+                "mode": "diff",
+                "added": diff["added"],
+                "removed": diff["removed"],
+                "unchanged": diff["unchanged"],
+                "elementCount": element_count,
+                "url": url,
+                "title": title,
+                "truncated": truncated,
+                "below_viewport": below_viewport,
+            }
+        )
+    _cache_tree(handle, url, lines)
+    payload: dict[str, Any] = {
+        "ok": True,
+        "url": url,
+        "title": title,
+        "elementCount": element_count,
+        "tree": tree,
+        "truncated": truncated,
+        "below_viewport": below_viewport,
+    }
+    if use_diff:
+        payload["mode"] = "full"
+    return _json_text(payload)
+
+
+@mcp.tool()
+@_public_tool
+def browser_get_text(
+    max_chars: int = 8000,
+    selector: str | None = None,
+    tab: str | None = None,
+) -> str:
+    """Readable page text for reading, separate from the interactive element tree.
+
+    Prefers ``<main>`` / ``<article>`` / ``[role=main]``, else ``body``. Strips
+    script, style, nav, footer, and aside. Pass selector to read a specific
+    subtree. Use this instead of ``browser_js("document.body.innerText")``.
+    """
+    try:
+        cap = max(1, int(max_chars))
+    except (TypeError, ValueError):
+        return _json_text({"ok": False, "error": "max_chars must be an integer"})
+    helpers, _ = _browser_harness()
+    try:
+        handle = _for_read(helpers, tab)
+    except tabs.UnknownTabError as exc:
+        return _unknown_tab_result(exc)
+    text = handle.readable_text(selector=selector)
+    truncated = len(text) > cap
+    if truncated:
+        text = text[:cap]
+    info = handle.page_info()
+    return _json_text(
+        {
+            "ok": True,
+            "text": text,
+            "truncated": truncated,
+            "url": info.get("url") or "",
+            "title": info.get("title") or "",
+        }
+    )
 
 
 @mcp.tool()

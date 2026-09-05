@@ -24,6 +24,14 @@
         const heading = document.createElement("h2");
         heading.textContent = "Section " + s;
         section.appendChild(heading);
+        if (s === 0) {
+          for (let i = 0; i < 3; i++) {
+            const buy = document.createElement("button");
+            buy.type = "button";
+            buy.textContent = "Buy now";
+            section.appendChild(buy);
+          }
+        }
         for (let i = 0; i < 75; i++) {
           const n = s * 75 + i;
           const a = document.createElement("a");

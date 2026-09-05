@@ -97,15 +97,17 @@ def _run_form(base: str) -> None:
     from browser_mcp import server
 
     server.browser_goto(f"{base}/form.html")
-    payload = _parse(server.browser_get_elements())
+    # Form fields near the bottom sit below a typical viewport; this scenario
+    # still needs the full tree to fill Nickname and click Submit.
+    payload = _parse(server.browser_get_elements(viewport_only=False))
     tree = str(payload.get("tree") or "")
     for label in _FORM_FIELDS:
         idx = _tree_index(tree, label, prefer_tags=("input", "textarea"))
         server.browser_input_by_index(idx, "benchvalue")
     # Submit starts disabled (unindexed) until Nickname is filled.
-    tree = str(_parse(server.browser_get_elements()).get("tree") or "")
+    tree = str(_parse(server.browser_get_elements(viewport_only=False)).get("tree") or "")
     server.browser_click_by_index(_tree_index(tree, "Submit", prefer_tags=("button",)))
-    server.browser_get_elements()
+    server.browser_get_elements(viewport_only=False)
 
 
 def _run_long_list(base: str) -> None:

@@ -28,7 +28,7 @@ def test_fast_fill_enables_submit_and_driver_survives_navigation(
     goto = json.loads(server.browser_goto(f"{base}/form.html"))
     assert "form.html" in str(goto.get("url") or "")
 
-    payload = json.loads(server.browser_get_elements())
+    payload = json.loads(server.browser_get_elements(contains="Nickname"))
     assert payload.get("ok") is True
     tree = str(payload.get("tree") or "")
     nick = tree_index(tree, "Nickname", prefer_tags=("input",))
@@ -41,7 +41,7 @@ def test_fast_fill_enables_submit_and_driver_survives_navigation(
     value = json.loads(server.browser_js("document.getElementById('nickname').value"))
     assert value.get("result") == "fastnick"
 
-    tree = str(json.loads(server.browser_get_elements()).get("tree") or "")
+    tree = str(json.loads(server.browser_get_elements(contains="Submit")).get("tree") or "")
     assert "Submit" in tree
 
     server.browser_goto(f"{base}/long_list.html")

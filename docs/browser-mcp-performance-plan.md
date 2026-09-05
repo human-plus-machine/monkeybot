@@ -1,6 +1,6 @@
 # Browser MCP — Performance Plan
 
-**Status:** Phase 0–2, 7a, and 8 complete — 7b and later phases not implemented  
+**Status:** Phase 0–3, 7a, and 8 complete — 7b and later phases not implemented  
 **Audience:** implementer (human or model) working in `integrations/browser-mcp/`  
 **Related:** [browser-mcp.md](browser-mcp.md) · [browser-mcp-perf-baseline.md](browser-mcp-perf-baseline.md) · `integrations/browser-mcp/src/browser_mcp/` · `examples/skills/browser/SKILL.md` · upstream [browser-use/browser-harness](https://github.com/browser-use/browser-harness) (pinned `browser-harness==0.1.5` in `.venv`)  
 **Baseline:** Phase 0 numbers in [browser-mcp-perf-baseline.md](browser-mcp-perf-baseline.md), `monkeybot-browser-mcp` 0.5.0  
@@ -173,7 +173,9 @@ Three layers, in decreasing cost:
 
 ---
 
-### Phase 3 — Observation diet
+### Phase 3 — Observation diet — **completed**
+
+**Status.** Done. Viewport-first default, stable indices, filters, diff mode, and `browser_get_text` are in tree. Acceptance: [Phase 3 numbers](browser-mcp-perf-baseline.md).
 
 **Goal.** Cut tokens per observation by ≥ 60 % and make indices reusable across actions.
 
@@ -196,7 +198,7 @@ Three layers, in decreasing cost:
 - Integration on `long_list.html`: viewport default returns < 150 elements with a correct `below_viewport` count; `contains="Buy"` filters; index for the same button is identical across two `getTree` calls after inserting 50 nodes above it.
 - Unit: diff computation on synthetic line lists; cache invalidation on URL change.
 
-**Acceptance.** Median `result_chars` of `get_elements` on `long_list.html` down ≥ 70 %; index stability test passes; `get_text` on a news-style fixture returns body text only.
+**Acceptance.** **Met** — [Phase 3 numbers](browser-mcp-perf-baseline.md). Median `result_chars` of `get_elements` on `long_list.html` 21073 → 4889 (−77 %). Index stability test passes; `get_text` on `article.html` returns body text only.
 
 **Risks.** Stable keys can collide for identical sibling elements (e.g. a list of identical "Add" buttons); the ancestor `nth-of-type` path disambiguates most, and a collision only means both keep distinct indices via the "next unused" rule (keys are hashed per element instance in a `WeakMap` fallback). Viewport-first can hide the element the model needs; the footer and `viewport_only=false` cover it, and the SKILL must say so.
 
@@ -403,9 +405,9 @@ Backward compatibility: the old top-level keys (`clicked`, `index`, `tagName`, `
 | Phase | Size | Depends on |
 |---|---|---|
 | 0 Instrumentation (completed) | S | — |
-| 1 Driver once + in-page fill/settle | M | 0 |
+| 1 Driver once + in-page fill/settle (completed) | M | 0 |
 | 2 Multi-tab control (completed) | M | 1 |
-| 3 Observation diet | M | 1, 2 (settle, driver, registry) |
+| 3 Observation diet (completed) | M | 1, 2 (settle, driver, registry) |
 | 4 Act then observe | S | 1, 3 |
 | 5 Batch + intent tools | M | 4 |
 | 6 Executable playbooks | M | 5 |

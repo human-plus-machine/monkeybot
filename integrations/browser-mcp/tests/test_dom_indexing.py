@@ -7,6 +7,7 @@ itself is exercised by hand against a live browser.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -120,6 +121,14 @@ def test_b64_chunks_stay_under_limit() -> None:
     assert all(len(c) <= dom_indexing._INJECT_CHUNK_CHARS for c in chunks)
 
 
+def _get_tree_payload(exprs: list[str]) -> dict:
+    for expr in exprs:
+        if expr.startswith("window.__bmcp.getTree("):
+            raw = expr[len("window.__bmcp.getTree(") : -1]
+            return json.loads(raw)
+    raise AssertionError(f"no getTree call in {exprs}")
+
+
 def test_get_elements_skips_inject_when_driver_present() -> None:
     helpers = _fake_helpers(
         present=True, tree={"tree": "[0]<button>Go</button>", "elementCount": 1}
@@ -127,9 +136,10 @@ def test_get_elements_skips_inject_when_driver_present() -> None:
     result = dom_indexing.get_elements(helpers, viewport_only=True)
     exprs = [c.args[0] for c in helpers.js.call_args_list]
     assert exprs[0] == "!!window.__bmcp"
-    assert any(e.startswith("window.__bmcp.getTree(true)") for e in exprs)
+    assert _get_tree_payload(exprs)["viewportOnly"] is True
     assert not any("__bmcpChunks" in e for e in exprs)
-    assert result == {"tree": "[0]<button>Go</button>", "elementCount": 1}
+    assert result["tree"] == "[0]<button>Go</button>"
+    assert result["elementCount"] == 1
 
 
 def test_get_elements_chunk_injects_then_calls_getTree() -> None:
@@ -142,17 +152,27 @@ def test_get_elements_chunk_injects_then_calls_getTree() -> None:
     assert "window.__bmcpChunks = []" in exprs
     assert any(e.startswith("window.__bmcpChunks.push(") for e in exprs)
     assert any("atob(window.__bmcpChunks.join" in e for e in exprs)
-    assert any(e.startswith("window.__bmcp.getTree(true)") for e in exprs)
+    assert _get_tree_payload(exprs)["viewportOnly"] is True
     # No single call should carry the full ~60KB source.
     assert all(len(e) < 40_000 for e in exprs)
-    assert result == {"tree": "[0]<button>Go</button>", "elementCount": 1}
+    assert result["tree"] == "[0]<button>Go</button>"
+    assert result["elementCount"] == 1
 
 
-def test_get_elements_default_scans_full_page() -> None:
+def test_get_elements_default_is_viewport() -> None:
+    helpers = _fake_helpers(present=True, tree={})
+    dom_indexing.get_elements(helpers)
+    exprs = [c.args[0] for c in helpers.js.call_args_list]
+    assert _get_tree_payload(exprs)["viewportOnly"] is True
+
+
+def test_get_elements_can_scan_full_page() -> None:
     helpers = _fake_helpers(present=True, tree={})
     dom_indexing.get_elements(helpers, viewport_only=False)
     exprs = [c.args[0] for c in helpers.js.call_args_list]
-    assert any("window.__bmcp.getTree(false)" in e for e in exprs)
+    payload = _get_tree_payload(exprs)
+    assert payload["viewportOnly"] is False
+    assert payload["maxElements"] == 150
 
 
 def test_get_rect_sends_short_followup_without_reinjecting_driver() -> None:
@@ -280,7 +300,8 @@ def test_get_elements_after_registration_is_one_js_call() -> None:
     helpers.js.reset_mock()
     result = dom_indexing.get_elements(helpers, viewport_only=True)
     assert helpers.js.call_count == 1
-    assert helpers.js.call_args.args[0] == "window.__bmcp.getTree(true)"
+    payload = json.loads(helpers.js.call_args.args[0][len("window.__bmcp.getTree(") : -1])
+    assert payload["viewportOnly"] is True
     assert result["elementCount"] == 1
 
 

@@ -15,9 +15,8 @@ Vendored assets (MIT licensed, see NOTICE.md):
   ported from page-agent's packages/page-controller/src/dom/index.ts
   (flatTreeToString, getSelectorMap) and actions.ts (selectOptionElement).
 
-Element indices are only valid until the next navigation or DOM mutation big enough
-to change the tree; call browser_get_elements again after any action that might
-have changed the page. A stale/unknown index raises ElementNotFoundError.
+Element indices remain valid until navigation. After navigation call
+browser_get_elements again. A stale/unknown index raises ElementNotFoundError.
 
 Injection note: browser-harness relays CDP over a newline-delimited Unix/TCP socket
 whose asyncio StreamReader defaults to a 64 KiB line limit. The combined driver is
@@ -31,6 +30,7 @@ or ``helpers.add_init_script`` is available, those chunks are also registered wi
 from __future__ import annotations
 
 import base64
+import difflib
 import json
 from pathlib import Path
 from typing import Any
@@ -51,6 +51,15 @@ _DRIVER_SOURCE = _DOM_TREE_JS + "\n" + _DRIVER_JS
 _INJECT_CHUNK_CHARS = 24_000
 _CDP_SOURCE_JSON_LIMIT = 60_000
 _FILL_MODES = frozenset({"auto", "keys", "fast"})
+_STALE_INDEX_MSG = (
+    "Element index not found (stale or navigated). "
+    "Call browser_get_elements again after navigation."
+)
+_FOOTER_BELOW = (
+    "… {n} more interactive elements below the viewport "
+    "(scroll or pass viewport_only=false)"
+)
+_FOOTER_TRUNCATED = "… truncated, {k} elements omitted; use contains= or scroll"
 # helpers._send uses a 5s socket timeout; each awaited JS wait must stay under it.
 _IPC_WAIT_CHUNK_S = 4.0
 _NAVIGATED_MARKERS = (
@@ -257,9 +266,7 @@ def _call(target: Any, expression: str) -> Any:
         return handle.evaluate(expression)
     except RuntimeError as exc:
         if "No element at index" in str(exc) or "window.__bmcp" in str(exc):
-            raise ElementNotFoundError(
-                "Element index not found (stale or DOM changed). Call browser_get_elements again."
-            ) from exc
+            raise ElementNotFoundError(_STALE_INDEX_MSG) from exc
         raise
 
 
@@ -272,16 +279,84 @@ def _inject_error(target: Any) -> str | None:
     return str(err) if err else None
 
 
-def get_elements(target: Any, viewport_only: bool) -> dict:
+def get_tree_expr(
+    viewport_only: bool,
+    *,
+    kind: str | None = None,
+    contains: str | None = None,
+    max_elements: int = 150,
+) -> str:
+    payload = {
+        "viewportOnly": bool(viewport_only),
+        "kind": kind,
+        "contains": contains,
+        "maxElements": max(1, int(max_elements)),
+    }
+    return f"window.__bmcp.getTree({json.dumps(payload)})"
+
+
+def tree_lines(tree: str) -> list[str]:
+    return list((tree or "").splitlines())
+
+
+def diff_tree_lines(previous: list[str], current: list[str]) -> dict[str, Any]:
+    """Line diff of two rendered trees. Unchanged lines compare equal (stable indices)."""
+    matcher = difflib.SequenceMatcher(a=previous, b=current, autojunk=False)
+    added: list[str] = []
+    removed: list[str] = []
+    unchanged = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            unchanged += i2 - i1
+        elif tag == "insert":
+            added.extend(current[j1:j2])
+        elif tag == "delete":
+            removed.extend(previous[i1:i2])
+        elif tag == "replace":
+            removed.extend(previous[i1:i2])
+            added.extend(current[j1:j2])
+    return {"added": added, "removed": removed, "unchanged": unchanged}
+
+
+def attach_tree_footers(
+    tree: str,
+    *,
+    viewport_only: bool,
+    below_viewport: int,
+    truncated: bool,
+    omitted: int,
+) -> str:
+    parts: list[str] = []
+    if tree:
+        parts.append(tree)
+    if viewport_only and below_viewport > 0:
+        parts.append(_FOOTER_BELOW.format(n=below_viewport))
+    if truncated:
+        parts.append(_FOOTER_TRUNCATED.format(k=omitted))
+    return "\n".join(parts)
+
+
+def get_elements(
+    target: Any,
+    viewport_only: bool = True,
+    *,
+    kind: str | None = None,
+    contains: str | None = None,
+    max_elements: int = 150,
+) -> dict:
     """Inject the driver (if not already present) and return the indexed
     interactive-element tree as simplified text.
 
+    Walks the full page so indices stay valid for off-screen elements; the
+    returned ``tree`` is filtered (viewport / kind / contains / max_elements).
     Caches an index -> element map in the page (window.__bmcpSelectorMap) that
     subsequent click/input/select-by-index calls read from.
     """
     handle = as_handle(target)
     _ensure_driver(handle)
-    expr = f"window.__bmcp.getTree({json.dumps(viewport_only)})"
+    expr = get_tree_expr(
+        viewport_only, kind=kind, contains=contains, max_elements=max_elements
+    )
     try:
         result = handle.evaluate(expr)
     except RuntimeError:
@@ -297,8 +372,11 @@ def get_elements(target: Any, viewport_only: bool) -> dict:
                 return {"error": err, "tree": "", "elementCount": 0}
             raise
     if isinstance(result, dict):
+        result.setdefault("truncated", False)
+        result.setdefault("below_viewport", 0)
+        result.setdefault("omitted", 0)
         return result
-    return {"tree": "", "elementCount": 0}
+    return {"tree": "", "elementCount": 0, "truncated": False, "below_viewport": 0, "omitted": 0}
 
 
 def get_rect(target: Any, index: int) -> dict:
@@ -378,9 +456,7 @@ def _try_fast_fill(target: Any, index: int, text: str, clear_first: bool) -> dic
         result = handle.evaluate(expr)
     except RuntimeError as exc:
         if "No element at index" in str(exc) or "window.__bmcp" in str(exc):
-            raise ElementNotFoundError(
-                "Element index not found (stale or DOM changed). Call browser_get_elements again."
-            ) from exc
+            raise ElementNotFoundError(_STALE_INDEX_MSG) from exc
         return None
     return result if isinstance(result, dict) else None
 

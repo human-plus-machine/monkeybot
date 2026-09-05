@@ -174,6 +174,9 @@ AWS_PROFILE=... AWS_REGION=us-east-1 BROWSER_BACKEND=agentcore \
 | `BROWSER_MCP_SCREENSHOTS_DIR` | Screenshot output directory (default: `{workspace}/browser/Screenshots`) |
 | `BROWSER_MCP_PERF` | Set to `1` to record per-tool wall time, harness-call counts, and result size (off by default) |
 | `BROWSER_MCP_PERF_LOG` | JSONL sink for perf records (default: `{workspace}/browser/perf/tools.jsonl`) |
+| `BROWSER_MCP_VIEWPORT_DEFAULT` | `1` (default) makes `browser_get_elements` viewport-only; `0`/`false` restores a full-page tree |
+| `BROWSER_MCP_FILL_MODE` | Default fill mode for `browser_input_by_index` (`auto`, `keys`, or `fast`) |
+| `BROWSER_MCP_MAX_TABS` | Cap on agent-controlled tabs (default 5) |
 
 All `BU_*` vars are passed through to `browser-harness` unchanged.
 
@@ -202,13 +205,13 @@ Errors raised by browser tools are scrubbed of `?token=` values before they reac
 
 Workflow:
 
-1. `browser_get_elements()` — returns an indexed text tree, e.g.:
+1. `browser_get_elements()` — returns an indexed text tree of the **viewport** by default (footer reports how many interactive elements are below; pass `viewport_only=false` or scroll). Filter with `kind=` (`inputs` / `buttons` / `links`) or `contains=`; `max_elements` defaults to 150. `observe="diff"` returns `{added, removed, unchanged}` vs the last tree for that tab (full tree after navigation or with no cache). Example:
    ```
    [12]<input placeholder='Email' />
    [35]<button aria-label='Submit form'>Submit</button>
    ```
 2. `browser_click_by_index(35)` / `browser_input_by_index(12, "user@example.com")` / `browser_select_by_index(index, "Option text")`
-3. Call `browser_get_elements()` again after navigation or any action that may have changed the DOM — indices are only valid for the tree they came from.
+3. Indices remain valid until navigation. Call `browser_get_elements()` again after navigation. Use `browser_get_text` to read page copy (`<main>` / `<article>` / `[role=main]`, else `body`; strips nav/footer/aside/script/style) instead of `browser_js("document.body.innerText")`.
 
 `browser_goto(url)` navigates the current tab in place; pass `new_tab=True` to open a second tab (focused), or `tab=` to navigate a specific tab without focusing it. `browser_input_by_index` defaults to an in-page fill (`mode="auto"`) and falls back to real key events when the framework reverts the value; pass `mode="keys"` for comboboxes and fields that only listen to `keydown` (or set `BROWSER_MCP_FILL_MODE=keys`). `browser_click_by_index` still clicks when another element covers the target and includes `"warning": "target obscured by <tag>"`.
 
@@ -216,7 +219,7 @@ Workflow:
 
 The server owns a tab registry with short aliases (`t1`, `t2`, …, or a name from `browser_open_tab(alias=...)`). Every interaction tool accepts `tab=` as its last parameter; omitted means the focused tab (same behavior as before).
 
-- **Reads never move focus:** `browser_get_elements`, `browser_page_info`, `browser_js`, `browser_wait_for`, `browser_read_tabs`.
+- **Reads never move focus:** `browser_get_elements`, `browser_get_text`, `browser_page_info`, `browser_js`, `browser_wait_for`, `browser_read_tabs`.
 - **Actions focus first:** click/input/select/fill/press/scroll/upload/screenshot. Headed Chrome throttles timers and pauses painting in background tabs, so clicking or capturing there is unreliable.
 - `browser_open_tab(url, alias=None, focus=False)` opens in the background by default. `browser_close_tab(tab)` refuses to close the last tab (navigates it to `about:blank` instead) and, if it was focused, focuses the most recently used remaining tab.
 - `browser_tabs()` returns `{ok, focused, tabs: [{tab, alias, url, title, focused, opened_by_agent, last_used}, ...]}` with the focused tab first. `browser_switch_tab(target_id)` accepts aliases or raw target ids.

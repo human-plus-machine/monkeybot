@@ -191,3 +191,43 @@ Three runs; table values are medians. `#page-2` is injected after a 300 ms timeo
 
 Acceptance met. `browser_wait_idle` now runs network idle then DOM `settle` (not in this bench).
 
+---
+
+## Phase 3 (2026-09-05)
+
+Playwright Chromium 151 headless (same stack as `BROWSER_MCP_INTEGRATION=1`),
+`BU_CDP_URL=http://127.0.0.1:9335`. Command:
+`BROWSER_MCP_PERF=1 BU_CDP_URL=http://127.0.0.1:9335 uv run python scripts/perf_bench.py`
+from `integrations/browser-mcp/`. Three runs per scenario; table values are medians.
+
+`browser_get_elements()` now defaults to the viewport (`max_elements=150`) with
+stable indices. The form scenario still passes `viewport_only=False` so Nickname
+and Submit (below a typical viewport) stay addressable; long_list uses the new
+default and is the observation-size target.
+
+### long_list.html
+
+| tool | median_wall_ms | harness_calls | result_chars |
+|---|---:|---:|---:|
+| browser_goto | 9.4 | 5.0 | 150 |
+| browser_get_elements | 10.0 | 1.0 | 4889 |
+
+- tool_calls_per_scenario: **2**
+- total_scenario_ms (median of 3): **18.7**
+- `get_elements` result_chars: **21073 → 4889 (−77 %)** vs Phase 0
+
+### form.html (full tree; `viewport_only=False`)
+
+| tool | median_wall_ms | harness_calls | result_chars |
+|---|---:|---:|---:|
+| browser_goto | 6.6 | 5.0 | 146 |
+| browser_get_elements | 1.1 | 1.0 | 1062 |
+| browser_input_by_index | 0.4 | 1.0 | 65 |
+| browser_click_by_index | 3.1 | 2.0 | 140 |
+
+- tool_calls_per_scenario: **11** (unchanged; act-then-observe is Phase 4)
+- total_scenario_ms (median of 3): **16.3**
+- Attribute trimming cut full-form `get_elements` 1301 → 1062 chars.
+
+Acceptance met (≥ 70 % char cut on long_list, stable indices, `browser_get_text` on `article.html`).
+

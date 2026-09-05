@@ -15,9 +15,9 @@ If `browser__*` tools are not in the active tool list yet, call **`enable_mcp("b
 
 Do **not** start with screenshots. Use the indexed element tree:
 
-1. `browser_get_elements()` — returns interactive elements as an indexed text tree, e.g. `[35]<button>Submit</button>`
+1. `browser_get_elements()` — returns interactive elements as an indexed text tree, e.g. `[35]<button>Submit</button>`. Viewport-only by default (footer says how many are below; pass `viewport_only=false` or scroll). Filter with `kind=` (`inputs`/`buttons`/`links`) or `contains=`. `observe="diff"` returns added/removed lines vs the last tree.
 2. Act with `browser_click_by_index(index)`, `browser_input_by_index(index, text)`, or `browser_select_by_index(index, option_text)`
-3. Call `browser_get_elements()` again after navigation or any action that may have changed the DOM — indices are only valid for the tree they came from
+3. Indices remain valid until navigation. Re-call `browser_get_elements()` after navigation. Use `browser_get_text` to read page copy instead of `browser_js("document.body.innerText")`.
 
 `browser_input_by_index` fills in-page by default. If a field ignores the typed value (search-as-you-type, autocomplete comboboxes, or sites that only listen to `keydown`), pass `mode="keys"`.
 
@@ -49,7 +49,8 @@ Text-only models should never rely on screenshots for page understanding — use
 
 - First navigation: `browser_goto(url)` — response includes matching playbook filenames when present.
 - After navigation: `browser_wait_for` or `browser_wait_idle` as needed.
-- Clicking / typing (default): `browser_get_elements` → `browser_click_by_index` / `browser_input_by_index` / `browser_select_by_index` → `browser_get_elements` again if the page changed.
+- Clicking / typing (default): `browser_get_elements` → `browser_click_by_index` / `browser_input_by_index` / `browser_select_by_index`. Indices stay valid until navigation.
+- Reading: `browser_get_text` for body copy; `observe="diff"` on `browser_get_elements` after in-page mutations.
 - Clicking (fallback only): `browser_screenshot(annotate=True)` → `load_file(path)` → `browser_click_by_index`. Use `browser_click(x, y)` only when there is no useful index.
 - Ad hoc DOM extraction: `browser_js(expression)` when you need custom page text or attributes.
 - Login walls: if the user asked to sign in on the Spaces in-app browser, call `browser_login(expected_origin="https://the-site.com")` (optionally with `username`). It uses a saved password and returns `{ok, loggedIn, origin}` only — never read or type the password yourself. Always pass `expected_origin`: the login targets the tab the user has focused, which is not necessarily the tab your other `browser_*` calls address, so this is what stops a login landing on the wrong site. Check the returned `origin` before reporting success. If it returns `this password is not allowed for agent use` or `focused tab is on a different origin`, stop and ask the user. Still stop for MFA, consent, or a password the user must type themselves.

@@ -32,15 +32,25 @@ _PAGE_INFO_JS = (
     "h:innerHeight,sx:scrollX,sy:scrollY,"
     "pw:document.documentElement.scrollWidth,ph:document.documentElement.scrollHeight})"
 )
-_READABLE_TEXT_JS = (
-    "(() => {"
-    "const root = document.querySelector('main, article, [role=main]') || document.body;"
-    "if (!root) return '';"
-    "const clone = root.cloneNode(true);"
-    "clone.querySelectorAll('script,style,nav,footer,aside').forEach((e) => e.remove());"
-    "return (clone.innerText || clone.textContent || '').replace(/\\s+/g, ' ').trim();"
-    "})()"
-)
+
+
+def readable_text_js(selector: str | None = None) -> str:
+    sel = json.dumps(selector) if selector else "null"
+    return (
+        "(function(){"
+        f"const sel={sel};"
+        "let root=null;"
+        "if(sel){try{root=document.querySelector(sel);}catch(e){root=null;}}"
+        "if(!root){root=document.querySelector('main, article, [role=main]')||document.body;}"
+        "if(!root)return '';"
+        "const clone=root.cloneNode(true);"
+        "clone.querySelectorAll('script,style,nav,footer,aside').forEach((e)=>e.remove());"
+        "return (clone.innerText||clone.textContent||'').replace(/\\s+/g,' ').trim();"
+        "})()"
+    )
+
+
+_READABLE_TEXT_JS = readable_text_js()
 _TAB_LIMIT_ACTION = (
     "Ask the user which tab to close (show them the list with aliases, titles, "
     "and last-used times), then call browser_close_tab(tab) with their choice "
@@ -277,8 +287,8 @@ class TabHandle:
                 pass
         return self.helpers.capture_screenshot(path=path, full=full, max_dim=max_dim)
 
-    def readable_text(self) -> str:
-        result = self.evaluate(_READABLE_TEXT_JS)
+    def readable_text(self, selector: str | None = None) -> str:
+        result = self.evaluate(readable_text_js(selector))
         return str(result or "")
 
 
