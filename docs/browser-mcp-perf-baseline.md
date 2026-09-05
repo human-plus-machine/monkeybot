@@ -313,3 +313,26 @@ only `browser_run_playbook("127.0.0.1", "signup")` against `form.html`.
 
 Acceptance met (second visit is 1 tool call).
 
+---
+
+## Refactor (2026-09-05)
+
+Same machine, Playwright Chromium headless (same stack as `BROWSER_MCP_INTEGRATION=1`).
+Recorded immediately before and after splitting `server.py` into concern modules.
+Command: `BROWSER_MCP_PERF=1 BU_CDP_URL=<playwright-cdp> uv run python scripts/perf_bench.py`
+from `integrations/browser-mcp/`. Three runs per scenario; table values are medians.
+
+Load-bearing counts are unchanged. Wall-time deltas are noise.
+
+| scenario | tool_calls | harness_calls (key tool) | result_chars | total_ms before | total_ms after |
+|---|---:|---|---:|---:|---:|
+| form.html | 2 | fill_form 18.0 | 1125 | 513.3 | 503.2 |
+| form_playbook | 1 | run_playbook 15.0 | 703 | 490.4 | 489.9 |
+| long_list.html | 2 | get_elements 1.0 | 4889 | 359.0 | 354.4 |
+| spa.html | 2 | click_by_index 9.0 | 740 | 805.2 | 798.2 |
+| spa_wait | 4 | wait_for 1.0 | 27 | 648.9 | 641.5 |
+| compare_three | 4 | read_tabs 10.0 | 3304 | 780.6 | 775.8 |
+| screenshot (long_list.html) | 4 | screenshot 2.0 | 484 | 383.5 | 400.6 |
+
+32-tool schema snapshot (`tests/fixtures/tool_surface.json`) matched after the split.
+
