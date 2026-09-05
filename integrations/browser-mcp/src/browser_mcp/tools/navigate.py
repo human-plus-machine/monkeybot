@@ -5,10 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 from browser_mcp import actions, backend, tab_ops, tabs
-from browser_mcp.app import mcp, _public_tool
+from browser_mcp.app import mcp, _public_tool, observe_mode
 from browser_mcp import results
-from browser_mcp.observe import observe_after, resolve_action_observe
+from browser_mcp.observe import observe_after
 from browser_mcp.tools.playbook import _playbook_hints
+
 
 def _goto_observation(
     handle: tabs.TabHandle, url: str, observe: str, payload: dict[str, Any]
@@ -31,9 +32,9 @@ def browser_goto(
     Returns page info, matching playbook filenames and executable flows, and a
     full observation by default (observe=\"diff\" / \"none\" to change that).
     """
-    mode = resolve_action_observe(observe, default="full")
-    if mode not in results._ACTION_OBSERVE_MODES:
-        return results.observe_error(observe if observe is not None else mode, results._ACTION_OBSERVE_MODES)
+    mode, error = observe_mode(observe, default="full")
+    if error:
+        return error
     helpers, _ = backend.browser_harness()
     if new_tab:
         opened = tab_ops._open_tab(helpers, url, alias=None, focus=True)

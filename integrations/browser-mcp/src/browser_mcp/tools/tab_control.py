@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from browser_mcp import backend, dom_indexing, tab_ops, tabs
-from browser_mcp.app import mcp, _public_tool
+from browser_mcp.app import mcp, _public_tool, observe_mode
 from browser_mcp import results
-from browser_mcp.observe import observe_after, resolve_action_observe
+from browser_mcp.observe import observe_after
+
 
 @mcp.tool()
 @_public_tool
@@ -22,9 +23,9 @@ def browser_tabs() -> str:
 @_public_tool
 def browser_switch_tab(target_id: str, observe: str | None = None) -> str:
     """Switch to a tab by alias or target_id (from browser_tabs)."""
-    mode = resolve_action_observe(observe)
-    if mode not in results._ACTION_OBSERVE_MODES:
-        return results.observe_error(observe if observe is not None else mode, results._ACTION_OBSERVE_MODES)
+    mode, error = observe_mode(observe)
+    if error:
+        return error
     helpers, _ = backend.browser_harness()
     try:
         handle = tab_ops._for_action(helpers, target_id)
@@ -77,9 +78,9 @@ def browser_open_tab(
         return results.json_text({"ok": False, "error": str(exc)})
     if not opened.get("ok") or not focus:
         return results.json_text(opened)
-    mode = resolve_action_observe(observe, default="full")
-    if mode not in results._ACTION_OBSERVE_MODES:
-        return results.observe_error(observe if observe is not None else mode, results._ACTION_OBSERVE_MODES)
+    mode, error = observe_mode(observe, default="full")
+    if error:
+        return error
     handle = tab_ops._for_action(helpers, str(opened.get("tab") or ""))
     wrapped = observe_after(
         handle,

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from browser_mcp import backend, dom_indexing, tab_ops, tabs
-from browser_mcp.app import mcp, _public_tool
+from browser_mcp import dom_indexing
+from browser_mcp.app import mcp, _public_tool, prepare_handle
 from browser_mcp import results
 from browser_mcp.observe import _resolve_viewport_only, snapshot_tree
+
 
 @mcp.tool()
 @_public_tool
@@ -56,11 +57,10 @@ def browser_get_elements(
     except (TypeError, ValueError):
         return results.json_text({"ok": False, "error": "max_elements must be an integer"})
     viewport = _resolve_viewport_only(viewport_only)
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = tab_ops._for_read(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
+    prep = prepare_handle(tab)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
     snap = snapshot_tree(
         handle,
         observe_norm,
@@ -93,11 +93,10 @@ def browser_get_text(
         cap = max(1, int(max_chars))
     except (TypeError, ValueError):
         return results.json_text({"ok": False, "error": "max_chars must be an integer"})
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = tab_ops._for_read(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
+    prep = prepare_handle(tab)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
     text = handle.readable_text(selector=selector)
     truncated = len(text) > cap
     if truncated:
@@ -117,11 +116,10 @@ def browser_get_text(
 @_public_tool
 def browser_js(expression: str, tab: str | None = None) -> str:
     """Evaluate JavaScript in the attached tab and return the result (DOM read/extraction)."""
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = tab_ops._for_read(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
+    prep = prepare_handle(tab)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
     result = handle.evaluate(expression)
     return results.json_text({"ok": True, "result": result})
 
@@ -145,11 +143,10 @@ def browser_extract(
         cap = max(1, int(limit))
     except (TypeError, ValueError):
         return results.json_text({"ok": False, "error": "limit must be an integer"})
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = tab_ops._for_read(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
+    prep = prepare_handle(tab)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
     result = dom_indexing.extract_rows(handle, selector, fields, limit=cap)
     if result.get("error"):
         return results.json_text({"ok": False, "error": result["error"]})
@@ -165,9 +162,8 @@ def browser_extract(
 @_public_tool
 def browser_page_info(tab: str | None = None) -> str:
     """Return current page url, title, viewport size, and scroll position."""
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = tab_ops._for_read(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
+    prep = prepare_handle(tab)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
     return results.json_text(handle.page_info())

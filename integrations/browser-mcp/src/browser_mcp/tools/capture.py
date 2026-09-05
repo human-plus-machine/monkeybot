@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from browser_mcp import backend, dom_indexing, screenshots, tab_ops, tabs
-from browser_mcp.app import mcp, _public_tool
+from browser_mcp import dom_indexing, screenshots
+from browser_mcp.app import mcp, _public_tool, prepare_handle
 from browser_mcp import results
+
 
 @mcp.tool()
 @_public_tool
@@ -42,11 +43,10 @@ def browser_screenshot(
     if q < 1 or q > 95:
         return results.json_text({"ok": False, "error": "quality must be 1–95"})
 
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = tab_ops._for_action(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
+    prep = prepare_handle(tab, focus=True)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
 
     dest, rel_path = screenshots.allocate_screenshot_path(fmt)
     native = dest.with_name(f"{dest.stem}-native.png")

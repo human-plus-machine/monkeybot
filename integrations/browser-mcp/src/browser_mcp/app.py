@@ -5,11 +5,13 @@ from __future__ import annotations
 import functools
 import threading
 from collections.abc import Callable
-from typing import ParamSpec
+from dataclasses import dataclass
+from typing import Any, ParamSpec
 
 from mcp.server.fastmcp import FastMCP
 
-from browser_mcp import in_app_cdp, perf
+from browser_mcp import backend, in_app_cdp, perf, results, tab_ops, tabs
+from browser_mcp.observe import resolve_action_observe
 
 _P = ParamSpec("_P")
 _TOOL_LOCK = threading.RLock()
@@ -90,3 +92,64 @@ def _public_tool(fn: Callable[_P, str]) -> Callable[_P, str]:
                     in_app_cdp._reraise_public_harness_error(exc)
 
     return wrapper
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedAction:
+    """Shared result of the per-tool observe/harness/tab preamble."""
+
+    error: str | None
+    helpers: Any = None
+    handle: Any = None
+    mode: str = "diff"
+    before_url: str = ""
+
+
+def observe_mode(observe: str | None, *, default: str = "diff") -> tuple[str, str | None]:
+    """Return (mode, error_json). error_json is set when observe is unknown."""
+    mode = resolve_action_observe(observe, default=default)
+    if mode not in results._ACTION_OBSERVE_MODES:
+        return mode, results.observe_error(
+            observe if observe is not None else mode, results._ACTION_OBSERVE_MODES
+        )
+    return mode, None
+
+
+def prepare_action(
+    observe: str | None,
+    tab: str | None,
+    *,
+    default: str = "diff",
+    focus: bool = True,
+    capture_url: bool = True,
+) -> PreparedAction:
+    """Validate observe, bind the backend, and resolve a tab for an action."""
+    mode, error = observe_mode(observe, default=default)
+    if error:
+        return PreparedAction(error=error, mode=mode)
+    helpers, _ = backend.browser_harness()
+    try:
+        handle = (
+            tab_ops._for_action(helpers, tab) if focus else tab_ops._for_read(helpers, tab)
+        )
+    except tabs.UnknownTabError as exc:
+        return PreparedAction(error=results.unknown_tab_result(exc), mode=mode)
+    before_url = str(handle.page_info().get("url") or "") if capture_url else ""
+    return PreparedAction(
+        error=None, helpers=helpers, handle=handle, mode=mode, before_url=before_url
+    )
+
+
+def prepare_handle(
+    tab: str | None, *, focus: bool = False, capture_url: bool = False
+) -> PreparedAction:
+    """Bind the backend and resolve a tab without observe-mode validation."""
+    helpers, _ = backend.browser_harness()
+    try:
+        handle = (
+            tab_ops._for_action(helpers, tab) if focus else tab_ops._for_read(helpers, tab)
+        )
+    except tabs.UnknownTabError as exc:
+        return PreparedAction(error=results.unknown_tab_result(exc))
+    before_url = str(handle.page_info().get("url") or "") if capture_url else ""
+    return PreparedAction(error=None, helpers=helpers, handle=handle, before_url=before_url)

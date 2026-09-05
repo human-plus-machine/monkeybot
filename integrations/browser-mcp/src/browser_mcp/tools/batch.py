@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from browser_mcp import actions, backend, login, tab_ops, tabs
-from browser_mcp.app import mcp, _public_tool
+from browser_mcp import actions, login, tab_ops, tabs
+from browser_mcp.app import mcp, _public_tool, prepare_handle, observe_mode
 from browser_mcp import results
-from browser_mcp.observe import observe_after, resolve_action_observe
+from browser_mcp.observe import observe_after
+
 
 def _act_context(helpers: Any, handle: tabs.TabHandle) -> actions.ActContext:
     def _open(url: str, *, alias: str | None = None, focus: bool = False) -> dict[str, Any]:
@@ -39,27 +40,25 @@ def browser_act(
     and the current observation so you can resume. login maps to browser_login
     (user-focused tab; always pass expected_origin).
     """
-    mode = resolve_action_observe(observe)
-    if mode not in results._ACTION_OBSERVE_MODES:
-        return results.observe_error(observe if observe is not None else mode, results._ACTION_OBSERVE_MODES)
+    mode, error = observe_mode(observe)
+    if error:
+        return error
     validated = actions.validate_steps(steps)
     if isinstance(validated, dict):
         return results.json_text(validated)
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = tab_ops._for_action(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
+    prep = prepare_handle(tab, focus=True, capture_url=True)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
 
-    ctx = _act_context(helpers, handle)
-    before_url = str(handle.page_info().get("url") or "")
+    ctx = _act_context(prep.helpers, handle)
     executed = actions.execute_steps(ctx, validated, stop_on_error=stop_on_error)
     handle = executed.pop("handle", ctx.handle)
     wrapped = observe_after(
         handle,
         mode,
         {"type": "act", "steps": len(validated)},
-        before_url=before_url,
+        before_url=prep.before_url,
     )
     payload = {k: v for k, v in executed.items() if k != "handle"}
     return results.json_text(results.with_observation(payload, wrapped))
@@ -83,24 +82,20 @@ def browser_fill_form(
     one exists and is enabled, otherwise presses Enter in the last field.
     The ``how`` field on each filled entry says which strategy matched.
     """
-    observe_mode = resolve_action_observe(observe)
-    if observe_mode not in results._ACTION_OBSERVE_MODES:
-        return results.observe_error(
-            observe if observe is not None else observe_mode, results._ACTION_OBSERVE_MODES
-        )
+    mode, error = observe_mode(observe)
+    if error:
+        return error
     if not isinstance(fields, dict):
         return results.json_text({"ok": False, "error": "fields must be an object of label → value"})
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = tab_ops._for_action(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
-    before_url = str(handle.page_info().get("url") or "")
+    prep = prepare_handle(tab, focus=True, capture_url=True)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
     payload = actions.do_fill_form(handle, fields, submit=submit, mode=mode)
     wrapped = observe_after(
         handle,
-        observe_mode,
+        mode,
         {"type": "fill_form", "filled": len(payload.get("filled") or [])},
-        before_url=before_url,
+        before_url=prep.before_url,
     )
     return results.json_text(results.with_observation(payload, wrapped))

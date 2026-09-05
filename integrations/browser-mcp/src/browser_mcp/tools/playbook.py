@@ -7,13 +7,14 @@ import os
 import time
 from typing import Any
 
-from browser_mcp import actions, backend, playbooks, tab_ops, tabs
-from browser_mcp.app import mcp, _public_tool
+from browser_mcp import actions, playbooks, tabs
+from browser_mcp.app import mcp, _public_tool, prepare_handle, observe_mode
 from browser_mcp import results
-from browser_mcp.observe import observe_after, resolve_action_observe
+from browser_mcp.observe import observe_after
 from browser_mcp.tools.batch import _act_context
 
 logger = logging.getLogger(__name__)
+
 
 def _playbook_hints(url: str | None) -> dict[str, Any]:
     key = url or ""
@@ -89,9 +90,9 @@ def browser_run_playbook(
     use {do: login, expected_origin: ...} which maps to browser_login (the
     user-focused tab). Capped by BROWSER_MCP_PLAYBOOK_TIMEOUT_S (default 120).
     """
-    mode = resolve_action_observe(observe)
-    if mode not in results._ACTION_OBSERVE_MODES:
-        return results.observe_error(observe if observe is not None else mode, results._ACTION_OBSERVE_MODES)
+    mode, error = observe_mode(observe)
+    if error:
+        return error
     if params is None:
         params = {}
     if not isinstance(params, dict):
@@ -101,13 +102,11 @@ def browser_run_playbook(
         steps = playbooks.substitute_params(flow, params)
     except playbooks.PlaybookError as exc:
         return results.json_text({"ok": False, "error": str(exc), "name": name})
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = tab_ops._for_action(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
-    ctx = _act_context(helpers, handle)
-    before_url = str(handle.page_info().get("url") or "")
+    prep = prepare_handle(tab, focus=True, capture_url=True)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
+    ctx = _act_context(prep.helpers, handle)
     deadline = time.monotonic() + _playbook_timeout_s()
     executed = actions.execute_steps(ctx, steps, stop_on_error=True, deadline=deadline)
     handle = executed.pop("handle", ctx.handle)
@@ -115,7 +114,7 @@ def browser_run_playbook(
         handle,
         mode,
         {"type": "run_playbook", "name": name, "steps": len(steps)},
-        before_url=before_url,
+        before_url=prep.before_url,
     )
     payload = {k: v for k, v in executed.items() if k != "handle"}
     payload["name"] = name

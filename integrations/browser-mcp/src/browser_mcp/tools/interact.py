@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from browser_mcp import actions, backend, dom_indexing, tab_ops, tabs
-from browser_mcp.app import mcp, _public_tool
+from typing import Any
+
+from browser_mcp import actions, dom_indexing
+from browser_mcp.app import mcp, _public_tool, prepare_action, prepare_handle, observe_mode
 from browser_mcp import results
-from browser_mcp.observe import observe_after, resolve_action_observe
+from browser_mcp.observe import observe_after
+
 
 @mcp.tool()
 @_public_tool
@@ -17,15 +20,11 @@ def browser_click_by_index(
 
     Default observe=\"diff\" returns the settled page snapshot in the response.
     """
-    mode = resolve_action_observe(observe)
-    if mode not in results._ACTION_OBSERVE_MODES:
-        return results.observe_error(observe if observe is not None else mode, results._ACTION_OBSERVE_MODES)
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = tab_ops._for_action(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
-    before_url = str(handle.page_info().get("url") or "")
+    prep = prepare_action(observe, tab)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
+    mode = prep.mode
     try:
         payload = actions.do_click_by_index(handle, index)
     except dom_indexing.ElementNotFoundError as exc:
@@ -34,7 +33,7 @@ def browser_click_by_index(
     if payload.get("warning"):
         action["warning"] = payload["warning"]
     wrapped = observe_after(
-        handle, mode, action, before_url=before_url, retry_until_change=True
+        handle, mode, action, before_url=prep.before_url, retry_until_change=True
     )
     return results.json_text(results.with_observation(payload, wrapped))
 
@@ -56,16 +55,11 @@ def browser_input_by_index(
     comboboxes and fields that only listen to keydown. Override the default with
     BROWSER_MCP_FILL_MODE. Default observe=\"diff\" returns the settled snapshot.
     """
-    observe_mode = resolve_action_observe(observe)
-    if observe_mode not in results._ACTION_OBSERVE_MODES:
-        return results.observe_error(
-            observe if observe is not None else observe_mode, results._ACTION_OBSERVE_MODES
-        )
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = tab_ops._for_action(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
+    prep = prepare_action(observe, tab)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
+    observe_mode = prep.mode
     try:
         payload = actions.do_input_by_index(
             handle, index, text, clear_first=clear_first, mode=mode
@@ -81,7 +75,7 @@ def browser_input_by_index(
             "tagName": payload.get("tagName"),
             "mode_used": payload.get("mode_used"),
         },
-        before_url=str(handle.page_info().get("url") or ""),
+        before_url=prep.before_url,
     )
     return results.json_text(results.with_observation(payload, wrapped))
 
@@ -92,14 +86,11 @@ def browser_select_by_index(
 ) -> str:
     """Select a <select> dropdown option by visible text, using the index from
     browser_get_elements."""
-    mode = resolve_action_observe(observe)
-    if mode not in results._ACTION_OBSERVE_MODES:
-        return results.observe_error(observe if observe is not None else mode, results._ACTION_OBSERVE_MODES)
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = tab_ops._for_action(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
+    prep = prepare_action(observe, tab)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
+    mode = prep.mode
     try:
         payload = actions.do_select_by_index(handle, index, text)
     except dom_indexing.ElementNotFoundError as exc:
@@ -108,7 +99,7 @@ def browser_select_by_index(
         handle,
         mode,
         {"type": "select", "index": index, "selected": text},
-        before_url=str(handle.page_info().get("url") or ""),
+        before_url=prep.before_url,
     )
     return results.json_text(results.with_observation(payload, wrapped))
 
@@ -129,21 +120,17 @@ def browser_click(
     represent (canvas, shadow DOM, drag targets) or after visually confirming a spot via
     browser_screenshot.
     """
-    mode = resolve_action_observe(observe)
-    if mode not in results._ACTION_OBSERVE_MODES:
-        return results.observe_error(observe if observe is not None else mode, results._ACTION_OBSERVE_MODES)
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = tab_ops._for_action(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
-    before_url = str(handle.page_info().get("url") or "")
+    prep = prepare_action(observe, tab)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
+    mode = prep.mode
     actions.do_click_xy(handle, x, y, button=button, clicks=clicks)
     wrapped = observe_after(
         handle,
         mode,
         {"type": "click", "x": x, "y": y, "button": button, "clicks": clicks},
-        before_url=before_url,
+        before_url=prep.before_url,
         retry_until_change=True,
     )
     return results.json_text(results.with_observation({"ok": True}, wrapped))
@@ -159,14 +146,11 @@ def browser_fill(
     tab: str | None = None,
 ) -> str:
     """Fill a form input (works with React/Vue controlled inputs)."""
-    mode = resolve_action_observe(observe)
-    if mode not in results._ACTION_OBSERVE_MODES:
-        return results.observe_error(observe if observe is not None else mode, results._ACTION_OBSERVE_MODES)
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = tab_ops._for_action(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
+    prep = prepare_action(observe, tab)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
+    mode = prep.mode
     actions.do_fill_selector(
         handle, selector, text, clear_first=clear_first, timeout=timeout
     )
@@ -174,7 +158,7 @@ def browser_fill(
         handle,
         mode,
         {"type": "fill", "selector": selector},
-        before_url=str(handle.page_info().get("url") or ""),
+        before_url=prep.before_url,
     )
     return results.json_text(results.with_observation({"ok": True}, wrapped))
 
@@ -184,20 +168,17 @@ def browser_press_key(
     key: str, modifiers: int = 0, observe: str | None = None, tab: str | None = None
 ) -> str:
     """Press a key. Modifiers bitfield: 1=Alt, 2=Ctrl, 4=Meta(Cmd), 8=Shift."""
-    mode = resolve_action_observe(observe)
-    if mode not in results._ACTION_OBSERVE_MODES:
-        return results.observe_error(observe if observe is not None else mode, results._ACTION_OBSERVE_MODES)
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = tab_ops._for_action(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
+    prep = prepare_action(observe, tab)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
+    mode = prep.mode
     actions.do_press(handle, key, modifiers)
     wrapped = observe_after(
         handle,
         mode,
         {"type": "press", "key": key, "modifiers": modifiers},
-        before_url=str(handle.page_info().get("url") or ""),
+        before_url=prep.before_url,
         retry_until_change=True,
     )
     return results.json_text(results.with_observation({"ok": True}, wrapped))
@@ -213,20 +194,17 @@ def browser_scroll(
     tab: str | None = None,
 ) -> str:
     """Scroll the page at viewport position (x, y)."""
-    mode = resolve_action_observe(observe)
-    if mode not in results._ACTION_OBSERVE_MODES:
-        return results.observe_error(observe if observe is not None else mode, results._ACTION_OBSERVE_MODES)
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = tab_ops._for_action(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
+    prep = prepare_action(observe, tab)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
+    mode = prep.mode
     actions.do_scroll(handle, x, y, dy=dy, dx=dx)
     wrapped = observe_after(
         handle,
         mode,
         {"type": "scroll", "x": x, "y": y, "dy": dy, "dx": dx},
-        before_url=str(handle.page_info().get("url") or ""),
+        before_url=prep.before_url,
         retry_until_change=True,
     )
     return results.json_text(results.with_observation({"ok": True}, wrapped))
@@ -247,9 +225,9 @@ def browser_click_text(
     toggles equality vs substring. Prefers visible, in-viewport, top elements.
     On a miss, returns did_you_mean with up to five near-misses.
     """
-    mode = resolve_action_observe(observe)
-    if mode not in results._ACTION_OBSERVE_MODES:
-        return results.observe_error(observe if observe is not None else mode, results._ACTION_OBSERVE_MODES)
+    mode, error = observe_mode(observe)
+    if error:
+        return error
     if role is not None and str(role).strip():
         role_norm = str(role).strip().lower()
         if role_norm not in actions.CLICK_TEXT_ROLES:
@@ -257,12 +235,10 @@ def browser_click_text(
             return results.json_text({"ok": False, "error": f"unknown role {role!r}; expected {names}"})
     else:
         role_norm = None
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = tab_ops._for_action(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
-    before_url = str(handle.page_info().get("url") or "")
+    prep = prepare_handle(tab, focus=True, capture_url=True)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
     payload = actions.do_click_text(
         handle, text, role=role_norm, exact=exact, nth=int(nth)
     )
@@ -272,7 +248,7 @@ def browser_click_text(
         handle,
         mode,
         {"type": "click_text", "text": text, "index": payload.get("index")},
-        before_url=before_url,
+        before_url=prep.before_url,
         retry_until_change=True,
     )
     return results.json_text(results.with_observation(payload, wrapped))
@@ -281,10 +257,8 @@ def browser_click_text(
 @_public_tool
 def browser_upload(selector: str, path: str, tab: str | None = None) -> str:
     """Set files on a file input. path must be an absolute filepath on the host."""
-    helpers, _ = backend.browser_harness()
-    try:
-        tab_ops._for_action(helpers, tab)
-    except tabs.UnknownTabError as exc:
-        return results.unknown_tab_result(exc)
-    helpers.upload_file(selector, path)
+    prep = prepare_handle(tab, focus=True)
+    if prep.error:
+        return prep.error
+    prep.helpers.upload_file(selector, path)
     return results.json_text({"ok": True})
