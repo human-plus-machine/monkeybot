@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -45,8 +46,63 @@ def test_allocate_screenshot_path_creates_unique_names(
     abs_path, rel_path = screenshots.allocate_screenshot_path()
     assert abs_path.parent == screenshots.screenshots_dir()
     assert rel_path.startswith("./browser/Screenshots/shot-")
-    assert rel_path.endswith(".png")
+    assert rel_path.endswith(".jpg")
     assert abs_path.parent.is_dir()
+
+
+def test_allocate_screenshot_path_png_suffix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "workspace").mkdir()
+    abs_path, rel_path = screenshots.allocate_screenshot_path("png")
+    assert rel_path.endswith(".png")
+    assert abs_path.suffix == ".png"
+
+
+def test_jpeg_encode_is_at_least_70_percent_smaller_than_png(tmp_path: Path) -> None:
+    from PIL import Image
+
+    raw = os.urandom(1800 * 1200 * 3)
+    img = Image.frombytes("RGB", (1800, 1200), raw)
+    png_path = tmp_path / "src.png"
+    img.save(png_path, format="PNG")
+    png_bytes = png_path.stat().st_size
+    dest = tmp_path / "out.jpg"
+    screenshots.encode_screenshot(png_path, dest, fmt="jpeg", quality=60, max_dim=1800)
+    jpeg_bytes = dest.read_bytes()
+    assert jpeg_bytes[:2] == b"\xff\xd8"
+    assert dest.stat().st_size <= png_bytes * 0.3
+
+
+def test_draw_index_labels_paints_badges() -> None:
+    from PIL import Image
+
+    img = Image.new("RGB", (400, 300), (255, 255, 255))
+    rects = {
+        "1": {"x": 10, "y": 10, "width": 40, "height": 20},
+        "2": {"x": 200, "y": 100, "width": 40, "height": 20},
+    }
+    out, labeled = screenshots.draw_index_labels(
+        img, rects, css_width=400, css_height=300
+    )
+    assert labeled == 2
+    assert out.getpixel((10, 10)) == screenshots.LABEL_FILL
+    assert out.getpixel((200, 100)) == screenshots.LABEL_FILL
+    assert out.getpixel((50, 200)) == (255, 255, 255)
+
+
+def test_draw_index_labels_caps_at_150() -> None:
+    from PIL import Image
+
+    img = Image.new("RGB", (400, 300), (255, 255, 255))
+    rects = {
+        str(i): {"x": i % 20, "y": i % 15, "width": 4, "height": 4} for i in range(200)
+    }
+    _out, labeled = screenshots.draw_index_labels(
+        img, rects, css_width=400, css_height=300
+    )
+    assert labeled == 150
 
 
 def test_env_paths_remain_stable_after_cwd_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

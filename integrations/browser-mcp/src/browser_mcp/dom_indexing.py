@@ -11,27 +11,35 @@ Vendored assets (MIT licensed, see NOTICE.md):
   assignment so it can run as a raw CDP-injected script (no bundler/module loader
   available on the target page).
 - assets/pa_driver.js - glue that flattens the tree to text and exposes
-  window.__bmcp.{getTree,getRect,getInputInfo,selectOption}, ported from
-  page-agent's packages/page-controller/src/dom/index.ts (flatTreeToString,
-  getSelectorMap) and actions.ts (selectOptionElement).
+  window.__bmcp.{getTree,getRect,getRects,getInputInfo,selectOption,fill,settle,
+  resolveField,setChecked,findByText,findFormSubmit,extract},
+  ported from page-agent's packages/page-controller/src/dom/index.ts
+  (flatTreeToString, getSelectorMap) and actions.ts (selectOptionElement).
 
-Element indices are only valid until the next navigation or DOM mutation big enough
-to change the tree; call browser_get_elements again after any action that might
-have changed the page. A stale/unknown index raises ElementNotFoundError.
+Element indices remain valid until navigation. After navigation call
+browser_get_elements again. A stale/unknown index raises ElementNotFoundError.
 
 Injection note: browser-harness relays CDP over a newline-delimited Unix/TCP socket
 whose asyncio StreamReader defaults to a 64 KiB line limit. The combined driver is
 ~60 KiB, so a single ``helpers.js(full_script)`` call fails with
 ``Separator is found, but chunk is longer than limit``. We therefore assemble the
-script in-page from base64 chunks, each well under that limit.
+script in-page from base64 chunks, each well under that limit. When ``helpers.cdp``
+or ``helpers.add_init_script`` is available, those chunks are also registered with
+``Page.addScriptToEvaluateOnNewDocument`` so later navigations skip re-injection.
 """
 
 from __future__ import annotations
 
 import base64
+import difflib
 import json
+import logging
 from pathlib import Path
 from typing import Any
+
+from browser_mcp.tabs import TabHandle, as_handle, registry, reset_registry
+
+logger = logging.getLogger(__name__)
 
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
@@ -44,6 +52,50 @@ _DRIVER_SOURCE = _DOM_TREE_JS + "\n" + _DRIVER_JS
 # Keep each IPC JSON line comfortably under asyncio's default 64 KiB StreamReader
 # limit (request framing + JSON escaping inflate the on-wire size).
 _INJECT_CHUNK_CHARS = 24_000
+_CDP_SOURCE_JSON_LIMIT = 60_000
+_FILL_MODES = frozenset({"auto", "keys", "fast"})
+_STALE_INDEX_MSG = (
+    "Element index not found (stale or navigated). "
+    "Call browser_get_elements again after navigation."
+)
+_FOOTER_BELOW = (
+    "… {n} more interactive elements below the viewport "
+    "(scroll or pass viewport_only=false)"
+)
+_FOOTER_TRUNCATED = "… truncated, {k} elements omitted; use contains= or scroll"
+# helpers._send uses a 5s socket timeout; each awaited JS wait must stay under it.
+_IPC_WAIT_CHUNK_S = 4.0
+_NAVIGATED_MARKERS = (
+    "context destroyed",
+    "inspected target navigated",
+    "execution context was destroyed",
+)
+
+_INJECT_EVAL_JS = (
+    "(() => {"
+    "if (window.__bmcp) return;"
+    "try {"
+    "const src = atob(window.__bmcpChunks.join(''));"
+    "delete window.__bmcpChunks;"
+    "(0, eval)(src);"
+    "} catch (e) {"
+    "window.__bmcpInjectError = String((e && e.message) || e);"
+    "}"
+    "})()"
+)
+
+_CDP_JOIN_SCRIPT = (
+    "(function(){"
+    "if (window.__bmcp) return;"
+    "try {"
+    "const src = atob((window.__bmcpChunks || []).join(''));"
+    "delete window.__bmcpChunks;"
+    "(0, eval)(src);"
+    "} catch (e) {"
+    "window.__bmcpInjectError = String((e && e.message) || e);"
+    "}"
+    "})()"
+)
 
 
 class ElementNotFoundError(RuntimeError):
@@ -55,69 +107,510 @@ def _b64_chunks(source: str, size: int = _INJECT_CHUNK_CHARS) -> list[str]:
     return [encoded[i : i + size] for i in range(0, len(encoded), size)]
 
 
-def _ensure_driver(helpers: Any) -> None:
-    """Inject the DOM driver if ``window.__bmcp`` is missing (chunked for IPC limits)."""
-    if helpers.js("!!window.__bmcp") is True:
-        return
+def _has_helper(helpers: Any, name: str) -> bool:
+    return callable(getattr(helpers, name, None))
 
-    helpers.js("window.__bmcpChunks = []")
-    for chunk in _b64_chunks(_DRIVER_SOURCE):
-        helpers.js(f"window.__bmcpChunks.push({json.dumps(chunk)})")
-    helpers.js(
-        "(() => {"
-        "const src = atob(window.__bmcpChunks.join(''));"
-        "delete window.__bmcpChunks;"
-        "(0, eval)(src);"
+
+def _handle_for_driver(target: Any) -> TabHandle:
+    handle = as_handle(target)
+    if handle.state is not None:
+        return handle
+    helpers = handle.helpers
+    if not _has_helper(helpers, "current_tab"):
+        return handle
+    try:
+        tab = helpers.current_tab()
+    except Exception:
+        logger.debug("current_tab failed during driver register", exc_info=True)
+        return handle
+    if not isinstance(tab, dict):
+        return handle
+    tid = tab.get("targetId") or tab.get("target_id")
+    if not tid:
+        return handle
+    state = registry().ensure(
+        str(tid),
+        url=str(tab.get("url") or ""),
+        title=str(tab.get("title") or ""),
+    )
+    return TabHandle(helpers, state, focused=handle.focused)
+
+
+def _mark_registered(handle: TabHandle) -> None:
+    if handle.state is not None:
+        handle.state.driver_registered = True
+
+
+def clear_registered_targets() -> None:
+    """Drop per-target registration (call on backend teardown)."""
+    reset_registry()
+
+
+def mark_driver_stale(target: Any | None = None) -> None:
+    """Current document may not have the driver (new tab / switch)."""
+    if target is None:
+        focused = registry().focused()
+        if focused is not None:
+            focused.driver_registered = False
+        return
+    handle = _handle_for_driver(target)
+    if handle.state is not None:
+        handle.state.driver_registered = False
+
+
+def _cdp_chunk_script(chunk: str) -> str:
+    return (
+        "(function(){"
+        "if (window.__bmcp) return;"
+        "window.__bmcpChunks = window.__bmcpChunks || [];"
+        f"window.__bmcpChunks.push({json.dumps(chunk)});"
         "})()"
     )
-    if helpers.js("!!window.__bmcp") is not True:
-        raise RuntimeError(
-            "Failed to inject browser DOM indexing driver (window.__bmcp missing after eval)."
-        )
 
 
-def _call(helpers: Any, expression: str) -> Any:
+def _wrapped_driver_source() -> str:
+    return (
+        "(function(){\n"
+        "if (window.__bmcp) return;\n"
+        "try {\n"
+        f"{_DRIVER_SOURCE}\n"
+        "} catch (e) { window.__bmcpInjectError = String((e && e.message) || e); }\n"
+        "})();"
+    )
+
+
+def _register_via_cdp(handle: TabHandle) -> None:
+    for chunk in _b64_chunks(_DRIVER_SOURCE):
+        source = _cdp_chunk_script(chunk)
+        payload = json.dumps({"source": source})
+        if len(payload) >= _CDP_SOURCE_JSON_LIMIT:
+            raise RuntimeError("DOM driver registration chunk exceeds IPC JSON limit")
+        handle.cdp("Page.addScriptToEvaluateOnNewDocument", source=source)
+    handle.cdp("Page.addScriptToEvaluateOnNewDocument", source=_CDP_JOIN_SCRIPT)
+
+
+def _register_via_init_script(handle: TabHandle) -> None:
+    helpers = handle.helpers
+    helpers.add_init_script(_wrapped_driver_source())
+    registry().init_script_registered = True
+
+
+def _inject_current(target: Any) -> None:
+    """Chunked eval of the driver into the already-loaded document."""
+    handle = as_handle(target)
+    handle.evaluate("window.__bmcpChunks = []")
+    for chunk in _b64_chunks(_DRIVER_SOURCE):
+        handle.evaluate(f"window.__bmcpChunks.push({json.dumps(chunk)})")
+    handle.evaluate(_INJECT_EVAL_JS)
+
+
+def _register_driver_for_new_documents(target: Any) -> None:
+    """Persist the driver for future documents on this target; inject the current one."""
+    handle = _handle_for_driver(target)
+    if handle.state is not None and handle.state.driver_registered:
+        return
+
+    helpers = handle.helpers
+    persisted = False
+    if _has_helper(helpers, "cdp"):
+        _register_via_cdp(handle)
+        persisted = True
+    elif _has_helper(helpers, "add_init_script"):
+        if not registry().init_script_registered:
+            _register_via_init_script(handle)
+        persisted = True
+
+    if persisted:
+        _inject_current(handle)
+        _mark_registered(handle)
+        return
+
+    try:
+        present = handle.evaluate("!!window.__bmcp") is True
+    except Exception:
+        logger.debug("driver presence probe failed", exc_info=True)
+        present = False
+    if present:
+        _mark_registered(handle)
+        return
+    _inject_current(handle)
+    _mark_registered(handle)
+
+
+def _ensure_driver(target: Any) -> None:
+    """Inject the DOM driver if ``window.__bmcp`` is missing (chunked for IPC limits)."""
+    _register_driver_for_new_documents(target)
+
+
+def _call(target: Any, expression: str) -> Any:
     """Evaluate a window.__bmcp.* expression, assuming it's already injected.
 
     Only get_elements() injects the driver script; every other call here is a
     short follow-up against the page's cached selector map, so we don't want to
     resend the full script on every click/type/select.
     """
+    handle = as_handle(target)
     try:
-        return helpers.js(expression)
+        return handle.evaluate(expression)
     except RuntimeError as exc:
         if "No element at index" in str(exc) or "window.__bmcp" in str(exc):
-            raise ElementNotFoundError(
-                "Element index not found (stale or DOM changed). Call browser_get_elements again."
-            ) from exc
+            raise ElementNotFoundError(_STALE_INDEX_MSG) from exc
         raise
 
 
-def get_elements(helpers: Any, viewport_only: bool) -> dict:
+def _inject_error(target: Any) -> str | None:
+    handle = as_handle(target)
+    try:
+        err = handle.evaluate("window.__bmcpInjectError || null")
+    except RuntimeError:
+        return None
+    return str(err) if err else None
+
+
+def get_tree_expr(
+    viewport_only: bool,
+    *,
+    kind: str | None = None,
+    contains: str | None = None,
+    max_elements: int = 150,
+) -> str:
+    payload = {
+        "viewportOnly": bool(viewport_only),
+        "kind": kind,
+        "contains": contains,
+        "maxElements": max(1, int(max_elements)),
+    }
+    return f"window.__bmcp.getTree({json.dumps(payload)})"
+
+
+def tree_lines(tree: str) -> list[str]:
+    return list((tree or "").splitlines())
+
+
+def diff_tree_lines(previous: list[str], current: list[str]) -> dict[str, Any]:
+    """Line diff of two rendered trees. Unchanged lines compare equal (stable indices)."""
+    matcher = difflib.SequenceMatcher(a=previous, b=current, autojunk=False)
+    added: list[str] = []
+    removed: list[str] = []
+    unchanged = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            unchanged += i2 - i1
+        elif tag == "insert":
+            added.extend(current[j1:j2])
+        elif tag == "delete":
+            removed.extend(previous[i1:i2])
+        elif tag == "replace":
+            removed.extend(previous[i1:i2])
+            added.extend(current[j1:j2])
+    return {"added": added, "removed": removed, "unchanged": unchanged}
+
+
+def attach_tree_footers(
+    tree: str,
+    *,
+    viewport_only: bool,
+    below_viewport: int,
+    truncated: bool,
+    omitted: int,
+) -> str:
+    parts: list[str] = []
+    if tree:
+        parts.append(tree)
+    if viewport_only and below_viewport > 0:
+        parts.append(_FOOTER_BELOW.format(n=below_viewport))
+    if truncated:
+        parts.append(_FOOTER_TRUNCATED.format(k=omitted))
+    return "\n".join(parts)
+
+
+def get_elements(
+    target: Any,
+    viewport_only: bool = True,
+    *,
+    kind: str | None = None,
+    contains: str | None = None,
+    max_elements: int = 150,
+) -> dict:
     """Inject the driver (if not already present) and return the indexed
     interactive-element tree as simplified text.
 
+    Walks the full page so indices stay valid for off-screen elements; the
+    returned ``tree`` is filtered (viewport / kind / contains / max_elements).
     Caches an index -> element map in the page (window.__bmcpSelectorMap) that
     subsequent click/input/select-by-index calls read from.
     """
-    _ensure_driver(helpers)
-    return helpers.js(f"window.__bmcp.getTree({json.dumps(viewport_only)})")
+    handle = as_handle(target)
+    _ensure_driver(handle)
+    expr = get_tree_expr(
+        viewport_only, kind=kind, contains=contains, max_elements=max_elements
+    )
+    try:
+        result = handle.evaluate(expr)
+    except RuntimeError:
+        err = _inject_error(handle)
+        if err:
+            return {"error": err, "tree": "", "elementCount": 0}
+        _inject_current(handle)
+        try:
+            result = handle.evaluate(expr)
+        except RuntimeError:
+            err = _inject_error(handle)
+            if err:
+                return {"error": err, "tree": "", "elementCount": 0}
+            raise
+    if isinstance(result, dict):
+        result.setdefault("truncated", False)
+        result.setdefault("below_viewport", 0)
+        result.setdefault("omitted", 0)
+        return result
+    return {"tree": "", "elementCount": 0, "truncated": False, "below_viewport": 0, "omitted": 0}
 
 
-def get_rect(helpers: Any, index: int) -> dict:
+def get_rect(target: Any, index: int) -> dict:
     """Bounding-box center for an indexed element (scrolls it into view first)."""
-    return _call(helpers, f"window.__bmcp.getRect({json.dumps(index)})")
+    return _call(target, f"window.__bmcp.getRect({json.dumps(index)})")
 
 
-def get_input_info(helpers: Any, index: int) -> dict:
+def get_rects(
+    target: Any,
+    indices: list[int] | None = None,
+    *,
+    scroll: bool = False,
+    full: bool = False,
+) -> dict:
+    """Top-left boxes for indexed elements. Does not scroll unless ``scroll=True``.
+
+    Returns ``{rects, cssWidth, cssHeight, dpr}``. ``rects`` keys may be strings
+    (JSON object keys). Empty / missing maps yield an empty ``rects`` dict.
+    """
+    expr = (
+        f"window.__bmcp.getRects({json.dumps(indices)}, "
+        f"{json.dumps({'scroll': scroll, 'full': full})})"
+    )
+    result = _call(target, expr)
+    if isinstance(result, dict) and isinstance(result.get("rects"), dict):
+        return result
+    return {"rects": {}, "cssWidth": 0, "cssHeight": 0, "dpr": 1}
+
+
+def get_input_info(target: Any, index: int) -> dict:
     """Validate an indexed text input/textarea/contenteditable element and return a
     CSS selector for it (a temporary `data-bmcp-idx` attribute), for use with
     browser-harness's `fill_input`."""
-    return _call(helpers, f"window.__bmcp.getInputInfo({json.dumps(index)})")
+    return _call(target, f"window.__bmcp.getInputInfo({json.dumps(index)})")
 
 
-def select_option(helpers: Any, index: int, option_text: str) -> bool:
+def select_option(target: Any, index: int, option_text: str) -> bool:
     """Set a <select> element's value by visible option text."""
     return _call(
-        helpers, f"window.__bmcp.selectOption({json.dumps(index)}, {json.dumps(option_text)})"
+        target, f"window.__bmcp.selectOption({json.dumps(index)}, {json.dumps(option_text)})"
     )
+
+
+def fill(
+    target: Any,
+    index: int,
+    text: str,
+    clear_first: bool = True,
+    mode: str = "auto",
+) -> dict:
+    """Fill an indexed input. ``auto`` tries in-page fill then key-event fallback."""
+    handle = as_handle(target)
+    if mode not in _FILL_MODES:
+        mode = "auto"
+    _ensure_driver(handle)
+    if mode != "keys":
+        result = _try_fast_fill(handle, index, text, clear_first)
+        if result is not None:
+            if mode == "fast" or (not result.get("needsKeys") and result.get("value") == text):
+                result["mode_used"] = "fast"
+                return result
+    info = get_input_info(handle, index)
+    handle.helpers.fill_input(info["selector"], text, clear_first=clear_first)
+    return {
+        "ok": True,
+        "value": text,
+        "tagName": info.get("tagName"),
+        "mode_used": "keys",
+    }
+
+
+def _try_fast_fill(target: Any, index: int, text: str, clear_first: bool) -> dict | None:
+    handle = as_handle(target)
+    opts = json.dumps({"clear": clear_first})
+    expr = f"window.__bmcp.fill({json.dumps(index)}, {json.dumps(text)}, {opts})"
+    try:
+        result = handle.evaluate(expr)
+    except RuntimeError as exc:
+        if "No element at index" in str(exc) or "window.__bmcp" in str(exc):
+            raise ElementNotFoundError(_STALE_INDEX_MSG) from exc
+        return None
+    return result if isinstance(result, dict) else None
+
+
+def settle(target: Any, quiet_ms: int = 150, max_ms: int = 1500) -> dict:
+    """Wait until the DOM is quiet or ``max_ms`` elapses. One awaited JS call."""
+    handle = as_handle(target)
+    _ensure_driver(handle)
+    expr = f"window.__bmcp.settle({json.dumps(quiet_ms)}, {json.dumps(max_ms)})"
+    try:
+        result = handle.evaluate(expr)
+    except RuntimeError as exc:
+        msg = str(exc).lower()
+        if any(marker in msg for marker in _NAVIGATED_MARKERS):
+            return {"quiet": True, "navigated": True}
+        if "window.__bmcp" in str(exc):
+            _inject_current(handle)
+            result = handle.evaluate(expr)
+        else:
+            raise
+    if isinstance(result, dict):
+        result.setdefault("navigated", False)
+        return result
+    return {"quiet": True, "navigated": False}
+
+
+def _wait_for_expr(selector: str, visible: bool, timeout_s: float) -> str:
+    sel = json.dumps(selector)
+    vis = "true" if visible else "false"
+    ms = int(max(timeout_s, 0.0) * 1000)
+    return (
+        "(function(){"
+        f"const sel={sel};const wantVisible={vis};const timeoutMs={ms};"
+        "const check=()=>{"
+        "try{"
+        "const e=document.querySelector(sel);if(!e)return {found:false};"
+        "if(!wantVisible)return {found:true};"
+        "if(typeof e.checkVisibility==='function')"
+        "return {found:e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})};"
+        "const s=getComputedStyle(e);"
+        "return {found:s.display!=='none'&&s.visibility!=='hidden'&&s.opacity!=='0'};"
+        "}catch(err){return {found:false,error:'invalid selector'};}"
+        "};"
+        "const first=check();"
+        "if(first.error||first.found)return first;"
+        "if(timeoutMs<=0)return {found:false};"
+        "return new Promise((resolve)=>{"
+        "let done=false;let observer;"
+        "const finish=(value)=>{if(done)return;done=true;"
+        "if(observer)observer.disconnect();clearTimeout(timer);resolve(value);};"
+        "observer=new MutationObserver(()=>{"
+        "const next=check();if(next.error||next.found)finish(next);"
+        "});"
+        "const timer=setTimeout(()=>finish({found:false}),timeoutMs);"
+        "observer.observe(document,{subtree:true,childList:true,attributes:true,characterData:true});"
+        "});"
+        "})()"
+    )
+
+
+def _as_wait_result(result: Any) -> dict:
+    if isinstance(result, dict):
+        out: dict[str, Any] = {"found": bool(result.get("found"))}
+        if result.get("error"):
+            out["error"] = str(result["error"])
+        if result.get("navigated"):
+            out["navigated"] = True
+        return out
+    return {"found": bool(result)}
+
+
+def wait_for_selector(
+    target: Any,
+    selector: str,
+    visible: bool = False,
+    timeout: float = 10.0,
+) -> dict:
+    """Wait for ``selector`` with one awaited MutationObserver per IPC chunk.
+
+    Chunks are capped at 4s so we stay under browser-harness's 5s socket
+    read timeout. Does not inject the DOM driver.
+    """
+    handle = as_handle(target)
+    remaining = max(float(timeout), 0.0)
+    last: dict[str, Any] = {"found": False}
+    while True:
+        chunk_s = min(remaining, _IPC_WAIT_CHUNK_S) if remaining > 0 else 0.0
+        try:
+            result = handle.evaluate(_wait_for_expr(selector, visible, chunk_s))
+        except RuntimeError as exc:
+            msg = str(exc).lower()
+            if any(marker in msg for marker in _NAVIGATED_MARKERS):
+                return {"found": False, "navigated": True}
+            raise
+        last = _as_wait_result(result)
+        if last.get("found") or last.get("error") or remaining <= 0:
+            return last
+        remaining -= chunk_s
+        if remaining <= 0:
+            return last
+
+
+def _ensure_call(target: Any, expression: str) -> Any:
+    handle = as_handle(target)
+    _ensure_driver(handle)
+    return _call(handle, expression)
+
+
+def resolve_field(target: Any, label: str) -> dict:
+    """Resolve a form field by label-like text. Misses return ``index: None``."""
+    result = _ensure_call(target, f"window.__bmcp.resolveField({json.dumps(label)})")
+    if isinstance(result, dict):
+        return result
+    return {"index": None, "how": None}
+
+
+def set_checked(target: Any, index: int, on: bool) -> dict:
+    """Check or uncheck an indexed checkbox/radio."""
+    result = _ensure_call(
+        target, f"window.__bmcp.setChecked({json.dumps(index)}, {json.dumps(bool(on))})"
+    )
+    if isinstance(result, dict):
+        return result
+    return {"ok": True, "index": index, "checked": bool(on)}
+
+
+def find_by_text(
+    target: Any,
+    text: str,
+    *,
+    role: str | None = None,
+    exact: bool = False,
+    nth: int = 0,
+) -> dict:
+    """Find an interactive element by visible text or aria-label."""
+    opts = {"role": role, "exact": bool(exact), "nth": int(nth)}
+    result = _ensure_call(
+        target, f"window.__bmcp.findByText({json.dumps(text)}, {json.dumps(opts)})"
+    )
+    if isinstance(result, dict):
+        return result
+    return {"ok": False, "nearMisses": []}
+
+
+def find_form_submit(target: Any, index: int) -> dict:
+    """Submit control in the same form as an indexed field, if any."""
+    result = _ensure_call(target, f"window.__bmcp.findFormSubmit({json.dumps(index)})")
+    if isinstance(result, dict):
+        return result
+    return {"ok": False}
+
+
+def extract_rows(
+    target: Any,
+    selector: str,
+    fields: dict[str, str],
+    limit: int = 50,
+) -> dict:
+    """Evaluate field sub-selectors under each ``selector`` match."""
+    lim = max(1, int(limit))
+    result = _ensure_call(
+        target,
+        f"window.__bmcp.extract({json.dumps(selector)}, {json.dumps(fields)}, {json.dumps(lim)})",
+    )
+    if isinstance(result, dict):
+        result.setdefault("rows", [])
+        result.setdefault("truncated", False)
+        return result
+    return {"rows": [], "truncated": False}
