@@ -75,12 +75,13 @@ from .events import (
 from .history_compaction import (
     HISTORY_LOAD_MAX,
     _await_history_write,
+    _intent_facts_from_ctx,
     _summarization_model_id,
     _summarization_viable,
     _summarize_history,
     protect_recent_count,
 )
-from .input_admission import InputAdmission, preview_text
+from .input_admission import InputAdmission, SteerItem, preview_text
 from .loop_hooks import (
     _HOOK_READ_TIMEOUT_S,
     _apply_before_provider_hook,
@@ -213,9 +214,10 @@ async def _drain_steers(
     if input_admission is None:
         return
     while True:
-        steered = input_admission.pop_steer()
-        if steered is None:
+        item = input_admission.pop_steer()
+        if item is None:
             break
+        steered = item.content
         await persist_message(
             history,
             Message(role="user", content=list(steered)),
@@ -225,15 +227,43 @@ async def _drain_steers(
             ingest=True,
         )
         preview = preview_text(steered)
+        _admit_steer_to_ledger(ctx, preview, item)
         logger.info(
             "steer injected %s",
             kv(
                 request_id=ctx.request_id,
                 thread_id=ctx.thread_id,
                 preview=preview[:80],
+                provenance=item.provenance,
             ),
         )
         yield UserSteered(request_id=ctx.request_id, text=preview)
+
+
+def _admit_steer_to_ledger(ctx: TurnContext, preview: str, item: SteerItem) -> None:
+    ledger = ctx.goal_ledger
+    if ledger is None or not preview:
+        return
+    from monkeybot.core.persistence.goal_ledger import Channel, Provenance
+
+    provenance = (
+        Provenance.VERIFIER_STEER
+        if item.provenance == Provenance.VERIFIER_STEER.value
+        else Provenance.HUMAN
+    )
+    try:
+        ledger.admit(
+            ctx.thread_id,
+            preview,
+            provenance=provenance,
+            channel=Channel.STEER,
+        )
+    except Exception:
+        logger.warning(
+            "goal_ledger steer tap failed %s",
+            kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+            exc_info=True,
+        )
 
 
 def _tools_schema_hash(tools: Sequence[ToolDef]) -> str:
@@ -494,6 +524,7 @@ async def _run_history_summarization(
                 provider,
                 _summarization_model_id(state.ctx),
                 window_tokens=state.ctx.context_window_tokens,
+                intent_facts=_intent_facts_from_ctx(state.ctx),
             )
         except Exception:
             logger.warning(
