@@ -175,6 +175,9 @@ AWS_PROFILE=... AWS_REGION=us-east-1 BROWSER_BACKEND=agentcore \
 | `BROWSER_MCP_PERF` | Set to `1` to record per-tool wall time, harness-call counts, and result size (off by default) |
 | `BROWSER_MCP_PERF_LOG` | JSONL sink for perf records (default: `{workspace}/browser/perf/tools.jsonl`) |
 | `BROWSER_MCP_VIEWPORT_DEFAULT` | `1` (default) makes `browser_get_elements` viewport-only; `0`/`false` restores a full-page tree |
+| `BROWSER_MCP_OBSERVE_DEFAULT` | Default post-action observation (`diff`, `full`, or `none`; default `diff`). `browser_goto` still defaults to `full`. |
+| `BROWSER_MCP_SETTLE_MS` | Max wait after an action before snapshotting (default 1500) |
+| `BROWSER_MCP_QUIET_MS` | DOM-quiet window for post-action settle (default 150) |
 | `BROWSER_MCP_FILL_MODE` | Default fill mode for `browser_input_by_index` (`auto`, `keys`, or `fast`) |
 | `BROWSER_MCP_MAX_TABS` | Cap on agent-controlled tabs (default 5) |
 
@@ -210,10 +213,10 @@ Workflow:
    [12]<input placeholder='Email' />
    [35]<button aria-label='Submit form'>Submit</button>
    ```
-2. `browser_click_by_index(35)` / `browser_input_by_index(12, "user@example.com")` / `browser_select_by_index(index, "Option text")`
-3. Indices remain valid until navigation. Call `browser_get_elements()` again after navigation. Use `browser_get_text` to read page copy (`<main>` / `<article>` / `[role=main]`, else `body`; strips nav/footer/aside/script/style) instead of `browser_js("document.body.innerText")`.
+2. `browser_click_by_index(35)` / `browser_input_by_index(12, "user@example.com")` / `browser_select_by_index(index, "Option text")` — each action waits for the DOM to settle and returns `{ok, action, page, observation}` plus the legacy top-level keys (`clicked`, `index`, `tagName`, `selected`). Default `observation` is a `diff` vs the last tree (`BROWSER_MCP_OBSERVE_DEFAULT`; pass `observe="full"` or `observe="none"`).
+3. Read the observation in the action response. Only call `browser_get_elements` again when you need a different filter, the whole tree, or after navigation if the snapshot is not enough. Use `browser_get_text` to read page copy (`<main>` / `<article>` / `[role=main]`, else `body`; strips nav/footer/aside/script/style) instead of `browser_js("document.body.innerText")`.
 
-`browser_goto(url)` navigates the current tab in place; pass `new_tab=True` to open a second tab (focused), or `tab=` to navigate a specific tab without focusing it. `browser_input_by_index` defaults to an in-page fill (`mode="auto"`) and falls back to real key events when the framework reverts the value; pass `mode="keys"` for comboboxes and fields that only listen to `keydown` (or set `BROWSER_MCP_FILL_MODE=keys`). `browser_click_by_index` still clicks when another element covers the target and includes `"warning": "target obscured by <tag>"`.
+`browser_goto(url)` navigates the current tab in place and returns a **full** observation by default (new document — no meaningful diff); pass `new_tab=True` to open a second tab (focused), or `tab=` to navigate a specific tab without focusing it. `browser_open_tab(..., focus=True)` also includes a full observation. `browser_input_by_index` defaults to an in-page fill (`mode="auto"`) and falls back to real key events when the framework reverts the value; pass `mode="keys"` for comboboxes and fields that only listen to `keydown` (or set `BROWSER_MCP_FILL_MODE=keys`). `browser_click_by_index` still clicks when another element covers the target and includes `"warning": "target obscured by <tag>"`. A huge diff (`added+removed` over 60 % of the tree) is replaced with `mode: "full"`. Pages that never go quiet hit `BROWSER_MCP_SETTLE_MS` and report `settled: false`.
 
 ### Tabs
 

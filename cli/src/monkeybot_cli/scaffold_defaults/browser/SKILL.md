@@ -16,8 +16,10 @@ They are not trusted skills and may be discarded with an ephemeral workspace.
 
 `browser_input_by_index` fills in-page by default; pass `mode="keys"` for
 comboboxes and fields that only listen to keydown. `browser_get_elements`
-is viewport-first; indices remain valid until navigation. Use
-`browser_get_text` to read page copy.
+is viewport-first; indices remain valid until navigation. Actions return
+an `observation` (diff by default) — read that instead of calling
+`get_elements` again. `browser_goto` returns a full observation.
+Use `browser_get_text` to read page copy.
 
 When the user asked to sign in on the Spaces in-app browser, call
 `browser_login` instead of typing a password. It returns `{ok, loggedIn, origin}`

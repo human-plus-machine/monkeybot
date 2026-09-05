@@ -584,6 +584,7 @@
 		const quiet = quietMs == null ? 150 : quietMs
 		const max = maxMs == null ? 1500 : maxMs
 		const start = performance.now()
+		lastMutation = start
 		const baseline = mutationCount
 		return new Promise(function (resolve) {
 			let done = false
@@ -595,7 +596,7 @@
 			function check() {
 				if (done) return
 				const now = performance.now()
-				if (mutationCount === baseline || now - lastMutation >= quiet) {
+				if (now - lastMutation >= quiet) {
 					finish(true)
 					return
 				}
@@ -605,7 +606,7 @@
 				}
 				setTimeout(check, 50)
 			}
-			setTimeout(check, 0)
+			setTimeout(check, quiet > 0 ? Math.min(quiet, 50) : 0)
 		})
 	}
 

@@ -42,7 +42,7 @@ def test_browser_click_by_index_success() -> None:
             dom_indexing, "get_rect", return_value={"x": 1, "y": 2, "tagName": "button"}
         ),
     ):
-        result = json.loads(server.browser_click_by_index(35))
+        result = json.loads(server.browser_click_by_index(35, observe="none"))
 
     assert result == {"ok": True, "clicked": {"x": 1, "y": 2, "tagName": "button"}}
     helpers.click_at_xy.assert_called_once_with(1, 2)
@@ -71,7 +71,7 @@ def test_browser_click_by_index_warns_when_obscured() -> None:
         _patch_harness(helpers),
         patch.object(dom_indexing, "get_rect", return_value=rect),
     ):
-        result = json.loads(server.browser_click_by_index(35))
+        result = json.loads(server.browser_click_by_index(35, observe="none"))
 
     assert result["ok"] is True
     assert result["clicked"] == rect
@@ -89,7 +89,7 @@ def test_browser_input_by_index_uses_fill() -> None:
             return_value={"ok": True, "tagName": "input", "mode_used": "fast"},
         ) as fill,
     ):
-        result = json.loads(server.browser_input_by_index(12, "hello@example.com"))
+        result = json.loads(server.browser_input_by_index(12, "hello@example.com", observe="none"))
 
     assert result == {
         "ok": True,
@@ -145,7 +145,7 @@ def test_browser_select_by_index_success() -> None:
         _patch_harness(helpers),
         patch.object(dom_indexing, "select_option", return_value=True),
     ):
-        result = json.loads(server.browser_select_by_index(7, "Option A"))
+        result = json.loads(server.browser_select_by_index(7, "Option A", observe="none"))
 
     assert result == {"ok": True, "index": 7, "selected": "Option A"}
 
@@ -179,7 +179,7 @@ def test_browser_goto_reuses_real_tab() -> None:
         patch.object(dom_indexing, "settle", return_value={"quiet": True, "navigated": False}),
         patch.object(dom_indexing, "_register_driver_for_new_documents"),
     ):
-        result = json.loads(server.browser_goto("https://example.test/next"))
+        result = json.loads(server.browser_goto("https://example.test/next", observe="none"))
 
     helpers.goto_url.assert_called_once_with("https://example.test/next")
     helpers.new_tab.assert_not_called()
@@ -198,7 +198,7 @@ def test_browser_goto_opens_tab_when_blank() -> None:
         patch.object(dom_indexing, "settle", return_value={"quiet": True}),
         patch.object(dom_indexing, "_register_driver_for_new_documents"),
     ):
-        server.browser_goto("https://example.test/")
+        server.browser_goto("https://example.test/", observe="none")
 
     helpers.new_tab.assert_called_once_with("https://example.test/")
     helpers.goto_url.assert_not_called()
@@ -218,7 +218,7 @@ def test_browser_goto_new_tab_flag_opens_tab() -> None:
         patch.object(dom_indexing, "settle", return_value={"quiet": True}),
         patch.object(dom_indexing, "_register_driver_for_new_documents"),
     ):
-        server.browser_goto("https://example.test/other", new_tab=True)
+        server.browser_goto("https://example.test/other", new_tab=True, observe="none")
 
     helpers.new_tab.assert_called_once_with("https://example.test/other", background=False)
     helpers.goto_url.assert_not_called()
@@ -231,7 +231,7 @@ def test_browser_switch_tab_registers_driver() -> None:
         _patch_harness(helpers),
         patch.object(dom_indexing, "_register_driver_for_new_documents") as register,
     ):
-        result = json.loads(server.browser_switch_tab("abc"))
+        result = json.loads(server.browser_switch_tab("abc", observe="none"))
 
     assert result == {"ok": True, "session_id": "sid"}
     register.assert_called_once_with(helpers)

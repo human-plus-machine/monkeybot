@@ -231,3 +231,48 @@ default and is the observation-size target.
 
 Acceptance met (≥ 70 % char cut on long_list, stable indices, `browser_get_text` on `article.html`).
 
+---
+
+## Phase 4 (2026-09-05)
+
+Playwright Chromium 151 headless (same stack as `BROWSER_MCP_INTEGRATION=1`),
+`BU_CDP_URL=http://127.0.0.1:64471`. Command:
+`BROWSER_MCP_PERF=1 BU_CDP_URL=http://127.0.0.1:64471 uv run python scripts/perf_bench.py`
+from `integrations/browser-mcp/`. Three runs per scenario; table values are medians.
+
+Actions now settle and return an observation, so wall time per tool includes the
+quiet window (~150 ms) and, for clicks, a retry until the tree changes. Tool-call
+count is the model-turn proxy.
+
+### form.html (full tree; `viewport_only=False`)
+
+| tool | median_wall_ms | harness_calls | result_chars |
+|---|---:|---:|---:|
+| browser_goto | 329.8 | 8.0 | 1395 |
+| browser_get_elements | 2.1 | 1.0 | 1035 |
+| browser_input_by_index | 160.4 | 5.0 | 471 |
+| browser_click_by_index | 163.8 | 6.0 | 664 |
+
+- tool_calls_per_scenario: **9** (was 11; dropped the post-fill and post-click `get_elements`)
+- total_scenario_ms (median of 3): **1458.8**
+
+Nickname/Submit sit below a typical viewport, so the scenario still starts with
+one full-tree `get_elements`. The last fill observation supplies Submit; the
+click observation replaces a trailing `get_elements`.
+
+### spa.html
+
+| tool | median_wall_ms | harness_calls | result_chars |
+|---|---:|---:|---:|
+| browser_goto | 324.4 | 8.0 | 554 |
+| browser_click_by_index | 469.1 | 9.0 | 740 |
+
+- tool_calls_per_scenario: **2** (was 4; −50 %)
+- total_scenario_ms (median of 3): **794.7**
+
+`goto` returns the page-1 tree; `click_by_index(Next)` retries settle until the
+300 ms SPA update lands, then returns the page-2 diff (`Page 2 done`). No
+follow-up `get_elements` or `wait_for`.
+
+Acceptance met (spa tool-calls 4 → 2, form 11 → 9).
+

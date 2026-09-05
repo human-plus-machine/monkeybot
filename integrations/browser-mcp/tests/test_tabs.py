@@ -291,8 +291,8 @@ def test_rlock_serializes_concurrent_tool_calls() -> None:
         _patch_harness(helpers),
         patch.object(dom_indexing, "get_rect", return_value={"x": 1, "y": 2}),
     ):
-        t1 = threading.Thread(target=server.browser_click_by_index, args=(1,))
-        t2 = threading.Thread(target=server.browser_click_by_index, args=(2,))
+        t1 = threading.Thread(target=lambda: server.browser_click_by_index(1, observe="none"))
+        t2 = threading.Thread(target=lambda: server.browser_click_by_index(2, observe="none"))
         t1.start()
         assert started.wait(timeout=2)
         t2.start()

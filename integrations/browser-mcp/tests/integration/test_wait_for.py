@@ -28,7 +28,10 @@ def test_wait_for_page_2_is_one_harness_call(
     json.loads(server.browser_goto(f"{base}/spa.html"))
     tree = str(json.loads(server.browser_get_elements()).get("tree") or "")
     json.loads(
-        server.browser_click_by_index(tree_index(tree, "Next", prefer_tags=("button",)))
+        server.browser_click_by_index(
+            tree_index(tree, "Next", prefer_tags=("button",)),
+            observe="none",
+        )
     )
 
     started = time.perf_counter()

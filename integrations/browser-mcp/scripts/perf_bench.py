@@ -93,21 +93,40 @@ def _new_records(path: Path, offset: int) -> tuple[list[dict[str, Any]], int]:
     return records, len(data)
 
 
+def _payload_tree(payload: dict[str, Any]) -> str:
+    if payload.get("tree"):
+        return str(payload["tree"])
+    obs = payload.get("observation") if isinstance(payload.get("observation"), dict) else {}
+    if obs.get("tree"):
+        return str(obs["tree"])
+    added = obs.get("added") if isinstance(obs, dict) else None
+    if added:
+        return "\n".join(str(line) for line in added)
+    return ""
+
+
 def _run_form(base: str) -> None:
     from browser_mcp import server
 
     server.browser_goto(f"{base}/form.html")
-    # Form fields near the bottom sit below a typical viewport; this scenario
-    # still needs the full tree to fill Nickname and click Submit.
     payload = _parse(server.browser_get_elements(viewport_only=False))
     tree = str(payload.get("tree") or "")
+    last_obs: dict[str, Any] = {}
     for label in _FORM_FIELDS:
         idx = _tree_index(tree, label, prefer_tags=("input", "textarea"))
-        server.browser_input_by_index(idx, "benchvalue")
-    # Submit starts disabled (unindexed) until Nickname is filled.
-    tree = str(_parse(server.browser_get_elements(viewport_only=False)).get("tree") or "")
-    server.browser_click_by_index(_tree_index(tree, "Submit", prefer_tags=("button",)))
-    server.browser_get_elements(viewport_only=False)
+        last_obs = _parse(server.browser_input_by_index(idx, "benchvalue"))
+    obs_tree = _payload_tree(last_obs)
+    try:
+        submit = _tree_index(obs_tree, "Submit", prefer_tags=("button",))
+    except RuntimeError:
+        submit_tree = str(
+            _parse(server.browser_get_elements(viewport_only=False, contains="Submit")).get(
+                "tree"
+            )
+            or ""
+        )
+        submit = _tree_index(submit_tree, "Submit", prefer_tags=("button",))
+    server.browser_click_by_index(submit)
 
 
 def _run_long_list(base: str) -> None:
@@ -120,11 +139,11 @@ def _run_long_list(base: str) -> None:
 def _run_spa(base: str) -> None:
     from browser_mcp import server
 
-    server.browser_goto(f"{base}/spa.html")
-    payload = _parse(server.browser_get_elements())
-    tree = str(payload.get("tree") or "")
+    goto = _parse(server.browser_goto(f"{base}/spa.html"))
+    tree = _payload_tree(goto)
+    if "Next" not in tree:
+        tree = str(_parse(server.browser_get_elements()).get("tree") or "")
     server.browser_click_by_index(_tree_index(tree, "Next", prefer_tags=("button",)))
-    server.browser_get_elements()
 
 
 def _run_spa_wait(base: str) -> None:
@@ -133,7 +152,9 @@ def _run_spa_wait(base: str) -> None:
     server.browser_goto(f"{base}/spa.html")
     payload = _parse(server.browser_get_elements())
     tree = str(payload.get("tree") or "")
-    server.browser_click_by_index(_tree_index(tree, "Next", prefer_tags=("button",)))
+    server.browser_click_by_index(
+        _tree_index(tree, "Next", prefer_tags=("button",)), observe="none"
+    )
     server.browser_wait_for("#page-2")
 
 

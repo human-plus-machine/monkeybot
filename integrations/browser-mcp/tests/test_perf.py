@@ -173,15 +173,24 @@ def test_ok_false_when_tool_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 def test_harness_calls_counted_through_wrapped_helpers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from browser_mcp import tabs
+    from browser_mcp.tabs import TabState
+
     log = tmp_path / "tools.jsonl"
     monkeypatch.setenv("BROWSER_MCP_PERF", "1")
     monkeypatch.setenv("BROWSER_MCP_PERF_LOG", str(log))
     inner = MagicMock()
     inner.page_info.return_value = {"url": "http://example.test", "title": "t"}
     wrapped = perf.wrap_helpers(inner)
+    tabs.reset_registry()
+    state = TabState(target_id="aaa", tab="t1", alias="t1")
+    tabs.registry()._tabs["aaa"] = state
+    tabs.registry()._aliases["t1"] = "aaa"
+    tabs.registry().set_focused("aaa")
     with patch.object(server, "_browser_harness", return_value=(wrapped, MagicMock())):
         server.browser_page_info()
     rec = _read_records(log)[0]
+    assert rec["tool"] == "browser_page_info"
     assert rec["harness_calls"] == 1
 
 

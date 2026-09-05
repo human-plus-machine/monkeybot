@@ -15,9 +15,9 @@ If `browser__*` tools are not in the active tool list yet, call **`enable_mcp("b
 
 Do **not** start with screenshots. Use the indexed element tree:
 
-1. `browser_get_elements()` — returns interactive elements as an indexed text tree, e.g. `[35]<button>Submit</button>`. Viewport-only by default (footer says how many are below; pass `viewport_only=false` or scroll). Filter with `kind=` (`inputs`/`buttons`/`links`) or `contains=`. `observe="diff"` returns added/removed lines vs the last tree.
-2. Act with `browser_click_by_index(index)`, `browser_input_by_index(index, text)`, or `browser_select_by_index(index, option_text)`
-3. Indices remain valid until navigation. Re-call `browser_get_elements()` after navigation. Use `browser_get_text` to read page copy instead of `browser_js("document.body.innerText")`.
+1. `browser_get_elements()` — returns interactive elements as an indexed text tree, e.g. `[35]<button>Submit</button>`. Viewport-only by default (footer says how many are below; pass `viewport_only=false` or scroll). Filter with `kind=` (`inputs`/`buttons`/`links`) or `contains=`.
+2. Act with `browser_click_by_index(index)`, `browser_input_by_index(index, text)`, or `browser_select_by_index(index, option_text)`. Each action settles and returns `observation` (a `diff` by default). Read that — do not call `get_elements` again unless you need a different filter or the whole tree. Pass `observe="none"` to skip the snapshot, `observe="full"` for the viewport tree. `browser_goto` returns a full observation by default.
+3. Indices remain valid until navigation. Re-call `browser_get_elements()` after navigation only if the action observation is not enough. Use `browser_get_text` to read page copy instead of `browser_js("document.body.innerText")`.
 
 `browser_input_by_index` fills in-page by default. If a field ignores the typed value (search-as-you-type, autocomplete comboboxes, or sites that only listen to `keydown`), pass `mode="keys"`.
 
@@ -47,10 +47,10 @@ Text-only models should never rely on screenshots for page understanding — use
 
 ## Workflow
 
-- First navigation: `browser_goto(url)` — response includes matching playbook filenames when present.
-- After navigation: `browser_wait_for` or `browser_wait_idle` as needed.
-- Clicking / typing (default): `browser_get_elements` → `browser_click_by_index` / `browser_input_by_index` / `browser_select_by_index`. Indices stay valid until navigation.
-- Reading: `browser_get_text` for body copy; `observe="diff"` on `browser_get_elements` after in-page mutations.
+- First navigation: `browser_goto(url)` — response includes a full observation plus matching playbook filenames when present.
+- After navigation: `browser_wait_for` or `browser_wait_idle` only if the observation is not enough.
+- Clicking / typing (default): `browser_get_elements` once → `browser_click_by_index` / `browser_input_by_index` / `browser_select_by_index`. Read `observation` on each action. Indices stay valid until navigation.
+- Reading: `browser_get_text` for body copy; action `observation` (diff) after in-page mutations. Call `browser_get_elements` again only for a different filter or the whole tree.
 - Clicking (fallback only): `browser_screenshot(annotate=True)` → `load_file(path)` → `browser_click_by_index`. Use `browser_click(x, y)` only when there is no useful index.
 - Ad hoc DOM extraction: `browser_js(expression)` when you need custom page text or attributes.
 - Login walls: if the user asked to sign in on the Spaces in-app browser, call `browser_login(expected_origin="https://the-site.com")` (optionally with `username`). It uses a saved password and returns `{ok, loggedIn, origin}` only — never read or type the password yourself. Always pass `expected_origin`: the login targets the tab the user has focused, which is not necessarily the tab your other `browser_*` calls address, so this is what stops a login landing on the wrong site. Check the returned `origin` before reporting success. If it returns `this password is not allowed for agent use` or `focused tab is on a different origin`, stop and ask the user. Still stop for MFA, consent, or a password the user must type themselves.

@@ -12,6 +12,7 @@ import re
 import signal
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -47,15 +48,17 @@ mcp = FastMCP(
         "Real-browser control via CDP (browser-harness). Use browser_* tools for web tasks.\n"
         "\n"
         "Default workflow — text-based, indexed DOM interaction:\n"
-        "1. browser_get_elements() to see interactive elements as an indexed text tree "
-        "(viewport by default; no image tokens, no pixel-guessing). Use kind=/contains= "
-        "to narrow, viewport_only=false or scroll when the footer says more are below, "
-        "and browser_get_text for readable page text.\n"
-        "2. browser_click_by_index(index) / browser_input_by_index(index, text) / "
-        "browser_select_by_index(index, text) to act on them. Indices remain valid "
-        "until navigation.\n"
-        "3. After navigation call browser_get_elements() again. Pass observe=\"diff\" "
-        "to see only added/removed lines when the DOM mutated in place.\n"
+        "1. browser_get_elements() once to see the indexed tree (viewport by default). "
+        "Use kind=/contains= to narrow, viewport_only=false or scroll when the footer "
+        "says more are below, and browser_get_text for readable page text.\n"
+        "2. browser_click_by_index / browser_input_by_index / browser_select_by_index "
+        "to act. Each action settles and returns observation (diff by default) — read "
+        "that instead of calling get_elements again. Indices remain valid until "
+        "navigation. Pass observe=\"none\" to skip the snapshot, observe=\"full\" for "
+        "the whole viewport tree.\n"
+        "3. Only call browser_get_elements again when you need a different filter, "
+        "the whole tree, or after navigation if the action observation is not enough. "
+        "browser_goto returns a full observation by default.\n"
         "\n"
         "browser_screenshot is a LAST-RESORT FALLBACK only — use it when "
         "browser_get_elements returns nothing useful (canvas apps, heavily shadow-DOM "
@@ -431,8 +434,18 @@ _LOAD_WAIT_JS = (
 _FILL_MODES = frozenset({"auto", "keys", "fast"})
 _ELEMENT_KINDS = frozenset({"inputs", "buttons", "links", "all"})
 _OBSERVE_MODES = frozenset({"full", "diff"})
+_ACTION_OBSERVE_MODES = frozenset({"full", "diff", "none"})
 _VIEWPORT_OFF = frozenset({"0", "false", "no", "off"})
 _VIEWPORT_ON = frozenset({"1", "true", "yes", "on"})
+_DIFF_TO_FULL_RATIO = 0.6
+_NETWORK_STARTED = "Network.requestWillBeSent"
+_NETWORK_ENDED = frozenset(
+    {
+        "Network.loadingFinished",
+        "Network.loadingFailed",
+        "Network.loadingCancelled",
+    }
+)
 
 
 def _is_blank_url(url: str) -> bool:
@@ -481,25 +494,406 @@ def _resolve_viewport_only(value: bool | None) -> bool:
 def _cache_tree(handle: tabs.TabHandle, url: str | None, lines: list[str]) -> None:
     state = handle.state
     if state is None:
+        logger.debug(
+            "cache_tree skipped: handle has no TabState (tree_n=%s url=%s)",
+            len(lines),
+            url,
+        )
         return
     state.last_tree = list(lines)
     if url:
         state.last_url = url
+    logger.debug(
+        "cache_tree target=%s tree_n=%s url=%s",
+        state.target_id,
+        len(state.last_tree),
+        state.last_url,
+    )
+
+
+def _env_ms(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return default
+
+
+def _quiet_ms() -> int:
+    return _env_ms("BROWSER_MCP_QUIET_MS", 150)
+
+
+def _settle_ms() -> int:
+    return _env_ms("BROWSER_MCP_SETTLE_MS", 1500)
+
+
+def _resolve_action_observe(value: str | None, *, default: str = "diff") -> str:
+    if value is not None and str(value).strip():
+        return str(value).strip().lower()
+    if default != "diff":
+        return default
+    env = (os.environ.get("BROWSER_MCP_OBSERVE_DEFAULT") or "diff").strip().lower()
+    return env if env in _ACTION_OBSERVE_MODES else "diff"
+
+
+def _observe_error(value: object, allowed: frozenset[str]) -> str:
+    names = ", ".join(sorted(allowed))
+    return _json_text(
+        {"ok": False, "error": f"unknown observe {value!r}; expected {names}"}
+    )
+
+
+def _remaining_ms(started: float, budget_ms: int) -> int:
+    used = int((time.monotonic() - started) * 1000)
+    return max(0, budget_ms - used)
+
+
+def _network_in_flight(helpers: Any, in_flight: set[str]) -> bool:
+    drain = getattr(helpers, "drain_events", None)
+    if not callable(drain):
+        return bool(in_flight)
+    try:
+        events = drain()
+    except Exception:
+        return bool(in_flight)
+    if not isinstance(events, (list, tuple)):
+        return bool(in_flight)
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        method = str(event.get("method") or "")
+        params = event.get("params") if isinstance(event.get("params"), dict) else {}
+        req_id = params.get("requestId")
+        if not req_id:
+            continue
+        key = str(req_id)
+        if method == _NETWORK_STARTED:
+            in_flight.add(key)
+        elif method in _NETWORK_ENDED:
+            in_flight.discard(key)
+    return bool(in_flight)
+
+
+def _wait_while_network_busy(
+    handle: tabs.TabHandle, *, remaining_ms: int, quiet_ms: int
+) -> dict[str, Any]:
+    helpers = handle.helpers
+    in_flight: set[str] = set()
+    if _network_in_flight(helpers, in_flight):
+        extra = {"quiet": True, "navigated": False}
+        deadline = time.monotonic() + remaining_ms / 1000.0
+        while in_flight and time.monotonic() < deadline:
+            left = max(0, int((deadline - time.monotonic()) * 1000))
+            chunk = min(max(quiet_ms, 50), left) if left else 0
+            if chunk <= 0:
+                break
+            extra = dom_indexing.settle(handle, quiet_ms=min(50, chunk), max_ms=chunk)
+            if extra.get("navigated"):
+                return extra
+            _network_in_flight(helpers, in_flight)
+        return extra
+    drain = getattr(helpers, "drain_events", None)
+    wait_idle = getattr(helpers, "wait_for_network_idle", None)
+    if callable(drain) or not callable(wait_idle) or remaining_ms <= 0:
+        return {"quiet": True, "navigated": False}
+    try:
+        wait_idle(timeout=remaining_ms / 1000.0, idle_ms=float(max(quiet_ms, 1)))
+    except TypeError:
+        wait_idle(timeout=remaining_ms / 1000.0)
+    except Exception:
+        pass
+    return {"quiet": True, "navigated": False}
+
+
+def _handle_navigated(handle: tabs.TabHandle) -> None:
+    with contextlib.suppress(Exception):
+        handle.evaluate(_LOAD_WAIT_JS)
+    dom_indexing._register_driver_for_new_documents(handle)
+
+
+def _settle_post_action(
+    handle: tabs.TabHandle, *, quiet_ms: int, max_ms: int
+) -> dict[str, Any]:
+    started = time.monotonic()
+    settled = dom_indexing.settle(handle, quiet_ms=quiet_ms, max_ms=max_ms)
+    logger.debug(
+        "observe settle js quiet_ms=%s max_ms=%s elapsed_ms=%.0f result=%s",
+        quiet_ms,
+        max_ms,
+        (time.monotonic() - started) * 1000,
+        settled,
+    )
+    if settled.get("navigated"):
+        _handle_navigated(handle)
+        return {"quiet": True, "navigated": True, "mutations": settled.get("mutations", 0)}
+    leftover = _remaining_ms(started, max_ms)
+    net = _wait_while_network_busy(handle, remaining_ms=leftover, quiet_ms=quiet_ms)
+    logger.debug("observe network leftover_ms=%s result=%s", leftover, net)
+    if net.get("navigated"):
+        _handle_navigated(handle)
+        return {"quiet": True, "navigated": True, "mutations": settled.get("mutations", 0)}
+    if not net.get("quiet", True):
+        settled = {**settled, "quiet": False}
+    return settled
+
+
+def _url_without_fragment(url: str) -> str:
+    return (url or "").split("#", 1)[0]
+
+
+def _snapshot_tree(
+    handle: tabs.TabHandle,
+    observe: str,
+    *,
+    viewport_only: bool | None = None,
+    kind: str | None = None,
+    contains: str | None = None,
+    max_elements: int = 150,
+) -> dict[str, Any]:
+    viewport = _resolve_viewport_only(viewport_only)
+    result = dom_indexing.get_elements(
+        handle,
+        viewport,
+        kind=kind,
+        contains=contains,
+        max_elements=max_elements,
+    )
+    if result.get("error"):
+        return {"error": result["error"], "observation": {"mode": "full", "tree": ""}, "_lines": []}
+    raw_tree = str(result.get("tree") or "")
+    lines = dom_indexing.tree_lines(raw_tree)
+    truncated = bool(result.get("truncated"))
+    below_viewport = int(result.get("below_viewport") or 0)
+    omitted = int(result.get("omitted") or 0)
+    url = str(result.get("url") or "")
+    title = str(result.get("title") or "")
+    element_count = int(result.get("elementCount") or 0)
+    searching = bool(contains and str(contains).strip())
+    tree = dom_indexing.attach_tree_footers(
+        raw_tree,
+        viewport_only=viewport and not searching,
+        below_viewport=below_viewport,
+        truncated=truncated,
+        omitted=omitted,
+    )
+    navigated = bool(
+        handle.state
+        and handle.state.last_url
+        and url
+        and _url_without_fragment(handle.state.last_url) != _url_without_fragment(url)
+    )
+    previous = handle.state.last_tree if handle.state is not None else None
+    full_obs: dict[str, Any] = {
+        "mode": "full",
+        "url": url,
+        "title": title,
+        "elementCount": element_count,
+        "tree": tree,
+        "truncated": truncated,
+        "below_viewport": below_viewport,
+    }
+    use_diff = observe == "diff" and previous is not None and not navigated
+    if use_diff:
+        diff = dom_indexing.diff_tree_lines(previous, lines)
+        added = list(diff["added"])
+        removed = list(diff["removed"])
+        oversized = (
+            len(lines) >= 8
+            and len(added) + len(removed) > _DIFF_TO_FULL_RATIO * len(lines)
+        )
+        if not oversized:
+            _cache_tree(handle, url, lines)
+            return {
+                "url": url,
+                "title": title,
+                "navigated": navigated,
+                "observation": {
+                    "mode": "diff",
+                    "added": added,
+                    "removed": removed,
+                    "unchanged": diff["unchanged"],
+                    "elementCount": element_count,
+                    "url": url,
+                    "title": title,
+                    "truncated": truncated,
+                    "below_viewport": below_viewport,
+                },
+                "_lines": lines,
+            }
+    _cache_tree(handle, url, lines)
+    full_obs["mode"] = "full"
+    return {
+        "url": url,
+        "title": title,
+        "navigated": navigated,
+        "observation": full_obs,
+        "_lines": lines,
+    }
+
+
+def _observe_after(
+    handle: tabs.TabHandle,
+    observe: str,
+    action: dict[str, Any],
+    *,
+    before_url: str,
+    retry_until_change: bool = False,
+) -> dict[str, Any] | None:
+    if observe == "none":
+        return None
+    quiet = _quiet_ms()
+    budget = _settle_ms()
+    started = time.monotonic()
+    before_lines = (
+        list(handle.state.last_tree) if handle.state and handle.state.last_tree else None
+    )
+    logger.debug(
+        "observe_after start action=%s observe=%s retry=%s quiet_ms=%s settle_ms=%s "
+        "before_url=%s last_tree_n=%s last_url=%s",
+        action.get("type"),
+        observe,
+        retry_until_change,
+        quiet,
+        budget,
+        before_url,
+        None if before_lines is None else len(before_lines),
+        handle.state.last_url if handle.state else None,
+    )
+    if retry_until_change and before_lines is None:
+        logger.debug(
+            "observe_after retry skipped: no last_tree (state=%s)",
+            None if handle.state is None else handle.state.target_id,
+        )
+    settled = _settle_post_action(handle, quiet_ms=quiet, max_ms=budget)
+    snap = _snapshot_tree(handle, observe)
+    navigated = bool(settled.get("navigated")) or bool(snap.get("navigated"))
+    logger.debug(
+        "observe_after first snap elapsed_ms=%.0f settled=%s snap_nav=%s mode=%s "
+        "url=%s lines=%s changed=%s tree=%r",
+        (time.monotonic() - started) * 1000,
+        settled,
+        snap.get("navigated"),
+        (snap.get("observation") or {}).get("mode"),
+        snap.get("url"),
+        len(snap.get("_lines") or []),
+        None if before_lines is None else list(snap.get("_lines") or []) != before_lines,
+        "\n".join(snap.get("_lines") or [])[:500],
+    )
+    retries = 0
+    if retry_until_change and before_lines is not None and not navigated:
+        while _remaining_ms(started, budget) > 0:
+            if list(snap.get("_lines") or []) != before_lines:
+                logger.debug(
+                    "observe_after retry stop: tree changed after %s extra settles",
+                    retries,
+                )
+                break
+            left = _remaining_ms(started, budget)
+            logger.debug("observe_after retry n=%s left_ms=%s", retries, left)
+            tick = time.monotonic()
+            extra = _settle_post_action(
+                handle, quiet_ms=min(quiet, left) if quiet else left, max_ms=left
+            )
+            if (time.monotonic() - tick) * 1000 < 20 and left > 0:
+                time.sleep(min(max(quiet, 1), left) / 1000.0)
+            retries += 1
+            if extra.get("navigated"):
+                settled = extra
+                navigated = True
+                snap = _snapshot_tree(handle, observe)
+                logger.debug(
+                    "observe_after retry navigated extra=%s url=%s",
+                    extra,
+                    snap.get("url"),
+                )
+                break
+            snap = _snapshot_tree(handle, observe)
+            logger.debug(
+                "observe_after retry snap n=%s nav=%s mode=%s url=%s changed=%s tree=%r",
+                retries,
+                snap.get("navigated"),
+                (snap.get("observation") or {}).get("mode"),
+                snap.get("url"),
+                list(snap.get("_lines") or []) != before_lines,
+                "\n".join(snap.get("_lines") or [])[:500],
+            )
+            if snap.get("navigated"):
+                navigated = True
+                break
+            settled = extra
+    if before_url and snap.get("url"):
+        if _url_without_fragment(before_url) != _url_without_fragment(str(snap["url"])):
+            navigated = True
+            logger.debug(
+                "observe_after url changed before=%s after=%s", before_url, snap.get("url")
+            )
+    observation = dict(snap.get("observation") or {"mode": "full", "tree": ""})
+    quiet_flag = bool(settled.get("quiet", True))
+    if not quiet_flag:
+        observation["settled"] = False
+    logger.debug(
+        "observe_after done elapsed_ms=%.0f retries=%s navigated=%s settled=%s mode=%s",
+        (time.monotonic() - started) * 1000,
+        retries,
+        navigated,
+        quiet_flag,
+        observation.get("mode"),
+    )
+    return {
+        "action": action,
+        "page": {
+            "url": str(snap.get("url") or ""),
+            "title": str(snap.get("title") or ""),
+            "navigated": navigated,
+            "settled": quiet_flag,
+        },
+        "observation": observation,
+    }
+
+
+def _with_observation(
+    payload: dict[str, Any], wrapped: dict[str, Any] | None
+) -> dict[str, Any]:
+    if wrapped is None:
+        return payload
+    return {**payload, **wrapped}
 
 
 def _unknown_tab_result(exc: tabs.UnknownTabError) -> str:
     return _json_text({"ok": False, "error": str(exc)})
 
 
+def _focused_handle(helpers: Any) -> tabs.TabHandle:
+    """Resolve the focused tab, refreshing the registry when it has no focus yet."""
+    reg = tabs.registry()
+    focused = reg.focused()
+    refreshed = False
+    if focused is None:
+        logger.debug("focused_handle: registry has no focus; refreshing")
+        reg.refresh(helpers)
+        focused = reg.focused()
+        refreshed = True
+    if focused is not None:
+        logger.debug(
+            "focused_handle target=%s last_tree_n=%s last_url=%s refreshed=%s",
+            focused.target_id,
+            None if focused.last_tree is None else len(focused.last_tree),
+            focused.last_url,
+            refreshed,
+        )
+        reg.mark_used(focused)
+        return reg.focused_handle(helpers, focused)
+    logger.debug("focused_handle: still no TabState after refresh=%s", refreshed)
+    return tabs.TabHandle(helpers, None, focused=True)
+
+
 def _for_read(helpers: Any, tab: str | None) -> tabs.TabHandle:
     """Resolve a tab for a read. Never calls switch_tab."""
-    reg = tabs.registry()
     if tab is None:
-        focused = reg.focused()
-        if focused is not None:
-            reg.mark_used(focused)
-            return reg.focused_handle(helpers, focused)
-        return tabs.TabHandle(helpers, None, focused=True)
+        return _focused_handle(helpers)
+    reg = tabs.registry()
     reg.refresh(helpers)
     state = reg.resolve(tab)
     focused = state.target_id == reg.focused_id
@@ -510,13 +904,9 @@ def _for_read(helpers: Any, tab: str | None) -> tabs.TabHandle:
 
 def _for_action(helpers: Any, tab: str | None) -> tabs.TabHandle:
     """Resolve a tab for an action. Focuses it first when it is not already focused."""
-    reg = tabs.registry()
     if tab is None:
-        focused = reg.focused()
-        if focused is not None:
-            reg.mark_used(focused)
-            return reg.focused_handle(helpers, focused)
-        return tabs.TabHandle(helpers, None, focused=True)
+        return _focused_handle(helpers)
+    reg = tabs.registry()
     reg.refresh(helpers)
     state = reg.resolve(tab)
     sid = None
@@ -625,16 +1015,31 @@ def _close_agent_opened_tabs(helpers: Any) -> None:
         reg.refresh(helpers)
 
 
+def _goto_observation(
+    handle: tabs.TabHandle, url: str, observe: str, payload: dict[str, Any]
+) -> str:
+    wrapped = _observe_after(
+        handle, observe, {"type": "goto", "url": url}, before_url="", retry_until_change=False
+    )
+    return _json_text(_with_observation(payload, wrapped))
+
+
 @mcp.tool()
 @_public_tool
-def browser_goto(url: str, new_tab: bool = False, tab: str | None = None) -> str:
+def browser_goto(
+    url: str, new_tab: bool = False, observe: str | None = None, tab: str | None = None
+) -> str:
     """Navigate to a URL in the current tab (or a new tab if new_tab=True / current is blank).
 
     Pass tab= to navigate a specific tab in place without focusing it. new_tab=True
     opens a new tab and focuses it (same as browser_open_tab with focus=True).
 
-    Returns page info and matching playbook filenames.
+    Returns page info, matching playbook filenames, and a full observation by default
+    (observe=\"diff\" / \"none\" to change that).
     """
+    mode = _resolve_action_observe(observe, default="full")
+    if mode not in _ACTION_OBSERVE_MODES:
+        return _observe_error(observe if observe is not None else mode, _ACTION_OBSERVE_MODES)
     helpers, _ = _browser_harness()
     if new_tab:
         opened = _open_tab(helpers, url, alias=None, focus=True)
@@ -647,7 +1052,8 @@ def browser_goto(url: str, new_tab: bool = False, tab: str | None = None) -> str
             "alias": opened.get("alias"),
         }
         names = playbooks.list_playbook_names(url)
-        return _json_text({**info, "playbooks": names})
+        handle = _for_action(helpers, opened.get("tab"))
+        return _goto_observation(handle, url, mode, {**info, "playbooks": names})
     if tab is not None:
         try:
             handle = _for_read(helpers, tab)
@@ -659,7 +1065,7 @@ def browser_goto(url: str, new_tab: bool = False, tab: str | None = None) -> str
         dom_indexing.settle(handle)
         info = handle.page_info()
         names = playbooks.list_playbook_names(url)
-        return _json_text({**info, "playbooks": names})
+        return _goto_observation(handle, url, mode, {**info, "playbooks": names})
     if not _can_goto_in_place(helpers):
         helpers.new_tab(url)
         dom_indexing.mark_driver_stale()
@@ -668,9 +1074,10 @@ def browser_goto(url: str, new_tab: bool = False, tab: str | None = None) -> str
     helpers.js(_LOAD_WAIT_JS)
     dom_indexing._register_driver_for_new_documents(helpers)
     dom_indexing.settle(helpers)
-    info = helpers.page_info()
+    handle = _for_action(helpers, None)
+    info = handle.page_info()
     names = playbooks.list_playbook_names(url)
-    return _json_text({**info, "playbooks": names})
+    return _goto_observation(handle, url, mode, {**info, "playbooks": names})
 
 
 @mcp.tool()
@@ -716,9 +1123,7 @@ def browser_get_elements(
             kind_norm = None
     observe_norm = (observe or "full").strip().lower()
     if observe_norm not in _OBSERVE_MODES:
-        return _json_text(
-            {"ok": False, "error": f"unknown observe {observe!r}; expected full or diff"}
-        )
+        return _observe_error(observe, _OBSERVE_MODES)
     try:
         cap = max(1, int(max_elements))
     except (TypeError, ValueError):
@@ -729,63 +1134,19 @@ def browser_get_elements(
         handle = _for_read(helpers, tab)
     except tabs.UnknownTabError as exc:
         return _unknown_tab_result(exc)
-    result = dom_indexing.get_elements(
+    snap = _snapshot_tree(
         handle,
-        viewport,
+        observe_norm,
+        viewport_only=viewport,
         kind=kind_norm,
         contains=contains,
         max_elements=cap,
     )
-    if result.get("error"):
-        return _json_text({"ok": False, **result})
-    raw_tree = str(result.get("tree") or "")
-    lines = dom_indexing.tree_lines(raw_tree)
-    truncated = bool(result.get("truncated"))
-    below_viewport = int(result.get("below_viewport") or 0)
-    omitted = int(result.get("omitted") or 0)
-    url = str(result.get("url") or "")
-    title = str(result.get("title") or "")
-    element_count = int(result.get("elementCount") or 0)
-    searching = bool(contains and str(contains).strip())
-    tree = dom_indexing.attach_tree_footers(
-        raw_tree,
-        viewport_only=viewport and not searching,
-        below_viewport=below_viewport,
-        truncated=truncated,
-        omitted=omitted,
-    )
-    navigated = bool(handle.state and handle.state.last_url and url and handle.state.last_url != url)
-    use_diff = observe_norm == "diff"
-    previous = handle.state.last_tree if handle.state is not None else None
-    if use_diff and previous is not None and not navigated:
-        diff = dom_indexing.diff_tree_lines(previous, lines)
-        _cache_tree(handle, url, lines)
-        return _json_text(
-            {
-                "ok": True,
-                "mode": "diff",
-                "added": diff["added"],
-                "removed": diff["removed"],
-                "unchanged": diff["unchanged"],
-                "elementCount": element_count,
-                "url": url,
-                "title": title,
-                "truncated": truncated,
-                "below_viewport": below_viewport,
-            }
-        )
-    _cache_tree(handle, url, lines)
-    payload: dict[str, Any] = {
-        "ok": True,
-        "url": url,
-        "title": title,
-        "elementCount": element_count,
-        "tree": tree,
-        "truncated": truncated,
-        "below_viewport": below_viewport,
-    }
-    if use_diff:
-        payload["mode"] = "full"
+    if snap.get("error"):
+        return _json_text({"ok": False, "error": snap["error"]})
+    payload = {"ok": True, **snap["observation"]}
+    if observe_norm != "diff":
+        payload.pop("mode", None)
     return _json_text(payload)
 
 
@@ -829,9 +1190,17 @@ def browser_get_text(
 
 @mcp.tool()
 @_public_tool
-def browser_click_by_index(index: int, tab: str | None = None) -> str:
+def browser_click_by_index(
+    index: int, observe: str | None = None, tab: str | None = None
+) -> str:
     """Click an interactive element by index from browser_get_elements. Prefer this over
-    browser_click(x, y) — no pixel-guessing, resilient to layout shifts."""
+    browser_click(x, y) — no pixel-guessing, resilient to layout shifts.
+
+    Default observe=\"diff\" returns the settled page snapshot in the response.
+    """
+    mode = _resolve_action_observe(observe)
+    if mode not in _ACTION_OBSERVE_MODES:
+        return _observe_error(observe if observe is not None else mode, _ACTION_OBSERVE_MODES)
     helpers, _ = _browser_harness()
     try:
         handle = _for_action(helpers, tab)
@@ -841,18 +1210,30 @@ def browser_click_by_index(index: int, tab: str | None = None) -> str:
         rect = dom_indexing.get_rect(handle, index)
     except dom_indexing.ElementNotFoundError as exc:
         return _json_text({"ok": False, "error": str(exc)})
+    before_url = str(handle.page_info().get("url") or "")
     helpers.click_at_xy(rect["x"], rect["y"])
     payload: dict[str, Any] = {"ok": True, "clicked": rect}
     obscured = rect.get("obscuredBy")
     if obscured:
         payload["warning"] = f"target obscured by {obscured}"
-    return _json_text(payload)
+    action: dict[str, Any] = {"type": "click", "index": index, "clicked": rect}
+    if obscured:
+        action["warning"] = payload["warning"]
+    wrapped = _observe_after(
+        handle, mode, action, before_url=before_url, retry_until_change=True
+    )
+    return _json_text(_with_observation(payload, wrapped))
 
 
 @mcp.tool()
 @_public_tool
 def browser_input_by_index(
-    index: int, text: str, clear_first: bool = True, mode: str = "auto", tab: str | None = None
+    index: int,
+    text: str,
+    clear_first: bool = True,
+    mode: str = "auto",
+    observe: str | None = None,
+    tab: str | None = None,
 ) -> str:
     """Click and type text into an indexed input/textarea/contenteditable element from
     browser_get_elements. Prefer this over screenshot + coordinate typing.
@@ -860,8 +1241,13 @@ def browser_input_by_index(
     mode: ``auto`` (default) tries an in-page value set and falls back to real key
     events; ``keys`` always types; ``fast`` never falls back. Pass ``keys`` for
     comboboxes and fields that only listen to keydown. Override the default with
-    BROWSER_MCP_FILL_MODE.
+    BROWSER_MCP_FILL_MODE. Default observe=\"diff\" returns the settled snapshot.
     """
+    observe_mode = _resolve_action_observe(observe)
+    if observe_mode not in _ACTION_OBSERVE_MODES:
+        return _observe_error(
+            observe if observe is not None else observe_mode, _ACTION_OBSERVE_MODES
+        )
     helpers, _ = _browser_harness()
     try:
         handle = _for_action(helpers, tab)
@@ -873,21 +1259,36 @@ def browser_input_by_index(
         )
     except dom_indexing.ElementNotFoundError as exc:
         return _json_text({"ok": False, "error": str(exc)})
-    return _json_text(
+    payload = {
+        "ok": True,
+        "index": index,
+        "tagName": result.get("tagName"),
+        "mode_used": result.get("mode_used"),
+    }
+    wrapped = _observe_after(
+        handle,
+        observe_mode,
         {
-            "ok": True,
+            "type": "input",
             "index": index,
             "tagName": result.get("tagName"),
             "mode_used": result.get("mode_used"),
-        }
+        },
+        before_url=str(handle.page_info().get("url") or ""),
     )
+    return _json_text(_with_observation(payload, wrapped))
 
 
 @mcp.tool()
 @_public_tool
-def browser_select_by_index(index: int, text: str, tab: str | None = None) -> str:
+def browser_select_by_index(
+    index: int, text: str, observe: str | None = None, tab: str | None = None
+) -> str:
     """Select a <select> dropdown option by visible text, using the index from
     browser_get_elements."""
+    mode = _resolve_action_observe(observe)
+    if mode not in _ACTION_OBSERVE_MODES:
+        return _observe_error(observe if observe is not None else mode, _ACTION_OBSERVE_MODES)
     helpers, _ = _browser_harness()
     try:
         handle = _for_action(helpers, tab)
@@ -897,7 +1298,14 @@ def browser_select_by_index(index: int, text: str, tab: str | None = None) -> st
         dom_indexing.select_option(handle, index, text)
     except dom_indexing.ElementNotFoundError as exc:
         return _json_text({"ok": False, "error": str(exc)})
-    return _json_text({"ok": True, "index": index, "selected": text})
+    payload = {"ok": True, "index": index, "selected": text}
+    wrapped = _observe_after(
+        handle,
+        mode,
+        {"type": "select", "index": index, "selected": text},
+        before_url=str(handle.page_info().get("url") or ""),
+    )
+    return _json_text(_with_observation(payload, wrapped))
 
 
 @mcp.tool()
@@ -1014,7 +1422,12 @@ def browser_screenshot(
 @mcp.tool()
 @_public_tool
 def browser_click(
-    x: float, y: float, button: str = "left", clicks: int = 1, tab: str | None = None
+    x: float,
+    y: float,
+    button: str = "left",
+    clicks: int = 1,
+    observe: str | None = None,
+    tab: str | None = None,
 ) -> str:
     """Click at viewport coordinates (x, y).
 
@@ -1023,13 +1436,24 @@ def browser_click(
     represent (canvas, shadow DOM, drag targets) or after visually confirming a spot via
     browser_screenshot.
     """
+    mode = _resolve_action_observe(observe)
+    if mode not in _ACTION_OBSERVE_MODES:
+        return _observe_error(observe if observe is not None else mode, _ACTION_OBSERVE_MODES)
     helpers, _ = _browser_harness()
     try:
-        _for_action(helpers, tab)
+        handle = _for_action(helpers, tab)
     except tabs.UnknownTabError as exc:
         return _unknown_tab_result(exc)
+    before_url = str(handle.page_info().get("url") or "")
     helpers.click_at_xy(x, y, button=button, clicks=clicks)
-    return _json_text({"ok": True})
+    wrapped = _observe_after(
+        handle,
+        mode,
+        {"type": "click", "x": x, "y": y, "button": button, "clicks": clicks},
+        before_url=before_url,
+        retry_until_change=True,
+    )
+    return _json_text(_with_observation({"ok": True}, wrapped))
 
 
 @mcp.tool()
@@ -1039,44 +1463,81 @@ def browser_fill(
     text: str,
     clear_first: bool = True,
     timeout: float = 0.0,
+    observe: str | None = None,
     tab: str | None = None,
 ) -> str:
     """Fill a form input (works with React/Vue controlled inputs)."""
+    mode = _resolve_action_observe(observe)
+    if mode not in _ACTION_OBSERVE_MODES:
+        return _observe_error(observe if observe is not None else mode, _ACTION_OBSERVE_MODES)
     helpers, _ = _browser_harness()
     try:
-        _for_action(helpers, tab)
+        handle = _for_action(helpers, tab)
     except tabs.UnknownTabError as exc:
         return _unknown_tab_result(exc)
     helpers.fill_input(selector, text, clear_first=clear_first, timeout=timeout)
-    return _json_text({"ok": True})
+    wrapped = _observe_after(
+        handle,
+        mode,
+        {"type": "fill", "selector": selector},
+        before_url=str(handle.page_info().get("url") or ""),
+    )
+    return _json_text(_with_observation({"ok": True}, wrapped))
 
 
 @mcp.tool()
 @_public_tool
-def browser_press_key(key: str, modifiers: int = 0, tab: str | None = None) -> str:
+def browser_press_key(
+    key: str, modifiers: int = 0, observe: str | None = None, tab: str | None = None
+) -> str:
     """Press a key. Modifiers bitfield: 1=Alt, 2=Ctrl, 4=Meta(Cmd), 8=Shift."""
+    mode = _resolve_action_observe(observe)
+    if mode not in _ACTION_OBSERVE_MODES:
+        return _observe_error(observe if observe is not None else mode, _ACTION_OBSERVE_MODES)
     helpers, _ = _browser_harness()
     try:
-        _for_action(helpers, tab)
+        handle = _for_action(helpers, tab)
     except tabs.UnknownTabError as exc:
         return _unknown_tab_result(exc)
     helpers.press_key(key, modifiers=modifiers)
-    return _json_text({"ok": True})
+    wrapped = _observe_after(
+        handle,
+        mode,
+        {"type": "press", "key": key, "modifiers": modifiers},
+        before_url=str(handle.page_info().get("url") or ""),
+        retry_until_change=True,
+    )
+    return _json_text(_with_observation({"ok": True}, wrapped))
 
 
 @mcp.tool()
 @_public_tool
 def browser_scroll(
-    x: float, y: float, dy: float = -300, dx: float = 0, tab: str | None = None
+    x: float,
+    y: float,
+    dy: float = -300,
+    dx: float = 0,
+    observe: str | None = None,
+    tab: str | None = None,
 ) -> str:
     """Scroll the page at viewport position (x, y)."""
+    mode = _resolve_action_observe(observe)
+    if mode not in _ACTION_OBSERVE_MODES:
+        return _observe_error(observe if observe is not None else mode, _ACTION_OBSERVE_MODES)
     helpers, _ = _browser_harness()
     try:
-        _for_action(helpers, tab)
+        handle = _for_action(helpers, tab)
     except tabs.UnknownTabError as exc:
         return _unknown_tab_result(exc)
     helpers.scroll(x, y, dy=dy, dx=dx)
-    return _json_text({"ok": True})
+    wrapped = _observe_after(
+        handle,
+        mode,
+        {"type": "scroll", "x": x, "y": y, "dy": dy, "dx": dx},
+        before_url=str(handle.page_info().get("url") or ""),
+        retry_until_change=True,
+    )
+    return _json_text(_with_observation({"ok": True}, wrapped))
 
 
 @mcp.tool()
@@ -1188,8 +1649,11 @@ def browser_tabs() -> str:
 
 @mcp.tool()
 @_public_tool
-def browser_switch_tab(target_id: str) -> str:
+def browser_switch_tab(target_id: str, observe: str | None = None) -> str:
     """Switch to a tab by alias or target_id (from browser_tabs)."""
+    mode = _resolve_action_observe(observe)
+    if mode not in _ACTION_OBSERVE_MODES:
+        return _observe_error(observe if observe is not None else mode, _ACTION_OBSERVE_MODES)
     helpers, _ = _browser_harness()
     try:
         handle = _for_action(helpers, target_id)
@@ -1197,27 +1661,63 @@ def browser_switch_tab(target_id: str) -> str:
         sid = helpers.switch_tab(target_id)
         dom_indexing.mark_driver_stale()
         dom_indexing._register_driver_for_new_documents(helpers)
-        return _json_text({"ok": True, "session_id": sid})
+        handle = _for_action(helpers, None)
+        payload = {"ok": True, "session_id": sid}
+        wrapped = _observe_after(
+            handle,
+            mode,
+            {"type": "switch_tab", "tab": target_id},
+            before_url=str(handle.page_info().get("url") or ""),
+            retry_until_change=True,
+        )
+        return _json_text(_with_observation(payload, wrapped))
     sid = handle.switch_session_id
     if sid is None and handle.state is not None:
         sid = helpers.switch_tab(handle.state.target_id)
     dom_indexing._register_driver_for_new_documents(handle)
-    return _json_text({"ok": True, "session_id": sid})
+    payload = {"ok": True, "session_id": sid}
+    wrapped = _observe_after(
+        handle,
+        mode,
+        {"type": "switch_tab", "tab": target_id},
+        before_url=str(handle.page_info().get("url") or ""),
+        retry_until_change=True,
+    )
+    return _json_text(_with_observation(payload, wrapped))
 
 
 @mcp.tool()
 @_public_tool
-def browser_open_tab(url: str, alias: str | None = None, focus: bool = False) -> str:
+def browser_open_tab(
+    url: str,
+    alias: str | None = None,
+    focus: bool = False,
+    observe: str | None = None,
+) -> str:
     """Open a URL in a new tab. Defaults to the background (does not steal focus).
 
     alias must match [a-z][a-z0-9_-]{0,23}. At most five agent-controlled tabs;
     on the cap this returns tab_limit_reached and does not open or close anything.
+    When focus=True, returns a full observation by default.
     """
     helpers, _ = _browser_harness()
     try:
-        return _json_text(_open_tab(helpers, url, alias=alias, focus=focus))
+        opened = _open_tab(helpers, url, alias=alias, focus=focus)
     except (ValueError, tabs.UnknownTabError) as exc:
         return _json_text({"ok": False, "error": str(exc)})
+    if not opened.get("ok") or not focus:
+        return _json_text(opened)
+    mode = _resolve_action_observe(observe, default="full")
+    if mode not in _ACTION_OBSERVE_MODES:
+        return _observe_error(observe if observe is not None else mode, _ACTION_OBSERVE_MODES)
+    handle = _for_action(helpers, str(opened.get("tab") or ""))
+    wrapped = _observe_after(
+        handle,
+        mode,
+        {"type": "open_tab", "url": url, "tab": opened.get("tab")},
+        before_url="",
+    )
+    return _json_text(_with_observation(opened, wrapped))
 
 
 @mcp.tool()

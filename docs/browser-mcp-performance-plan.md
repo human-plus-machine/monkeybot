@@ -1,6 +1,6 @@
 # Browser MCP — Performance Plan
 
-**Status:** Phase 0–3, 7a, and 8 complete — 7b and later phases not implemented  
+**Status:** Phase 0–4, 7a, and 8 complete — 7b and later phases not implemented  
 **Audience:** implementer (human or model) working in `integrations/browser-mcp/`  
 **Related:** [browser-mcp.md](browser-mcp.md) · [browser-mcp-perf-baseline.md](browser-mcp-perf-baseline.md) · `integrations/browser-mcp/src/browser_mcp/` · `examples/skills/browser/SKILL.md` · upstream [browser-use/browser-harness](https://github.com/browser-use/browser-harness) (pinned `browser-harness==0.1.5` in `.venv`)  
 **Baseline:** Phase 0 numbers in [browser-mcp-perf-baseline.md](browser-mcp-perf-baseline.md), `monkeybot-browser-mcp` 0.5.0  
@@ -204,7 +204,9 @@ Three layers, in decreasing cost:
 
 ---
 
-### Phase 4 — Act then observe
+### Phase 4 — Act then observe — **completed**
+
+**Status.** Done. Actions return a settled observation (diff by default). Acceptance: [Phase 4 numbers](browser-mcp-perf-baseline.md).
 
 **Goal.** Halve model turns: every action returns the resulting observation.
 
