@@ -109,9 +109,14 @@ def _run_form(base: str) -> None:
     from browser_mcp import server
 
     server.browser_goto(f"{base}/form.html")
-    server.browser_fill_form(
-        {label: "benchvalue" for label in _FORM_FIELDS},
-        submit=True,
+    server.browser_act(
+        [
+            {
+                "do": "fill_form",
+                "fields": {label: "benchvalue" for label in _FORM_FIELDS},
+                "submit": True,
+            }
+        ]
     )
 
 

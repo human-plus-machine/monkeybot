@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from datetime import UTC, datetime
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from PIL import Image, ImageDraw, ImageFont
+
+logger = logging.getLogger(__name__)
 
 _SCREENSHOTS_REL = Path("browser") / "Screenshots"
 _EXT_BY_FORMAT = {"jpeg": ".jpg", "jpg": ".jpg", "png": ".png"}
@@ -146,3 +149,55 @@ def encode_screenshot(
         raise
     finally:
         img.close()
+
+
+def _annotate_image(handle: Any, native: Path, *, full: bool) -> tuple[Image.Image | None, int]:
+    from browser_mcp import dom_indexing
+
+    map_len = 0
+    try:
+        raw = handle.evaluate("Object.keys(window.__bmcpSelectorMap || {}).length")
+        map_len = int(raw or 0)
+    except (TypeError, ValueError):
+        map_len = 0
+    except Exception:
+        logger.debug("selector-map probe failed", exc_info=True)
+        map_len = 0
+    if not map_len:
+        dom_indexing.get_elements(handle, viewport_only=not full)
+    payload = dom_indexing.get_rects(handle, scroll=False, full=full)
+    with Image.open(native) as captured:
+        return draw_index_labels(
+            captured,
+            payload.get("rects") or {},
+            css_width=float(payload.get("cssWidth") or 0),
+            css_height=float(payload.get("cssHeight") or 0),
+        )
+
+
+def save_capture(
+    handle: Any,
+    dest: Path,
+    *,
+    full: bool,
+    annotate: bool,
+    fmt: str,
+    quality: int,
+    max_dim: int | None,
+) -> int:
+    """Capture, optionally annotate, encode to ``dest``. Returns labeled count."""
+    native = dest.with_name(f"{dest.stem}-native.png")
+    annotated_img = None
+    labeled = 0
+    try:
+        handle.capture_screenshot(path=str(native), full=full, max_dim=None)
+        if annotate:
+            annotated_img, labeled = _annotate_image(handle, native, full=full)
+        encode_screenshot(
+            native, dest, fmt=fmt, quality=quality, max_dim=max_dim, image=annotated_img
+        )
+    finally:
+        native.unlink(missing_ok=True)
+        if annotated_img is not None:
+            annotated_img.close()
+    return labeled

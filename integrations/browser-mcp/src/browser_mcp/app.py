@@ -23,9 +23,9 @@ mcp = FastMCP(
         "\n"
         "Default workflow — text-based, indexed DOM interaction:\n"
         "1. Prefer intent tools when you already know the labels or the multi-step "
-        "flow: browser_fill_form for forms, browser_click_text when the visible label "
-        "is known, browser_act for a batch of clicks/inputs/waits (cap 25 steps), "
-        "browser_extract for structured scraping instead of browser_js.\n"
+        "flow: browser_click_text when the visible label is known, browser_act for a "
+        "batch of clicks/inputs/waits/fill_form (cap 25 steps), browser_extract for "
+        "structured scraping instead of browser_js.\n"
         "2. Otherwise browser_get_elements() once to see the indexed tree (viewport "
         "by default). Use kind=/contains= to narrow, viewport_only=false or scroll "
         "when the footer says more are below, and browser_get_text for readable page "
@@ -49,7 +49,6 @@ mcp = FastMCP(
         "call browser_run_playbook(host, name, params) instead of re-planning. "
         "Read markdown playbooks only for notes. On a failed_step, continue by hand and "
         "browser_write_playbook(..., append=true) with a corrected ```playbook fence. "
-        "browser_recent_actions(host) lists what actually worked (labels and lengths, not typed text). "
         "If the user asked to sign in on the Spaces in-app browser and a saved "
         "password exists, call browser_login(expected_origin=...) — never read or "
         "type the password yourself, and check the returned origin. "
@@ -58,7 +57,7 @@ mcp = FastMCP(
         "Tabs: each tab has a short alias (t1, t2, …) or a name you pass to "
         "browser_open_tab(alias=...). Reads (get_elements, get_text, page_info, js, wait_for, "
         "read_tabs) never move focus — pass tab= to address a background tab. "
-        "Actions (click, input, select, fill, fill_form, click_text, act, screenshot, …) focus the tab first "
+        "Actions (click, input, select, fill, click_text, act, screenshot, …) focus the tab first "
         "because background tabs throttle timers and pause painting. Open a second "
         "tab to compare pages, keep a form while reading docs, or fan out with "
         "browser_read_tabs. At most five agent-controlled tabs; if you hit the cap, "
@@ -108,25 +107,27 @@ class PreparedAction:
 def observe_mode(observe: str | None, *, default: str = "diff") -> tuple[str, str | None]:
     """Return (mode, error_json). error_json is set when observe is unknown."""
     mode = resolve_action_observe(observe, default=default)
-    if mode not in results._ACTION_OBSERVE_MODES:
+    if mode not in results.ACTION_OBSERVE_MODES:
         return mode, results.observe_error(
-            observe if observe is not None else mode, results._ACTION_OBSERVE_MODES
+            observe if observe is not None else mode, results.ACTION_OBSERVE_MODES
         )
     return mode, None
 
 
 def prepare_action(
-    observe: str | None,
-    tab: str | None,
+    tab: str | None = None,
     *,
-    default: str = "diff",
-    focus: bool = True,
-    capture_url: bool = True,
+    observe: str | None = None,
+    default: str | None = None,
+    focus: bool = False,
+    capture_url: bool = False,
 ) -> PreparedAction:
-    """Validate observe, bind the backend, and resolve a tab for an action."""
-    mode, error = observe_mode(observe, default=default)
-    if error:
-        return PreparedAction(error=error, mode=mode)
+    """Bind the backend and resolve a tab. Pass ``default`` to validate observe mode."""
+    mode = "diff"
+    if default is not None:
+        mode, error = observe_mode(observe, default=default)
+        if error:
+            return PreparedAction(error=error, mode=mode)
     helpers, _ = backend.browser_harness()
     try:
         handle = (
@@ -138,18 +139,3 @@ def prepare_action(
     return PreparedAction(
         error=None, helpers=helpers, handle=handle, mode=mode, before_url=before_url
     )
-
-
-def prepare_handle(
-    tab: str | None, *, focus: bool = False, capture_url: bool = False
-) -> PreparedAction:
-    """Bind the backend and resolve a tab without observe-mode validation."""
-    helpers, _ = backend.browser_harness()
-    try:
-        handle = (
-            tab_ops._for_action(helpers, tab) if focus else tab_ops._for_read(helpers, tab)
-        )
-    except tabs.UnknownTabError as exc:
-        return PreparedAction(error=results.unknown_tab_result(exc))
-    before_url = str(handle.page_info().get("url") or "") if capture_url else ""
-    return PreparedAction(error=None, helpers=helpers, handle=handle, before_url=before_url)

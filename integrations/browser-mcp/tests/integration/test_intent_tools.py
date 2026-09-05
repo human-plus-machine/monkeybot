@@ -38,13 +38,19 @@ def test_fill_form_resolves_strategies_and_submit(fixture_server: str, cdp_url: 
     fields = {label: "benchvalue" for label in _FORM_LABELS}
     fields["Country"] = "United States"
     fields["Promo code"] = "nope"
-    result = json.loads(server.browser_fill_form(fields, submit=True, observe="full"))
+    result = json.loads(
+        server.browser_act(
+            [{"do": "fill_form", "fields": fields, "submit": True}],
+            observe="full",
+        )
+    )
     assert result["ok"] is True
-    how_by_label = {row["label"]: row["how"] for row in result["filled"]}
+    filled_row = result["steps"][0]
+    how_by_label = {row["label"]: row["how"] for row in filled_row["filled"]}
     for label, how in _FORM_LABELS.items():
         assert how_by_label.get(label) == how, (label, how_by_label)
-    assert "Promo code" in result["unresolved"]
-    assert result["submitted"] is True
+    assert "Promo code" in filled_row["unresolved"]
+    assert filled_row["submitted"] is True
     status = json.loads(server.browser_js("!document.getElementById('status').hidden"))
     assert status.get("result") is True
 
@@ -54,7 +60,10 @@ def test_click_text_prefers_button_role(fixture_server: str, cdp_url: str) -> No
 
     json.loads(server.browser_goto(f"{fixture_server}/form.html"))
     json.loads(
-        server.browser_fill_form({"Nickname": "clicknick"}, observe="none")
+        server.browser_act(
+            [{"do": "fill_form", "fields": {"Nickname": "clicknick"}}],
+            observe="none",
+        )
     )
     result = json.loads(
         server.browser_click_text("Submit", role="button", observe="full")
@@ -70,9 +79,12 @@ def test_act_input_then_click_text(fixture_server: str, cdp_url: str) -> None:
 
     json.loads(server.browser_goto(f"{fixture_server}/form.html"))
     filled = json.loads(
-        server.browser_fill_form({"Nickname": "actnick"}, observe="none")
+        server.browser_act(
+            [{"do": "fill_form", "fields": {"Nickname": "actnick"}}],
+            observe="none",
+        )
     )
-    nick = filled["filled"][0]["index"]
+    nick = filled["steps"][0]["filled"][0]["index"]
     result = json.loads(
         server.browser_act(
             [

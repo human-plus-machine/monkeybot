@@ -336,3 +336,28 @@ Load-bearing counts are unchanged. Wall-time deltas are noise.
 
 32-tool schema snapshot (`tests/fixtures/tool_surface.json`) matched after the split.
 
+---
+
+## Cleanup (2026-09-05)
+
+Same machine and Playwright Chromium headless stack as the Refactor row.
+Form scenario is now `goto` + `browser_act([{do: fill_form, ...}])` (the dedicated
+`browser_fill_form` tool was removed). Load-bearing **tool_calls** are unchanged.
+`form.html` key-tool harness_calls 18 → 19 is the extra settle from wrapping
+`fill_form` in `browser_act`; not a model-turn regression.
+
+| scenario | tool_calls | harness_calls (key tool) | result_chars | total_ms |
+|---|---:|---|---:|---:|
+| form.html | 2 | act 19.0 | 880 | 655.5 |
+| form_playbook | 1 | run_playbook 17.0 | 703 | 490.8 |
+| long_list.html | 2 | get_elements 1.0 | 4889 | 355.2 |
+| spa.html | 2 | click_by_index 9.0 | 740 | 800.0 |
+| spa_wait | 4 | wait_for 1.0 | 27 | 644.2 |
+| compare_three | 4 | read_tabs 10.0 | 3304 | 774.1 |
+| screenshot (long_list.html) | 4 | screenshot 2.0 | 484 | 400.3 |
+
+30-tool schema snapshot (`tests/fixtures/tool_surface.json`) after dropping
+`browser_fill_form` and `browser_recent_actions`. JPEG vs PNG byte counts on this
+fixture are within noise (viewport already small); encode unit tests still require
+JPEG ≥70% smaller on a large synthetic capture.
+

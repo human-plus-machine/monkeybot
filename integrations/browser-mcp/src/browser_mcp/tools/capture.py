@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from browser_mcp import dom_indexing, screenshots
-from browser_mcp.app import mcp, _public_tool, prepare_handle
+from browser_mcp import screenshots
+from browser_mcp.app import mcp, _public_tool, prepare_action
 from browser_mcp import results
 
 
@@ -43,51 +43,15 @@ def browser_screenshot(
     if q < 1 or q > 95:
         return results.json_text({"ok": False, "error": "quality must be 1–95"})
 
-    prep = prepare_handle(tab, focus=True)
+    prep = prepare_action(tab, focus=True)
     if prep.error:
         return prep.error
     handle = prep.handle
 
     dest, rel_path = screenshots.allocate_screenshot_path(fmt)
-    native = dest.with_name(f"{dest.stem}-native.png")
-    annotated_img = None
-    labeled = 0
-    try:
-        handle.capture_screenshot(path=str(native), full=full, max_dim=None)
-        if annotate:
-            map_len = 0
-            try:
-                raw = handle.evaluate("Object.keys(window.__bmcpSelectorMap || {}).length")
-                map_len = int(raw or 0)
-            except (TypeError, ValueError):
-                map_len = 0
-            except Exception:
-                map_len = 0
-            if not map_len:
-                dom_indexing.get_elements(handle, viewport_only=not full)
-            payload = dom_indexing.get_rects(handle, scroll=False, full=full)
-            from PIL import Image
-
-            with Image.open(native) as captured:
-                annotated_img, labeled = screenshots.draw_index_labels(
-                    captured,
-                    payload.get("rects") or {},
-                    css_width=float(payload.get("cssWidth") or 0),
-                    css_height=float(payload.get("cssHeight") or 0),
-                )
-        screenshots.encode_screenshot(
-            native,
-            dest,
-            fmt=fmt,
-            quality=q,
-            max_dim=max_dim,
-            image=annotated_img,
-        )
-    finally:
-        native.unlink(missing_ok=True)
-        if annotated_img is not None:
-            annotated_img.close()
-
+    labeled = screenshots.save_capture(
+        handle, dest, full=full, annotate=annotate, fmt=fmt, quality=q, max_dim=max_dim
+    )
     info = handle.page_info()
     note = (
         "Screenshot saved under the agent workspace. Vision models: call load_file "

@@ -8,6 +8,7 @@ no JS steps.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -18,6 +19,8 @@ from urllib.parse import urlparse
 import yaml
 
 from browser_mcp import actions
+
+logger = logging.getLogger(__name__)
 
 SECRET_PARAM_NAMES = frozenset({"password", "secret", "token"})
 _FENCE_RE = re.compile(r"^```playbook[^\n]*\n(.*?)(?:^```[ \t]*$)", re.MULTILINE | re.DOTALL)
@@ -231,7 +234,8 @@ def list_flows(host_or_url: str | None = None) -> list[dict[str, Any]]:
             text = path.read_text(encoding="utf-8")
             for flow in parse_flows(text, host=slug):
                 out.append({"host": slug, "name": flow.name, "params": list(flow.params)})
-        except (PlaybookError, OSError):
+        except (PlaybookError, OSError) as exc:
+            logger.warning("skipping unreadable playbook %s: %s", name, exc)
             continue
     return out
 

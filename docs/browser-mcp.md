@@ -191,7 +191,7 @@ synchronization layer.
 
 ## Tools
 
-Navigation, interaction, screenshots, tabs, waits, playbooks (`browser_list_playbooks`, `browser_read_playbook`, `browser_write_playbook`, `browser_run_playbook`, `browser_recent_actions`), `browser_login` for Spaces-saved passwords (returns `{ok, loggedIn, origin}` — never the password), and `browser_stop` for daemon cleanup.
+Navigation, interaction, screenshots, tabs, waits, playbooks (`browser_list_playbooks`, `browser_read_playbook`, `browser_write_playbook`, `browser_run_playbook`), `browser_login` for Spaces-saved passwords (returns `{ok, loggedIn, origin}` — never the password), and `browser_stop` for daemon cleanup.
 
 ### `browser_login` targets the focused tab
 
@@ -210,7 +210,7 @@ Errors raised by browser tools are scrubbed of `?token=` values before they reac
 Workflow:
 
 1. Prefer intent tools when the labels or the multi-step flow are already known:
-   - `browser_fill_form({Email: "...", Password: "..."}, submit=True)` — resolves fields by label[for], aria-label, aria-labelledby, placeholder, name, id, then nearest preceding row text. Checkboxes take `"true"`/`"false"`. Unresolved labels are listed (`how` says which strategy matched) and are not an error unless every field failed.
+   - `browser_act([{do:"fill_form", fields:{Email: "...", Password: "..."}, submit:true}])` — resolves fields by label[for], aria-label, aria-labelledby, placeholder, name, id, then nearest preceding row text. Checkboxes take `"true"`/`"false"`. Unresolved labels are listed (`how` says which strategy matched) and are not an error unless every field failed.
    - `browser_click_text("Continue", role="button")` — click by visible text / aria-label. On a miss, `did_you_mean` lists near-misses so you do not need another `get_elements`.
    - `browser_act(steps)` — up to 25 sequential steps (`click`, `input`, `select`, `press`, `click_text`, `wait_for`, `wait_idle`, `goto`, `scroll`, `settle`, `tab`, `open_tab`). One observation at the end. On failure: `{ok:false, completed, failed_step, error, observation}`.
    - `browser_extract(selector, fields)` — structured rows instead of `browser_js` scraping. Field values are relative sub-selectors; `a@href` reads an attribute.
@@ -261,7 +261,6 @@ expect:
 - **Allowed `do` values.** The same set as `browser_act`: `click`, `input`, `select`, `press`, `click_text`, `wait_for`, `wait_idle`, `goto`, `scroll`, `settle`, `tab`, `open_tab`, `fill_form`, `login`. No `js`, `upload`, or `extract` steps — playbooks are untrusted workspace data.
 - **Params.** Declared in `params:`; missing, extra, or unknown `{{placeholders}}` fail before any step runs. Names `password`, `secret`, and `token` are rejected at parse time. A flow that needs a saved password uses `{do: login, expected_origin: "https://example.com"}` which maps to `browser_login` (still the **user-focused** tab).
 - **Write.** `browser_write_playbook` validates every `playbook` fence in the composed document (including `append: true`) and returns the parse error without writing if a fence is invalid. Notes-only markdown still writes.
-- **Drafting.** `browser_recent_actions(host)` returns the last 50 successful actions for that host (action type, index, resolved labels, typed-text **lengths** — never contents) so a flow can be drafted from what actually worked. On divergence, continue by hand and `browser_write_playbook(..., append=true)` with a corrected fence.
 - **Timeout.** `BROWSER_MCP_PLAYBOOK_TIMEOUT_S` (default 120) is checked before each step.
 
 ### Waits

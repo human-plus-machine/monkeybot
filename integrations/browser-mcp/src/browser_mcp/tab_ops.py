@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
 from typing import Any
 
@@ -154,10 +153,16 @@ def _open_tab(
 
 def _close_agent_opened_tabs(helpers: Any) -> None:
     reg = tabs.registry()
-    with contextlib.suppress(Exception):
+    try:
         reg.refresh(helpers)
+    except Exception:
+        logger.warning("close agent tabs: refresh failed", exc_info=True)
     for state in list(reg.agent_opened()):
-        with contextlib.suppress(Exception):
+        try:
             _close_target(helpers, state.target_id)
-    with contextlib.suppress(Exception):
+        except Exception:
+            logger.warning("close agent tab %s failed", state.tab, exc_info=True)
+    try:
         reg.refresh(helpers)
+    except Exception:
+        logger.warning("close agent tabs: post-close refresh failed", exc_info=True)

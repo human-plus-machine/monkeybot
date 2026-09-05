@@ -1,8 +1,7 @@
 {
-  "instructions": "Real-browser control via CDP (browser-harness). Use browser_* tools for web tasks.\n\nDefault workflow \u2014 text-based, indexed DOM interaction:\n1. Prefer intent tools when you already know the labels or the multi-step flow: browser_fill_form for forms, browser_click_text when the visible label is known, browser_act for a batch of clicks/inputs/waits (cap 25 steps), browser_extract for structured scraping instead of browser_js.\n2. Otherwise browser_get_elements() once to see the indexed tree (viewport by default). Use kind=/contains= to narrow, viewport_only=false or scroll when the footer says more are below, and browser_get_text for readable page text.\n3. browser_click_by_index / browser_input_by_index / browser_select_by_index to act. Each action settles and returns observation (diff by default) \u2014 read that instead of calling get_elements again. Indices remain valid until navigation. Pass observe=\"none\" to skip the snapshot, observe=\"full\" for the whole viewport tree. Only call browser_get_elements again when you need a different filter, the whole tree, or after navigation if the observation is not enough. browser_goto returns a full observation by default.\n\nbrowser_screenshot is a LAST-RESORT FALLBACK only \u2014 use it when browser_get_elements returns nothing useful (canvas apps, heavily shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering). Prefer browser_screenshot(annotate=True) then browser_click_by_index when indices are available; browser_click(x, y) is last-resort after that. Do not default to screenshots for ordinary clicking/typing.\n\nCheck browser_list_playbooks before improvising on a site. If flows are listed, call browser_run_playbook(host, name, params) instead of re-planning. Read markdown playbooks only for notes. On a failed_step, continue by hand and browser_write_playbook(..., append=true) with a corrected ```playbook fence. browser_recent_actions(host) lists what actually worked (labels and lengths, not typed text). If the user asked to sign in on the Spaces in-app browser and a saved password exists, call browser_login(expected_origin=...) \u2014 never read or type the password yourself, and check the returned origin. Call browser_stop when done with remote/cloud sessions.\n\nTabs: each tab has a short alias (t1, t2, \u2026) or a name you pass to browser_open_tab(alias=...). Reads (get_elements, get_text, page_info, js, wait_for, read_tabs) never move focus \u2014 pass tab= to address a background tab. Actions (click, input, select, fill, fill_form, click_text, act, screenshot, \u2026) focus the tab first because background tabs throttle timers and pause painting. Open a second tab to compare pages, keep a form while reading docs, or fan out with browser_read_tabs. At most five agent-controlled tabs; if you hit the cap, relay the returned tab list to the user, ask which to close, then browser_close_tab and retry \u2014 never close a tab without their confirmation. Close tabs you opened when done. Do not expect a background SPA to finish loading while unfocused.",
   "tools": [
     {
-      "description": "Run up to 25 sequential browser steps in one turn.\n\n    Each step is ``{do, ...}``. Allowed do values: click, input, select, press,\n    click_text, wait_for, wait_idle, goto, scroll, settle, tab, open_tab,\n    fill_form, login. After each action the page settles; one observation is\n    returned at the end for the focused tab. On the first failure\n    (stop_on_error=True, default) returns completed steps, failed_step, error,\n    and the current observation so you can resume. login maps to browser_login\n    (user-focused tab; always pass expected_origin).\n    ",
+      "description": "Run up to 25 sequential browser steps in one turn.\n\n    Each step is ``{do, ...}``. Allowed do values: click, input, select, press,\n    click_text, wait_for, wait_idle, goto, scroll, settle, tab, open_tab,\n    fill_form, login. After each action the page settles; one observation is\n    returned at the end for the focused tab. On the first failure\n    (stop_on_error=True, default) returns completed steps, failed_step, error,\n    and the current observation so you can resume. login maps to browser_login\n    (user-focused tab; always pass expected_origin). fill_form resolves fields\n    by label (label[for], aria-label, placeholder, name, id, preceding row text).\n    ",
       "inputSchema": {
         "properties": {
           "observe": {
@@ -325,60 +324,6 @@
         "type": "object"
       },
       "name": "browser_fill"
-    },
-    {
-      "description": "Fill a form by field label in one call.\n\n    Resolves each key with label[for], aria-label, aria-labelledby, placeholder,\n    name, id, then nearest preceding row text (case-insensitive, unique\n    substring). Selects for <select>; checks/unchecks checkboxes when the value\n    is \"true\"/\"false\". Unresolved labels are listed and are not an error\n    unless every field failed. submit=True clicks the form's submit button if\n    one exists and is enabled, otherwise presses Enter in the last field.\n    The ``how`` field on each filled entry says which strategy matched.\n    ",
-      "inputSchema": {
-        "properties": {
-          "fields": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "title": "Fields",
-            "type": "object"
-          },
-          "mode": {
-            "default": "auto",
-            "title": "Mode",
-            "type": "string"
-          },
-          "observe": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "title": "Observe"
-          },
-          "submit": {
-            "default": false,
-            "title": "Submit",
-            "type": "boolean"
-          },
-          "tab": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "title": "Tab"
-          }
-        },
-        "required": [
-          "fields"
-        ],
-        "title": "browser_fill_formArguments",
-        "type": "object"
-      },
-      "name": "browser_fill_form"
     },
     {
       "description": "Return interactive elements as an indexed text tree \u2014 the default way to see the page.\n\n    Prefer this over browser_screenshot for locating things to click/type into. Injects a\n    DOM-walker (vendored from alibaba/page-agent, MIT licensed) that scans the live DOM and\n    returns lines like ``[12]<input placeholder='Email' />`` / ``[35]<button>Submit</button>``,\n    indentation shows parent/child nesting. Use the numeric index with browser_click_by_index /\n    browser_input_by_index / browser_select_by_index \u2014 no coordinates needed.\n\n    Defaults to the visible viewport (override with viewport_only=false or\n    BROWSER_MCP_VIEWPORT_DEFAULT=0). kind is inputs/buttons/links/all; contains is a\n    case-insensitive substring on the rendered line (searches the whole page, including\n    below the fold); max_elements (default 150) truncates with a footer. Indices remain\n    valid until navigation \u2014 re-call after navigation, or when the footer says to scroll.\n    observe=\"diff\" returns added/removed lines vs the last tree for this tab (falls back\n    to a full tree after navigation or with no cache). Pass tab= to read a background tab\n    without moving focus.\n    ",
@@ -839,23 +784,6 @@
         "type": "object"
       },
       "name": "browser_read_tabs"
-    },
-    {
-      "description": "Return the last 50 successful actions for a host (labels and lengths, not typed text).",
-      "inputSchema": {
-        "properties": {
-          "host": {
-            "title": "Host",
-            "type": "string"
-          }
-        },
-        "required": [
-          "host"
-        ],
-        "title": "browser_recent_actionsArguments",
-        "type": "object"
-      },
-      "name": "browser_recent_actions"
     },
     {
       "description": "Execute a named ```playbook flow from the host markdown file.\n\n    Substitutes {{param}} into string fields, runs steps via browser_act, then\n    checks expect (url_contains, selector, text). On failure returns failed_step\n    plus an observation so you can continue by hand. Secrets are never params \u2014\n    use {do: login, expected_origin: ...} which maps to browser_login (the\n    user-focused tab). Capped by BROWSER_MCP_PLAYBOOK_TIMEOUT_S (default 120).\n    ",

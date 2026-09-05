@@ -9,18 +9,18 @@ pauses rendering in background tabs.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
-from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 _ALIAS_RE = re.compile(r"^[a-z][a-z0-9_-]{0,23}$")
 _CHROME_INTERNAL = ("chrome://", "chrome-untrusted://", "devtools://", "chrome-extension://")
-_SESSION_LOST = "session with given id not found"
-MAX_RECENT_ACTIONS = 50
+_SESSION_LOST = "session with given id"
+logger = logging.getLogger(__name__)
 _SINGLE_TAB_MARKERS = (
     "not allowed",
     "not supported",
@@ -94,6 +94,17 @@ def utc_now() -> str:
 
 def _has_helper(helpers: Any, name: str) -> bool:
     return callable(getattr(helpers, name, None))
+
+
+def _session_gone(exc: BaseException) -> bool:
+    return _SESSION_LOST in str(exc).lower()
+
+
+def _log_detach_failure(session_id: str, exc: BaseException) -> None:
+    if _session_gone(exc):
+        logger.debug("detach session %s already gone", session_id)
+        return
+    logger.warning("detach session %s failed", session_id, exc_info=True)
 
 
 def _target_id_of(tab: dict[str, Any] | None) -> str | None:
@@ -197,7 +208,6 @@ class TabState:
     last_used: str | None = None
     url: str = ""
     title: str = ""
-    extra: dict[str, Any] = field(default_factory=dict)
 
     @property
     def agent_controlled(self) -> bool:
@@ -232,7 +242,7 @@ class TabHandle:
         try:
             return cdp_evaluate(self.helpers, expression, sid, await_promise)
         except RuntimeError as exc:
-            if _SESSION_LOST not in str(exc).lower():
+            if not _session_gone(exc):
                 raise
             self.state.session_id = None
             sid = registry().session_for(self.helpers, self.state)
@@ -247,7 +257,7 @@ class TabHandle:
         try:
             return self.helpers.cdp(method, session_id=sid, **params)
         except RuntimeError as exc:
-            if _SESSION_LOST not in str(exc).lower():
+            if not _session_gone(exc):
                 raise
             self.state.session_id = None
             sid = registry().session_for(self.helpers, self.state)
@@ -302,7 +312,6 @@ class TabRegistry:
         self._retired: set[str] = set()
         self._focused_id: str | None = None
         self.init_script_registered: bool = False
-        self._recent: dict[str, deque[dict[str, Any]]] = {}
 
     def reset(self) -> None:
         self._tabs.clear()
@@ -311,7 +320,6 @@ class TabRegistry:
         self._retired.clear()
         self._focused_id = None
         self.init_script_registered = False
-        self._recent.clear()
 
     @property
     def focused_id(self) -> str | None:
@@ -350,8 +358,8 @@ class TabRegistry:
         if state.session_id and helpers is not None and _has_helper(helpers, "cdp"):
             try:
                 helpers.cdp("Target.detachFromTarget", sessionId=state.session_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                _log_detach_failure(state.session_id, exc)
         if self._focused_id == state.target_id:
             self._focused_id = None
 
@@ -403,6 +411,7 @@ class TabRegistry:
         try:
             current = helpers.current_tab()
         except Exception:
+            logger.debug("current_tab failed in _sync_focus", exc_info=True)
             return
         tid = _target_id_of(current if isinstance(current, dict) else None)
         if tid:
@@ -538,8 +547,8 @@ class TabRegistry:
             if state.session_id:
                 try:
                     helpers.cdp("Target.detachFromTarget", sessionId=state.session_id)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    _log_detach_failure(state.session_id, exc)
         self.reset()
 
     def remember_created(
@@ -563,20 +572,19 @@ class TabRegistry:
             self.set_alias(state.tab, alias)
         return state
 
-    def record_action(self, host: str, action: dict[str, Any]) -> None:
-        if not host:
-            return
-        ring = self._recent.get(host)
-        if ring is None:
-            ring = deque(maxlen=MAX_RECENT_ACTIONS)
-            self._recent[host] = ring
-        ring.append(dict(action))
-
-    def recent_actions(self, host: str) -> list[dict[str, Any]]:
-        ring = self._recent.get(host)
-        if not ring:
-            return []
-        return [dict(item) for item in ring]
+    def ensure(self, target_id: str, *, url: str = "", title: str = "") -> TabState:
+        existing = self.get(target_id)
+        if existing is not None:
+            if url:
+                existing.url = url
+            if title:
+                existing.title = title
+            return existing
+        tab = self._alloc_tn()
+        state = TabState(target_id=target_id, tab=tab, alias=tab, url=url, title=title)
+        self._tabs[target_id] = state
+        self._bind_alias(tab, target_id)
+        return state
 
 
 _registry = TabRegistry()

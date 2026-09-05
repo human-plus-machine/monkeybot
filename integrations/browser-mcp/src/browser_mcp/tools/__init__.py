@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from browser_mcp.tools.batch import browser_act, browser_fill_form
+from browser_mcp.tools.batch import browser_act
 from browser_mcp.tools.capture import browser_screenshot
 from browser_mcp.tools.interact import (
     browser_click,
@@ -14,11 +14,12 @@ from browser_mcp.tools.interact import (
     browser_scroll,
     browser_select_by_index,
     browser_upload,
+    browser_wait_for,
+    browser_wait_idle,
 )
 from browser_mcp.tools.playbook import (
     browser_list_playbooks,
     browser_read_playbook,
-    browser_recent_actions,
     browser_run_playbook,
     browser_write_playbook,
 )
@@ -30,15 +31,15 @@ from browser_mcp.tools.read import (
     browser_js,
     browser_page_info,
 )
-from browser_mcp.tools.session import browser_login, browser_stop
 from browser_mcp.tools.tab_control import (
     browser_close_tab,
+    browser_login,
     browser_open_tab,
     browser_read_tabs,
+    browser_stop,
     browser_switch_tab,
     browser_tabs,
 )
-from browser_mcp.tools.wait import browser_wait_for, browser_wait_idle
 
 __all__ = [
     "browser_act",
@@ -48,7 +49,6 @@ __all__ = [
     "browser_close_tab",
     "browser_extract",
     "browser_fill",
-    "browser_fill_form",
     "browser_get_elements",
     "browser_get_text",
     "browser_goto",
@@ -61,7 +61,6 @@ __all__ = [
     "browser_press_key",
     "browser_read_playbook",
     "browser_read_tabs",
-    "browser_recent_actions",
     "browser_run_playbook",
     "browser_screenshot",
     "browser_scroll",

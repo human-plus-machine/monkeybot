@@ -6,6 +6,7 @@ an observation. ``browser_act`` runs the same helpers in a loop.
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from collections.abc import Callable
@@ -14,6 +15,8 @@ from typing import Any
 
 from browser_mcp import dom_indexing
 from browser_mcp.tabs import TabHandle
+
+logger = logging.getLogger(__name__)
 
 MAX_ACT_STEPS = 25
 FILL_MODES = frozenset({"auto", "keys", "fast"})
@@ -51,12 +54,6 @@ WAIT_IDLE_NOTE = (
 )
 
 
-def _login_unavailable(
-    username: str | None = None, expected_origin: str | None = None
-) -> dict[str, Any]:
-    return {"ok": False, "loggedIn": False, "error": "login is not available"}
-
-
 @dataclass
 class ActContext:
     """Mutable handle plus tab callbacks so the executor can switch tabs."""
@@ -65,24 +62,7 @@ class ActContext:
     handle: TabHandle
     for_action: Callable[[str | None], TabHandle]
     open_tab: Callable[..., dict[str, Any]]
-    login: Callable[..., dict[str, Any]] = _login_unavailable
-
-
-def _record_success(handle: TabHandle, rec: dict[str, Any]) -> None:
-    """Append a sanitized action to the per-host ring. Never raises."""
-    url = ""
-    if handle.state is not None:
-        url = handle.state.url or handle.state.last_url or ""
-    if not url:
-        return
-    try:
-        from browser_mcp import playbooks
-        from browser_mcp.tabs import registry
-
-        host = playbooks.host_slug(url)
-        registry().record_action(host, rec)
-    except Exception:
-        return
+    login: Callable[..., dict[str, Any]]
 
 
 def _is_blank_url(url: str) -> bool:
@@ -98,6 +78,7 @@ def can_goto_in_place(helpers: Any) -> bool:
         try:
             tab = helpers.current_tab()
         except Exception:
+            logger.debug("current_tab failed in can_goto_in_place", exc_info=True)
             tab = None
         if isinstance(tab, dict):
             url = str(tab.get("url") or "")
@@ -106,6 +87,7 @@ def can_goto_in_place(helpers: Any) -> bool:
             info = helpers.page_info() or {}
             url = str(info.get("url") or "")
         except Exception:
+            logger.debug("page_info failed in can_goto_in_place", exc_info=True)
             url = ""
     return not _is_blank_url(url)
 
@@ -124,7 +106,6 @@ def do_click_by_index(handle: TabHandle, index: int) -> dict[str, Any]:
     obscured = rect.get("obscuredBy")
     if obscured:
         payload["warning"] = f"target obscured by {obscured}"
-    _record_success(handle, {"do": "click", "index": index})
     return payload
 
 
@@ -139,7 +120,6 @@ def do_input_by_index(
     result = dom_indexing.fill(
         handle, index, text, clear_first=clear_first, mode=resolve_fill_mode(mode)
     )
-    _record_success(handle, {"do": "input", "index": index, "text_len": len(text)})
     return {
         "ok": True,
         "index": index,
@@ -150,7 +130,6 @@ def do_input_by_index(
 
 def do_select_by_index(handle: TabHandle, index: int, text: str) -> dict[str, Any]:
     dom_indexing.select_option(handle, index, text)
-    _record_success(handle, {"do": "select", "index": index, "text_len": len(text)})
     return {"ok": True, "index": index, "selected": text}
 
 
@@ -180,7 +159,6 @@ def do_fill_selector(
 
 def do_press(handle: TabHandle, key: str, modifiers: int = 0) -> dict[str, Any]:
     handle.helpers.press_key(key, modifiers=modifiers)
-    _record_success(handle, {"do": "press", "key": key})
     return {"ok": True, "key": key, "modifiers": modifiers}
 
 
@@ -188,7 +166,6 @@ def do_scroll(
     handle: TabHandle, x: float, y: float, *, dy: float = -300, dx: float = 0
 ) -> dict[str, Any]:
     handle.helpers.scroll(x, y, dy=dy, dx=dx)
-    _record_success(handle, {"do": "scroll", "dy": dy, "dx": dx})
     return {"ok": True, "x": x, "y": y, "dy": dy, "dx": dx}
 
 
@@ -202,29 +179,28 @@ def do_wait_for(
     return {"ok": found, "found": found}
 
 
+def _settle_idle_note(handle: TabHandle, note: str) -> dict[str, Any]:
+    settled = dom_indexing.settle(handle)
+    return {
+        "ok": True,
+        "idle": None,
+        "quiet": bool(settled.get("quiet", True)),
+        "navigated": bool(settled.get("navigated", False)),
+        "note": note,
+    }
+
+
 def do_wait_idle(
     handle: TabHandle, *, timeout: float = 10.0, idle_ms: float = 500
 ) -> dict[str, Any]:
     helpers = handle.helpers
     if not handle.focused:
-        settled = dom_indexing.settle(handle)
-        return {
-            "ok": True,
-            "idle": None,
-            "quiet": bool(settled.get("quiet", True)),
-            "navigated": bool(settled.get("navigated", False)),
-            "note": WAIT_IDLE_NOTE,
-        }
+        return _settle_idle_note(handle, WAIT_IDLE_NOTE)
     wait_idle = getattr(helpers, "wait_for_network_idle", None)
     if not callable(wait_idle):
-        settled = dom_indexing.settle(handle)
-        return {
-            "ok": True,
-            "idle": None,
-            "quiet": bool(settled.get("quiet", True)),
-            "navigated": bool(settled.get("navigated", False)),
-            "note": "network idle is not available on this backend; DOM settle was used",
-        }
+        return _settle_idle_note(
+            handle, "network idle is not available on this backend; DOM settle was used"
+        )
     idle = bool(wait_idle(timeout=timeout, idle_ms=idle_ms))
     if not idle:
         return {"ok": False, "idle": False, "quiet": False, "navigated": False}
@@ -261,12 +237,6 @@ def do_click_text(
     obscured = found.get("obscuredBy")
     if obscured:
         payload["warning"] = f"target obscured by {obscured}"
-    rec: dict[str, Any] = {"do": "click_text", "text": text}
-    if role:
-        rec["role"] = role
-    if found.get("index") is not None:
-        rec["index"] = found.get("index")
-    _record_success(handle, rec)
     return payload
 
 
@@ -298,7 +268,6 @@ def do_goto(handle: TabHandle, url: str) -> dict[str, Any]:
     if handle.state is not None and url:
         handle.state.url = url
         handle.state.title = str(info.get("title") or handle.state.title)
-    _record_success(handle, {"do": "goto"})
     return {
         "ok": True,
         "url": info.get("url"),
@@ -316,6 +285,32 @@ def do_settle(handle: TabHandle) -> dict[str, Any]:
     }
 
 
+def _fill_one_field(
+    handle: TabHandle, label: str, value: str, mode: str
+) -> dict[str, Any] | None:
+    resolved = dom_indexing.resolve_field(handle, label)
+    index = resolved.get("index")
+    if index is None:
+        return None
+    idx = int(index)
+    tag = str(resolved.get("tagName") or "").lower()
+    typ = str(resolved.get("type") or "").lower()
+    try:
+        if tag == "select":
+            do_select_by_index(handle, idx, value)
+        elif tag == "input" and typ in {"checkbox", "radio"}:
+            flag = value.strip().lower()
+            if flag not in {"true", "false"}:
+                return None
+            dom_indexing.set_checked(handle, idx, flag == "true")
+        else:
+            do_input_by_index(handle, idx, value, mode=mode)
+    except (dom_indexing.ElementNotFoundError, RuntimeError):
+        logger.debug("fill_form field %r failed", label, exc_info=True)
+        return None
+    return {"label": label, "index": idx, "how": resolved.get("how")}
+
+
 def do_fill_form(
     handle: TabHandle,
     fields: dict[str, str],
@@ -327,46 +322,18 @@ def do_fill_form(
     unresolved: list[str] = []
     last_index: int | None = None
     for label, value in fields.items():
-        resolved = dom_indexing.resolve_field(handle, str(label))
-        index = resolved.get("index")
-        if index is None:
+        row = _fill_one_field(handle, str(label), str(value), mode)
+        if row is None:
             unresolved.append(str(label))
             continue
-        idx = int(index)
-        how = resolved.get("how")
-        tag = str(resolved.get("tagName") or "").lower()
-        typ = str(resolved.get("type") or "").lower()
-        try:
-            if tag == "select":
-                do_select_by_index(handle, idx, str(value))
-            elif tag == "input" and typ in {"checkbox", "radio"}:
-                flag = str(value).strip().lower()
-                if flag not in {"true", "false"}:
-                    unresolved.append(str(label))
-                    continue
-                dom_indexing.set_checked(handle, idx, flag == "true")
-            else:
-                do_input_by_index(handle, idx, str(value), mode=mode)
-        except (dom_indexing.ElementNotFoundError, RuntimeError):
-            unresolved.append(str(label))
-            continue
-        filled.append({"label": str(label), "index": idx, "how": how})
-        last_index = idx
+        filled.append(row)
+        last_index = int(row["index"])
     submitted = False
     if submit and last_index is not None:
         submitted = _submit_form(handle, last_index)
     ok = bool(filled) or not fields
     if fields and not filled:
         ok = False
-    if ok:
-        _record_success(
-            handle,
-            {
-                "do": "fill_form",
-                "labels": [row["label"] for row in filled],
-                "submitted": submitted,
-            },
-        )
     return {
         "ok": ok,
         "filled": filled,
@@ -426,86 +393,26 @@ def validate_steps(steps: Any) -> dict[str, Any] | list[dict[str, Any]]:
 
 
 def _validate_step(kind: str, step: dict[str, Any]) -> str | None:
-    if kind == "click":
-        if not _is_int(step.get("index")):
-            return "click requires integer index"
-    elif kind == "input":
-        if not _is_int(step.get("index")) or not _is_str(step.get("text")):
-            return "input requires integer index and string text"
-        mode = step.get("mode", "auto")
-        if mode is not None and (not _is_str(mode) or mode not in FILL_MODES):
-            return "input mode must be auto, keys, or fast"
-    elif kind == "select":
-        if not _is_int(step.get("index")) or not _is_str(step.get("text")):
-            return "select requires integer index and string text"
-    elif kind == "press":
-        if not _is_str(step.get("key")):
-            return "press requires string key"
-        mods = step.get("modifiers", 0)
-        if mods is not None and not _is_int(mods):
-            return "press modifiers must be an integer"
-    elif kind == "click_text":
-        if not _is_str(step.get("text")):
-            return "click_text requires string text"
-        role = step.get("role")
-        if role is not None and (not _is_str(role) or role not in CLICK_TEXT_ROLES):
-            return "click_text role must be button, link, tab, menuitem, checkbox, radio, or option"
-        if "exact" in step and not isinstance(step.get("exact"), bool):
-            return "click_text exact must be a boolean"
-        if "nth" in step and not _is_int(step.get("nth")):
-            return "click_text nth must be an integer"
-    elif kind == "wait_for":
-        if not _is_str(step.get("selector")):
-            return "wait_for requires string selector"
-        if "timeout" in step and not _is_num(step.get("timeout")):
-            return "wait_for timeout must be a number"
-    elif kind == "wait_idle":
-        if "timeout" in step and not _is_num(step.get("timeout")):
-            return "wait_idle timeout must be a number"
-    elif kind == "goto":
-        if not _is_str(step.get("url")):
-            return "goto requires string url"
-    elif kind == "scroll":
-        if "dy" not in step:
-            return "scroll requires dy"
-        if not _is_num(step.get("dy")):
-            return "scroll dy must be a number"
-        if "dx" in step and not _is_num(step.get("dx")):
-            return "scroll dx must be a number"
-        if "x" in step and not _is_num(step.get("x")):
-            return "scroll x must be a number"
-        if "y" in step and not _is_num(step.get("y")):
-            return "scroll y must be a number"
-    elif kind == "tab":
-        if not _is_str(step.get("tab")):
-            return "tab requires string tab"
-    elif kind == "open_tab":
-        if not _is_str(step.get("url")):
-            return "open_tab requires string url"
-        if "alias" in step and step.get("alias") is not None and not _is_str(step.get("alias")):
-            return "open_tab alias must be a string"
-        if "focus" in step and not isinstance(step.get("focus"), bool):
-            return "open_tab focus must be a boolean"
-    elif kind == "fill_form":
-        fields = step.get("fields")
-        if not isinstance(fields, dict):
-            return "fill_form requires fields object of label to value"
-        if not all(_is_str(k) and _is_str(v) for k, v in fields.items()):
-            return "fill_form fields must be string label to string value"
-        if "submit" in step and not isinstance(step.get("submit"), bool):
-            return "fill_form submit must be a boolean"
-        mode = step.get("mode", "auto")
-        if mode is not None and (not _is_str(mode) or mode not in FILL_MODES):
-            return "fill_form mode must be auto, keys, or fast"
-    elif kind == "login":
-        origin = step.get("expected_origin")
-        if not _is_str(origin) or not origin.strip():
-            return "login requires string expected_origin"
-        if "username" in step and step.get("username") is not None and not _is_str(
-            step.get("username")
-        ):
-            return "login username must be a string"
-    return None
+    validator = _STEP_VALIDATORS.get(kind)
+    return validator(step) if validator else None
+
+
+def _fail_payload(
+    completed: list[dict[str, Any]],
+    index: int,
+    error: str | None,
+    handle: TabHandle,
+    extra: dict[str, Any],
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "ok": False,
+        "completed": completed,
+        "failed_step": index,
+        "error": error,
+        "handle": handle,
+    }
+    out.update(extra)
+    return out
 
 
 def execute_steps(
@@ -516,132 +423,223 @@ def execute_steps(
     deadline: float | None = None,
 ) -> dict[str, Any]:
     completed: list[dict[str, Any]] = []
+    extra: dict[str, Any] = {}
     failed_step: int | None = None
     error: str | None = None
-    extra: dict[str, Any] = {}
     for i, step in enumerate(steps):
         if deadline is not None and time.monotonic() >= deadline:
-            return {
-                "ok": False,
-                "completed": completed,
-                "failed_step": i,
-                "error": PLAYBOOK_TIMEOUT_ERROR,
-                "handle": ctx.handle,
-            }
+            return _fail_payload(completed, i, PLAYBOOK_TIMEOUT_ERROR, ctx.handle, extra)
         try:
             result = _run_step(ctx, step)
         except dom_indexing.ElementNotFoundError as exc:
             result = {"ok": False, "error": str(exc)}
         except Exception as exc:
+            logger.exception("browser step %s (%s) failed", i, step.get("do"))
             result = {"ok": False, "error": str(exc)}
         row = {**result, "do": step.get("do"), "step_index": i}
-        if not result.get("ok"):
-            failed_step = i
-            error = str(result.get("error") or "step failed")
-            if result.get("did_you_mean") is not None:
-                extra["did_you_mean"] = result.get("did_you_mean")
-            if stop_on_error:
-                out: dict[str, Any] = {
-                    "ok": False,
-                    "completed": completed,
-                    "failed_step": failed_step,
-                    "error": error,
-                    "handle": ctx.handle,
-                }
-                out.update(extra)
-                return out
+        if result.get("ok"):
             completed.append(row)
+            if step.get("do") not in SKIP_SETTLE:
+                dom_indexing.settle(ctx.handle)
             continue
+        failed_step = i
+        error = str(result.get("error") or "step failed")
+        if result.get("did_you_mean") is not None:
+            extra["did_you_mean"] = result.get("did_you_mean")
+        if stop_on_error:
+            return _fail_payload(completed, i, error, ctx.handle, extra)
         completed.append(row)
-        if step.get("do") not in SKIP_SETTLE:
-            dom_indexing.settle(ctx.handle)
     if failed_step is not None:
-        out = {
-            "ok": False,
-            "completed": [row for row in completed if row.get("ok")],
-            "failed_step": failed_step,
-            "error": error,
-            "handle": ctx.handle,
-        }
-        out.update(extra)
-        return out
+        ok_rows = [row for row in completed if row.get("ok")]
+        return _fail_payload(ok_rows, failed_step, error, ctx.handle, extra)
     return {"ok": True, "steps": completed, "handle": ctx.handle}
 
 
 def _run_step(ctx: ActContext, step: dict[str, Any]) -> dict[str, Any]:
-    kind = str(step["do"])
-    handle = ctx.handle
-    if kind == "click":
-        return do_click_by_index(handle, int(step["index"]))
-    if kind == "input":
-        return do_input_by_index(
-            handle,
-            int(step["index"]),
-            str(step["text"]),
-            mode=str(step.get("mode") or "auto"),
-        )
-    if kind == "select":
-        return do_select_by_index(handle, int(step["index"]), str(step["text"]))
-    if kind == "press":
-        return do_press(handle, str(step["key"]), int(step.get("modifiers") or 0))
-    if kind == "click_text":
-        role = step.get("role")
-        return do_click_text(
-            handle,
-            str(step["text"]),
-            role=str(role) if role else None,
-            exact=bool(step.get("exact", False)),
-            nth=int(step.get("nth") or 0),
-        )
-    if kind == "wait_for":
-        timeout = step.get("timeout", 10)
-        return do_wait_for(handle, str(step["selector"]), timeout=float(timeout))
-    if kind == "wait_idle":
-        timeout = step.get("timeout", 10)
-        return do_wait_idle(handle, timeout=float(timeout))
-    if kind == "goto":
-        result = do_goto(handle, str(step["url"]))
-        if handle.focused:
-            ctx.handle = ctx.for_action(None)
-        return result
-    if kind == "scroll":
-        return do_scroll(
-            handle,
-            float(step.get("x") or 0),
-            float(step.get("y") or 0),
-            dy=float(step.get("dy") if step.get("dy") is not None else -300),
-            dx=float(step.get("dx") or 0),
-        )
-    if kind == "settle":
-        return do_settle(handle)
-    if kind == "tab":
-        ctx.handle = ctx.for_action(str(step["tab"]))
-        _record_success(ctx.handle, {"do": "tab", "tab": step["tab"]})
-        return {"ok": True, "tab": step["tab"]}
-    if kind == "open_tab":
-        opened = ctx.open_tab(
-            str(step["url"]),
-            alias=step.get("alias"),
-            focus=bool(step.get("focus", False)),
-        )
-        if not opened.get("ok"):
-            return opened
-        if opened.get("focused"):
-            ctx.handle = ctx.for_action(str(opened.get("tab") or ""))
-        _record_success(ctx.handle, {"do": "open_tab"})
-        return opened
-    if kind == "fill_form":
-        fields = step.get("fields") or {}
-        return do_fill_form(
-            handle,
-            {str(k): str(v) for k, v in fields.items()},
-            submit=bool(step.get("submit", False)),
-            mode=str(step.get("mode") or "auto"),
-        )
-    if kind == "login":
-        username = step.get("username")
-        return ctx.login(
-            str(username) if username is not None else None,
-            str(step["expected_origin"]),
-        )
-    return {"ok": False, "error": f"unknown do {kind!r}"}
+    runner = _STEP_RUNNERS.get(str(step["do"]))
+    if runner is None:
+        return {"ok": False, "error": f"unknown do {step['do']!r}"}
+    return runner(ctx, step)
+
+
+def _run_goto(ctx: ActContext, step: dict[str, Any]) -> dict[str, Any]:
+    result = do_goto(ctx.handle, str(step["url"]))
+    if ctx.handle.focused:
+        ctx.handle = ctx.for_action(None)
+    return result
+
+
+def _run_tab(ctx: ActContext, step: dict[str, Any]) -> dict[str, Any]:
+    ctx.handle = ctx.for_action(str(step["tab"]))
+    return {"ok": True, "tab": step["tab"]}
+
+
+def _run_open_tab(ctx: ActContext, step: dict[str, Any]) -> dict[str, Any]:
+    opened = ctx.open_tab(
+        str(step["url"]),
+        alias=step.get("alias"),
+        focus=bool(step.get("focus", False)),
+    )
+    if opened.get("ok") and opened.get("focused"):
+        ctx.handle = ctx.for_action(str(opened.get("tab") or ""))
+    return opened
+
+
+def _req_int(step: dict[str, Any], key: str, label: str) -> str | None:
+    if not _is_int(step.get(key)):
+        return label
+    return None
+
+
+def _req_str(step: dict[str, Any], key: str, label: str) -> str | None:
+    if not _is_str(step.get(key)):
+        return label
+    return None
+
+
+def _opt_num(step: dict[str, Any], key: str, label: str) -> str | None:
+    if key in step and not _is_num(step.get(key)):
+        return label
+    return None
+
+
+def _validate_input(step: dict[str, Any]) -> str | None:
+    if not _is_int(step.get("index")) or not _is_str(step.get("text")):
+        return "input requires integer index and string text"
+    mode = step.get("mode", "auto")
+    if mode is not None and (not _is_str(mode) or mode not in FILL_MODES):
+        return "input mode must be auto, keys, or fast"
+    return None
+
+
+def _validate_press(step: dict[str, Any]) -> str | None:
+    if not _is_str(step.get("key")):
+        return "press requires string key"
+    mods = step.get("modifiers", 0)
+    if mods is not None and not _is_int(mods):
+        return "press modifiers must be an integer"
+    return None
+
+
+def _validate_click_text(step: dict[str, Any]) -> str | None:
+    if not _is_str(step.get("text")):
+        return "click_text requires string text"
+    role = step.get("role")
+    if role is not None and (not _is_str(role) or role not in CLICK_TEXT_ROLES):
+        return "click_text role must be button, link, tab, menuitem, checkbox, radio, or option"
+    if "exact" in step and not isinstance(step.get("exact"), bool):
+        return "click_text exact must be a boolean"
+    if "nth" in step and not _is_int(step.get("nth")):
+        return "click_text nth must be an integer"
+    return None
+
+
+def _validate_scroll(step: dict[str, Any]) -> str | None:
+    if "dy" not in step:
+        return "scroll requires dy"
+    if not _is_num(step.get("dy")):
+        return "scroll dy must be a number"
+    return (
+        _opt_num(step, "dx", "scroll dx must be a number")
+        or _opt_num(step, "x", "scroll x must be a number")
+        or _opt_num(step, "y", "scroll y must be a number")
+    )
+
+
+def _validate_open_tab(step: dict[str, Any]) -> str | None:
+    if not _is_str(step.get("url")):
+        return "open_tab requires string url"
+    if "alias" in step and step.get("alias") is not None and not _is_str(step.get("alias")):
+        return "open_tab alias must be a string"
+    if "focus" in step and not isinstance(step.get("focus"), bool):
+        return "open_tab focus must be a boolean"
+    return None
+
+
+def _validate_fill_form(step: dict[str, Any]) -> str | None:
+    fields = step.get("fields")
+    if not isinstance(fields, dict):
+        return "fill_form requires fields object of label to value"
+    if not all(_is_str(k) and _is_str(v) for k, v in fields.items()):
+        return "fill_form fields must be string label to string value"
+    if "submit" in step and not isinstance(step.get("submit"), bool):
+        return "fill_form submit must be a boolean"
+    mode = step.get("mode", "auto")
+    if mode is not None and (not _is_str(mode) or mode not in FILL_MODES):
+        return "fill_form mode must be auto, keys, or fast"
+    return None
+
+
+def _validate_login(step: dict[str, Any]) -> str | None:
+    origin = step.get("expected_origin")
+    if not _is_str(origin) or not origin.strip():
+        return "login requires string expected_origin"
+    if "username" in step and step.get("username") is not None and not _is_str(step.get("username")):
+        return "login username must be a string"
+    return None
+
+
+_STEP_VALIDATORS: dict[str, Callable[[dict[str, Any]], str | None]] = {
+    "click": lambda s: _req_int(s, "index", "click requires integer index"),
+    "input": _validate_input,
+    "select": lambda s: (
+        "select requires integer index and string text"
+        if not _is_int(s.get("index")) or not _is_str(s.get("text"))
+        else None
+    ),
+    "press": _validate_press,
+    "click_text": _validate_click_text,
+    "wait_for": lambda s: _req_str(s, "selector", "wait_for requires string selector")
+    or _opt_num(s, "timeout", "wait_for timeout must be a number"),
+    "wait_idle": lambda s: _opt_num(s, "timeout", "wait_idle timeout must be a number"),
+    "goto": lambda s: _req_str(s, "url", "goto requires string url"),
+    "scroll": _validate_scroll,
+    "settle": lambda _s: None,
+    "tab": lambda s: _req_str(s, "tab", "tab requires string tab"),
+    "open_tab": _validate_open_tab,
+    "fill_form": _validate_fill_form,
+    "login": _validate_login,
+}
+
+_STEP_RUNNERS: dict[str, Callable[[ActContext, dict[str, Any]], dict[str, Any]]] = {
+    "click": lambda ctx, s: do_click_by_index(ctx.handle, int(s["index"])),
+    "input": lambda ctx, s: do_input_by_index(
+        ctx.handle, int(s["index"]), str(s["text"]), mode=str(s.get("mode") or "auto")
+    ),
+    "select": lambda ctx, s: do_select_by_index(ctx.handle, int(s["index"]), str(s["text"])),
+    "press": lambda ctx, s: do_press(
+        ctx.handle, str(s["key"]), int(s.get("modifiers") or 0)
+    ),
+    "click_text": lambda ctx, s: do_click_text(
+        ctx.handle,
+        str(s["text"]),
+        role=str(s["role"]) if s.get("role") else None,
+        exact=bool(s.get("exact", False)),
+        nth=int(s.get("nth") or 0),
+    ),
+    "wait_for": lambda ctx, s: do_wait_for(
+        ctx.handle, str(s["selector"]), timeout=float(s.get("timeout", 10))
+    ),
+    "wait_idle": lambda ctx, s: do_wait_idle(ctx.handle, timeout=float(s.get("timeout", 10))),
+    "goto": _run_goto,
+    "scroll": lambda ctx, s: do_scroll(
+        ctx.handle,
+        float(s.get("x") or 0),
+        float(s.get("y") or 0),
+        dy=float(s.get("dy") if s.get("dy") is not None else -300),
+        dx=float(s.get("dx") or 0),
+    ),
+    "settle": lambda ctx, _s: do_settle(ctx.handle),
+    "tab": _run_tab,
+    "open_tab": _run_open_tab,
+    "fill_form": lambda ctx, s: do_fill_form(
+        ctx.handle,
+        {str(k): str(v) for k, v in (s.get("fields") or {}).items()},
+        submit=bool(s.get("submit", False)),
+        mode=str(s.get("mode") or "auto"),
+    ),
+    "login": lambda ctx, s: ctx.login(
+        str(s["username"]) if s.get("username") is not None else None,
+        str(s["expected_origin"]),
+    ),
+}

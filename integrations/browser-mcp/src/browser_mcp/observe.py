@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 import time
@@ -27,9 +26,9 @@ def _resolve_viewport_only(value: bool | None) -> bool:
     if value is not None:
         return bool(value)
     raw = (os.environ.get("BROWSER_MCP_VIEWPORT_DEFAULT") or "1").strip().lower()
-    if raw in results._VIEWPORT_OFF:
+    if raw in results.VIEWPORT_OFF:
         return False
-    if raw in results._VIEWPORT_ON:
+    if raw in results.VIEWPORT_ON:
         return True
     return True
 
@@ -78,7 +77,7 @@ def resolve_action_observe(value: str | None, *, default: str = "diff") -> str:
     if default != "diff":
         return default
     env = (os.environ.get("BROWSER_MCP_OBSERVE_DEFAULT") or "diff").strip().lower()
-    return env if env in results._ACTION_OBSERVE_MODES else "diff"
+    return env if env in results.ACTION_OBSERVE_MODES else "diff"
 
 
 def _remaining_ms(started: float, budget_ms: int) -> int:
@@ -93,6 +92,7 @@ def _network_in_flight(helpers: Any, in_flight: set[str]) -> bool:
     try:
         events = drain()
     except Exception:
+        logger.debug("drain_events failed", exc_info=True)
         return bool(in_flight)
     if not isinstance(events, (list, tuple)):
         return bool(in_flight)
@@ -139,13 +139,15 @@ def _wait_while_network_busy(
     except TypeError:
         wait_idle(timeout=remaining_ms / 1000.0)
     except Exception:
-        pass
+        logger.debug("wait_for_network_idle failed", exc_info=True)
     return {"quiet": True, "navigated": False}
 
 
 def _handle_navigated(handle: tabs.TabHandle) -> None:
-    with contextlib.suppress(Exception):
+    try:
         handle.evaluate(_LOAD_WAIT_JS)
+    except Exception:
+        logger.debug("post-navigation load wait failed", exc_info=True)
     dom_indexing._register_driver_for_new_documents(handle)
 
 
@@ -177,6 +179,67 @@ def _settle_post_action(
 
 def _url_without_fragment(url: str) -> str:
     return (url or "").split("#", 1)[0]
+
+
+def _page_navigated(handle: tabs.TabHandle, url: str) -> bool:
+    return bool(
+        handle.state
+        and handle.state.last_url
+        and url
+        and _url_without_fragment(handle.state.last_url) != _url_without_fragment(url)
+    )
+
+
+def _full_observation(
+    *,
+    url: str,
+    title: str,
+    element_count: int,
+    tree: str,
+    truncated: bool,
+    below_viewport: int,
+) -> dict[str, Any]:
+    return {
+        "mode": "full",
+        "url": url,
+        "title": title,
+        "elementCount": element_count,
+        "tree": tree,
+        "truncated": truncated,
+        "below_viewport": below_viewport,
+    }
+
+
+def _diff_observation(
+    previous: list[str],
+    lines: list[str],
+    *,
+    url: str,
+    title: str,
+    element_count: int,
+    truncated: bool,
+    below_viewport: int,
+) -> dict[str, Any] | None:
+    diff = dom_indexing.diff_tree_lines(previous, lines)
+    added = list(diff["added"])
+    removed = list(diff["removed"])
+    oversized = (
+        len(lines) >= 8
+        and len(added) + len(removed) > results.DIFF_TO_FULL_RATIO * len(lines)
+    )
+    if oversized:
+        return None
+    return {
+        "mode": "diff",
+        "added": added,
+        "removed": removed,
+        "unchanged": diff["unchanged"],
+        "elementCount": element_count,
+        "url": url,
+        "title": title,
+        "truncated": truncated,
+        "below_viewport": below_viewport,
+    }
 
 
 def snapshot_tree(
@@ -214,59 +277,88 @@ def snapshot_tree(
         truncated=truncated,
         omitted=omitted,
     )
-    navigated = bool(
-        handle.state
-        and handle.state.last_url
-        and url
-        and _url_without_fragment(handle.state.last_url) != _url_without_fragment(url)
-    )
+    navigated = _page_navigated(handle, url)
     previous = handle.state.last_tree if handle.state is not None else None
-    full_obs: dict[str, Any] = {
-        "mode": "full",
-        "url": url,
-        "title": title,
-        "elementCount": element_count,
-        "tree": tree,
-        "truncated": truncated,
-        "below_viewport": below_viewport,
-    }
-    use_diff = observe == "diff" and previous is not None and not navigated
-    if use_diff:
-        diff = dom_indexing.diff_tree_lines(previous, lines)
-        added = list(diff["added"])
-        removed = list(diff["removed"])
-        oversized = (
-            len(lines) >= 8
-            and len(added) + len(removed) > results._DIFF_TO_FULL_RATIO * len(lines)
+    if observe == "diff" and previous is not None and not navigated:
+        diff_obs = _diff_observation(
+            previous,
+            lines,
+            url=url,
+            title=title,
+            element_count=element_count,
+            truncated=truncated,
+            below_viewport=below_viewport,
         )
-        if not oversized:
+        if diff_obs is not None:
             _cache_tree(handle, url, lines)
             return {
                 "url": url,
                 "title": title,
                 "navigated": navigated,
-                "observation": {
-                    "mode": "diff",
-                    "added": added,
-                    "removed": removed,
-                    "unchanged": diff["unchanged"],
-                    "elementCount": element_count,
-                    "url": url,
-                    "title": title,
-                    "truncated": truncated,
-                    "below_viewport": below_viewport,
-                },
+                "observation": diff_obs,
                 "_lines": lines,
             }
     _cache_tree(handle, url, lines)
-    full_obs["mode"] = "full"
     return {
         "url": url,
         "title": title,
         "navigated": navigated,
-        "observation": full_obs,
+        "observation": _full_observation(
+            url=url,
+            title=title,
+            element_count=element_count,
+            tree=tree,
+            truncated=truncated,
+            below_viewport=below_viewport,
+        ),
         "_lines": lines,
     }
+
+
+def _retry_until_tree_changes(
+    handle: tabs.TabHandle,
+    observe: str,
+    *,
+    before_lines: list[str],
+    started: float,
+    budget: int,
+    quiet: int,
+    settled: dict[str, Any],
+    snap: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    retries = 0
+    navigated = bool(settled.get("navigated")) or bool(snap.get("navigated"))
+    while _remaining_ms(started, budget) > 0:
+        if list(snap.get("_lines") or []) != before_lines:
+            logger.debug("observe_after retry stop: tree changed after %s extra settles", retries)
+            break
+        left = _remaining_ms(started, budget)
+        logger.debug("observe_after retry n=%s left_ms=%s", retries, left)
+        tick = time.monotonic()
+        extra = _settle_post_action(
+            handle, quiet_ms=min(quiet, left) if quiet else left, max_ms=left
+        )
+        if (time.monotonic() - tick) * 1000 < 20 and left > 0:
+            time.sleep(min(max(quiet, 1), left) / 1000.0)
+        retries += 1
+        if extra.get("navigated"):
+            snap = snapshot_tree(handle, observe)
+            logger.debug("observe_after retry navigated extra=%s url=%s", extra, snap.get("url"))
+            return extra, snap, True
+        snap = snapshot_tree(handle, observe)
+        logger.debug(
+            "observe_after retry snap n=%s nav=%s mode=%s url=%s changed=%s tree=%r",
+            retries,
+            snap.get("navigated"),
+            (snap.get("observation") or {}).get("mode"),
+            snap.get("url"),
+            list(snap.get("_lines") or []) != before_lines,
+            "\n".join(snap.get("_lines") or [])[:500],
+        )
+        if snap.get("navigated"):
+            return extra, snap, True
+        settled = extra
+    return settled, snap, navigated
 
 
 def observe_after(
@@ -305,60 +397,19 @@ def observe_after(
     settled = _settle_post_action(handle, quiet_ms=quiet, max_ms=budget)
     snap = snapshot_tree(handle, observe)
     navigated = bool(settled.get("navigated")) or bool(snap.get("navigated"))
-    logger.debug(
-        "observe_after first snap elapsed_ms=%.0f settled=%s snap_nav=%s mode=%s "
-        "url=%s lines=%s changed=%s tree=%r",
-        (time.monotonic() - started) * 1000,
-        settled,
-        snap.get("navigated"),
-        (snap.get("observation") or {}).get("mode"),
-        snap.get("url"),
-        len(snap.get("_lines") or []),
-        None if before_lines is None else list(snap.get("_lines") or []) != before_lines,
-        "\n".join(snap.get("_lines") or [])[:500],
-    )
     retries = 0
     if retry_until_change and before_lines is not None and not navigated:
-        while _remaining_ms(started, budget) > 0:
-            if list(snap.get("_lines") or []) != before_lines:
-                logger.debug(
-                    "observe_after retry stop: tree changed after %s extra settles",
-                    retries,
-                )
-                break
-            left = _remaining_ms(started, budget)
-            logger.debug("observe_after retry n=%s left_ms=%s", retries, left)
-            tick = time.monotonic()
-            extra = _settle_post_action(
-                handle, quiet_ms=min(quiet, left) if quiet else left, max_ms=left
-            )
-            if (time.monotonic() - tick) * 1000 < 20 and left > 0:
-                time.sleep(min(max(quiet, 1), left) / 1000.0)
-            retries += 1
-            if extra.get("navigated"):
-                settled = extra
-                navigated = True
-                snap = snapshot_tree(handle, observe)
-                logger.debug(
-                    "observe_after retry navigated extra=%s url=%s",
-                    extra,
-                    snap.get("url"),
-                )
-                break
-            snap = snapshot_tree(handle, observe)
-            logger.debug(
-                "observe_after retry snap n=%s nav=%s mode=%s url=%s changed=%s tree=%r",
-                retries,
-                snap.get("navigated"),
-                (snap.get("observation") or {}).get("mode"),
-                snap.get("url"),
-                list(snap.get("_lines") or []) != before_lines,
-                "\n".join(snap.get("_lines") or [])[:500],
-            )
-            if snap.get("navigated"):
-                navigated = True
-                break
-            settled = extra
+        settled, snap, navigated = _retry_until_tree_changes(
+            handle,
+            observe,
+            before_lines=before_lines,
+            started=started,
+            budget=budget,
+            quiet=quiet,
+            settled=settled,
+            snap=snap,
+        )
+        retries = 1
     if before_url and snap.get("url"):
         if _url_without_fragment(before_url) != _url_without_fragment(str(snap["url"])):
             navigated = True
@@ -387,3 +438,4 @@ def observe_after(
         },
         "observation": observation,
     }
+

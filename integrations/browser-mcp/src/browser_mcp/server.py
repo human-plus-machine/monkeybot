@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import asyncio
 import contextlib
 import logging
 import signal
@@ -10,42 +11,24 @@ import sys
 
 from browser_mcp.app import mcp
 from browser_mcp import backend, in_app_cdp
-from browser_mcp.tools import (  # noqa: F401
-    browser_act,
-    browser_click,
-    browser_click_by_index,
-    browser_click_text,
-    browser_close_tab,
-    browser_extract,
-    browser_fill,
-    browser_fill_form,
-    browser_get_elements,
-    browser_get_text,
-    browser_goto,
-    browser_input_by_index,
-    browser_js,
-    browser_list_playbooks,
-    browser_login,
-    browser_open_tab,
-    browser_page_info,
-    browser_press_key,
-    browser_read_playbook,
-    browser_read_tabs,
-    browser_recent_actions,
-    browser_run_playbook,
-    browser_screenshot,
-    browser_scroll,
-    browser_select_by_index,
-    browser_stop,
-    browser_switch_tab,
-    browser_tabs,
-    browser_upload,
-    browser_wait_for,
-    browser_wait_idle,
-    browser_write_playbook,
-)
+from browser_mcp.tools import *  # noqa: F401,F403
 
 logger = logging.getLogger(__name__)
+
+
+def tool_surface() -> dict[str, object]:
+    """Public tool names, docs, and input schemas (no MCP instructions blob)."""
+    tools = asyncio.run(mcp.list_tools())
+    return {
+        "tools": [
+            {
+                "name": t.name,
+                "description": t.description,
+                "inputSchema": t.inputSchema,
+            }
+            for t in sorted(tools, key=lambda t: t.name)
+        ],
+    }
 
 
 def _stop_daemon_for_shutdown() -> None:

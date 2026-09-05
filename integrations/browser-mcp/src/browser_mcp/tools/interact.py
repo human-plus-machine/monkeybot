@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from browser_mcp import actions, dom_indexing
-from browser_mcp.app import mcp, _public_tool, prepare_action, prepare_handle, observe_mode
+from browser_mcp.app import mcp, _public_tool, prepare_action
 from browser_mcp import results
 from browser_mcp.observe import observe_after
 
@@ -20,7 +20,9 @@ def browser_click_by_index(
 
     Default observe=\"diff\" returns the settled page snapshot in the response.
     """
-    prep = prepare_action(observe, tab)
+    prep = prepare_action(
+        tab, observe=observe, default="diff", focus=True, capture_url=True
+    )
     if prep.error:
         return prep.error
     handle = prep.handle
@@ -55,7 +57,9 @@ def browser_input_by_index(
     comboboxes and fields that only listen to keydown. Override the default with
     BROWSER_MCP_FILL_MODE. Default observe=\"diff\" returns the settled snapshot.
     """
-    prep = prepare_action(observe, tab)
+    prep = prepare_action(
+        tab, observe=observe, default="diff", focus=True, capture_url=True
+    )
     if prep.error:
         return prep.error
     handle = prep.handle
@@ -86,7 +90,9 @@ def browser_select_by_index(
 ) -> str:
     """Select a <select> dropdown option by visible text, using the index from
     browser_get_elements."""
-    prep = prepare_action(observe, tab)
+    prep = prepare_action(
+        tab, observe=observe, default="diff", focus=True, capture_url=True
+    )
     if prep.error:
         return prep.error
     handle = prep.handle
@@ -120,7 +126,9 @@ def browser_click(
     represent (canvas, shadow DOM, drag targets) or after visually confirming a spot via
     browser_screenshot.
     """
-    prep = prepare_action(observe, tab)
+    prep = prepare_action(
+        tab, observe=observe, default="diff", focus=True, capture_url=True
+    )
     if prep.error:
         return prep.error
     handle = prep.handle
@@ -146,7 +154,9 @@ def browser_fill(
     tab: str | None = None,
 ) -> str:
     """Fill a form input (works with React/Vue controlled inputs)."""
-    prep = prepare_action(observe, tab)
+    prep = prepare_action(
+        tab, observe=observe, default="diff", focus=True, capture_url=True
+    )
     if prep.error:
         return prep.error
     handle = prep.handle
@@ -168,7 +178,9 @@ def browser_press_key(
     key: str, modifiers: int = 0, observe: str | None = None, tab: str | None = None
 ) -> str:
     """Press a key. Modifiers bitfield: 1=Alt, 2=Ctrl, 4=Meta(Cmd), 8=Shift."""
-    prep = prepare_action(observe, tab)
+    prep = prepare_action(
+        tab, observe=observe, default="diff", focus=True, capture_url=True
+    )
     if prep.error:
         return prep.error
     handle = prep.handle
@@ -194,7 +206,9 @@ def browser_scroll(
     tab: str | None = None,
 ) -> str:
     """Scroll the page at viewport position (x, y)."""
-    prep = prepare_action(observe, tab)
+    prep = prepare_action(
+        tab, observe=observe, default="diff", focus=True, capture_url=True
+    )
     if prep.error:
         return prep.error
     handle = prep.handle
@@ -225,9 +239,6 @@ def browser_click_text(
     toggles equality vs substring. Prefers visible, in-viewport, top elements.
     On a miss, returns did_you_mean with up to five near-misses.
     """
-    mode, error = observe_mode(observe)
-    if error:
-        return error
     if role is not None and str(role).strip():
         role_norm = str(role).strip().lower()
         if role_norm not in actions.CLICK_TEXT_ROLES:
@@ -235,7 +246,9 @@ def browser_click_text(
             return results.json_text({"ok": False, "error": f"unknown role {role!r}; expected {names}"})
     else:
         role_norm = None
-    prep = prepare_handle(tab, focus=True, capture_url=True)
+    prep = prepare_action(
+        tab, observe=observe, default="diff", focus=True, capture_url=True
+    )
     if prep.error:
         return prep.error
     handle = prep.handle
@@ -246,7 +259,7 @@ def browser_click_text(
         return results.json_text(payload)
     wrapped = observe_after(
         handle,
-        mode,
+        prep.mode,
         {"type": "click_text", "text": text, "index": payload.get("index")},
         before_url=prep.before_url,
         retry_until_change=True,
@@ -257,8 +270,40 @@ def browser_click_text(
 @_public_tool
 def browser_upload(selector: str, path: str, tab: str | None = None) -> str:
     """Set files on a file input. path must be an absolute filepath on the host."""
-    prep = prepare_handle(tab, focus=True)
+    prep = prepare_action(tab, focus=True)
     if prep.error:
         return prep.error
     prep.helpers.upload_file(selector, path)
     return results.json_text({"ok": True})
+
+
+@mcp.tool()
+@_public_tool
+def browser_wait_for(
+    selector: str, visible: bool = False, timeout: float = 10.0, tab: str | None = None
+) -> str:
+    """Wait until an element matching selector exists (optionally visible)."""
+    prep = prepare_action(tab)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
+    return results.json_text(
+        actions.do_wait_for(handle, selector, visible=visible, timeout=timeout)
+    )
+
+
+@mcp.tool()
+@_public_tool
+def browser_wait_idle(
+    timeout: float = 10.0, idle_ms: float = 500, tab: str | None = None
+) -> str:
+    """Wait until network activity is idle, then until the DOM is quiet.
+
+    Network idle is only available on the focused tab. On another tab this falls
+    back to a DOM settle and reports idle as null.
+    """
+    prep = prepare_action(tab)
+    if prep.error:
+        return prep.error
+    handle = prep.handle
+    return results.json_text(actions.do_wait_idle(handle, timeout=timeout, idle_ms=idle_ms))

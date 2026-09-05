@@ -44,48 +44,25 @@ def _helpers() -> MagicMock:
 
 
 def test_fill_form_unresolved_is_not_error() -> None:
-    helpers = _helpers()
-    with (
-        _patch_harness(helpers),
-        patch.object(
-            actions,
-            "do_fill_form",
-            return_value={
-                "ok": True,
-                "filled": [{"label": "Email", "index": 2, "how": "aria-label"}],
-                "unresolved": ["Promo code"],
-                "submitted": False,
-            },
-        ),
+    handle = MagicMock()
+    with patch.object(
+        actions,
+        "_fill_one_field",
+        side_effect=[
+            {"label": "Email", "index": 2, "how": "aria-label"},
+            None,
+        ],
     ):
-        json.loads(server.browser_tabs())
-        result = json.loads(
-            server.browser_fill_form(
-                {"Email": "a@b.test", "Promo code": "x"}, observe="none"
-            )
-        )
+        result = actions.do_fill_form(handle, {"Email": "a@b.test", "Promo code": "x"})
     assert result["ok"] is True
     assert result["unresolved"] == ["Promo code"]
     assert result["filled"][0]["how"] == "aria-label"
 
 
 def test_fill_form_all_failed_is_error() -> None:
-    helpers = _helpers()
-    with (
-        _patch_harness(helpers),
-        patch.object(
-            actions,
-            "do_fill_form",
-            return_value={
-                "ok": False,
-                "filled": [],
-                "unresolved": ["Nope"],
-                "submitted": False,
-            },
-        ),
-    ):
-        json.loads(server.browser_tabs())
-        result = json.loads(server.browser_fill_form({"Nope": "x"}, observe="none"))
+    handle = MagicMock()
+    with patch.object(actions, "_fill_one_field", return_value=None):
+        result = actions.do_fill_form(handle, {"Nope": "x"})
     assert result["ok"] is False
     assert result["unresolved"] == ["Nope"]
 

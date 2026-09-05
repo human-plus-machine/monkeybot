@@ -33,11 +33,13 @@ from __future__ import annotations
 import base64
 import difflib
 import json
+import logging
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from browser_mcp.tabs import TabHandle, as_handle, registry, reset_registry
+
+logger = logging.getLogger(__name__)
 
 _ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
@@ -95,9 +97,6 @@ _CDP_JOIN_SCRIPT = (
     "})()"
 )
 
-_registered_targets: set[str] = set()
-_driver_ready: bool = False
-
 
 class ElementNotFoundError(RuntimeError):
     """Raised when an index has no matching element in the page's current selector map."""
@@ -112,58 +111,51 @@ def _has_helper(helpers: Any, name: str) -> bool:
     return callable(getattr(helpers, name, None))
 
 
-def _helpers_of(target: Any) -> Any:
-    return target.helpers if isinstance(target, TabHandle) else target
-
-
-def _target_key(target: Any) -> str:
-    if isinstance(target, TabHandle) and target.state is not None:
-        return target.state.target_id
-    helpers = _helpers_of(target)
-    if _has_helper(helpers, "current_tab"):
-        try:
-            tab = helpers.current_tab()
-        except Exception:
-            tab = None
-        if isinstance(tab, dict):
-            tid = tab.get("targetId") or tab.get("target_id")
-            if tid:
-                return str(tid)
-    if _has_helper(helpers, "page_info"):
-        try:
-            info = helpers.page_info() or {}
-        except Exception:
-            info = {}
-        url = str(info.get("url") or "")
-        return urlparse(url).netloc or url
-    return ""
+def _handle_for_driver(target: Any) -> TabHandle:
+    handle = as_handle(target)
+    if handle.state is not None:
+        return handle
+    helpers = handle.helpers
+    if not _has_helper(helpers, "current_tab"):
+        return handle
+    try:
+        tab = helpers.current_tab()
+    except Exception:
+        logger.debug("current_tab failed during driver register", exc_info=True)
+        return handle
+    if not isinstance(tab, dict):
+        return handle
+    tid = tab.get("targetId") or tab.get("target_id")
+    if not tid:
+        return handle
+    state = registry().ensure(
+        str(tid),
+        url=str(tab.get("url") or ""),
+        title=str(tab.get("title") or ""),
+    )
+    return TabHandle(helpers, state, focused=handle.focused)
 
 
 def _mark_registered(handle: TabHandle) -> None:
-    global _driver_ready
     if handle.state is not None:
         handle.state.driver_registered = True
-        return
-    key = _target_key(handle) or "_default"
-    _registered_targets.add(key)
-    _driver_ready = True
 
 
 def clear_registered_targets() -> None:
     """Drop per-target registration (call on backend teardown)."""
-    global _driver_ready
-    _registered_targets.clear()
-    _driver_ready = False
     reset_registry()
 
 
 def mark_driver_stale(target: Any | None = None) -> None:
     """Current document may not have the driver (new tab / switch)."""
-    global _driver_ready
-    if isinstance(target, TabHandle) and target.state is not None:
-        target.state.driver_registered = False
+    if target is None:
+        focused = registry().focused()
+        if focused is not None:
+            focused.driver_registered = False
         return
-    _driver_ready = False
+    handle = _handle_for_driver(target)
+    if handle.state is not None:
+        handle.state.driver_registered = False
 
 
 def _cdp_chunk_script(chunk: str) -> str:
@@ -214,19 +206,9 @@ def _inject_current(target: Any) -> None:
 
 def _register_driver_for_new_documents(target: Any) -> None:
     """Persist the driver for future documents on this target; inject the current one."""
-    global _driver_ready
-    handle = as_handle(target)
-    if handle.state is not None:
-        if handle.state.driver_registered:
-            return
-    elif _driver_ready:
+    handle = _handle_for_driver(target)
+    if handle.state is not None and handle.state.driver_registered:
         return
-
-    if handle.state is None:
-        key = _target_key(handle) or "_default"
-        if key in _registered_targets:
-            _driver_ready = True
-            return
 
     helpers = handle.helpers
     persisted = False
@@ -243,7 +225,12 @@ def _register_driver_for_new_documents(target: Any) -> None:
         _mark_registered(handle)
         return
 
-    if handle.evaluate("!!window.__bmcp") is True:
+    try:
+        present = handle.evaluate("!!window.__bmcp") is True
+    except Exception:
+        logger.debug("driver presence probe failed", exc_info=True)
+        present = False
+    if present:
         _mark_registered(handle)
         return
     _inject_current(handle)

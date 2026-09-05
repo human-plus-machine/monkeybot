@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from browser_mcp import dom_indexing
-from browser_mcp.app import mcp, _public_tool, prepare_handle
+from browser_mcp.app import mcp, _public_tool, prepare_action
 from browser_mcp import results
 from browser_mcp.observe import _resolve_viewport_only, snapshot_tree
 
@@ -38,7 +38,7 @@ def browser_get_elements(
     kind_norm: str | None = None
     if kind is not None and str(kind).strip():
         kind_norm = str(kind).strip().lower()
-        if kind_norm not in results._ELEMENT_KINDS:
+        if kind_norm not in results.ELEMENT_KINDS:
             return results.json_text(
                 {
                     "ok": False,
@@ -50,14 +50,14 @@ def browser_get_elements(
         if kind_norm == "all":
             kind_norm = None
     observe_norm = (observe or "full").strip().lower()
-    if observe_norm not in results._OBSERVE_MODES:
-        return results.observe_error(observe, results._OBSERVE_MODES)
+    if observe_norm not in results.OBSERVE_MODES:
+        return results.observe_error(observe, results.OBSERVE_MODES)
     try:
         cap = max(1, int(max_elements))
     except (TypeError, ValueError):
         return results.json_text({"ok": False, "error": "max_elements must be an integer"})
     viewport = _resolve_viewport_only(viewport_only)
-    prep = prepare_handle(tab)
+    prep = prepare_action(tab)
     if prep.error:
         return prep.error
     handle = prep.handle
@@ -93,7 +93,7 @@ def browser_get_text(
         cap = max(1, int(max_chars))
     except (TypeError, ValueError):
         return results.json_text({"ok": False, "error": "max_chars must be an integer"})
-    prep = prepare_handle(tab)
+    prep = prepare_action(tab)
     if prep.error:
         return prep.error
     handle = prep.handle
@@ -116,7 +116,7 @@ def browser_get_text(
 @_public_tool
 def browser_js(expression: str, tab: str | None = None) -> str:
     """Evaluate JavaScript in the attached tab and return the result (DOM read/extraction)."""
-    prep = prepare_handle(tab)
+    prep = prepare_action(tab)
     if prep.error:
         return prep.error
     handle = prep.handle
@@ -143,7 +143,7 @@ def browser_extract(
         cap = max(1, int(limit))
     except (TypeError, ValueError):
         return results.json_text({"ok": False, "error": "limit must be an integer"})
-    prep = prepare_handle(tab)
+    prep = prepare_action(tab)
     if prep.error:
         return prep.error
     handle = prep.handle
@@ -162,7 +162,7 @@ def browser_extract(
 @_public_tool
 def browser_page_info(tab: str | None = None) -> str:
     """Return current page url, title, viewport size, and scroll position."""
-    prep = prepare_handle(tab)
+    prep = prepare_action(tab)
     if prep.error:
         return prep.error
     handle = prep.handle

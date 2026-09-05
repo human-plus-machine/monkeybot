@@ -7,12 +7,12 @@ from typing import Any
 
 from browser_mcp import tabs
 
-_ELEMENT_KINDS = frozenset({"inputs", "buttons", "links", "all"})
-_OBSERVE_MODES = frozenset({"full", "diff"})
-_ACTION_OBSERVE_MODES = frozenset({"full", "diff", "none"})
-_VIEWPORT_OFF = frozenset({"0", "false", "no", "off"})
-_VIEWPORT_ON = frozenset({"1", "true", "yes", "on"})
-_DIFF_TO_FULL_RATIO = 0.6
+ELEMENT_KINDS = frozenset({"inputs", "buttons", "links", "all"})
+OBSERVE_MODES = frozenset({"full", "diff"})
+ACTION_OBSERVE_MODES = frozenset({"full", "diff", "none"})
+VIEWPORT_OFF = frozenset({"0", "false", "no", "off"})
+VIEWPORT_ON = frozenset({"1", "true", "yes", "on"})
+DIFF_TO_FULL_RATIO = 0.6
 
 
 def json_text(payload: object) -> str:

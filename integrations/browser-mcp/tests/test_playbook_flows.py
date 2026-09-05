@@ -1,4 +1,4 @@
-"""Unit tests for executable playbook flows (parse, params, run, recent actions)."""
+"""Unit tests for executable playbook flows (parse, params, run)."""
 
 from __future__ import annotations
 
@@ -243,45 +243,3 @@ steps:
     assert result["error"] == "playbook timeout"
     assert result["failed_step"] == 0
 
-
-def test_recent_actions_records_labels_and_lengths_not_contents() -> None:
-    helpers = _helpers()
-    with (
-        _patch_harness(helpers),
-        patch.object(
-            dom_indexing,
-            "fill",
-            return_value={"ok": True, "tagName": "input", "mode_used": "fast"},
-        ),
-    ):
-        json.loads(server.browser_tabs())
-        json.loads(server.browser_input_by_index(3, "super-secret", observe="none"))
-    listed = json.loads(server.browser_recent_actions("a.test"))
-    assert listed["ok"] is True
-    assert listed["host"] == "a.test"
-    assert listed["actions"]
-    rec = listed["actions"][-1]
-    assert rec["do"] == "input"
-    assert rec["index"] == 3
-    assert rec["text_len"] == len("super-secret")
-    assert "super-secret" not in json.dumps(listed)
-    assert "text" not in rec
-
-
-def test_recent_actions_caps_at_50() -> None:
-    helpers = _helpers()
-    with (
-        _patch_harness(helpers),
-        patch.object(
-            dom_indexing,
-            "fill",
-            return_value={"ok": True, "tagName": "input", "mode_used": "fast"},
-        ),
-    ):
-        json.loads(server.browser_tabs())
-        for i in range(55):
-            json.loads(server.browser_input_by_index(i, "x", observe="none"))
-    listed = json.loads(server.browser_recent_actions("https://a.test/"))
-    assert len(listed["actions"]) == 50
-    assert listed["actions"][0]["index"] == 5
-    assert listed["actions"][-1]["index"] == 54

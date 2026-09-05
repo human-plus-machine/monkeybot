@@ -1,4 +1,4 @@
-"""Site playbook list/read/write/run and recent actions."""
+"""Site playbook list/read/write/run."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ import os
 import time
 from typing import Any
 
-from browser_mcp import actions, playbooks, tabs
-from browser_mcp.app import mcp, _public_tool, prepare_handle, observe_mode
+from browser_mcp import actions, playbooks
+from browser_mcp.app import mcp, _public_tool, prepare_action
 from browser_mcp import results
 from browser_mcp.observe import observe_after
 from browser_mcp.tools.batch import _act_context
@@ -90,9 +90,6 @@ def browser_run_playbook(
     use {do: login, expected_origin: ...} which maps to browser_login (the
     user-focused tab). Capped by BROWSER_MCP_PLAYBOOK_TIMEOUT_S (default 120).
     """
-    mode, error = observe_mode(observe)
-    if error:
-        return error
     if params is None:
         params = {}
     if not isinstance(params, dict):
@@ -102,7 +99,9 @@ def browser_run_playbook(
         steps = playbooks.substitute_params(flow, params)
     except playbooks.PlaybookError as exc:
         return results.json_text({"ok": False, "error": str(exc), "name": name})
-    prep = prepare_handle(tab, focus=True, capture_url=True)
+    prep = prepare_action(
+        tab, observe=observe, default="diff", focus=True, capture_url=True
+    )
     if prep.error:
         return prep.error
     handle = prep.handle
@@ -112,7 +111,7 @@ def browser_run_playbook(
     handle = executed.pop("handle", ctx.handle)
     wrapped = observe_after(
         handle,
-        mode,
+        prep.mode,
         {"type": "run_playbook", "name": name, "steps": len(steps)},
         before_url=prep.before_url,
     )
@@ -125,19 +124,3 @@ def browser_run_playbook(
             payload["ok"] = False
             payload["error"] = expect_error
     return results.json_text(results.with_observation(payload, wrapped))
-
-@mcp.tool()
-@_public_tool
-def browser_recent_actions(host: str) -> str:
-    """Return the last 50 successful actions for a host (labels and lengths, not typed text)."""
-    try:
-        slug = playbooks.host_slug(host)
-    except playbooks.PlaybookError as exc:
-        return results.json_text({"ok": False, "error": str(exc)})
-    return results.json_text(
-        {
-            "ok": True,
-            "host": slug,
-            "actions": tabs.registry().recent_actions(slug),
-        }
-    )

@@ -15,7 +15,7 @@ If `browser__*` tools are not in the active tool list yet, call **`enable_mcp("b
 
 Do **not** start with screenshots. Prefer intent tools when you already know the labels or the flow:
 
-1. Multi-field forms: `browser_fill_form({Email: "...", ...}, submit=True)`. Resolves labels via `label[for]`, aria-label, aria-labelledby, placeholder, name, id, then nearest preceding row text. Checkboxes take `"true"`/`"false"`. Unresolved labels are listed (`how` says which strategy matched) and are not an error unless every field failed.
+1. Multi-field forms: `browser_act([{do:"fill_form", fields:{Email: "...", ...}, submit:true}])`. Resolves labels via `label[for]`, aria-label, aria-labelledby, placeholder, name, id, then nearest preceding row text. Checkboxes take `"true"`/`"false"`. Unresolved labels are listed (`how` says which strategy matched) and are not an error unless every field failed.
 2. Known button/link text: `browser_click_text("Continue", role="button")`. On a miss, `did_you_mean` lists near-misses — do not immediately `get_elements`.
 3. Multi-step (login, pagination): `browser_act([{do:"click", index:n}, {do:"input", index:n, text:"..."}, ...])` — up to 25 steps; one observation at the end. Allowed `do`: click, input, select, press, click_text, wait_for, wait_idle, goto, scroll, settle, tab, open_tab, fill_form, login. On failure, resume from `failed_step` using the returned observation.
 4. Structured scraping: `browser_extract(selector, {title:"h2", href:"a@href"})` instead of `browser_js`.
@@ -35,7 +35,7 @@ This is the default workflow: no image tokens, no pixel guessing, and clicks res
 1. Call `browser_list_playbooks` with the host or URL. If `flows` are listed, call `browser_run_playbook(host, name, params)` instead of re-planning.
 2. If there are notes but no flows, call `browser_read_playbook` and follow them.
 3. Use `browser_get_elements` to see what you can click/type — not a screenshot.
-4. After a playbook `failed_step`, continue by hand from the returned observation. Then `browser_write_playbook(..., append=true)` with a corrected `playbook` YAML fence. `browser_recent_actions(host)` lists what actually worked (labels and lengths, not typed text). Secrets are never flow params — use `{do: login, expected_origin: ...}` which maps to `browser_login`.
+4. After a playbook `failed_step`, continue by hand from the returned observation. Then `browser_write_playbook(..., append=true)` with a corrected `playbook` YAML fence. Secrets are never flow params — use `{do: login, expected_origin: ...}` which maps to `browser_login`.
 
 ## Fallback: screenshots + coordinates (last resort)
 
@@ -57,7 +57,7 @@ Text-only models should never rely on screenshots for page understanding — use
 
 - First navigation: `browser_goto(url)` — response includes a full observation plus matching playbook filenames and executable `flows` when present.
 - After navigation: `browser_wait_for` or `browser_wait_idle` only if the observation is not enough.
-- Clicking / typing (default): `browser_fill_form` / `browser_click_text` / `browser_act` when you know the labels or the flow; otherwise `browser_get_elements` once → `browser_click_by_index` / `browser_input_by_index` / `browser_select_by_index`. Read `observation` on each action. Indices stay valid until navigation.
+- Clicking / typing (default): `browser_click_text` / `browser_act` (including `do: fill_form`) when you know the labels or the flow; otherwise `browser_get_elements` once → `browser_click_by_index` / `browser_input_by_index` / `browser_select_by_index`. Read `observation` on each action. Indices stay valid until navigation.
 - Reading: `browser_get_text` for body copy; `browser_extract` for structured rows; action `observation` (diff) after in-page mutations. Call `browser_get_elements` again only for a different filter or the whole tree.
 - Clicking (fallback only): `browser_screenshot(annotate=True)` → `load_file(path)` → `browser_click_by_index`. Use `browser_click(x, y)` only when there is no useful index.
 - Ad hoc DOM extraction: `browser_extract` for repeating cards/rows; `browser_js(expression)` only when you need custom page text or attributes.
@@ -76,7 +76,7 @@ When you finish a task on a host without a playbook—or discover selectors, wai
 - Prefer a `playbook` YAML fence (name, params, steps, optional expect) so the next visit can `browser_run_playbook`.
 - Keep notes terse: what worked, exact selectors, edge cases.
 - If a playbook already exists, pass `append: true` to add a section instead of overwriting. Broken fences are rejected and not written.
-- Do not hand-author huge docs; `browser_recent_actions` plus what actually worked in the browser.
+- Do not hand-author huge docs; write a `playbook` fence from what actually worked in the browser.
 
 ## Cleanup
 
