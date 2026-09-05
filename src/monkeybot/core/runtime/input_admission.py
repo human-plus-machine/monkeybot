@@ -51,6 +51,14 @@ class FollowUpItem:
     first_lock_fail_at_ms: int | None = None
 
 
+@dataclass(frozen=True)
+class SteerItem:
+    """One mid-turn steer. Provenance is tagged at enqueue, never inferred."""
+
+    content: list[ContentBlock]
+    provenance: str = "human"
+
+
 class InputAdmission:
     """Per-session steer + follow-up queues."""
 
@@ -70,7 +78,7 @@ class InputAdmission:
             if max_follow_up is not None
             else _queue_limit("MONKEYBOT_FOLLOW_UP_QUEUE_MAX", 16)
         )
-        self._steer: deque[list[ContentBlock]] = deque()
+        self._steer: deque[SteerItem] = deque()
         self._follow_up: deque[FollowUpItem] = deque()
 
     @property
@@ -81,7 +89,12 @@ class InputAdmission:
     def follow_up_depth(self) -> int:
         return len(self._follow_up)
 
-    def enqueue_steer(self, content: list[ContentBlock]) -> int:
+    def enqueue_steer(
+        self,
+        content: list[ContentBlock],
+        *,
+        provenance: str = "human",
+    ) -> int:
         """Append steer content; return 0-based queue position.
 
         Raises:
@@ -92,7 +105,7 @@ class InputAdmission:
             raise ValueError("steer content must be non-empty")
         if len(self._steer) >= self.max_steer:
             raise AdmissionQueueFullError("steer", self.max_steer)
-        self._steer.append(list(content))
+        self._steer.append(SteerItem(content=list(content), provenance=provenance))
         return len(self._steer) - 1
 
     def enqueue_follow_up(
@@ -108,7 +121,7 @@ class InputAdmission:
         self._follow_up.append(FollowUpItem(request_id=request_id, content=list(content)))
         return len(self._follow_up) - 1
 
-    def pop_steer(self) -> list[ContentBlock] | None:
+    def pop_steer(self) -> SteerItem | None:
         """Take the oldest steer message, or ``None`` if empty."""
         if not self._steer:
             return None
@@ -150,5 +163,6 @@ __all__ = [
     "AdmissionQueueFullError",
     "FollowUpItem",
     "InputAdmission",
+    "SteerItem",
     "preview_text",
 ]

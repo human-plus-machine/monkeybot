@@ -359,6 +359,15 @@ async def test_sqlite_backend_scheduled_loops_returns_same_instance(
     assert s1 is s2
 
 
+@pytest.mark.asyncio
+async def test_sqlite_backend_goal_ledger_returns_same_instance(
+    sqlite_backend: SQLiteStorageBackend,
+) -> None:
+    g1 = sqlite_backend.goal_ledger()
+    g2 = sqlite_backend.goal_ledger()
+    assert g1 is g2
+
+
 # ---------------------------------------------------------------------------
 # HistoryStore protocol — append / load / reset
 # ---------------------------------------------------------------------------

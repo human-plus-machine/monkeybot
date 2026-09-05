@@ -36,6 +36,7 @@ from monkeybot.core.persistence.durable_runs import (
     _tuple_to_run_row,
 )
 from monkeybot.core.persistence.errors import AmbiguousCommitError
+from monkeybot.core.persistence.goal_ledger import InMemoryGoalLedgerStore
 from monkeybot.core.persistence.scheduled_loops import (
     _SCHEDULED_LOOP_COLUMNS,
     ScheduledLoopCreate,
@@ -1576,6 +1577,7 @@ class PostgresStorageBackend:
         self._usage_store: PostgresUsageStore | None = None
         self._runs_store: PostgresRunStore | None = None
         self._scheduled_loops_store: PostgresScheduledLoopStore | None = None
+        self._goal_ledger_store: InMemoryGoalLedgerStore | None = None
         self._session_turn_lock_store: PostgresSessionTurnLockStore | None = None
         self._outbox_store: PostgresOutboxStore | None = None
 
@@ -1591,6 +1593,8 @@ class PostgresStorageBackend:
         self._usage_store = PostgresUsageStore(self._pool)
         self._runs_store = PostgresRunStore(self._pool)
         self._scheduled_loops_store = PostgresScheduledLoopStore(self._pool)
+        self._goal_ledger_store = InMemoryGoalLedgerStore()
+        logger.warning("goal_ledger using in-memory store on Postgres (SQLite persistence only)")
         self._session_turn_lock_store = PostgresSessionTurnLockStore(self._pool)
         self._outbox_store = PostgresOutboxStore(self._pool)
 
@@ -1602,6 +1606,7 @@ class PostgresStorageBackend:
             self._usage_store = None
             self._runs_store = None
             self._scheduled_loops_store = None
+            self._goal_ledger_store = None
             self._session_turn_lock_store = None
             self._outbox_store = None
 
@@ -1624,6 +1629,11 @@ class PostgresStorageBackend:
         if self._scheduled_loops_store is None:
             raise RuntimeError("PostgresStorageBackend.open() has not been called")
         return self._scheduled_loops_store
+
+    def goal_ledger(self) -> InMemoryGoalLedgerStore:
+        if self._goal_ledger_store is None:
+            raise RuntimeError("PostgresStorageBackend.open() has not been called")
+        return self._goal_ledger_store
 
     def session_turns(self) -> PostgresSessionTurnLockStore:
         if self._session_turn_lock_store is None:

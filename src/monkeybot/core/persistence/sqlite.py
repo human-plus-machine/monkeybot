@@ -188,6 +188,23 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     request_id TEXT,
     claimed_at_ms INTEGER
 )""",
+    """CREATE TABLE IF NOT EXISTS goal_ledger (
+    entry_id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    verbatim TEXT NOT NULL,
+    provenance TEXT NOT NULL,
+    channel TEXT,
+    intent TEXT NOT NULL,
+    status TEXT NOT NULL,
+    relates_to TEXT,
+    constraints_json TEXT NOT NULL,
+    done_when_json TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL
+)""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_goal_ledger_thread_seq
+    ON goal_ledger(thread_id, seq)""",
+    "CREATE INDEX IF NOT EXISTS idx_goal_ledger_thread ON goal_ledger(thread_id, seq)",
     OUTBOX_DDL,
     OUTBOX_INDEX_DDL,
 )
