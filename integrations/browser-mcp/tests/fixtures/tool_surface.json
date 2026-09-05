@@ -1,0 +1,1257 @@
+{
+  "instructions": "Real-browser control via CDP (browser-harness). Use browser_* tools for web tasks.\n\nDefault workflow \u2014 text-based, indexed DOM interaction:\n1. Prefer intent tools when you already know the labels or the multi-step flow: browser_fill_form for forms, browser_click_text when the visible label is known, browser_act for a batch of clicks/inputs/waits (cap 25 steps), browser_extract for structured scraping instead of browser_js.\n2. Otherwise browser_get_elements() once to see the indexed tree (viewport by default). Use kind=/contains= to narrow, viewport_only=false or scroll when the footer says more are below, and browser_get_text for readable page text.\n3. browser_click_by_index / browser_input_by_index / browser_select_by_index to act. Each action settles and returns observation (diff by default) \u2014 read that instead of calling get_elements again. Indices remain valid until navigation. Pass observe=\"none\" to skip the snapshot, observe=\"full\" for the whole viewport tree. Only call browser_get_elements again when you need a different filter, the whole tree, or after navigation if the observation is not enough. browser_goto returns a full observation by default.\n\nbrowser_screenshot is a LAST-RESORT FALLBACK only \u2014 use it when browser_get_elements returns nothing useful (canvas apps, heavily shadow-DOM UIs, drag-and-drop, or visually confirming layout/rendering). Prefer browser_screenshot(annotate=True) then browser_click_by_index when indices are available; browser_click(x, y) is last-resort after that. Do not default to screenshots for ordinary clicking/typing.\n\nCheck browser_list_playbooks before improvising on a site. If flows are listed, call browser_run_playbook(host, name, params) instead of re-planning. Read markdown playbooks only for notes. On a failed_step, continue by hand and browser_write_playbook(..., append=true) with a corrected ```playbook fence. browser_recent_actions(host) lists what actually worked (labels and lengths, not typed text). If the user asked to sign in on the Spaces in-app browser and a saved password exists, call browser_login(expected_origin=...) \u2014 never read or type the password yourself, and check the returned origin. Call browser_stop when done with remote/cloud sessions.\n\nTabs: each tab has a short alias (t1, t2, \u2026) or a name you pass to browser_open_tab(alias=...). Reads (get_elements, get_text, page_info, js, wait_for, read_tabs) never move focus \u2014 pass tab= to address a background tab. Actions (click, input, select, fill, fill_form, click_text, act, screenshot, \u2026) focus the tab first because background tabs throttle timers and pause painting. Open a second tab to compare pages, keep a form while reading docs, or fan out with browser_read_tabs. At most five agent-controlled tabs; if you hit the cap, relay the returned tab list to the user, ask which to close, then browser_close_tab and retry \u2014 never close a tab without their confirmation. Close tabs you opened when done. Do not expect a background SPA to finish loading while unfocused.",
+  "tools": [
+    {
+      "description": "Run up to 25 sequential browser steps in one turn.\n\n    Each step is ``{do, ...}``. Allowed do values: click, input, select, press,\n    click_text, wait_for, wait_idle, goto, scroll, settle, tab, open_tab,\n    fill_form, login. After each action the page settles; one observation is\n    returned at the end for the focused tab. On the first failure\n    (stop_on_error=True, default) returns completed steps, failed_step, error,\n    and the current observation so you can resume. login maps to browser_login\n    (user-focused tab; always pass expected_origin).\n    ",
+      "inputSchema": {
+        "properties": {
+          "observe": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observe"
+          },
+          "steps": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Steps",
+            "type": "array"
+          },
+          "stop_on_error": {
+            "default": true,
+            "title": "Stop On Error",
+            "type": "boolean"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          }
+        },
+        "required": [
+          "steps"
+        ],
+        "title": "browser_actArguments",
+        "type": "object"
+      },
+      "name": "browser_act"
+    },
+    {
+      "description": "Click at viewport coordinates (x, y).\n\n    LAST-RESORT FALLBACK: prefer browser_get_elements + browser_click_by_index for\n    ordinary clicking. Only use raw coordinates for elements browser_get_elements can't\n    represent (canvas, shadow DOM, drag targets) or after visually confirming a spot via\n    browser_screenshot.\n    ",
+      "inputSchema": {
+        "properties": {
+          "button": {
+            "default": "left",
+            "title": "Button",
+            "type": "string"
+          },
+          "clicks": {
+            "default": 1,
+            "title": "Clicks",
+            "type": "integer"
+          },
+          "observe": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observe"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          },
+          "x": {
+            "title": "X",
+            "type": "number"
+          },
+          "y": {
+            "title": "Y",
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "title": "browser_clickArguments",
+        "type": "object"
+      },
+      "name": "browser_click"
+    },
+    {
+      "description": "Click an interactive element by index from browser_get_elements. Prefer this over\n    browser_click(x, y) \u2014 no pixel-guessing, resilient to layout shifts.\n\n    Default observe=\"diff\" returns the settled page snapshot in the response.\n    ",
+      "inputSchema": {
+        "properties": {
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "observe": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observe"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          }
+        },
+        "required": [
+          "index"
+        ],
+        "title": "browser_click_by_indexArguments",
+        "type": "object"
+      },
+      "name": "browser_click_by_index"
+    },
+    {
+      "description": "Click the interactive element whose visible text or aria-label matches.\n\n    role restricts to button|link|tab|menuitem|checkbox|radio|option. exact\n    toggles equality vs substring. Prefers visible, in-viewport, top elements.\n    On a miss, returns did_you_mean with up to five near-misses.\n    ",
+      "inputSchema": {
+        "properties": {
+          "exact": {
+            "default": false,
+            "title": "Exact",
+            "type": "boolean"
+          },
+          "nth": {
+            "default": 0,
+            "title": "Nth",
+            "type": "integer"
+          },
+          "observe": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observe"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Role"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "browser_click_textArguments",
+        "type": "object"
+      },
+      "name": "browser_click_text"
+    },
+    {
+      "description": "Close a tab by alias or target id.\n\n    Refuses to close the last tab (navigates it to about:blank instead). If the\n    closed tab was focused, focuses the most recently used remaining tab.\n    ",
+      "inputSchema": {
+        "properties": {
+          "tab": {
+            "title": "Tab",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tab"
+        ],
+        "title": "browser_close_tabArguments",
+        "type": "object"
+      },
+      "name": "browser_close_tab"
+    },
+    {
+      "description": "Extract structured rows from elements matching ``selector``.\n\n    Each field is a relative sub-selector (``\"title\": \"h2\"``). Append\n    ``@attr`` for an attribute (``\"href\": \"a@href\"``). Missing nodes are\n    null. Use this instead of ad-hoc ``browser_js`` scraping.\n    ",
+      "inputSchema": {
+        "properties": {
+          "fields": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Fields",
+            "type": "object"
+          },
+          "limit": {
+            "default": 50,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "selector": {
+            "title": "Selector",
+            "type": "string"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          }
+        },
+        "required": [
+          "selector",
+          "fields"
+        ],
+        "title": "browser_extractArguments",
+        "type": "object"
+      },
+      "name": "browser_extract"
+    },
+    {
+      "description": "Fill a form input (works with React/Vue controlled inputs).",
+      "inputSchema": {
+        "properties": {
+          "clear_first": {
+            "default": true,
+            "title": "Clear First",
+            "type": "boolean"
+          },
+          "observe": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observe"
+          },
+          "selector": {
+            "title": "Selector",
+            "type": "string"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "timeout": {
+            "default": 0.0,
+            "title": "Timeout",
+            "type": "number"
+          }
+        },
+        "required": [
+          "selector",
+          "text"
+        ],
+        "title": "browser_fillArguments",
+        "type": "object"
+      },
+      "name": "browser_fill"
+    },
+    {
+      "description": "Fill a form by field label in one call.\n\n    Resolves each key with label[for], aria-label, aria-labelledby, placeholder,\n    name, id, then nearest preceding row text (case-insensitive, unique\n    substring). Selects for <select>; checks/unchecks checkboxes when the value\n    is \"true\"/\"false\". Unresolved labels are listed and are not an error\n    unless every field failed. submit=True clicks the form's submit button if\n    one exists and is enabled, otherwise presses Enter in the last field.\n    The ``how`` field on each filled entry says which strategy matched.\n    ",
+      "inputSchema": {
+        "properties": {
+          "fields": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Fields",
+            "type": "object"
+          },
+          "mode": {
+            "default": "auto",
+            "title": "Mode",
+            "type": "string"
+          },
+          "observe": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observe"
+          },
+          "submit": {
+            "default": false,
+            "title": "Submit",
+            "type": "boolean"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          }
+        },
+        "required": [
+          "fields"
+        ],
+        "title": "browser_fill_formArguments",
+        "type": "object"
+      },
+      "name": "browser_fill_form"
+    },
+    {
+      "description": "Return interactive elements as an indexed text tree \u2014 the default way to see the page.\n\n    Prefer this over browser_screenshot for locating things to click/type into. Injects a\n    DOM-walker (vendored from alibaba/page-agent, MIT licensed) that scans the live DOM and\n    returns lines like ``[12]<input placeholder='Email' />`` / ``[35]<button>Submit</button>``,\n    indentation shows parent/child nesting. Use the numeric index with browser_click_by_index /\n    browser_input_by_index / browser_select_by_index \u2014 no coordinates needed.\n\n    Defaults to the visible viewport (override with viewport_only=false or\n    BROWSER_MCP_VIEWPORT_DEFAULT=0). kind is inputs/buttons/links/all; contains is a\n    case-insensitive substring on the rendered line (searches the whole page, including\n    below the fold); max_elements (default 150) truncates with a footer. Indices remain\n    valid until navigation \u2014 re-call after navigation, or when the footer says to scroll.\n    observe=\"diff\" returns added/removed lines vs the last tree for this tab (falls back\n    to a full tree after navigation or with no cache). Pass tab= to read a background tab\n    without moving focus.\n    ",
+      "inputSchema": {
+        "properties": {
+          "contains": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Contains"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Kind"
+          },
+          "max_elements": {
+            "default": 150,
+            "title": "Max Elements",
+            "type": "integer"
+          },
+          "observe": {
+            "default": "full",
+            "title": "Observe",
+            "type": "string"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          },
+          "viewport_only": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Viewport Only"
+          }
+        },
+        "title": "browser_get_elementsArguments",
+        "type": "object"
+      },
+      "name": "browser_get_elements"
+    },
+    {
+      "description": "Readable page text for reading, separate from the interactive element tree.\n\n    Prefers ``<main>`` / ``<article>`` / ``[role=main]``, else ``body``. Strips\n    script, style, nav, footer, and aside. Pass selector to read a specific\n    subtree. Use this instead of ``browser_js(\"document.body.innerText\")``.\n    ",
+      "inputSchema": {
+        "properties": {
+          "max_chars": {
+            "default": 8000,
+            "title": "Max Chars",
+            "type": "integer"
+          },
+          "selector": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Selector"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          }
+        },
+        "title": "browser_get_textArguments",
+        "type": "object"
+      },
+      "name": "browser_get_text"
+    },
+    {
+      "description": "Navigate to a URL in the current tab (or a new tab if new_tab=True / current is blank).\n\n    Pass tab= to navigate a specific tab in place without focusing it. new_tab=True\n    opens a new tab and focuses it (same as browser_open_tab with focus=True).\n\n    Returns page info, matching playbook filenames and executable flows, and a\n    full observation by default (observe=\"diff\" / \"none\" to change that).\n    ",
+      "inputSchema": {
+        "properties": {
+          "new_tab": {
+            "default": false,
+            "title": "New Tab",
+            "type": "boolean"
+          },
+          "observe": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observe"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "browser_gotoArguments",
+        "type": "object"
+      },
+      "name": "browser_goto"
+    },
+    {
+      "description": "Click and type text into an indexed input/textarea/contenteditable element from\n    browser_get_elements. Prefer this over screenshot + coordinate typing.\n\n    mode: ``auto`` (default) tries an in-page value set and falls back to real key\n    events; ``keys`` always types; ``fast`` never falls back. Pass ``keys`` for\n    comboboxes and fields that only listen to keydown. Override the default with\n    BROWSER_MCP_FILL_MODE. Default observe=\"diff\" returns the settled snapshot.\n    ",
+      "inputSchema": {
+        "properties": {
+          "clear_first": {
+            "default": true,
+            "title": "Clear First",
+            "type": "boolean"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "mode": {
+            "default": "auto",
+            "title": "Mode",
+            "type": "string"
+          },
+          "observe": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observe"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "text"
+        ],
+        "title": "browser_input_by_indexArguments",
+        "type": "object"
+      },
+      "name": "browser_input_by_index"
+    },
+    {
+      "description": "Evaluate JavaScript in the attached tab and return the result (DOM read/extraction).",
+      "inputSchema": {
+        "properties": {
+          "expression": {
+            "title": "Expression",
+            "type": "string"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          }
+        },
+        "required": [
+          "expression"
+        ],
+        "title": "browser_jsArguments",
+        "type": "object"
+      },
+      "name": "browser_js"
+    },
+    {
+      "description": "List playbook markdown filenames and executable flows, optionally filtered by host.",
+      "inputSchema": {
+        "properties": {
+          "host": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Host"
+          }
+        },
+        "title": "browser_list_playbooksArguments",
+        "type": "object"
+      },
+      "name": "browser_list_playbooks"
+    },
+    {
+      "description": "Log in with a saved Spaces password without revealing the credential.\n\n    Call this only when the user asked to sign in. Do not type or read the\n    password. Returns {ok, loggedIn, origin} \u2014 never the password value.\n\n    This signs in to the tab the user has focused, which is not necessarily the\n    tab your other browser_* calls address. Pass expected_origin (e.g.\n    \"https://example.com\") to make the bridge refuse rather than sign in to a\n    different site; always check the returned origin before reporting success.\n    ",
+      "inputSchema": {
+        "properties": {
+          "expected_origin": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Expected Origin"
+          },
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Username"
+          }
+        },
+        "title": "browser_loginArguments",
+        "type": "object"
+      },
+      "name": "browser_login"
+    },
+    {
+      "description": "Open a URL in a new tab. Defaults to the background (does not steal focus).\n\n    alias must match [a-z][a-z0-9_-]{0,23}. At most five agent-controlled tabs;\n    on the cap this returns tab_limit_reached and does not open or close anything.\n    When focus=True, returns a full observation by default.\n    ",
+      "inputSchema": {
+        "properties": {
+          "alias": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Alias"
+          },
+          "focus": {
+            "default": false,
+            "title": "Focus",
+            "type": "boolean"
+          },
+          "observe": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observe"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "browser_open_tabArguments",
+        "type": "object"
+      },
+      "name": "browser_open_tab"
+    },
+    {
+      "description": "Return current page url, title, viewport size, and scroll position.",
+      "inputSchema": {
+        "properties": {
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          }
+        },
+        "title": "browser_page_infoArguments",
+        "type": "object"
+      },
+      "name": "browser_page_info"
+    },
+    {
+      "description": "Press a key. Modifiers bitfield: 1=Alt, 2=Ctrl, 4=Meta(Cmd), 8=Shift.",
+      "inputSchema": {
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "modifiers": {
+            "default": 0,
+            "title": "Modifiers",
+            "type": "integer"
+          },
+          "observe": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observe"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "title": "browser_press_keyArguments",
+        "type": "object"
+      },
+      "name": "browser_press_key"
+    },
+    {
+      "description": "Read the playbook markdown for a host or URL.",
+      "inputSchema": {
+        "properties": {
+          "host": {
+            "title": "Host",
+            "type": "string"
+          }
+        },
+        "required": [
+          "host"
+        ],
+        "title": "browser_read_playbookArguments",
+        "type": "object"
+      },
+      "name": "browser_read_playbook"
+    },
+    {
+      "description": "Fan-out read over tabs without changing focus.\n\n    ``tabs`` defaults to agent-opened tabs. mode is ``text`` (readable body) or\n    ``tree`` (indexed element tree). Sequential; one IPC call per tab.\n    ",
+      "inputSchema": {
+        "properties": {
+          "max_chars": {
+            "default": 3000,
+            "title": "Max Chars",
+            "type": "integer"
+          },
+          "mode": {
+            "default": "text",
+            "title": "Mode",
+            "type": "string"
+          },
+          "tabs": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tabs"
+          }
+        },
+        "title": "browser_read_tabsArguments",
+        "type": "object"
+      },
+      "name": "browser_read_tabs"
+    },
+    {
+      "description": "Return the last 50 successful actions for a host (labels and lengths, not typed text).",
+      "inputSchema": {
+        "properties": {
+          "host": {
+            "title": "Host",
+            "type": "string"
+          }
+        },
+        "required": [
+          "host"
+        ],
+        "title": "browser_recent_actionsArguments",
+        "type": "object"
+      },
+      "name": "browser_recent_actions"
+    },
+    {
+      "description": "Execute a named ```playbook flow from the host markdown file.\n\n    Substitutes {{param}} into string fields, runs steps via browser_act, then\n    checks expect (url_contains, selector, text). On failure returns failed_step\n    plus an observation so you can continue by hand. Secrets are never params \u2014\n    use {do: login, expected_origin: ...} which maps to browser_login (the\n    user-focused tab). Capped by BROWSER_MCP_PLAYBOOK_TIMEOUT_S (default 120).\n    ",
+      "inputSchema": {
+        "properties": {
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "observe": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observe"
+          },
+          "params": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Params"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          }
+        },
+        "required": [
+          "host",
+          "name"
+        ],
+        "title": "browser_run_playbookArguments",
+        "type": "object"
+      },
+      "name": "browser_run_playbook"
+    },
+    {
+      "description": "Capture the current viewport as a JPEG (PNG available).\n\n    LAST-RESORT FALLBACK: use browser_get_elements + browser_click_by_index /\n    browser_input_by_index for ordinary clicking and typing instead \u2014 it's cheaper (no\n    image tokens) and more reliable (indexed elements vs. guessed pixels). Reach for\n    this tool only when browser_get_elements doesn't surface what you need: canvas-based\n    apps, heavy shadow-DOM UIs, drag-and-drop, or visually confirming rendering/layout.\n    Pass ``annotate=True`` to draw current index labels so the next click can still\n    use browser_click_by_index.\n\n    Returns JSON with a workspace-relative path under ``./browser/Screenshots/`` (for\n    ``load_file`` on vision models), ``bytes`` (file size), and ``format`` \u2014 not inline\n    image bytes.\n    ",
+      "inputSchema": {
+        "properties": {
+          "annotate": {
+            "default": false,
+            "title": "Annotate",
+            "type": "boolean"
+          },
+          "format": {
+            "default": "jpeg",
+            "title": "Format",
+            "type": "string"
+          },
+          "full": {
+            "default": false,
+            "title": "Full",
+            "type": "boolean"
+          },
+          "max_dim": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": 1200,
+            "title": "Max Dim"
+          },
+          "quality": {
+            "default": 60,
+            "title": "Quality",
+            "type": "integer"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          }
+        },
+        "title": "browser_screenshotArguments",
+        "type": "object"
+      },
+      "name": "browser_screenshot"
+    },
+    {
+      "description": "Scroll the page at viewport position (x, y).",
+      "inputSchema": {
+        "properties": {
+          "dx": {
+            "default": 0,
+            "title": "Dx",
+            "type": "number"
+          },
+          "dy": {
+            "default": -300,
+            "title": "Dy",
+            "type": "number"
+          },
+          "observe": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observe"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          },
+          "x": {
+            "title": "X",
+            "type": "number"
+          },
+          "y": {
+            "title": "Y",
+            "type": "number"
+          }
+        },
+        "required": [
+          "x",
+          "y"
+        ],
+        "title": "browser_scrollArguments",
+        "type": "object"
+      },
+      "name": "browser_scroll"
+    },
+    {
+      "description": "Select a <select> dropdown option by visible text, using the index from\n    browser_get_elements.",
+      "inputSchema": {
+        "properties": {
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "observe": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observe"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "text"
+        ],
+        "title": "browser_select_by_indexArguments",
+        "type": "object"
+      },
+      "name": "browser_select_by_index"
+    },
+    {
+      "description": "Stop the active browser backend (cleanup after browsing; important for cloud/AgentCore browsers).",
+      "inputSchema": {
+        "properties": {},
+        "title": "browser_stopArguments",
+        "type": "object"
+      },
+      "name": "browser_stop"
+    },
+    {
+      "description": "Switch to a tab by alias or target_id (from browser_tabs).",
+      "inputSchema": {
+        "properties": {
+          "observe": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Observe"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_id"
+        ],
+        "title": "browser_switch_tabArguments",
+        "type": "object"
+      },
+      "name": "browser_switch_tab"
+    },
+    {
+      "description": "List open browser tabs with aliases, focus, and last-used times.",
+      "inputSchema": {
+        "properties": {},
+        "title": "browser_tabsArguments",
+        "type": "object"
+      },
+      "name": "browser_tabs"
+    },
+    {
+      "description": "Set files on a file input. path must be an absolute filepath on the host.",
+      "inputSchema": {
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "selector": {
+            "title": "Selector",
+            "type": "string"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          }
+        },
+        "required": [
+          "selector",
+          "path"
+        ],
+        "title": "browser_uploadArguments",
+        "type": "object"
+      },
+      "name": "browser_upload"
+    },
+    {
+      "description": "Wait until an element matching selector exists (optionally visible).",
+      "inputSchema": {
+        "properties": {
+          "selector": {
+            "title": "Selector",
+            "type": "string"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          },
+          "timeout": {
+            "default": 10.0,
+            "title": "Timeout",
+            "type": "number"
+          },
+          "visible": {
+            "default": false,
+            "title": "Visible",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "selector"
+        ],
+        "title": "browser_wait_forArguments",
+        "type": "object"
+      },
+      "name": "browser_wait_for"
+    },
+    {
+      "description": "Wait until network activity is idle, then until the DOM is quiet.\n\n    Network idle is only available on the focused tab. On another tab this falls\n    back to a DOM settle and reports idle as null.\n    ",
+      "inputSchema": {
+        "properties": {
+          "idle_ms": {
+            "default": 500,
+            "title": "Idle Ms",
+            "type": "number"
+          },
+          "tab": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Tab"
+          },
+          "timeout": {
+            "default": 10.0,
+            "title": "Timeout",
+            "type": "number"
+          }
+        },
+        "title": "browser_wait_idleArguments",
+        "type": "object"
+      },
+      "name": "browser_wait_idle"
+    },
+    {
+      "description": "Write or append a site playbook. ```playbook fences are validated before save.",
+      "inputSchema": {
+        "properties": {
+          "append": {
+            "default": false,
+            "title": "Append",
+            "type": "boolean"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          }
+        },
+        "required": [
+          "host",
+          "content"
+        ],
+        "title": "browser_write_playbookArguments",
+        "type": "object"
+      },
+      "name": "browser_write_playbook"
+    }
+  ]
+}
