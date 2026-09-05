@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Signup form</title>
+  <style>
+    body { font-family: sans-serif; margin: 1rem; max-width: 32rem; }
+    label { display: block; margin-top: 0.6rem; }
+    input, select, textarea { width: 100%; box-sizing: border-box; }
+    textarea { min-height: 4rem; }
+    button[disabled] { opacity: 0.5; }
+  </style>
+</head>
+<body>
+  <h1>Signup</h1>
+  <form id="signup" action="#done" method="get">
+    <label for="full-name">Full name</label>
+    <input id="full-name" name="full-name" placeholder="Full name">
+
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" placeholder="Email">
+
+    <label for="phone">Phone</label>
+    <input id="phone" name="phone" type="tel" placeholder="Phone">
+
+    <label for="address">Address</label>
+    <input id="address" name="address" placeholder="Address">
+
+    <label for="city">City</label>
+    <input id="city" name="city" placeholder="City">
+
+    <label for="country">Country</label>
+    <select id="country" name="country">
+      <option value="">Select a country</option>
+      <option value="us">United States</option>
+      <option value="ca">Canada</option>
+      <option value="gb">United Kingdom</option>
+    </select>
+
+    <label for="zip">Zip</label>
+    <input id="zip" name="zip" placeholder="Zip">
+
+    <label for="company">Company</label>
+    <input id="company" name="company" placeholder="Company">
+
+    <label for="role">Role</label>
+    <input id="role" name="role" placeholder="Role">
+
+    <label for="website">Website</label>
+    <input id="website" name="website" type="url" placeholder="Website">
+
+    <label for="comments">Comments</label>
+    <textarea id="comments" name="comments" placeholder="Comments"></textarea>
+
+    <label for="nickname">Nickname</label>
+    <input id="nickname" name="nickname" placeholder="Nickname">
+
+    <p>
+      <button type="submit" id="submit" disabled>Submit</button>
+    </p>
+  </form>
+  <p id="status" hidden>Thanks, form submitted.</p>
+  <script>
+    (function () {
+      let nickname = "";
+      const el = document.getElementById("nickname");
+      const submit = document.getElementById("submit");
+      const proto = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+      el.addEventListener("input", function () {
+        nickname = el.value;
+        proto.set.call(el, nickname);
+        submit.disabled = nickname.trim() === "";
+      });
+      document.getElementById("signup").addEventListener("submit", function (event) {
+        event.preventDefault();
+        document.getElementById("status").hidden = false;
+      });
+    })();
+  </script>
+</body>
+</html>

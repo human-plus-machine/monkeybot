@@ -13,6 +13,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Browser MCP (`monkeybot-browser-mcp` 0.5.0): opt-in per-tool timing via `BROWSER_MCP_PERF=1` (JSONL to `BROWSER_MCP_PERF_LOG` or `<workspace>/browser/perf/tools.jsonl`). Never logs tool arguments. `scripts/perf_bench.py` records the Phase 0 baseline against static fixtures. See [browser-mcp-perf-baseline.md](docs/browser-mcp-perf-baseline.md).
 - Local Ollama prefix-cache knobs: `ollama-local` sends `keep_alive` (default 24h, `model.keep_alive`) and optional pinned `num_ctx` (`model.num_ctx`) via OpenAI-compat `extra_body`. YAML-only — not mapped from the runtime env. `model.context_window` is never mapped to `num_ctx`. `doctor` warns on `*-mlx` tags, default thinking on known reasoning tags, and huge `num_ctx`, and fails on unparseable/`<1` `num_ctx`. See `docs/ollama-local.md` and `examples/ollama/PrefixStable.Modelfile`.
 
 ### Fixed

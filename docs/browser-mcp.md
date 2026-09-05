@@ -172,6 +172,8 @@ AWS_PROFILE=... AWS_REGION=us-east-1 BROWSER_BACKEND=agentcore \
 | `AGENTCORE_BROWSER_ID` | AgentCore backend: browser identifier (default `aws.browser.v1`) |
 | `BROWSER_MCP_PLAYBOOKS_DIR` | Playbooks directory (agent-written site notes) |
 | `BROWSER_MCP_SCREENSHOTS_DIR` | Screenshot output directory (default: `{workspace}/browser/Screenshots`) |
+| `BROWSER_MCP_PERF` | Set to `1` to record per-tool wall time, harness-call counts, and result size (off by default) |
+| `BROWSER_MCP_PERF_LOG` | JSONL sink for perf records (default: `{workspace}/browser/perf/tools.jsonl`) |
 
 All `BU_*` vars are passed through to `browser-harness` unchanged.
 

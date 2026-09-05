@@ -20,7 +20,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from mcp.server.fastmcp import FastMCP
 
-from browser_mcp import agentcore, dom_indexing, playbooks, screenshots
+from browser_mcp import agentcore, dom_indexing, perf, playbooks, screenshots
 
 logger = logging.getLogger(__name__)
 
@@ -239,10 +239,14 @@ def _public_tool(fn: Callable[_P, str]) -> Callable[_P, str]:
 
     @functools.wraps(fn)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> str:
-        try:
-            return fn(*args, **kwargs)
-        except Exception as exc:
-            _reraise_public_harness_error(exc)
+        with perf.timed_tool(fn.__name__) as rec:
+            try:
+                result = fn(*args, **kwargs)
+                rec.observe(result)
+                return result
+            except Exception as exc:
+                rec.fail()
+                _reraise_public_harness_error(exc)
 
     return wrapper
 
@@ -312,6 +316,11 @@ def _teardown_bound_backend() -> None:
         bh_admin.restart_daemon()
 
 
+def _with_perf_helpers(bh: tuple[Any, Any]) -> tuple[Any, Any]:
+    helpers, admin = bh
+    return perf.wrap_helpers(helpers), admin
+
+
 def _reconnect_agentcore() -> tuple[str, dict[str, str]]:
     """Force a fresh AgentCore session (stop + restart) and return new ws creds.
 
@@ -354,12 +363,12 @@ def _browser_harness() -> tuple[Any, Any]:
 
     if agentcore.agentcore_backend_requested():
         if _bh is not None and _bound_cdp == "agentcore":
-            return _bh
+            return _with_perf_helpers(_bh)
         _teardown_bound_backend()
-        return _agentcore_browser_harness()
+        return _with_perf_helpers(_agentcore_browser_harness())
 
     if _bh is not None and cdp == _bound_cdp:
-        return _bh
+        return _with_perf_helpers(_bh)
 
     if _bound_cdp == "agentcore":
         _teardown_bound_backend()
@@ -380,7 +389,7 @@ def _browser_harness() -> tuple[Any, Any]:
     admin.ensure_daemon()
     _bh = (helpers, admin)
     _bound_cdp = cdp
-    return _bh
+    return _with_perf_helpers(_bh)
 
 
 def _json_text(payload: object) -> str:

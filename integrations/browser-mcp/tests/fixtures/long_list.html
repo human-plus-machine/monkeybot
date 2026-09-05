@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Long list</title>
+  <style>
+    body { margin: 0; font-family: sans-serif; }
+    section {
+      min-height: 100vh;
+      padding: 1rem;
+      box-sizing: border-box;
+      border-bottom: 1px solid #ddd;
+    }
+    a, button { margin: 0.15rem; }
+  </style>
+</head>
+<body>
+  <script>
+    (function () {
+      const body = document.body;
+      for (let s = 0; s < 8; s++) {
+        const section = document.createElement("section");
+        section.dataset.section = String(s);
+        const heading = document.createElement("h2");
+        heading.textContent = "Section " + s;
+        section.appendChild(heading);
+        for (let i = 0; i < 75; i++) {
+          const n = s * 75 + i;
+          const a = document.createElement("a");
+          a.href = "#item-" + n;
+          a.textContent = "Link " + n;
+          section.appendChild(a);
+        }
+        section.appendChild(document.createElement("br"));
+        for (let i = 0; i < 25; i++) {
+          const n = s * 25 + i;
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = "Button " + n;
+          section.appendChild(button);
+        }
+        body.appendChild(section);
+      }
+    })();
+  </script>
+</body>
+</html>
