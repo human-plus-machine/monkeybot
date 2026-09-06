@@ -364,3 +364,69 @@ async def test_run_yields_queued_verifier_verdict_before_turn_complete() -> None
 
     assert isinstance(system_rows[0].content[0], SystemNotification)
     assert system_rows[0].content[0].notification_type == "verifierVerdict"
+
+
+def test_cap_severity() -> None:
+    from monkeybot.core.verifier.severity import cap_severity
+
+    assert cap_severity("block", "nudge") == "nudge"
+    assert cap_severity("nudge", "none") == "none"
+    assert cap_severity("none", "nudge") == "none"
+    assert cap_severity("replan", "replan") == "replan"
+
+
+@pytest.mark.asyncio
+async def test_nudge_reaches_next_system_message_once() -> None:
+    from monkeybot.core.hooks import HookManager
+    from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
+    from monkeybot.core.types.content_blocks import Text
+    from monkeybot.core.verifier.actuator import NudgeActuator
+
+    mailbox = VerdictMailbox()
+    mailbox.put(
+        "t1",
+        VerifierVerdict(
+            request_id="r1",
+            verdict_id="v1",
+            checkpoint_id="r1:1",
+            status="drifting",
+            severity="nudge",
+            rationale="constraint_touch",
+            triggering_signals=("constraint_touch",),
+            correction="[Verifier] leave the migrations alone",
+        ),
+    )
+    mgr = HookManager()
+    NudgeActuator(mailbox).register(mgr)
+    ctx = replace(loop_ctx(), verdict_mailbox=mailbox)
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                UsageEvent(input_tokens=1, output_tokens=1),
+                Done(),
+            ],
+            [TextDelta(text="ok"), UsageEvent(input_tokens=1, output_tokens=1), Done()],
+        ]
+    )
+    events = []
+    async for event in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+        hook_manager=mgr,
+    ):
+        events.append(event)
+    assert any(isinstance(e, VerifierVerdict) for e in events)
+    assert len(prov.stream_messages) >= 2
+    second = " ".join(
+        b.text
+        for msg in prov.stream_messages[1]
+        for b in msg.content
+        if isinstance(b, Text)
+    )
+    assert "leave the migrations alone" in second

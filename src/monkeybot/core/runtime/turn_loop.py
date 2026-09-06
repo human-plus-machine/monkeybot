@@ -246,8 +246,10 @@ async def _drain_steers(
 async def _drain_verdicts(
     ctx: TurnContext,
     history: HistoryStore | None = None,
+    *,
+    grace_s: float = 0.0,
 ) -> AsyncIterator[AgentEvent]:
-    """Commit ready verdicts at a safe boundary. Never waits on a judge."""
+    """Commit ready verdicts at a safe boundary. Never waits on a judge unless ``grace_s``."""
     mailbox = ctx.verdict_mailbox
     if mailbox is None:
         return
@@ -256,6 +258,20 @@ async def _drain_verdicts(
         return
     try:
         ready = take(ctx.thread_id)
+        if not ready and grace_s > 0:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + grace_s
+            while loop.time() < deadline:
+                await asyncio.sleep(min(0.05, max(0.0, deadline - loop.time())))
+                ready = take(ctx.thread_id)
+                if ready:
+                    break
+            if not ready:
+                logger.info(
+                    "verdict tail stale %s",
+                    kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+                )
+                return
     except Exception:
         logger.warning(
             "verdict mailbox drain failed %s",
@@ -263,9 +279,17 @@ async def _drain_verdicts(
             exc_info=True,
         )
         return
+    max_sev = "nudge"
+    if ctx.config is not None:
+        max_sev = ctx.config.verifier.escalation.max_severity
+    from monkeybot.core.verifier.severity import cap_severity
+
     for verdict in ready:
         if not isinstance(verdict, VerifierVerdict):
             continue
+        capped = cap_severity(verdict.severity, max_sev)
+        if capped != verdict.severity:
+            verdict = dataclasses.replace(verdict, severity=capped)
         if history is not None:
             try:
                 await persist_message(
@@ -290,6 +314,13 @@ async def _drain_verdicts(
                     "verdict persist failed %s",
                     kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
                     exc_info=True,
+                )
+        if capped == "nudge":
+            put_nudge = getattr(mailbox, "put_nudge", None)
+            if callable(put_nudge):
+                put_nudge(
+                    ctx.thread_id,
+                    verdict.correction or f"[Verifier] {verdict.rationale}",
                 )
         yield verdict
 
@@ -1588,7 +1619,10 @@ async def _run_inner_core(
     # below (freeze) so the assistant row is durable and not overwritten.
     await _await_history_write(state.assistant_write_task)
 
-    async for verdict_evt in _drain_verdicts(state.ctx, history):
+    grace_s = 0.0
+    if state.ctx.config is not None:
+        grace_s = state.ctx.config.verifier.judge.tail_grace_s
+    async for verdict_evt in _drain_verdicts(state.ctx, history, grace_s=grace_s):
         yield verdict_evt
 
     descriptor_events = await freeze_attachments_in_history(

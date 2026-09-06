@@ -1,6 +1,6 @@
 # Background Verifier Agent — Design
 
-**Status:** Phase 3 done on `feat/verifier-agent`. Next work is **Phase 4 — nudge**.  
+**Status:** Phase 4 done on `feat/verifier-agent`. Next work is **Phase 5 — replan**.  
 **Branch:** `feat/verifier-agent` — all phases commit here; no phase gets its own branch; do not push unless asked  
 **Audience:** MonkeyBot harness maintainers  
 **Related:** [Features & Design Reference](features.md) · `core/hooks/` · `core/runtime/turn_loop.py` · `core/knowledge/evidence_guard.py` · [live-evals.md](live-evals.md) · [smoke baseline](../evals/baselines/smoke.md)  
@@ -14,7 +14,7 @@
 
 ## Progress / handoff
 
-A new session should read this section, then Part 8 Phase 4, then Part 5 (escalation). Do not re-do Phases 0–3.
+A new session should read this section, then Part 8 Phase 5, then Part 5 (escalation). Do not re-do Phases 0–4.
 
 | Phase | State |
 |---|---|
@@ -22,7 +22,7 @@ A new session should read this section, then Part 8 Phase 4, then Part 5 (escala
 | **1 — Goal ledger** | **Done.** `GoalLedgerStore` + SQLite, `USER_MESSAGE` + steer tap, typed `Constraint` classifier, `ResolvedIntent` into compaction and subagent context. Defaults still off. |
 | **2 — Tracker, observe-only** | **Done.** `ProgressTracker` on write-side hooks, `VerifierVerdict` at severity `none` (SSE + log only). Cold-state: no tool record → no accumulation signal. Ledger signals may fire immediately. |
 | **3 — Durable record** | **Done.** `SystemNotification` `verifierVerdict`, drain at inner preamble and turn tail plus `run()` finally, compaction pin, `DURABLE_EVENT_KINDS`. |
-| 4–6 — `nudge` / `replan` / `block` | **Next:** Phase 4 `nudge`. |
+| 4–6 — `nudge` / `replan` / `block` | **Phase 4 done** (`nudge` via PRE_TOOL). Next: replan, then block. |
 
 **Constraints for whoever picks this up:**
 
@@ -64,7 +64,12 @@ A new session should read this section, then Part 8 Phase 4, then Part 5 (escala
 - Persist: `_drain_verdicts` writes `role="system"` + `SystemNotification` with `ingest=False`.
 - Drain sites: inner preamble (via `_drain_steers`), after `_await_history_write`, and `loop.py` `finally` (POST_TURN `done_unmet`).
 - Compaction: `split_messages_for_compaction` ignores pinned notification rows; `rebuild_compacted_history` splices them back.
-- `VerifierVerdict` is in `DURABLE_EVENT_KINDS`, not `SUBAGENT_FORWARD_KINDS`.
+**Phase 4 left in the tree (do not recreate):**
+
+- `VerifierPort` / `ScriptedVerifier` / `SignalJudge` / `JudgeWorker` (off-loop queue).
+- `NudgeActuator` on `PRE_TOOL`; drain caps severity and stashes one nudge.
+- `tail_grace_s` on the turn-tail drain only.
+- Tests: `tests/core/test_progress_tracker.py` (`test_nudge_reaches_next_system_message_once`), `tests/evals/test_verifier_port.py`.
 
 ---
 
@@ -754,7 +759,7 @@ Each phase is independently shippable and independently reversible: **one commit
 
 **Phase 3 — Durable record. Done.** `SystemNotification` verdict rows; `_drain_verdicts` at **both** call sites (inner-turn preamble and turn tail after `_await_history_write`, `grace_s=0`); `DURABLE_EVENT_KINDS` entry; frontend wire type (`verifierVerdict`). Compaction: pin provider-excluded / system-notification rows, exclude them from split accounting, splice back after `history.reset` (the token-budget "fires earlier" worry is false; the durability-through-compaction hole is real). HistoryStore append/load/reset tests for `role="system"`. Still no behavioral intervention.
 
-**Phase 4 — `nudge`.** Async `VerifierPort`, queue + mailbox with a verifier-owned worker (not `HookManager`-tracked), `PRE_TOOL` injection, rate limits, spend logging, `tail_grace_s` measurement for `done` verdicts.
+**Phase 4 — `nudge`. Done.** Async `VerifierPort`, queue + mailbox with a verifier-owned worker (not `HookManager`-tracked), `PRE_TOOL` injection, rate limits, spend logging, `tail_grace_s` measurement for `done` verdicts.
 
 **Phase 5 — `replan`.** Reuse the doom-loop primitive for forced re-plan turns.
 

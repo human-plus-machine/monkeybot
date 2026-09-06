@@ -187,6 +187,8 @@ class GatewayRuntime:
     goal_ledger: Any | None = None
     progress_tracker: Any | None = None
     verdict_mailbox: Any | None = None
+    nudge_actuator: Any | None = None
+    judge_worker: Any | None = None
 
     def build_inspectors(
         self, layout: AgentLayout, cfg: RuntimeConfig | None = None, *, fail_closed: bool = False
@@ -285,6 +287,13 @@ class GatewayRuntime:
         self.goal_ledger = None
         self.progress_tracker = None
         self.verdict_mailbox = None
+        old_judge = self.judge_worker
+        if old_judge is not None:
+            close = getattr(old_judge, "close", None)
+            if callable(close):
+                close()
+        self.judge_worker = None
+        self.nudge_actuator = None
         if cfg is None or not cfg.verifier.enabled:
             return
         if cfg.verifier.ledger.enabled:
@@ -311,12 +320,28 @@ class GatewayRuntime:
             from monkeybot.core.verifier.tracker import ProgressTracker
 
             self.verdict_mailbox = VerdictMailbox()
+            judge = None
+            if cfg.verifier.judge.enabled:
+                from monkeybot.core.verifier.judge import JudgeWorker, SignalJudge
+
+                judge = JudgeWorker(
+                    self.verdict_mailbox,
+                    SignalJudge(),
+                    ledger_fn=lambda: self.goal_ledger,
+                    config=cfg.verifier.judge,
+                )
+                self.judge_worker = judge
+                logger.info("verifier judge enabled")
             self.progress_tracker = ProgressTracker(
                 self.verdict_mailbox,
                 ledger_fn=lambda: self.goal_ledger,
                 config=cfg.verifier.tracker,
+                judge=judge,
             )
-            logger.info("progress tracker enabled (observe-only)")
+            from monkeybot.core.verifier.actuator import NudgeActuator
+
+            self.nudge_actuator = NudgeActuator(self.verdict_mailbox)
+            logger.info("progress tracker enabled")
 
     def rebuild_memory_hooks(self, cfg: RuntimeConfig | None, fastapi_app: FastAPI | None) -> None:
         """Re-bind memory/knowledge hooks without reopening storage (URI is restart-only)."""
@@ -334,6 +359,9 @@ class GatewayRuntime:
             has_hooks = True
         if self.progress_tracker is not None:
             self.progress_tracker.register(mgr)
+            has_hooks = True
+        if self.nudge_actuator is not None:
+            self.nudge_actuator.register(mgr)
             has_hooks = True
         self.hook_manager = mgr if has_hooks else None
         if fastapi_app is None:
@@ -1129,7 +1157,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
         raise
 
     gateway_runtime.build_verifier(cfg, storage=fastapi_app.state.storage)
-    if gateway_runtime.goal_ledger is not None or gateway_runtime.progress_tracker is not None:
+    if gateway_runtime.goal_ledger is not None or gateway_runtime.progress_tracker is not None or gateway_runtime.nudge_actuator is not None:
         hook_mgr = gateway_runtime.hook_manager
         if hook_mgr is None:
             hook_mgr = HookManager()
@@ -1138,6 +1166,8 @@ async def _startup(fastapi_app: FastAPI) -> None:
             gateway_runtime.goal_ledger.register(hook_mgr)
         if gateway_runtime.progress_tracker is not None:
             gateway_runtime.progress_tracker.register(hook_mgr)
+        if gateway_runtime.nudge_actuator is not None:
+            gateway_runtime.nudge_actuator.register(hook_mgr)
 
     fastapi_app.state.gateway_runtime = gateway_runtime
 
@@ -1221,7 +1251,14 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
             logger.warning("goal ledger close failed: %s", exc)
         gateway_runtime.goal_ledger = None
 
+    if gateway_runtime.judge_worker is not None:
+        try:
+            gateway_runtime.judge_worker.close()
+        except Exception as exc:
+            logger.warning("judge worker close failed: %s", exc)
+        gateway_runtime.judge_worker = None
     gateway_runtime.progress_tracker = None
+    gateway_runtime.nudge_actuator = None
     gateway_runtime.verdict_mailbox = None
 
     memory = gateway_runtime.memory or getattr(fastapi_app.state, "memory", None)
