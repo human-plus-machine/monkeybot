@@ -33,7 +33,24 @@ _LOGIN_PUBLIC_ERRORS = frozenset(
     }
 )
 _LOGIN_PUBLIC_MFA_VALUES = frozenset({"none", "completed", "needed"})
-_LOGIN_PUBLIC_MODE_VALUES = frozenset({"keystroke", "network"})
+_LOGIN_PUBLIC_MODE_VALUES = frozenset({"keystroke", "network", "passkey"})
+# Phase 4.4 — UNVERIFIED against a live browser; see docs/credential-broker.md.
+_PASSKEY_PUBLIC_ERRORS = frozenset(
+    {
+        "in-app browser is not available",
+        "in-app browser token is missing",
+        "in-app browser could not verify the origin",
+        "no tab",
+        "not a web page",
+        "focused tab is on a different origin",
+        "no saved passkey for this site",
+        "login needs your attention",
+        "waiting for your approval",
+        "agent access denied for this site",
+        "unexpected login response",
+        "login failed",
+    }
+)
 # Passing ProxyHandler({}) makes urllib skip its default env-based proxy
 # handler. The empty handler itself is then dropped (no *_open methods),
 # so loopback requests never honor HTTP_PROXY.
@@ -103,6 +120,25 @@ def _public_login_result(body: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _public_passkey_result(body: dict[str, Any]) -> dict[str, Any]:
+    """Same allowlist discipline as `_public_login_result`, for `/json/passkey`."""
+    error = body.get("error")
+    origin = body.get("origin")
+    result: dict[str, Any] = {
+        "ok": bool(body.get("ok")),
+        "loggedIn": bool(body.get("loggedIn")),
+    }
+    if isinstance(origin, str) and origin:
+        result["origin"] = origin
+    mode = body.get("mode")
+    if isinstance(mode, str) and mode in _LOGIN_PUBLIC_MODE_VALUES:
+        result["mode"] = mode
+    if error:
+        message = str(error)
+        result["error"] = message if message in _PASSKEY_PUBLIC_ERRORS else "login failed"
+    return result
+
+
 def _loopback_open(req: urllib.request.Request, timeout: float = _LOGIN_TIMEOUT_S) -> Any:
     return _LOOPBACK_OPENER.open(req, timeout=timeout)
 
@@ -148,6 +184,58 @@ def _sealed_login(username: str | None, expected_origin: str | None) -> dict[str
         # A Spaces build older than expectedOrigin support ignores it and echoes
         # no origin, so the login it just performed is unverifiable. Report that
         # rather than letting the agent treat an unchecked login as confirmed.
+        result = {
+            "ok": False,
+            "loggedIn": result["loggedIn"],
+            "error": "in-app browser could not verify the origin",
+        }
+    return result
+
+
+def _sealed_passkey(expected_origin: str | None) -> dict[str, Any]:
+    """Passkey sign-in over `/json/passkey`.
+
+    Phase 4.4 — UNVERIFIED against a live browser: the WebAuthn CDP calls
+    the bridge makes for this have not been exercised against a real
+    Electron instance. See docs/credential-broker.md before relying on it.
+    """
+    if backend._bound_cdp == "agentcore":
+        return {"ok": False, "loggedIn": False, "error": "in-app browser is not available"}
+    http, token = _in_app_http_and_token()
+    if not http:
+        return {"ok": False, "loggedIn": False, "error": "in-app browser is not available"}
+    if not token:
+        return {"ok": False, "loggedIn": False, "error": "in-app browser token is missing"}
+    request_body: dict[str, str] = {}
+    if expected_origin:
+        request_body["expectedOrigin"] = expected_origin
+    payload = json.dumps(request_body).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
+        **in_app_cdp._run_headers(),
+    }
+    req = urllib.request.Request(
+        f"{http}/json/passkey", data=payload, headers=headers, method="POST"
+    )
+    try:
+        with _loopback_open(req, timeout=_LOGIN_TIMEOUT_S) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if getattr(exc, "code", None) in {401, 403}:
+            return {"ok": False, "loggedIn": False, "error": "in-app browser token is missing"}
+        try:
+            body = json.loads(exc.read().decode("utf-8"))
+        except Exception:
+            logger.warning("browser_passkey HTTP %s", getattr(exc, "code", "?"))
+            return {"ok": False, "loggedIn": False, "error": "login failed"}
+    except Exception:
+        logger.warning("browser_passkey failed", exc_info=True)
+        return {"ok": False, "loggedIn": False, "error": "login failed"}
+    if not isinstance(body, dict):
+        return {"ok": False, "loggedIn": False, "error": "unexpected login response"}
+    result = _public_passkey_result(body)
+    if expected_origin and "origin" not in result:
         result = {
             "ok": False,
             "loggedIn": result["loggedIn"],

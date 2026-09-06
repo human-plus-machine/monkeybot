@@ -216,6 +216,27 @@ def browser_login(username: str | None = None, expected_origin: str | None = Non
 
 @mcp.tool()
 @_public_tool
+def browser_passkey(expected_origin: str | None = None) -> str:
+    """Sign in with a saved Spaces passkey without revealing any key material.
+
+    Call this only when the user asked to sign in and a passkey (not a saved
+    password) is what's stored for the site. Returns {ok, loggedIn, origin,
+    mode: "passkey"} — never any credential material.
+
+    UNVERIFIED (phase 4.4): this has not been exercised against a live
+    browser or a real passkey-enabled site — see docs/credential-broker.md
+    in the Spaces repo. Prefer browser_login when a saved password exists.
+
+    Signs in to the tab the user has focused, same caveat as browser_login:
+    pass expected_origin to make the bridge refuse a mismatched site, and
+    always check the returned origin before reporting success.
+    """
+    result = login._sealed_passkey(expected_origin)
+    return results.json_text(result)
+
+
+@mcp.tool()
+@_public_tool
 def browser_stop() -> str:
     """Stop the active browser backend (cleanup after browsing; important for cloud/AgentCore browsers)."""
     try:
