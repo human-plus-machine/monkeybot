@@ -15,7 +15,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from models import Scenario  # noqa: E402
-from runner import run_scenario_live  # noqa: E402
+from runner import _path_args, run_scenario_live  # noqa: E402
 
 
 def _sse_block(event: dict) -> bytes:
@@ -65,7 +65,9 @@ def _make_transport(request_id_holder: list[str]) -> httpx.MockTransport:
                 },
             ]
             body_bytes = b"".join(_sse_block(e) for e in events)
-            return httpx.Response(200, content=body_bytes, headers={"content-type": "text/event-stream"})
+            return httpx.Response(
+                200, content=body_bytes, headers={"content-type": "text/event-stream"}
+            )
         raise AssertionError(f"unexpected request: {request.method} {path}")
 
     return httpx.MockTransport(handler)
@@ -137,13 +139,49 @@ def test_cross_session_opens_two_sessions() -> None:
 
     runner_mod.httpx.AsyncClient = patched_client  # type: ignore[attr-defined]
     try:
-        scenario = Scenario(id="cross", messages=[], sessions=[["first"], ["second"]], session_pause_sec=0)
+        scenario = Scenario(
+            id="cross", messages=[], sessions=[["first"], ["second"]], session_pause_sec=0
+        )
         turns = asyncio.run(run_scenario_live(scenario, "http://fake-agent"))
     finally:
         runner_mod.httpx.AsyncClient = orig_client_cls  # type: ignore[attr-defined]
 
     assert len(turns) == 2
     assert session_post_count["n"] == 2
+
+
+def test_path_args_matches_core_tool_aliases() -> None:
+    assert _path_args({"file": "db/migrations/001.sql"}) == ["db/migrations/001.sql"]
+    assert _path_args({"root": "db/migrations"}) == ["db/migrations"]
+    assert _path_args({"path": "src/app.py", "file_path": "src/app.py"}) == [
+        "src/app.py",
+        "src/app.py",
+    ]
+    assert _path_args({"paths": ["a.py", "b.py"]}) == ["a.py", "b.py"]
+
+
+def test_path_args_extracts_apply_patch_headers() -> None:
+    patch = (
+        "*** Begin Patch\n"
+        "*** Update File: db/migrations/001.sql\n"
+        "*** Move to: db/migrations/001_init.sql\n"
+        "@@\n"
+        "-old\n"
+        "+new\n"
+        "*** Add File: db/migrations/002.sql\n"
+        "+create\n"
+        "*** Delete File: tmp/scratch.sql\n"
+        "*** End Patch\n"
+    )
+    paths = _path_args({"patch_text": patch})
+    assert paths == [
+        "db/migrations/001.sql",
+        "db/migrations/001_init.sql",
+        "db/migrations/002.sql",
+        "tmp/scratch.sql",
+    ]
+    assert _path_args({"patch": "*** Add File: secret.env\n+x\n"}) == ["secret.env"]
+    assert _path_args({"text": "*** Add File: ignored.sql\n+x\n"}) == []
 
 
 if __name__ == "__main__":

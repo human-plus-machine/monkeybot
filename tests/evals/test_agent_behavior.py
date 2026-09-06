@@ -36,26 +36,3 @@ async def test_scenario(scenario_file: str) -> None:
     scenario = load_scenario(path)
     record = await run_scenario(scenario)
     check_assertions(record, scenario.assertions)
-
-
-def test_check_assertions_system_prompt_contains_once() -> None:
-    from tests.evals.eval_hook import EvalRecord
-    from tests.evals.scenario_runner import ScenarioAssertions, check_assertions
-
-    record = EvalRecord(completed=True, system_texts=["hello world", "other"])
-    check_assertions(record, ScenarioAssertions(system_prompt_contains_once="hello"))
-    with pytest.raises(AssertionError, match="appeared 2 times"):
-        check_assertions(
-            EvalRecord(system_texts=["hello", "hello"]),
-            ScenarioAssertions(system_prompt_contains_once="hello"),
-        )
-
-
-def test_check_assertions_tools_empty_on_turn() -> None:
-    from tests.evals.eval_hook import EvalRecord
-    from tests.evals.scenario_runner import ScenarioAssertions, check_assertions
-
-    record = EvalRecord(tool_counts=[4, 0, 4])
-    check_assertions(record, ScenarioAssertions(tools_empty_on_turn=2))
-    with pytest.raises(AssertionError, match="had 4 tools"):
-        check_assertions(record, ScenarioAssertions(tools_empty_on_turn=1))

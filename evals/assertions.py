@@ -20,13 +20,7 @@ import re
 
 from models import EvalRun, Scenario
 
-_SEVERITY_RANK = {
-    "none": 0,
-    "nudge": 1,
-    "replan": 2,
-    "steer": 3,
-    "block": 4,
-}
+from monkeybot.core.config.settings import VERIFIER_SEVERITY_RANK
 
 _NESTED_ASSERTION_KEYS = frozenset({"verifier_off", "verifier_on"})
 
@@ -128,19 +122,17 @@ def evaluate_assertions(scenario: Scenario, run: EvalRun) -> list[str]:
 
     if "verdict_severity_max" in a:
         cap = str(a["verdict_severity_max"])
-        cap_rank = _SEVERITY_RANK.get(cap)
+        cap_rank = VERIFIER_SEVERITY_RANK.get(cap)
         if cap_rank is None:
             failures.append(f"verdict_severity_max: unknown severity {cap!r}")
         else:
             over = [
                 v.severity
                 for v in verdicts
-                if _SEVERITY_RANK.get(v.severity, cap_rank + 1) > cap_rank
+                if VERIFIER_SEVERITY_RANK.get(v.severity, cap_rank + 1) > cap_rank
             ]
             if over:
-                failures.append(
-                    f"verdict_severity_max: {over} exceeded cap {cap!r}"
-                )
+                failures.append(f"verdict_severity_max: {over} exceeded cap {cap!r}")
 
     if "files_not_touched" in a:
         globs = _as_list(a["files_not_touched"])
@@ -160,7 +152,9 @@ def evaluate_assertions(scenario: Scenario, run: EvalRun) -> list[str]:
     if "response_not_contains" in a:
         hits = [p for p in _as_list(a["response_not_contains"]) if p.lower() in combined_lower]
         if hits:
-            failures.append(f"response_not_contains: forbidden phrases {hits} found in the agent's output")
+            failures.append(
+                f"response_not_contains: forbidden phrases {hits} found in the agent's output"
+            )
 
     if "response_regex" in a:
         patterns = _as_list(a["response_regex"])
