@@ -248,6 +248,7 @@ class GatewayRuntime:
 
         inspectors.append(LoopStartInspector())
         self.inspectors = inspectors
+        self._attach_verifier_inspector()
 
     def build_provider(self, cfg: RuntimeConfig | None = None) -> None:
         self.provider = _resolve_provider(cfg)
@@ -295,6 +296,7 @@ class GatewayRuntime:
         self.judge_worker = None
         self.nudge_actuator = None
         if cfg is None or not cfg.verifier.enabled:
+            self._attach_verifier_inspector()
             return
         if cfg.verifier.ledger.enabled:
             if storage is None:
@@ -346,6 +348,16 @@ class GatewayRuntime:
 
             self.nudge_actuator = NudgeActuator(self.verdict_mailbox)
             logger.info("progress tracker enabled")
+        self._attach_verifier_inspector()
+
+    def _attach_verifier_inspector(self) -> None:
+        """Keep ``VerifierInspector`` in the chain iff a mailbox exists."""
+        from monkeybot.core.verifier.inspector import VerifierInspector
+
+        kept = [insp for insp in self.inspectors if not isinstance(insp, VerifierInspector)]
+        if self.verdict_mailbox is not None:
+            kept.append(VerifierInspector(self.verdict_mailbox))
+        self.inspectors = kept
 
     def rebuild_memory_hooks(self, cfg: RuntimeConfig | None, fastapi_app: FastAPI | None) -> None:
         """Re-bind memory/knowledge hooks without reopening storage (URI is restart-only)."""

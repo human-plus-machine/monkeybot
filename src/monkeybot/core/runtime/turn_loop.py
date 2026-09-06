@@ -290,6 +290,9 @@ async def _drain_verdicts(
         capped = cap_severity(verdict.severity, max_sev)
         if capped != verdict.severity:
             verdict = dataclasses.replace(verdict, severity=capped)
+        set_last = getattr(mailbox, "set_last", None)
+        if callable(set_last):
+            set_last(ctx.thread_id, verdict)
         if history is not None:
             try:
                 await persist_message(

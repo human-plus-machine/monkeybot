@@ -19,7 +19,7 @@ from monkeybot.core.persistence.goal_ledger import (
     Intent,
     Provenance,
 )
-from monkeybot.core.runtime.events import TurnComplete, VerifierVerdict
+from monkeybot.core.runtime.events import ToolCallResult, TurnComplete, VerifierVerdict
 from monkeybot.core.runtime.loop import run
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.core.verifier.classify import ScriptedClassifier
@@ -492,3 +492,76 @@ async def test_replan_empties_tools_for_exactly_one_turn() -> None:
     )
     assert "leave the migrations alone" in first
     assert "Do not call tools this turn" in first
+
+
+@pytest.mark.asyncio
+async def test_block_denies_mutating_tool_and_allows_read_only() -> None:
+    from monkeybot.core.config.settings import VerifierConfig, VerifierEscalationConfig
+    from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
+    from monkeybot.core.verifier.inspector import VerifierInspector
+
+    class _Cfg:
+        env_values: dict[str, str] = {}
+        verifier = VerifierConfig(
+            escalation=VerifierEscalationConfig(max_severity="block"),
+        )
+
+    mailbox = VerdictMailbox()
+    mailbox.put(
+        "t1",
+        VerifierVerdict(
+            request_id="r1",
+            verdict_id="v1",
+            checkpoint_id="r1:1",
+            status="drifting",
+            severity="block",
+            rationale="constraint_touch",
+            triggering_signals=("constraint_touch",),
+            correction="[Verifier] leave the migrations alone",
+        ),
+    )
+    ctx = replace(
+        loop_ctx(),
+        verdict_mailbox=mailbox,
+        config=_Cfg(),  # type: ignore[arg-type]
+        tools=[
+            ToolDef("run_command", "Run shell", {}),
+            ToolDef("read_file", "Read", {}, parallel_safe=True),
+        ],
+    )
+    exe = RecordingExecutor()
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                UsageEvent(input_tokens=1, output_tokens=1),
+                Done(),
+            ],
+            [
+                ToolCall(call_id="c2", name="read_file", args={"path": "README.md"}),
+                UsageEvent(input_tokens=1, output_tokens=1),
+                Done(),
+            ],
+            [TextDelta(text="ok"), UsageEvent(input_tokens=1, output_tokens=1), Done()],
+        ]
+    )
+    events = []
+    async for event in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector(), VerifierInspector(mailbox)],
+        tool_executor=exe,
+        max_turns=4,
+    ):
+        events.append(event)
+    assert exe.calls and exe.calls[0].name == "read_file"
+    assert all(c.name != "run_command" for c in exe.calls)
+    assert any(
+        isinstance(e, ToolCallResult)
+        and e.tool == "run_command"
+        and isinstance(e.error, str)
+        and "leave the migrations alone" in e.error
+        for e in events
+    )
