@@ -59,10 +59,12 @@ class ProgressTracker:
         *,
         ledger_fn: Callable[[], GoalLedger | None],
         config: VerifierTrackerConfig,
+        judge: Any | None = None,
     ) -> None:
         self._mailbox = mailbox
         self._ledger_fn = ledger_fn
         self._config = config
+        self._judge = judge
         self._by_thread: OrderedDict[str, _ThreadTrack] = OrderedDict()
 
     def register(self, manager: HookManager) -> None:
@@ -240,16 +242,38 @@ class ProgressTracker:
             )
         if not signals:
             return
+        if self._judge is not None:
+            from monkeybot.core.verifier.port import EvidenceBundle
+
+            enqueue = getattr(self._judge, "enqueue", None)
+            if callable(enqueue):
+                ledger = self._ledger_fn()
+                enqueue(
+                    EvidenceBundle(
+                        thread_id=payload.thread_id,
+                        request_id=payload.request_id,
+                        inner_turn=inner,
+                        signals=tuple(signals),
+                        intent=ledger.resolved_intent(payload.thread_id) if ledger is not None else None,
+                    )
+                )
+            state.emitted_this_turn = True
+            return
         status = "stuck" if any(s in {"error_streak", "no_progress", "done_unmet"} for s in signals) else "drifting"
         verdict = VerifierVerdict(
             request_id=payload.request_id,
             verdict_id=str(uuid.uuid4()),
             checkpoint_id=f"{payload.request_id}:{inner}",
             status=status,
-            severity="none",
+            severity="nudge" if ledger_hit else "none",
             confidence=0.9 if ledger_hit else 0.6,
             rationale=", ".join(signals),
             triggering_signals=tuple(signals),
+            correction=(
+                f"[Verifier] {', '.join(signals)}. Stay on the user's stated goal."
+                if ledger_hit
+                else None
+            ),
         )
         self._mailbox.put(payload.thread_id, verdict)
         state.emitted_this_turn = True
