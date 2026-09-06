@@ -430,3 +430,65 @@ async def test_nudge_reaches_next_system_message_once() -> None:
         if isinstance(b, Text)
     )
     assert "leave the migrations alone" in second
+
+
+@pytest.mark.asyncio
+async def test_replan_empties_tools_for_exactly_one_turn() -> None:
+    from monkeybot.core.config.settings import VerifierConfig, VerifierEscalationConfig
+    from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
+    from monkeybot.core.types.content_blocks import Text
+    from tests.core.test_doom_loop import ToolsRecordingProvider
+
+    class _Cfg:
+        env_values: dict[str, str] = {}
+        verifier = VerifierConfig(
+            escalation=VerifierEscalationConfig(max_severity="replan"),
+        )
+
+    mailbox = VerdictMailbox()
+    mailbox.put(
+        "t1",
+        VerifierVerdict(
+            request_id="r1",
+            verdict_id="v1",
+            checkpoint_id="r1:1",
+            status="drifting",
+            severity="replan",
+            rationale="constraint_touch",
+            triggering_signals=("constraint_touch",),
+            correction="[Verifier] leave the migrations alone",
+        ),
+    )
+    ctx = replace(loop_ctx(), verdict_mailbox=mailbox, config=_Cfg())  # type: ignore[arg-type]
+    prov = ToolsRecordingProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                UsageEvent(input_tokens=1, output_tokens=1),
+                Done(),
+            ],
+            [TextDelta(text="ok"), UsageEvent(input_tokens=1, output_tokens=1), Done()],
+        ]
+    )
+    events = []
+    async for event in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        events.append(event)
+    assert any(isinstance(e, VerifierVerdict) for e in events)
+    assert prov.stream_tools[0] == []
+    assert prov.stream_tools[1] == ["run_command"]
+    first = " ".join(
+        b.text
+        for msg in prov.stream_messages[0]
+        for b in msg.content
+        if isinstance(b, Text)
+    )
+    assert "leave the migrations alone" in first
+    assert "Do not call tools this turn" in first

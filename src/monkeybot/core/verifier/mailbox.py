@@ -13,6 +13,7 @@ class VerdictMailbox:
     def __init__(self) -> None:
         self._ready: dict[str, deque[VerifierVerdict]] = defaultdict(deque)
         self._nudges: dict[str, deque[str]] = defaultdict(deque)
+        self._replans: dict[str, deque[str]] = defaultdict(deque)
         self._last: dict[str, VerifierVerdict] = {}
 
     def put(self, thread_id: str, verdict: VerifierVerdict) -> None:
@@ -28,6 +29,16 @@ class VerdictMailbox:
 
     def take_nudge(self, thread_id: str) -> str | None:
         bucket = self._nudges.get(thread_id)
+        if not bucket:
+            return None
+        return bucket.popleft()
+
+    def put_replan(self, thread_id: str, text: str) -> None:
+        if text.strip():
+            self._replans[thread_id].append(text.strip())
+
+    def take_replan(self, thread_id: str) -> str | None:
+        bucket = self._replans.get(thread_id)
         if not bucket:
             return None
         return bucket.popleft()

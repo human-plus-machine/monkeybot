@@ -1,6 +1,6 @@
 # Background Verifier Agent — Design
 
-**Status:** Phase 4 done on `feat/verifier-agent`. Next work is **Phase 5 — replan**.  
+**Status:** Phase 5 done on `feat/verifier-agent`. Next work is **Phase 6 — block**.  
 **Branch:** `feat/verifier-agent` — all phases commit here; no phase gets its own branch; do not push unless asked  
 **Audience:** MonkeyBot harness maintainers  
 **Related:** [Features & Design Reference](features.md) · `core/hooks/` · `core/runtime/turn_loop.py` · `core/knowledge/evidence_guard.py` · [live-evals.md](live-evals.md) · [smoke baseline](../evals/baselines/smoke.md)  
@@ -14,7 +14,7 @@
 
 ## Progress / handoff
 
-A new session should read this section, then Part 8 Phase 5, then Part 5 (escalation). Do not re-do Phases 0–4.
+A new session should read this section, then Part 8 Phase 6, then Part 5 (escalation). Do not re-do Phases 0–5.
 
 | Phase | State |
 |---|---|
@@ -22,7 +22,7 @@ A new session should read this section, then Part 8 Phase 5, then Part 5 (escala
 | **1 — Goal ledger** | **Done.** `GoalLedgerStore` + SQLite, `USER_MESSAGE` + steer tap, typed `Constraint` classifier, `ResolvedIntent` into compaction and subagent context. Defaults still off. |
 | **2 — Tracker, observe-only** | **Done.** `ProgressTracker` on write-side hooks, `VerifierVerdict` at severity `none` (SSE + log only). Cold-state: no tool record → no accumulation signal. Ledger signals may fire immediately. |
 | **3 — Durable record** | **Done.** `SystemNotification` `verifierVerdict`, drain at inner preamble and turn tail plus `run()` finally, compaction pin, `DURABLE_EVENT_KINDS`. |
-| 4–6 — `nudge` / `replan` / `block` | **Phase 4 done** (`nudge` via PRE_TOOL). Next: replan, then block. |
+| 4–6 — `nudge` / `replan` / `block` | **Phase 5 done** (`replan` via doom-loop `force_no_tools`). Next: block. |
 
 **Constraints for whoever picks this up:**
 
@@ -70,6 +70,12 @@ A new session should read this section, then Part 8 Phase 5, then Part 5 (escala
 - `NudgeActuator` on `PRE_TOOL`; drain caps severity and stashes one nudge.
 - `tail_grace_s` on the turn-tail drain only.
 - Tests: `tests/core/test_progress_tracker.py` (`test_nudge_reaches_next_system_message_once`), `tests/evals/test_verifier_port.py`.
+
+**Phase 5 left in the tree (do not recreate):**
+
+- Mailbox `put_replan` / `take_replan`; drain stashes when capped severity is `replan`.
+- `_arm_replan_from_mailbox` sets `_DoomLoopTracker.force_no_tools` + recovery note; `consume_recovery` empties tools for exactly one inner turn.
+- Tests: `test_replan_empties_tools_for_exactly_one_turn`.
 
 ---
 
@@ -761,7 +767,7 @@ Each phase is independently shippable and independently reversible: **one commit
 
 **Phase 4 — `nudge`. Done.** Async `VerifierPort`, queue + mailbox with a verifier-owned worker (not `HookManager`-tracked), `PRE_TOOL` injection, rate limits, spend logging, `tail_grace_s` measurement for `done` verdicts.
 
-**Phase 5 — `replan`.** Reuse the doom-loop primitive for forced re-plan turns.
+**Phase 5 — `replan`. Done.** Reuse the doom-loop primitive for forced re-plan turns.
 
 **Phase 6 — `block`.** `VerifierInspector` in the chain via `build_inspectors()`, gating destructive tools on cached verdict state.
 
