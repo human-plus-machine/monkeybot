@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from fnmatch import fnmatch
 from typing import Any
 
@@ -70,8 +71,6 @@ def constraint_matches(
     if constraint.kind == ConstraintKind.PATH_GLOB:
         return any(glob_match(path, constraint.pattern) for path in path_args(args))
     if constraint.kind == ConstraintKind.COMMAND_REGEX:
-        import re
-
         text = command_text(args)
         if not text:
             return False

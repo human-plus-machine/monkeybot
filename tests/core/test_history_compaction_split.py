@@ -12,6 +12,7 @@ from monkeybot.core.runtime.history_compaction import (
     protect_recent_count,
     rebuild_compacted_history,
     split_messages_for_compaction,
+    truncate_history_preserving_pins,
 )
 from monkeybot.core.tools.spill_inventory import spill_budgets_from_window
 from monkeybot.core.types.content_blocks import (
@@ -172,3 +173,54 @@ def test_rebuild_keeps_middle_notification_typed() -> None:
     assert len(pinned) == 1
     assert isinstance(pinned[0].content[0], SystemNotification)
     assert pinned[0].content[0].notification_type == "verifierVerdict"
+
+
+def test_inline_and_thinking_notifications_are_not_pinned() -> None:
+    messages = _msgs(12, chars=40)
+    inline = Message(
+        role="system",
+        content=[SystemNotification(notification_type="inlineMessage", msg="note")],
+    )
+    thinking = Message(
+        role="system",
+        content=[SystemNotification(notification_type="thinkingMessage", msg="…")],
+    )
+    mixed = [*messages[:4], inline, thinking, *messages[4:]]
+    assert not _is_pinned_history_row(inline)
+    assert not _is_pinned_history_row(thinking)
+    head, middle, tail = split_messages_for_compaction(mixed, window_tokens=100)
+    assert inline in head + middle + tail
+    assert thinking in head + middle + tail
+    summary = Message(role="assistant", content=[Text(text="[Context Summary]: x")])
+    rebuilt = rebuild_compacted_history(mixed, head=head, summary=summary, tail=tail)
+    assert not any(_is_pinned_history_row(m) for m in rebuilt)
+
+
+def test_protect_recent_count_covers_pinned_rows_in_tail_span() -> None:
+    messages = _msgs(20, chars=40)
+    pinned = Message(
+        role="system",
+        content=[SystemNotification(notification_type="verifierVerdict", msg="x")],
+    )
+    mixed = [*messages[:-2], pinned, *messages[-2:]]
+    _, _, tail = split_messages_for_compaction(mixed, window_tokens=50_000)
+    protected = protect_recent_count(mixed, window_tokens=50_000)
+    assert protected >= len(tail)
+    # The protected window is a suffix of the full list and includes the pin.
+    window = mixed[-protected:]
+    assert pinned in window
+    assert all(msg in window for msg in tail)
+
+
+def test_truncate_history_keeps_pinned_verdicts() -> None:
+    messages = _msgs(10, chars=20)
+    pinned = Message(
+        role="system",
+        content=[SystemNotification(notification_type="verifierVerdict", msg="keep")],
+    )
+    mixed = [pinned, *messages]
+    truncated = truncate_history_preserving_pins(mixed, max_rows=4)
+    assert len(truncated) == 4
+    assert pinned in truncated
+    assert truncated[-1] is messages[-1]
+    assert messages[0] not in truncated

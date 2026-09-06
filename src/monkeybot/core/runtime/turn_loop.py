@@ -72,7 +72,6 @@ from .events import (
     SystemPromptSnapshot,
     Thinking,
     UserSteered,
-    VerifierVerdict,
 )
 from .history_compaction import (
     HISTORY_LOAD_MAX,
@@ -82,6 +81,7 @@ from .history_compaction import (
     _summarization_viable,
     _summarize_history,
     protect_recent_count,
+    truncate_history_preserving_pins,
 )
 from .input_admission import InputAdmission, SteerItem, join_text, preview_text
 from .loop_hooks import (
@@ -251,11 +251,8 @@ async def _drain_verdicts(
     mailbox = ctx.verdict_mailbox
     if mailbox is None:
         return
-    take = getattr(mailbox, "take_ready", None)
-    if not callable(take):
-        return
     try:
-        ready = take(ctx.thread_id)
+        ready = mailbox.take_ready(ctx.thread_id)
     except Exception:
         logger.warning(
             "verdict mailbox drain failed %s",
@@ -264,8 +261,6 @@ async def _drain_verdicts(
         )
         return
     for verdict in ready:
-        if not isinstance(verdict, VerifierVerdict):
-            continue
         if history is not None:
             try:
                 await persist_message(
@@ -670,7 +665,9 @@ async def _apply_history_load_max_safety(
     if len(state.chat_messages) <= HISTORY_LOAD_MAX:
         return
     dropped = len(state.chat_messages) - HISTORY_LOAD_MAX
-    truncated = state.chat_messages[-HISTORY_LOAD_MAX:]
+    truncated = truncate_history_preserving_pins(
+        state.chat_messages, max_rows=HISTORY_LOAD_MAX
+    )
     logger.error(
         "history exceeds load max after compact attempt; truncating tail %s",
         kv(
@@ -1578,7 +1575,6 @@ async def _run_inner_core(
                 max_turns=state.effective_max,
             ),
         )
-        yield Error(request_id=state.ctx.request_id, error=MAX_TURNS_ERROR)
 
     # Ensure the backgrounded assistant write has landed before any load/reset
     # below (freeze) so the assistant row is durable and not overwritten.
@@ -1610,3 +1606,5 @@ async def _run_inner_core(
     )
     # Settlement for POST_TURN / lingering POST_TOOL runs in run() finally
     # before TurnComplete — do not drain twice here.
+    if state.needs_followup_after_tools:
+        yield Error(request_id=state.ctx.request_id, error=MAX_TURNS_ERROR)

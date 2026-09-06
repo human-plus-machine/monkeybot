@@ -20,6 +20,7 @@ from monkeybot.core.verifier.match import (
     READ_TOOLS,
     WRITE_TOOLS,
     constraint_matches,
+    glob_match,
     path_args,
 )
 
@@ -31,10 +32,6 @@ _NO_PROGRESS_N = 3
 _ERROR_STREAK_N = 3
 _BUDGET_FRACTION = 0.5
 _LEDGER_SIGNALS = frozenset({"constraint_touch", "repeat_correction", "done_unmet"})
-# Session-lifetime token sums and tool-only inner turns fire on healthy
-# long smoke/memory work. Log them; do not put them on the SSE mailbox until
-# a later phase proves precision.
-_NOISY_SIGNALS = frozenset({"budget_burn", "no_progress"})
 
 
 @dataclass
@@ -43,7 +40,6 @@ class _ThreadTrack:
     write_counts: dict[str, int] = field(default_factory=dict)
     error_streak: int = 0
     no_text_turns: int = 0
-    tokens_used: int = 0
     inner_turn: int = 0
     emitted_this_turn: bool = False
     seen_tool: bool = False
@@ -149,21 +145,34 @@ class ProgressTracker:
             call_tokens = int(payload.usage.get("input_tokens") or 0) + int(
                 payload.usage.get("output_tokens") or 0
             )
-            state.tokens_used += call_tokens
         text = (payload.assistant_text or "").strip()
         has_tools = bool(payload.tool_requests)
         if has_tools and not text:
             state.no_text_turns += 1
         else:
             state.no_text_turns = 0
-        signals: list[str] = []
+        # budget_burn / no_progress fire on healthy long tool loops. Log only
+        # until a later phase proves precision; do not put them on the mailbox.
         if warm and state.no_text_turns >= _NO_PROGRESS_N:
-            signals.append("no_progress")
+            logger.info(
+                "progress_tracker signal %s",
+                kv(
+                    thread_id=payload.thread_id,
+                    signals="no_progress",
+                    mailbox=False,
+                ),
+            )
         window = payload.ctx.context_window_tokens
         if warm and window > 0 and call_tokens >= int(window * _BUDGET_FRACTION):
-            signals.append("budget_burn")
+            logger.info(
+                "progress_tracker signal %s",
+                kv(
+                    thread_id=payload.thread_id,
+                    signals="budget_burn",
+                    mailbox=False,
+                ),
+            )
         state.seen_provider = True
-        self._maybe_emit(payload, state, signals)
 
     def _observe_turn_end(self, payload: HookPayload) -> None:
         signals = self._ledger_signals(payload.thread_id, "", None, turn_end=True)
@@ -208,8 +217,7 @@ class ProgressTracker:
             unmet = [
                 item
                 for item in view.active_goal.done_when
-                if ("/" in item or item.endswith(".txt") or item.endswith(".md"))
-                and not any(item in path or path.endswith(item) for path in written)
+                if _looks_like_path(item) and not _done_when_satisfied(item, written)
             ]
             if unmet:
                 signals.append("done_unmet")
@@ -227,20 +235,11 @@ class ProgressTracker:
         ledger_hit = [s for s in signals if s in _LEDGER_SIGNALS]
         other = [s for s in signals if s not in _LEDGER_SIGNALS]
         signals = ledger_hit if inner < self._config.min_turn_before_verdict else ledger_hit + other
-        noisy = [s for s in signals if s in _NOISY_SIGNALS]
-        signals = [s for s in signals if s not in _NOISY_SIGNALS]
-        if noisy:
-            logger.info(
-                "progress_tracker signal %s",
-                kv(
-                    thread_id=payload.thread_id,
-                    signals=",".join(noisy),
-                    mailbox=False,
-                ),
-            )
         if not signals:
             return
-        status = "stuck" if any(s in {"error_streak", "no_progress", "done_unmet"} for s in signals) else "drifting"
+        status = (
+            "stuck" if any(s in {"error_streak", "done_unmet"} for s in signals) else "drifting"
+        )
         verdict = VerifierVerdict(
             request_id=payload.request_id,
             verdict_id=str(uuid.uuid4()),
@@ -261,3 +260,20 @@ class ProgressTracker:
                 signals=",".join(signals),
             ),
         )
+
+
+def _looks_like_path(item: str) -> bool:
+    return "/" in item or item.endswith(".txt") or item.endswith(".md")
+
+
+def _done_when_satisfied(item: str, written: set[str]) -> bool:
+    needle = item.replace("\\", "/").lstrip("./")
+    if not needle:
+        return False
+    for path in written:
+        normalized = path.replace("\\", "/").lstrip("./")
+        if normalized == needle or normalized.endswith("/" + needle):
+            return True
+        if glob_match(normalized, needle):
+            return True
+    return False

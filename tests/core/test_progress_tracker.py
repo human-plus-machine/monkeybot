@@ -19,7 +19,7 @@ from monkeybot.core.persistence.goal_ledger import (
     Intent,
     Provenance,
 )
-from monkeybot.core.runtime.events import TurnComplete, VerifierVerdict
+from monkeybot.core.runtime.events import Error, TurnComplete, VerifierVerdict
 from monkeybot.core.runtime.loop import run
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.core.verifier.ledger import GoalLedger
@@ -362,3 +362,77 @@ async def test_run_yields_queued_verifier_verdict_before_turn_complete() -> None
 
     assert isinstance(system_rows[0].content[0], SystemNotification)
     assert system_rows[0].content[0].notification_type == "verifierVerdict"
+
+
+@pytest.mark.asyncio
+async def test_run_yields_queued_verdict_before_error() -> None:
+    class BoomProvider(FakeProvider):
+        async def stream(self, *args: object, **kwargs: object):
+            raise RuntimeError("boom")
+            yield  # pragma: no cover
+
+    mailbox = VerdictMailbox()
+    mailbox.put(
+        "t1",
+        VerifierVerdict(
+            request_id="r1",
+            verdict_id="v1",
+            checkpoint_id="r1:1",
+            status="drifting",
+            severity="none",
+            confidence=0.9,
+            rationale="constraint_touch",
+            triggering_signals=("constraint_touch",),
+        ),
+    )
+    ctx = replace(loop_ctx(), verdict_mailbox=mailbox)
+    events = []
+    async for event in run(
+        "hello",
+        ctx,
+        provider=BoomProvider([[]]),
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        events.append(event)
+    kinds = [type(e) for e in events]
+    assert kinds.index(VerifierVerdict) < kinds.index(Error)
+    assert kinds.index(Error) < kinds.index(TurnComplete)
+
+
+def test_mailbox_caps_per_thread_and_evicts_idle_threads() -> None:
+    from monkeybot.core.verifier.mailbox import _PER_THREAD_MAX, _THREAD_CAP
+
+    mailbox = VerdictMailbox()
+
+    def _verdict(i: int) -> VerifierVerdict:
+        return VerifierVerdict(
+            request_id="r",
+            verdict_id=str(i),
+            checkpoint_id=f"r:{i}",
+            status="drifting",
+            severity="none",
+        )
+
+    for i in range(_PER_THREAD_MAX + 5):
+        mailbox.put("t1", _verdict(i))
+    ready = mailbox.take_ready("t1")
+    assert len(ready) == _PER_THREAD_MAX
+    assert ready[0].verdict_id == "5"
+
+    for i in range(_THREAD_CAP + 1):
+        mailbox.put(f"t{i}", _verdict(i))
+    assert mailbox.take_ready("t0") == []
+    assert len(mailbox.take_ready(f"t{_THREAD_CAP}")) == 1
+
+
+def test_done_when_requires_path_boundary() -> None:
+    from monkeybot.core.verifier.tracker import _done_when_satisfied
+
+    written = {"other/docs/a.md.bak", "notes.md"}
+    assert not _done_when_satisfied("docs/a.md", written)
+    assert _done_when_satisfied("docs/a.md", {"docs/a.md"})
+    assert _done_when_satisfied("docs/a.md", {"src/docs/a.md"})
+    assert _done_when_satisfied("notes.md", written)

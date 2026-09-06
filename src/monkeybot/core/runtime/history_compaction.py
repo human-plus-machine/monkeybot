@@ -185,9 +185,19 @@ def _estimate_message_tokens(message: Message) -> int:
     return estimate_tokens_from_char_count(_raw_message_char_count(message))
 
 
+_PINNED_NOTIFICATION_TYPES = frozenset({"verifierVerdict"})
+
+
 def _is_pinned_history_row(msg: Message) -> bool:
-    """True for UI-only system notification rows that must survive compaction."""
-    return bool(msg.content) and all(isinstance(block, SystemNotification) for block in msg.content)
+    """True for verifierVerdict rows that must survive compaction.
+
+    Other ``SystemNotification`` kinds (thinking / inline / credits) stay compactable.
+    """
+    return bool(msg.content) and all(
+        isinstance(block, SystemNotification)
+        and block.notification_type in _PINNED_NOTIFICATION_TYPES
+        for block in msg.content
+    )
 
 
 def _split_accountable(
@@ -275,11 +285,51 @@ def protect_recent_count(
     *,
     window_tokens: int,
 ) -> int:
-    """How many newest rows pressure-shaping should leave verbatim."""
+    """How many newest *full-list* rows pressure-shaping should leave verbatim.
+
+    Tail length is computed over accountable rows, then expanded to the original
+    span so pinned verdicts interleaved in that tail do not shrink the window
+    the caller applies as ``len(messages) - protect_recent``.
+    """
     _, _, tail = split_messages_for_compaction(messages, window_tokens=window_tokens)
-    if tail:
-        return len(tail)
-    return min(len(messages), SUMMARY_KEEP_TAIL_MIN)
+    if not tail:
+        return min(len(messages), SUMMARY_KEEP_TAIL_MIN)
+    tail_ids = {id(msg) for msg in tail}
+    for i, msg in enumerate(messages):
+        if id(msg) in tail_ids:
+            return len(messages) - i
+    return len(tail)
+
+
+def truncate_history_preserving_pins(
+    messages: Sequence[Message],
+    *,
+    max_rows: int,
+) -> list[Message]:
+    """Keep newest accountable rows plus pinned verdicts, in original order."""
+    if max_rows <= 0:
+        return []
+    if len(messages) <= max_rows:
+        return list(messages)
+    pinned = [msg for msg in messages if _is_pinned_history_row(msg)]
+    accountable = [msg for msg in messages if not _is_pinned_history_row(msg)]
+    keep_accountable_n = max(0, max_rows - len(pinned))
+    keep_accountable = accountable[-keep_accountable_n:] if keep_accountable_n else []
+    keep_ids = {id(msg) for msg in keep_accountable}
+    keep_ids.update(id(msg) for msg in pinned)
+    kept = [msg for msg in messages if id(msg) in keep_ids]
+    if len(kept) <= max_rows:
+        return kept
+    overflow = len(kept) - max_rows
+    pinned_ids = {id(msg) for msg in pinned}
+    dropped = 0
+    trimmed: list[Message] = []
+    for msg in kept:
+        if dropped < overflow and id(msg) in pinned_ids:
+            dropped += 1
+            continue
+        trimmed.append(msg)
+    return trimmed
 
 
 def _summarization_viable(
