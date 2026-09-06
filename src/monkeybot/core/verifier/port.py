@@ -15,7 +15,6 @@ class EvidenceBundle:
     request_id: str
     inner_turn: int
     signals: tuple[str, ...]
-    intent: ResolvedIntent | None
 
 
 class VerifierPort(Protocol):

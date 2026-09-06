@@ -6,7 +6,6 @@ import asyncio
 import logging
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
 
 from monkeybot.core.config.settings import VerifierJudgeConfig
 from monkeybot.core.logging_utils import kv
@@ -18,11 +17,6 @@ from monkeybot.core.verifier.port import EvidenceBundle, VerifierPort
 logger = logging.getLogger(__name__)
 
 _QUEUE_CAP = 32
-
-
-@dataclass
-class _JudgeJob:
-    evidence: EvidenceBundle
 
 
 class JudgeWorker:
@@ -40,7 +34,7 @@ class JudgeWorker:
         self._port = port
         self._ledger_fn = ledger_fn
         self._config = config
-        self._queue: asyncio.Queue[_JudgeJob | None] = asyncio.Queue(maxsize=_QUEUE_CAP)
+        self._queue: asyncio.Queue[EvidenceBundle | None] = asyncio.Queue(maxsize=_QUEUE_CAP)
         self._task: asyncio.Task[None] | None = None
         self._closed = False
         self._verdicts_this_request: dict[str, int] = {}
@@ -92,19 +86,18 @@ class JudgeWorker:
             )
             return
         try:
-            self._queue.put_nowait(_JudgeJob(evidence=evidence))
+            self._queue.put_nowait(evidence)
         except asyncio.QueueFull:
             logger.warning("judge queue full %s", kv(thread_id=thread_id))
 
     async def _run(self) -> None:
         while True:
-            job = await self._queue.get()
-            if job is None:
+            evidence = await self._queue.get()
+            if evidence is None:
                 return
-            await self._handle(job)
+            await self._handle(evidence)
 
-    async def _handle(self, job: _JudgeJob) -> None:
-        evidence = job.evidence
+    async def _handle(self, evidence: EvidenceBundle) -> None:
         ledger = self._ledger_fn()
         intent = ledger.resolved_intent(evidence.thread_id) if ledger is not None else None
         try:
@@ -117,6 +110,10 @@ class JudgeWorker:
             )
             return
         if not isinstance(verdict, VerifierVerdict):
+            logger.warning(
+                "judge skipped non-verdict %s",
+                kv(thread_id=evidence.thread_id, type=type(verdict).__name__),
+            )
             return
         self._mailbox.put(evidence.thread_id, verdict)
         self._verdicts_this_request[evidence.request_id] = (

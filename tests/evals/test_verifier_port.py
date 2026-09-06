@@ -24,7 +24,6 @@ async def test_scripted_verifier_returns_queued_verdict() -> None:
         request_id="r1",
         inner_turn=3,
         signals=("constraint_touch",),
-        intent=None,
     )
     out = await port.verify(None, evidence)
     assert out.verdict_id == "v1"

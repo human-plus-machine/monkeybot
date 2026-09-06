@@ -38,7 +38,6 @@ from monkeybot.core.persistence.durable_runs import (
     SubagentEnvelope,
     SubagentRunRow,
 )
-from monkeybot.core.persistence.goal_ledger import InMemoryGoalLedgerStore
 from monkeybot.core.persistence.errors import AmbiguousCommitError
 from monkeybot.core.persistence.firestore_scheduled_loops import FirestoreScheduledLoopStore
 from monkeybot.core.persistence.thread_summary import (
@@ -1411,7 +1410,6 @@ class FirestoreStorageBackend:
         self._usage_store: FirestoreUsageStore | None = None
         self._runs_store: FirestoreRunStore | None = None
         self._scheduled_loops_store: FirestoreScheduledLoopStore | None = None
-        self._goal_ledger_store: InMemoryGoalLedgerStore | None = None
         self._session_turn_lock_store: FirestoreSessionTurnLockStore | None = None
         self._outbox_store: FirestoreOutboxStore | None = None
 
@@ -1432,8 +1430,7 @@ class FirestoreStorageBackend:
         self._usage_store = FirestoreUsageStore(self._client, prefix)
         self._runs_store = FirestoreRunStore(self._client, prefix)
         self._scheduled_loops_store = FirestoreScheduledLoopStore(self._client, prefix)
-        self._goal_ledger_store = InMemoryGoalLedgerStore()
-        logger.warning("goal_ledger using in-memory store on Firestore (SQLite persistence only)")
+        logger.warning("goal ledger unavailable on Firestore; SQLite is the durable backend")
         self._session_turn_lock_store = FirestoreSessionTurnLockStore(self._client, prefix)
         self._outbox_store = FirestoreOutboxStore(self._client, prefix)
 
@@ -1446,7 +1443,6 @@ class FirestoreStorageBackend:
             self._usage_store = None
             self._runs_store = None
             self._scheduled_loops_store = None
-            self._goal_ledger_store = None
             self._session_turn_lock_store = None
             self._outbox_store = None
 
@@ -1470,10 +1466,8 @@ class FirestoreStorageBackend:
             raise RuntimeError("FirestoreStorageBackend.open() has not been called")
         return self._scheduled_loops_store
 
-    def goal_ledger(self) -> InMemoryGoalLedgerStore:
-        if self._goal_ledger_store is None:
-            raise RuntimeError("FirestoreStorageBackend.open() has not been called")
-        return self._goal_ledger_store
+    def goal_ledger(self) -> None:
+        return None
 
     def session_turns(self) -> FirestoreSessionTurnLockStore:
         if self._session_turn_lock_store is None:

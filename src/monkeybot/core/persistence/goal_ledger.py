@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from collections import defaultdict
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 import aiosqlite
 
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.sqlite import TaskReentrantLock, with_conn_lock
+
+logger = logging.getLogger(__name__)
 
 
 class Provenance(StrEnum):
@@ -207,6 +211,7 @@ def _constraints_from_json(raw: str, fallback_entry_id: str) -> tuple[Constraint
     try:
         payload = json.loads(raw or "[]")
     except json.JSONDecodeError:
+        logger.warning("goal_ledger constraints json invalid %s", kv(raw=raw[:80]), exc_info=True)
         return ()
     if not isinstance(payload, list):
         return ()
@@ -233,6 +238,7 @@ def _done_when_from_json(raw: str) -> tuple[str, ...]:
     try:
         payload = json.loads(raw or "[]")
     except json.JSONDecodeError:
+        logger.warning("goal_ledger done_when json invalid %s", kv(raw=raw[:80]), exc_info=True)
         return ()
     if not isinstance(payload, list):
         return ()
@@ -283,6 +289,8 @@ class GoalLedgerStore(Protocol):
 
     async def update_status(self, entry_id: str, status: Status) -> None: ...
 
+    async def delete_entry(self, entry_id: str) -> None: ...
+
 
 GOAL_LEDGER_COLUMNS = (
     "entry_id",
@@ -322,26 +330,21 @@ class InMemoryGoalLedgerStore:
         old = self._by_id.get(entry_id)
         if old is None:
             return
-        updated = GoalEntry(
-            entry_id=old.entry_id,
-            thread_id=old.thread_id,
-            seq=old.seq,
-            verbatim=old.verbatim,
-            provenance=old.provenance,
-            channel=old.channel,
-            intent=old.intent,
-            status=status,
-            relates_to=old.relates_to,
-            constraints=old.constraints,
-            done_when=old.done_when,
-            created_at_ms=old.created_at_ms,
-        )
+        updated = replace(old, status=status)
         self._by_id[entry_id] = updated
         rows = self._entries[old.thread_id]
         for i, row in enumerate(rows):
             if row.entry_id == entry_id:
                 rows[i] = updated
                 break
+
+    async def delete_entry(self, entry_id: str) -> None:
+        old = self._by_id.pop(entry_id, None)
+        if old is None:
+            return
+        self._entries[old.thread_id] = [
+            row for row in self._entries[old.thread_id] if row.entry_id != entry_id
+        ]
 
 
 class SQLiteGoalLedgerStore:
@@ -410,4 +413,9 @@ class SQLiteGoalLedgerStore:
             "UPDATE goal_ledger SET status = ? WHERE entry_id = ?",
             (status.value, entry_id),
         )
+        await self._conn.commit()
+
+    @with_conn_lock
+    async def delete_entry(self, entry_id: str) -> None:
+        await self._conn.execute("DELETE FROM goal_ledger WHERE entry_id = ?", (entry_id,))
         await self._conn.commit()

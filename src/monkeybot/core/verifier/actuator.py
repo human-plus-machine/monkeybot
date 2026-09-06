@@ -27,6 +27,10 @@ class NudgeActuator:
                 return
             existing = (payload.inject_text or "").rstrip()
             payload.inject_text = f"{existing}\n\n{text}" if existing else text
+            logger.info(
+                "verifier nudge injected %s",
+                kv(thread_id=payload.thread_id),
+            )
         except Exception:
             logger.warning(
                 "nudge actuator failed %s",
