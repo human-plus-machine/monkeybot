@@ -7,7 +7,7 @@ import logging
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
@@ -89,11 +89,8 @@ class GoalEntry:
 @dataclass(frozen=True)
 class ResolvedIntent:
     active_goal: GoalEntry | None
-    refinement_chain: tuple[GoalEntry, ...]
     deferred_stack: tuple[GoalEntry, ...]
-    superseded: tuple[str, ...]
     standing_constraints: tuple[Constraint, ...]
-    correction_history: Mapping[Constraint, int]
     pending_classification: bool
 
 
@@ -109,7 +106,6 @@ class Classification:
     intent: Intent
     relates_to: str | None
     constraints: tuple[ConstraintDraft, ...]
-    done_when: tuple[str, ...]
 
 
 def new_entry_id() -> str:
@@ -123,11 +119,8 @@ def now_ms() -> int:
 def empty_resolved(*, pending: bool) -> ResolvedIntent:
     return ResolvedIntent(
         active_goal=None,
-        refinement_chain=(),
         deferred_stack=(),
-        superseded=(),
         standing_constraints=(),
-        correction_history={},
         pending_classification=pending,
     )
 
@@ -137,25 +130,16 @@ def resolve_intent(
     *,
     pending_classification: bool,
 ) -> ResolvedIntent:
-    """Derive the verifier's view. Only HUMAN provenance contributes intent."""
+    """Derive the verifier's view. Only HUMAN provenance contributes intent.
+
+    ``standing_constraints`` accumulate from every human entry regardless of
+    status. Constraints are sticky across scope changes: a path glob attached
+    to a later-superseded goal stays standing until a later correction
+    replaces that same ``(kind, pattern)`` key.
+    """
     human = [e for e in entries if e.provenance == Provenance.HUMAN]
-    by_id = {e.entry_id: e for e in human}
     active = next((e for e in reversed(human) if e.status == Status.ACTIVE), None)
-    chain: list[GoalEntry] = []
-    cursor = active
-    seen: set[str] = set()
-    while cursor is not None and cursor.entry_id not in seen:
-        chain.append(cursor)
-        seen.add(cursor.entry_id)
-        if not cursor.relates_to:
-            break
-        parent = by_id.get(cursor.relates_to)
-        if parent is None or parent.intent not in (Intent.NEW_GOAL, Intent.REFINEMENT, Intent.SCOPE_CHANGE):
-            break
-        cursor = parent
-    chain.reverse()
     deferred = tuple(e for e in human if e.status == Status.DEFERRED)
-    superseded = tuple(_one_liner(e) for e in human if e.status == Status.SUPERSEDED)
     standing: list[Constraint] = []
     standing_seen: set[tuple[ConstraintKind, str]] = set()
     for entry in human:
@@ -165,31 +149,12 @@ def resolve_intent(
                 continue
             standing_seen.add(key)
             standing.append(constraint)
-    corr_counts: dict[tuple[ConstraintKind, str], tuple[Constraint, int]] = {}
-    for entry in human:
-        if entry.intent != Intent.CORRECTION:
-            continue
-        for constraint in entry.constraints:
-            key = constraint.match_key
-            prev = corr_counts.get(key)
-            corr_counts[key] = (constraint, (prev[1] if prev else 0) + 1)
-    history = dict(corr_counts.values())
     return ResolvedIntent(
         active_goal=active,
-        refinement_chain=tuple(chain),
         deferred_stack=deferred,
-        superseded=superseded,
         standing_constraints=tuple(standing),
-        correction_history=history,
         pending_classification=pending_classification,
     )
-
-
-def _one_liner(entry: GoalEntry) -> str:
-    text = " ".join(entry.verbatim.split())
-    if len(text) <= 120:
-        return text
-    return text[:119] + "…"
 
 
 def _constraints_to_json(constraints: tuple[Constraint, ...]) -> str:
@@ -285,6 +250,13 @@ class GoalLedgerStore(Protocol):
 
     async def append(self, entry: GoalEntry) -> None: ...
 
+    async def commit_classified(
+        self,
+        entry: GoalEntry,
+        *,
+        status_updates: Sequence[tuple[str, Status]] = (),
+    ) -> GoalEntry: ...
+
     async def list_entries(self, thread_id: str) -> list[GoalEntry]: ...
 
     async def update_status(self, entry_id: str, status: Status) -> None: ...
@@ -309,7 +281,7 @@ GOAL_LEDGER_COLUMNS = (
 
 
 class InMemoryGoalLedgerStore:
-    """Process-local store for tests and non-SQLite backends (Phase 1)."""
+    """Process-local store for tests."""
 
     def __init__(self) -> None:
         self._entries: dict[str, list[GoalEntry]] = defaultdict(list)
@@ -323,10 +295,7 @@ class InMemoryGoalLedgerStore:
         self._entries[entry.thread_id].append(entry)
         self._by_id[entry.entry_id] = entry
 
-    async def list_entries(self, thread_id: str) -> list[GoalEntry]:
-        return list(self._entries.get(thread_id) or [])
-
-    async def update_status(self, entry_id: str, status: Status) -> None:
+    def _apply_status(self, entry_id: str, status: Status) -> None:
         old = self._by_id.get(entry_id)
         if old is None:
             return
@@ -337,6 +306,25 @@ class InMemoryGoalLedgerStore:
             if row.entry_id == entry_id:
                 rows[i] = updated
                 break
+
+    async def commit_classified(
+        self,
+        entry: GoalEntry,
+        *,
+        status_updates: Sequence[tuple[str, Status]] = (),
+    ) -> GoalEntry:
+        for entry_id, status in status_updates:
+            self._apply_status(entry_id, status)
+        seq = await self.next_seq(entry.thread_id)
+        stamped = replace(entry, seq=seq)
+        await self.append(stamped)
+        return stamped
+
+    async def list_entries(self, thread_id: str) -> list[GoalEntry]:
+        return list(self._entries.get(thread_id) or [])
+
+    async def update_status(self, entry_id: str, status: Status) -> None:
+        self._apply_status(entry_id, status)
 
     async def delete_entry(self, entry_id: str) -> None:
         old = self._by_id.pop(entry_id, None)
@@ -370,8 +358,7 @@ class SQLiteGoalLedgerStore:
         current = int(row[0]) if row is not None else 0
         return current + 1
 
-    @with_conn_lock
-    async def append(self, entry: GoalEntry) -> None:
+    async def _insert_entry(self, entry: GoalEntry) -> None:
         await self._conn.execute(
             """
             INSERT INTO goal_ledger(
@@ -394,7 +381,39 @@ class SQLiteGoalLedgerStore:
                 entry.created_at_ms,
             ),
         )
+
+    @with_conn_lock
+    async def append(self, entry: GoalEntry) -> None:
+        await self._insert_entry(entry)
         await self._conn.commit()
+
+    @with_conn_lock
+    async def commit_classified(
+        self,
+        entry: GoalEntry,
+        *,
+        status_updates: Sequence[tuple[str, Status]] = (),
+    ) -> GoalEntry:
+        cursor = await self._conn.execute(
+            "SELECT COALESCE(MAX(seq), 0) FROM goal_ledger WHERE thread_id = ?",
+            (entry.thread_id,),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        seq = (int(row[0]) if row is not None else 0) + 1
+        stamped = replace(entry, seq=seq)
+        try:
+            for entry_id, status in status_updates:
+                await self._conn.execute(
+                    "UPDATE goal_ledger SET status = ? WHERE entry_id = ?",
+                    (status.value, entry_id),
+                )
+            await self._insert_entry(stamped)
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
+        return stamped
 
     @with_conn_lock
     async def list_entries(self, thread_id: str) -> list[GoalEntry]:

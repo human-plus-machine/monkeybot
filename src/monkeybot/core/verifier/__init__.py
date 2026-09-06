@@ -11,7 +11,7 @@ from monkeybot.core.persistence.goal_ledger import (
     ResolvedIntent,
     Status,
 )
-from monkeybot.core.verifier.classify import ClassifierPort, ProviderClassifier, ScriptedClassifier
+from monkeybot.core.verifier.classify import ClassifierPort, ProviderClassifier
 from monkeybot.core.verifier.ledger import GoalLedger
 
 __all__ = [
@@ -26,6 +26,5 @@ __all__ = [
     "Provenance",
     "ProviderClassifier",
     "ResolvedIntent",
-    "ScriptedClassifier",
     "Status",
 ]
