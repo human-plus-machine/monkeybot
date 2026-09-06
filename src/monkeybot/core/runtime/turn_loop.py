@@ -315,14 +315,57 @@ async def _drain_verdicts(
                     kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
                     exc_info=True,
                 )
-        if capped == "nudge":
-            put_nudge = getattr(mailbox, "put_nudge", None)
-            if callable(put_nudge):
-                put_nudge(
-                    ctx.thread_id,
-                    verdict.correction or f"[Verifier] {verdict.rationale}",
-                )
+        _stash_escalation(mailbox, ctx.thread_id, capped, verdict)
         yield verdict
+
+
+def _stash_escalation(
+    mailbox: object, thread_id: str, capped: str, verdict: VerifierVerdict
+) -> None:
+    """Queue one-shot nudge/replan for the next inner turn. Fail-open."""
+    text = verdict.correction or f"[Verifier] {verdict.rationale}"
+    try:
+        if capped == "nudge":
+            put = getattr(mailbox, "put_nudge", None)
+            if callable(put):
+                put(thread_id, text)
+        elif capped == "replan":
+            put = getattr(mailbox, "put_replan", None)
+            if callable(put):
+                put(
+                    thread_id,
+                    f"{text}\nDo not call tools this turn. Restate the plan.",
+                )
+    except Exception:
+        logger.warning("verdict escalation stash failed %s", kv(thread_id=thread_id), exc_info=True)
+
+
+def _arm_replan_from_mailbox(state: _TurnState) -> None:
+    """Reuse doom-loop ``force_no_tools`` for a drained ``replan`` verdict."""
+    mailbox = state.ctx.verdict_mailbox
+    if mailbox is None:
+        return
+    take = getattr(mailbox, "take_replan", None)
+    if not callable(take):
+        return
+    try:
+        note = take(state.ctx.thread_id)
+    except Exception:
+        logger.warning(
+            "replan mailbox take failed %s",
+            kv(thread_id=state.ctx.thread_id, request_id=state.ctx.request_id),
+            exc_info=True,
+        )
+        return
+    if not note:
+        return
+    state.doom_tracker.force_no_tools = True
+    existing = state.doom_tracker.recovery_note
+    state.doom_tracker.recovery_note = f"{existing}\n\n{note}" if existing else note
+    logger.info(
+        "verifier replan armed %s",
+        kv(thread_id=state.ctx.thread_id, request_id=state.ctx.request_id),
+    )
 
 
 def _admit_steer_to_ledger(ctx: TurnContext, preview: str, item: SteerItem) -> None:
@@ -454,6 +497,7 @@ async def _prepare_turn_context(
         yield epoch_evt
     system = _system_message_from_text(state.admit.leading_system_text)
     combined_extra = _combine_extras(state.pre_turn_extra, state.pre_tool_extra_next)
+    _arm_replan_from_mailbox(state)
     force_no_tools, doom_loop_note = state.doom_tracker.consume_recovery()
     combined_extra = _combine_extras(combined_extra, doom_loop_note)
     state.system = _append_extra_system_text(system, combined_extra)
