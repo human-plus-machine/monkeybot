@@ -280,10 +280,14 @@ class GatewayRuntime:
             close = getattr(old, "close", None)
             if callable(close):
                 close()
-            self.goal_ledger = None
+        self.goal_ledger = None
         if cfg is None or storage is None:
             return
         if not cfg.verifier.enabled or not cfg.verifier.ledger.enabled:
+            return
+        store = storage.goal_ledger()
+        if store is None:
+            logger.warning("goal ledger skipped: backend has no durable ledger")
             return
         from monkeybot.core.verifier import GoalLedger, ProviderClassifier
 
@@ -292,7 +296,7 @@ class GatewayRuntime:
             model=cfg.verifier.ledger.model,
         )
         self.goal_ledger = GoalLedger(
-            storage.goal_ledger(),
+            store,
             classifier,
             max_entries_per_thread=cfg.verifier.ledger.max_entries_per_thread,
         )

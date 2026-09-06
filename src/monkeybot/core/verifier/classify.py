@@ -157,9 +157,6 @@ class ProviderClassifier:
         self._provider = provider
         self._model = model
 
-    def bind_provider(self, provider: Provider | Callable[[], Provider | None] | None) -> None:
-        self._provider = provider
-
     def _current_provider(self) -> Provider | None:
         provider = self._provider
         if callable(provider):
@@ -173,6 +170,7 @@ class ProviderClassifier:
     ) -> Classification:
         provider = self._current_provider()
         if provider is None:
+            logger.warning("classifier skipped: no provider")
             return fail_open_classification(open_entries)
         open_blob = _open_entries_blob(open_entries)
         messages = [

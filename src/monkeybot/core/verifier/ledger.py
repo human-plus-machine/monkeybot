@@ -309,7 +309,7 @@ class GoalLedger:
             and not e.constraints
         ]
         for entry in droppable[:extra]:
-            await self._store.update_status(entry.entry_id, Status.ABANDONED)
+            await self._store.delete_entry(entry.entry_id)
 
     async def _refresh_view(self, thread_id: str) -> None:
         entries = await self._store.list_entries(thread_id)
