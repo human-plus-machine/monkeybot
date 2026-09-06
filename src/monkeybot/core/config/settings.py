@@ -113,7 +113,13 @@ class SubagentSettings:
 _DEFAULT_SUBAGENT_SETTINGS = SubagentSettings()
 
 
-_VERIFIER_SEVERITIES = frozenset({"none", "nudge", "replan", "steer", "block"})
+# Rank order is the source of truth. `steer` is reserved for an optional later
+# phase; Phases 4–6 ship nudge / replan / block.
+VERIFIER_SEVERITY_ORDER: tuple[str, ...] = ("none", "nudge", "replan", "steer", "block")
+VERIFIER_SEVERITY_RANK: dict[str, int] = {
+    name: index for index, name in enumerate(VERIFIER_SEVERITY_ORDER)
+}
+_VERIFIER_SEVERITIES = frozenset(VERIFIER_SEVERITY_ORDER)
 
 
 @dataclass(frozen=True)
@@ -511,7 +517,9 @@ def _verifier_int(raw: Any, label: str, default: int, *, min_value: int = 0) -> 
         return default
     if isinstance(raw, bool) or not isinstance(raw, int):
         raise ConfigError(f"{label} must be an integer, got {raw!r}")
-    return max(min_value, raw)
+    if raw < min_value:
+        raise ConfigError(f"{label} must be >= {min_value}, got {raw}")
+    return raw
 
 
 def _verifier_float(raw: Any, label: str, default: float, *, min_value: float = 0.0) -> float:
@@ -519,7 +527,10 @@ def _verifier_float(raw: Any, label: str, default: float, *, min_value: float = 
         return default
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         raise ConfigError(f"{label} must be a number, got {raw!r}")
-    return max(min_value, float(raw))
+    value = float(raw)
+    if value < min_value:
+        raise ConfigError(f"{label} must be >= {min_value}, got {raw}")
+    return value
 
 
 def _verifier_str(raw: Any, label: str, default: str) -> str:
@@ -560,7 +571,7 @@ def verifier_config_from_section(section: dict[str, Any]) -> VerifierConfig:
         defaults.escalation.max_severity,
     )
     if severity not in _VERIFIER_SEVERITIES:
-        allowed = ", ".join(sorted(_VERIFIER_SEVERITIES))
+        allowed = ", ".join(VERIFIER_SEVERITY_ORDER)
         raise ConfigError(
             f"verifier.escalation.max_severity must be one of {allowed}, got {severity!r}"
         )

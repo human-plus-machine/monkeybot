@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from monkeybot.core.llm.provider import Message
     from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageGranularity, UsageSummary
     from monkeybot.core.persistence.durable_runs import SubagentEnvelope, SubagentRunRow
-    from monkeybot.core.persistence.goal_ledger import GoalEntry, Status
+    from monkeybot.core.persistence.goal_ledger import GoalLedgerStore
     from monkeybot.core.persistence.scheduled_loops import (
         ScheduledLoopCreate,
         ScheduledLoopRow,
@@ -164,21 +164,6 @@ class ScheduledLoopStore(Protocol):
     async def resume(self, loop_id: str) -> bool: ...
 
     async def stop(self, loop_id: str, *, stop_reason: str = "manual") -> bool: ...
-
-
-@runtime_checkable
-class GoalLedgerStore(Protocol):
-    """Protocol for the verifier goal ledger (SQLite first)."""
-
-    async def next_seq(self, thread_id: str) -> int: ...
-
-    async def append(self, entry: GoalEntry) -> None: ...
-
-    async def list_entries(self, thread_id: str) -> list[GoalEntry]: ...
-
-    async def update_status(self, entry_id: str, status: Status) -> None: ...
-
-    async def delete_entry(self, entry_id: str) -> None: ...
 
 
 @runtime_checkable

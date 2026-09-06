@@ -639,7 +639,9 @@ class FirestoreUsageStore:
                 cost_usd=sum(_field_float(r, "cost_usd") for r in group),
             )
 
-        def _series_point(bkey: str, model: str, group: list[dict[str, object]]) -> UsageSeriesPoint:
+        def _series_point(
+            bkey: str, model: str, group: list[dict[str, object]]
+        ) -> UsageSeriesPoint:
             return UsageSeriesPoint(
                 bucket=bkey,
                 model=model,
@@ -1430,7 +1432,6 @@ class FirestoreStorageBackend:
         self._usage_store = FirestoreUsageStore(self._client, prefix)
         self._runs_store = FirestoreRunStore(self._client, prefix)
         self._scheduled_loops_store = FirestoreScheduledLoopStore(self._client, prefix)
-        logger.warning("goal ledger unavailable on Firestore; SQLite is the durable backend")
         self._session_turn_lock_store = FirestoreSessionTurnLockStore(self._client, prefix)
         self._outbox_store = FirestoreOutboxStore(self._client, prefix)
 

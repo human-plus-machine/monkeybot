@@ -738,12 +738,21 @@ verifier:
     max_severity: nudge        # nudge | replan | steer | block
 ```
 
-**Gating is explicit and hierarchical.** `verifier.enabled: false` disables every child regardless of its own flag; that is the one switch an operator needs to turn the whole feature off. Within it, `ledger` can run alone (Phase 1 ships this way, as a compaction and subagent-context improvement); `tracker` without `ledger` runs only the ledger-independent signals (`error_streak`, `no_progress`, `write_without_read`, `budget_burn`, `rewrite_churn`); `judge` requires `tracker`. The ledger's default is `false` because it is the only sub-feature with a per-message model cost even when nothing is being verified.
+**Gating is explicit and hierarchical.** Precedence, highest first:
+
+1. **`verifier.enabled` is the master switch.** When `false`, nothing below runs — not the ledger, not the tracker, not the judge, and not actuation — regardless of child `enabled` flags or `escalation.max_severity`. That is the one switch an operator needs to turn the whole feature off.
+2. **Child `enabled` flags** (`ledger`, `tracker`, `judge`) only apply when the master switch is on. A child set `true` while the master is `false` is a no-op, not an override.
+3. **`judge` requires `tracker`.** `tracker` without `ledger` runs only the ledger-independent signals (`error_streak`, `no_progress`, `write_without_read`, `budget_burn`, `rewrite_churn`). `ledger` can run alone (Phase 1 ships this way).
+4. **`escalation.max_severity` caps actuation, it does not enable anything.** `enabled: true` plus `max_severity: none` is "on but muted": observe/record verdicts at `none`, never nudge/replan/steer/block. Raising the cap cannot turn on a disabled child. The smoke fixture `evals/smoke_agent/monkeybot_config/monkeybot.verifier-on.yaml` uses this shape on purpose.
+
+The parser does not rewrite child flags when the master is off; readers must check `verifier.enabled` first. `max_severity` values are `none | nudge | replan | steer | block` in that rank order (`VERIFIER_SEVERITY_ORDER` in `core/config/settings.py`). `steer` is reserved for a later optional phase; Phases 4–6 ship nudge/replan/block.
+
+The ledger's default is `false` because it is the only sub-feature with a per-message model cost even when nothing is being verified.
 
 **Plumbing is a typed snapshot field, not an env map.** Mirror `subagents:`:
 
 - Nested frozen dataclasses in `core/config/settings.py` next to `SubagentSettings`, with `_verifier_section()` and `verifier_config_from_section()`.
-- `_parse_verifier(merged)` called from `build_runtime_config()`; a `verifier: VerifierConfig` field on `RuntimeConfig` (`core/config/snapshot.py`).
+- `_parse_verifier(merged)` called from `build_runtime_config()`; a `verifier: VerifierConfig` field on `RuntimeConfig` (`core/config/snapshot.py`). A malformed `verifier:` block logs at **error** and falls back to defaults-off so bootstrap cannot abort; `get_verifier_config()` (disk read) still raises. Phase 2 must surface that fallback in the snapshot diff, not only in logs.
 - `VERIFIER_DIFF_KEY = "verifier.*"` in `core/config/runtime_env.py`, explicitly **not** in `ENV_MAP` / `ENV_SPEC`. Tests assert `("verifier", "enabled") not in ENV_MAP`.
 - Typed comparison in `diff_runtime_configs()` plus an explicit `tiers.add(ConfigTier.REBUILD)` when the synthetic key is present — `ENV_TIERS` is keyed by env var name, so a YAML-only key would otherwise produce an empty `tiers` set and skip reload.
 - A `build_verifier(cfg)` live slice triggered from `_rebuild_live_slices` in `gateway/sse/app.py`, using the pinned snapshot (not a later disk read). **Not wired yet** — Phase 0 shipped parser + snapshot only; wire this when Phase 1 has a consumer.
@@ -767,7 +776,7 @@ Each phase is independently shippable and independently reversible: **one commit
 
 **Phase 1 — Goal ledger. Next.** `GoalLedgerStore` protocol + SQLite backend; `USER_MESSAGE` hook **and** the steer tap in `_drain_steers`; write-time provenance (`HUMAN` for message / steer / follow-up); the typed `Constraint` schema and a classifier prompt that emits it; classifier running in a ledger-owned per-thread worker (hook only enqueues); `ResolvedIntent` derivation with `pending_classification`. No verification yet. Independently valuable: feed `ResolvedIntent` into compaction as an additive input (current template stays the fallback) and into `SubagentEnvelope.context`. Log the typed / free-text constraint ratio.
 
-**Phase 2 — Tracker, observe-only. Done.** `ProgressTracker` on write-side hooks, `VerifierVerdict` event emitted at severity `none`, wired to logging and SSE only. Cold-state rule: no record → no signal. Acceptance: the Phase 0 zero-verdict smoke run is green (no verdicts, baseline gates hold), and the drift suite's `verifier_on` blocks show which deterministic signals fire on cases (a), (d), (e) while (b) and (c) stay silent. Then run over real sessions and measure. **This phase decides whether Tier 2 is needed at all.**
+**Phase 2 — Tracker, observe-only. Done.** `ProgressTracker` on write-side hooks, `VerifierVerdict` event emitted at severity `none`, wired to logging and SSE only. Cold-state rule: no record → no signal. If `_parse_verifier` fell back to defaults-off, include that in the snapshot diff rather than only an error log. Acceptance: the Phase 0 zero-verdict smoke run is green (no verdicts, baseline gates hold), and the drift suite's `verifier_on` blocks show which deterministic signals fire on cases (a), (d), (e) while (b) and (c) stay silent. Then run over real sessions and measure. **This phase decides whether Tier 2 is needed at all.**
 
 **Phase 3 — Durable record. Done.** `SystemNotification` verdict rows; `_drain_verdicts` at **both** call sites (inner-turn preamble and turn tail after `_await_history_write`, `grace_s=0`); `DURABLE_EVENT_KINDS` entry; frontend wire type (`verifierVerdict`). Compaction: pin provider-excluded / system-notification rows, exclude them from split accounting, splice back after `history.reset` (the token-budget "fires earlier" worry is false; the durability-through-compaction hole is real). HistoryStore append/load/reset tests for `role="system"`. Still no behavioral intervention.
 
@@ -783,7 +792,7 @@ Each phase is independently shippable and independently reversible: **one commit
 
 ## Part 9 — Testing
 
-**Deterministic loop evals** (`tests/evals/scenario_runner.py` with the fake provider) are the primary harness. Stub `VerifierPort` to return fixed verdicts and assert on loop reaction: that `nudge` reaches the next system message exactly once, that `replan` empties the tool list for exactly one turn, that a verdict row is committed at the expected position, that a blocked call is denied.
+**Deterministic loop evals** (`tests/evals/scenario_runner.py` with the fake provider) are the primary harness. Stub `VerifierPort` to return fixed verdicts and assert on loop reaction: that `nudge` reaches the next system message exactly once, that `replan` empties the tool list for exactly one turn, that a verdict row is committed at the expected position, that a blocked call is denied. YAML assertion keys `system_prompt_contains_once` and `tools_empty_on_turn` land in that same PR, not earlier.
 
 **Ledger unit tests** for classification and lifecycle: preempt defers rather than abandons, scope change supersedes, constraints accumulate across goal changes, verifier-steer provenance is excluded from intent derivation, **human steers and follow-ups are `HUMAN` and do derive intent**, and two rapid inputs on one thread are classified in `seq` order.
 

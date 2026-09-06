@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -22,13 +23,14 @@ from monkeybot.core.types.content_blocks import Text
 
 logger = logging.getLogger(__name__)
 
+_CLASSIFIER_TIMEOUT_S = 15.0
+
 _CLASSIFIER_SYSTEM = """\
 You classify one new human message against the currently open goals.
 Return ONLY compact JSON with this schema:
 {"intent":"new_goal|refinement|scope_change|correction|preempt|answer|noise",\
 "relates_to":"<entry_id or null>",\
-"constraints":[{"kind":"path_glob|tool_name|command_regex|free_text","pattern":"...","verbatim":"..."}],\
-"done_when":["..."]}
+"constraints":[{"kind":"path_glob|tool_name|command_regex|free_text","pattern":"...","verbatim":"..."}]}
 
 Rules:
 - intent is required. Use new_goal when this starts work, refinement when it narrows the open goal,
@@ -38,7 +40,6 @@ Rules:
 - relates_to must be an open entry_id when intent is refinement, scope_change, correction, or preempt.
 - Prefer typed constraints: path_glob for file/dir globs, tool_name for a tool, command_regex for shell.
   Use free_text only when you cannot type it. pattern is the glob/name/regex; verbatim is the user's words.
-- done_when is optional success criteria, short.
 - Do not invent constraints the user did not state.
 """
 
@@ -53,35 +54,6 @@ class ClassifierPort(Protocol):
         verbatim: str,
         open_entries: Sequence[GoalEntry],
     ) -> Classification: ...
-
-
-class ScriptedClassifier:
-    """Test double: returns queued classifications, optionally delaying."""
-
-    def __init__(
-        self,
-        results: Sequence[Classification],
-        *,
-        delay_s: float = 0.0,
-    ) -> None:
-        self._results = list(results)
-        self._delay_s = delay_s
-        self.calls: list[str] = []
-
-    async def classify(
-        self,
-        verbatim: str,
-        open_entries: Sequence[GoalEntry],
-    ) -> Classification:
-        del open_entries
-        import asyncio
-
-        self.calls.append(verbatim)
-        if self._delay_s > 0:
-            await asyncio.sleep(self._delay_s)
-        if not self._results:
-            return Classification(intent=Intent.NOISE, relates_to=None, constraints=(), done_when=())
-        return self._results.pop(0)
 
 
 def parse_classification(raw: str) -> Classification | None:
@@ -128,21 +100,23 @@ def parse_classification(raw: str) -> Classification | None:
                     verbatim=verbatim or pattern,
                 )
             )
-    done_raw = payload.get("done_when") or []
-    done_when = tuple(str(x).strip() for x in done_raw if str(x).strip()) if isinstance(done_raw, list) else ()
     return Classification(
         intent=intent,
         relates_to=relates_to,
         constraints=tuple(drafts),
-        done_when=done_when,
     )
 
 
 def fail_open_classification(open_entries: Sequence[GoalEntry]) -> Classification:
-    """Persist the verbatim without inventing constraints if the model fails."""
-    if any(e.status.value == "active" for e in open_entries):
-        return Classification(intent=Intent.ANSWER, relates_to=None, constraints=(), done_when=())
-    return Classification(intent=Intent.NEW_GOAL, relates_to=None, constraints=(), done_when=())
+    """Persist the verbatim without inventing constraints if the model fails.
+
+    Callers pass currently-active human entries. Any non-empty list means an
+    open goal exists, so we record the utterance as an answer rather than a
+    new goal.
+    """
+    if open_entries:
+        return Classification(intent=Intent.ANSWER, relates_to=None, constraints=())
+    return Classification(intent=Intent.NEW_GOAL, relates_to=None, constraints=())
 
 
 class ProviderClassifier:
@@ -153,9 +127,11 @@ class ProviderClassifier:
         provider: Provider | Callable[[], Provider | None] | None,
         *,
         model: str,
+        timeout_s: float = _CLASSIFIER_TIMEOUT_S,
     ) -> None:
         self._provider = provider
         self._model = model
+        self._timeout_s = timeout_s
 
     def _current_provider(self) -> Provider | None:
         provider = self._provider
@@ -178,22 +154,21 @@ class ProviderClassifier:
             Message(
                 role="user",
                 content=[
-                    Text(
-                        text=(
-                            f"Open entries:\n{open_blob}\n\nNew human message:\n{verbatim}"
-                        )
-                    )
+                    Text(text=(f"Open entries:\n{open_blob}\n\nNew human message:\n{verbatim}"))
                 ],
             ),
         ]
-        text = ""
         try:
-            async with aclosing(cast(Any, provider.stream(messages, [], model=self._model))) as stream:
-                async for ev in stream:
-                    if isinstance(ev, TextDelta):
-                        text += ev.text
-                    elif isinstance(ev, Done):
-                        break
+            text = await asyncio.wait_for(
+                _collect_classifier_text(provider, messages, self._model),
+                timeout=self._timeout_s,
+            )
+        except TimeoutError:
+            logger.warning(
+                "goal_ledger classifier timed out %s",
+                kv(model=self._model, timeout_s=self._timeout_s),
+            )
+            return fail_open_classification(open_entries)
         except Exception:
             logger.warning(
                 "goal_ledger classifier failed %s",
@@ -209,6 +184,21 @@ class ProviderClassifier:
             )
             return fail_open_classification(open_entries)
         return parsed
+
+
+async def _collect_classifier_text(
+    provider: Provider,
+    messages: list[Message],
+    model: str,
+) -> str:
+    text = ""
+    async with aclosing(cast(Any, provider.stream(messages, [], model=model))) as stream:
+        async for ev in stream:
+            if isinstance(ev, TextDelta):
+                text += ev.text
+            elif isinstance(ev, Done):
+                break
+    return text
 
 
 def _open_entries_blob(open_entries: Sequence[GoalEntry]) -> str:

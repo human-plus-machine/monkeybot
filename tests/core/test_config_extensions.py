@@ -367,6 +367,20 @@ class TestVerifierConfig:
         with pytest.raises(ConfigError, match="max_severity must be one of"):
             get_verifier_config()
 
+    def test_rejects_out_of_range_numbers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._write_config(tmp_path, "verifier:\n  tracker:\n    suspicion_threshold: -5\n")
+        with pytest.raises(ConfigError, match="suspicion_threshold must be >= 1"):
+            get_verifier_config()
+        (tmp_path / "monkeybot_config" / "monkeybot.yaml").write_text(
+            "verifier:\n  judge:\n    max_spend_ratio: -1\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ConfigError, match="max_spend_ratio must be >= 0.0"):
+            get_verifier_config()
+
     def test_not_mapped_to_env(self) -> None:
         assert ("verifier", "enabled") not in ENV_MAP
         assert ("verifier", "ledger.enabled") not in ENV_MAP
@@ -699,9 +713,7 @@ class TestRetiredContextCuration:
     def test_section_retired_from_env_map(self) -> None:
         assert not any(section == "context_curation" for section, _ in ENV_MAP)
 
-    def test_yaml_section_warns_once_and_is_ignored(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_yaml_section_warns_once_and_is_ignored(self, caplog: pytest.LogCaptureFixture) -> None:
         reset_runtime_env_state_for_tests()
         leftover = {
             "context_curation": {

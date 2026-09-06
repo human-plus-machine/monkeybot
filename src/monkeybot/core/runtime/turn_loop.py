@@ -83,8 +83,9 @@ from .history_compaction import (
     _summarization_viable,
     _summarize_history,
     protect_recent_count,
+    truncate_history_preserving_pins,
 )
-from .input_admission import InputAdmission, SteerItem, preview_text
+from .input_admission import InputAdmission, SteerItem, join_text, preview_text
 from .loop_hooks import (
     _HOOK_READ_TIMEOUT_S,
     _apply_before_provider_hook,
@@ -229,7 +230,7 @@ async def _drain_steers(
                 ingest=True,
             )
             preview = preview_text(steered)
-            _admit_steer_to_ledger(ctx, preview, item)
+            _admit_steer_to_ledger(ctx, join_text(steered), item)
             logger.info(
                 "steer injected %s",
                 kv(
@@ -382,9 +383,9 @@ def _arm_replan_from_mailbox(state: _TurnState) -> None:
     )
 
 
-def _admit_steer_to_ledger(ctx: TurnContext, preview: str, item: SteerItem) -> None:
+def _admit_steer_to_ledger(ctx: TurnContext, verbatim: str, item: SteerItem) -> None:
     ledger = ctx.goal_ledger
-    if ledger is None or not preview:
+    if ledger is None or not verbatim:
         return
     from monkeybot.core.persistence.goal_ledger import Channel, Provenance
 
@@ -396,7 +397,7 @@ def _admit_steer_to_ledger(ctx: TurnContext, preview: str, item: SteerItem) -> N
     try:
         ledger.admit(
             ctx.thread_id,
-            preview,
+            verbatim,
             provenance=provenance,
             channel=Channel.STEER,
         )
@@ -600,9 +601,7 @@ def _token_pressure_should_summarize(
     cap: int,
     window_tokens: int,
 ) -> bool:
-    return preflight >= cap and _summarization_viable(
-        chat_messages, window_tokens=window_tokens
-    )
+    return preflight >= cap and _summarization_viable(chat_messages, window_tokens=window_tokens)
 
 
 async def _preflight_prompt_tokens(
@@ -761,7 +760,7 @@ async def _apply_history_load_max_safety(
     if len(state.chat_messages) <= HISTORY_LOAD_MAX:
         return
     dropped = len(state.chat_messages) - HISTORY_LOAD_MAX
-    truncated = state.chat_messages[-HISTORY_LOAD_MAX:]
+    truncated = truncate_history_preserving_pins(state.chat_messages, max_rows=HISTORY_LOAD_MAX)
     logger.error(
         "history exceeds load max after compact attempt; truncating tail %s",
         kv(
@@ -1251,9 +1250,7 @@ async def _persist_partial_assistant_on_abort(
     if not assist_blocks:
         return
     tool_text_fn = (
-        interrupted_tool_result_text
-        if state.provider_stream_failed
-        else cancelled_tool_result_text
+        interrupted_tool_result_text if state.provider_stream_failed else cancelled_tool_result_text
     )
     await persist_message(
         history,
@@ -1671,7 +1668,6 @@ async def _run_inner_core(
                 max_turns=state.effective_max,
             ),
         )
-        yield Error(request_id=state.ctx.request_id, error=MAX_TURNS_ERROR)
 
     # Ensure the backgrounded assistant write has landed before any load/reset
     # below (freeze) so the assistant row is durable and not overwritten.
@@ -1706,3 +1702,5 @@ async def _run_inner_core(
     )
     # Settlement for POST_TURN / lingering POST_TOOL runs in run() finally
     # before TurnComplete — do not drain twice here.
+    if state.needs_followup_after_tools:
+        yield Error(request_id=state.ctx.request_id, error=MAX_TURNS_ERROR)

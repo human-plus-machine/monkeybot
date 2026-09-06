@@ -447,6 +447,25 @@ def test_verifier_included_in_snapshot_and_diff(
     assert get_verifier_config(config=reloaded).tracker.suspicion_threshold == 9
 
 
+def test_invalid_verifier_section_does_not_abort_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from monkeybot.core.config.settings import get_verifier_config
+
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(
+        tmp_path,
+        "model:\n  provider: fake\nverifier:\n  enabled: 1\n",
+    )
+    with caplog.at_level("ERROR"):
+        apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    cfg = get_config_store().current()
+    assert cfg.verifier.enabled is False
+    assert "Ignoring invalid verifier section" in caplog.text
+    with pytest.raises(ConfigError, match="verifier.enabled must be true or false"):
+        get_verifier_config()
+
+
 def test_effective_max_turns_uses_pinned_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

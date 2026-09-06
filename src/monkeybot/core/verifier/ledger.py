@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.logging_utils import kv
@@ -32,6 +31,7 @@ logger = logging.getLogger(__name__)
 
 _THREAD_STATE_CAP = 256
 _RECORD_INTENTS = (Intent.CORRECTION, Intent.ANSWER, Intent.NOISE)
+_TERMINAL_STATUSES = (Status.SATISFIED, Status.SUPERSEDED, Status.ABANDONED)
 
 
 @dataclass(frozen=True)
@@ -40,7 +40,6 @@ class _Job:
     verbatim: str
     provenance: Provenance
     channel: Channel | None
-    seq: int
 
 
 class GoalLedger:
@@ -58,7 +57,7 @@ class GoalLedger:
         self._classifier = classifier
         self._max_entries = max(1, max_entries_per_thread)
         self._thread_cap = max(1, thread_cap)
-        self._queues: dict[str, asyncio.Queue[_Job | None]] = {}
+        self._queues: dict[str, asyncio.Queue[_Job]] = {}
         self._workers: dict[str, asyncio.Task[None]] = {}
         self._pending: dict[str, int] = {}
         self._cache: OrderedDict[str, ResolvedIntent] = OrderedDict()
@@ -89,16 +88,15 @@ class GoalLedger:
         """Enqueue a ledger write. Returns without waiting on the classifier."""
         if self._closed or not verbatim.strip():
             return
+        queue = self._ensure_worker(thread_id)
         self._pending[thread_id] = self._pending.get(thread_id, 0) + 1
         self._touch_pending_view(thread_id)
-        queue = self._ensure_worker(thread_id)
         queue.put_nowait(
             _Job(
                 thread_id=thread_id,
                 verbatim=verbatim.strip(),
                 provenance=provenance,
                 channel=channel,
-                seq=0,
             )
         )
 
@@ -108,15 +106,7 @@ class GoalLedger:
         if view is None:
             return empty_resolved(pending=pending) if pending else None
         if pending and not view.pending_classification:
-            return ResolvedIntent(
-                active_goal=view.active_goal,
-                refinement_chain=view.refinement_chain,
-                deferred_stack=view.deferred_stack,
-                superseded=view.superseded,
-                standing_constraints=view.standing_constraints,
-                correction_history=view.correction_history,
-                pending_classification=True,
-            )
+            return replace(view, pending_classification=True)
         self._cache.move_to_end(thread_id)
         return view
 
@@ -142,32 +132,39 @@ class GoalLedger:
 
     def close(self) -> None:
         self._closed = True
-        for queue in self._queues.values():
-            with contextlib.suppress(asyncio.QueueFull):
-                queue.put_nowait(None)
         for task in self._workers.values():
             task.cancel()
         self._workers.clear()
+        self._queues.clear()
+        self._pending.clear()
 
-    def _ensure_worker(self, thread_id: str) -> asyncio.Queue[_Job | None]:
+    def _ensure_worker(self, thread_id: str) -> asyncio.Queue[_Job]:
         existing = self._queues.get(thread_id)
         if existing is not None:
             return existing
-        queue: asyncio.Queue[_Job | None] = asyncio.Queue()
+        queue: asyncio.Queue[_Job] = asyncio.Queue()
+        worker = self._run_worker(thread_id, queue)
+        try:
+            task = asyncio.create_task(
+                worker,
+                name=f"goal-ledger-{thread_id[:12]}",
+            )
+        except Exception:
+            worker.close()
+            raise
         self._queues[thread_id] = queue
-        self._workers[thread_id] = asyncio.create_task(
-            self._run_worker(thread_id, queue),
-            name=f"goal-ledger-{thread_id[:12]}",
-        )
+        self._workers[thread_id] = task
         return queue
 
-    async def _run_worker(self, thread_id: str, queue: asyncio.Queue[_Job | None]) -> None:
+    async def _run_worker(self, thread_id: str, queue: asyncio.Queue[_Job]) -> None:
         while True:
             job = await queue.get()
             try:
-                if job is None or self._closed:
+                if self._closed:
                     return
                 await self._handle_job(job)
+            except asyncio.CancelledError:
+                raise
             except Exception:
                 logger.warning(
                     "goal_ledger worker failed %s",
@@ -181,28 +178,23 @@ class GoalLedger:
                     self._pending.pop(thread_id, None)
                 else:
                     self._pending[thread_id] = pending
-                await self._refresh_view(thread_id)
+                if not self._closed:
+                    await self._refresh_view(thread_id)
 
     async def _handle_job(self, job: _Job) -> None:
-        seq = await self._store.next_seq(job.thread_id)
-        job = _Job(
-            thread_id=job.thread_id,
-            verbatim=job.verbatim,
-            provenance=job.provenance,
-            channel=job.channel,
-            seq=seq,
-        )
         if job.provenance != Provenance.HUMAN:
             await self._persist_non_human(job)
             return
         entries = await self._store.list_entries(job.thread_id)
-        open_entries = [e for e in entries if e.provenance == Provenance.HUMAN and e.status == Status.ACTIVE]
+        open_entries = [
+            e for e in entries if e.provenance == Provenance.HUMAN and e.status == Status.ACTIVE
+        ]
         try:
             result = await self._classifier.classify(job.verbatim, open_entries)
         except Exception:
             logger.warning(
                 "goal_ledger classify raised %s",
-                kv(thread_id=job.thread_id, seq=job.seq),
+                kv(thread_id=job.thread_id),
                 exc_info=True,
             )
             result = fail_open_classification(open_entries)
@@ -212,7 +204,7 @@ class GoalLedger:
         entry = GoalEntry(
             entry_id=new_entry_id(),
             thread_id=job.thread_id,
-            seq=job.seq,
+            seq=0,
             verbatim=job.verbatim,
             provenance=job.provenance,
             channel=job.channel,
@@ -223,7 +215,7 @@ class GoalLedger:
             done_when=(),
             created_at_ms=now_ms(),
         )
-        await self._store.append(entry)
+        await self._store.commit_classified(entry)
 
     async def _apply_classification(
         self,
@@ -251,28 +243,37 @@ class GoalLedger:
             Intent.CORRECTION,
         ):
             active = next(
-                (e for e in reversed(entries) if e.provenance == Provenance.HUMAN and e.status == Status.ACTIVE),
+                (
+                    e
+                    for e in reversed(entries)
+                    if e.provenance == Provenance.HUMAN and e.status == Status.ACTIVE
+                ),
                 None,
             )
             if active is not None:
                 relates_to = active.entry_id
+        status_updates: list[tuple[str, Status]] = []
         if result.intent == Intent.PREEMPT and relates_to:
-            await self._store.update_status(relates_to, Status.DEFERRED)
+            status_updates.append((relates_to, Status.DEFERRED))
         elif result.intent in (Intent.SCOPE_CHANGE, Intent.NEW_GOAL) and relates_to:
-            await self._store.update_status(relates_to, Status.SUPERSEDED)
+            status_updates.append((relates_to, Status.SUPERSEDED))
         elif result.intent == Intent.NEW_GOAL and not relates_to:
             active = next(
-                (e for e in reversed(entries) if e.provenance == Provenance.HUMAN and e.status == Status.ACTIVE),
+                (
+                    e
+                    for e in reversed(entries)
+                    if e.provenance == Provenance.HUMAN and e.status == Status.ACTIVE
+                ),
                 None,
             )
             if active is not None:
-                await self._store.update_status(active.entry_id, Status.SUPERSEDED)
+                status_updates.append((active.entry_id, Status.SUPERSEDED))
                 relates_to = active.entry_id
         status = Status.SATISFIED if result.intent in _RECORD_INTENTS else Status.ACTIVE
         entry = GoalEntry(
             entry_id=entry_id,
             thread_id=job.thread_id,
-            seq=job.seq,
+            seq=0,
             verbatim=job.verbatim,
             provenance=job.provenance,
             channel=job.channel,
@@ -280,17 +281,17 @@ class GoalLedger:
             status=status,
             relates_to=relates_to,
             constraints=constraints,
-            done_when=result.done_when,
+            done_when=(),
             created_at_ms=now_ms(),
         )
-        await self._store.append(entry)
+        stamped = await self._store.commit_classified(entry, status_updates=status_updates)
         await self._prune(job.thread_id)
         typed = sum(1 for c in constraints if c.kind != ConstraintKind.FREE_TEXT)
         logger.info(
             "goal_ledger classified %s",
             kv(
                 thread_id=job.thread_id,
-                seq=job.seq,
+                seq=stamped.seq,
                 intent=result.intent.value,
                 typed_constraints=typed,
                 free_text_constraints=len(constraints) - typed,
@@ -302,12 +303,9 @@ class GoalLedger:
         if len(entries) <= self._max_entries:
             return
         extra = len(entries) - self._max_entries
-        droppable = [
-            e
-            for e in entries
-            if e.status in (Status.SATISFIED, Status.SUPERSEDED, Status.ABANDONED)
-            and not e.constraints
-        ]
+        unconstrained = [e for e in entries if e.status in _TERMINAL_STATUSES and not e.constraints]
+        constrained = [e for e in entries if e.status in _TERMINAL_STATUSES and e.constraints]
+        droppable = unconstrained + constrained
         for entry in droppable[:extra]:
             await self._store.delete_entry(entry.entry_id)
 
@@ -325,15 +323,7 @@ class GoalLedger:
         if view is None:
             self._cache[thread_id] = empty_resolved(pending=True)
         elif not view.pending_classification:
-            self._cache[thread_id] = ResolvedIntent(
-                active_goal=view.active_goal,
-                refinement_chain=view.refinement_chain,
-                deferred_stack=view.deferred_stack,
-                superseded=view.superseded,
-                standing_constraints=view.standing_constraints,
-                correction_history=view.correction_history,
-                pending_classification=True,
-            )
+            self._cache[thread_id] = replace(view, pending_classification=True)
         self._cache.move_to_end(thread_id)
         while len(self._cache) > self._thread_cap:
             self._cache.popitem(last=False)
@@ -361,5 +351,7 @@ def format_subagent_context(view: ResolvedIntent) -> str:
     if view.active_goal is not None:
         lines.append(f"Active goal: {view.active_goal.verbatim}")
     for constraint in view.standing_constraints:
-        lines.append(f"Constraint: {constraint.verbatim} ({constraint.kind.value} {constraint.pattern})")
+        lines.append(
+            f"Constraint: {constraint.verbatim} ({constraint.kind.value} {constraint.pattern})"
+        )
     return "\n".join(lines)

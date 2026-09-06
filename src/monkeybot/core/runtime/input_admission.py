@@ -69,9 +69,7 @@ class InputAdmission:
         max_follow_up: int | None = None,
     ) -> None:
         self.max_steer = (
-            max_steer
-            if max_steer is not None
-            else _queue_limit("MONKEYBOT_STEER_QUEUE_MAX", 8)
+            max_steer if max_steer is not None else _queue_limit("MONKEYBOT_STEER_QUEUE_MAX", 8)
         )
         self.max_follow_up = (
             max_follow_up
@@ -108,9 +106,7 @@ class InputAdmission:
         self._steer.append(SteerItem(content=list(content), provenance=provenance))
         return len(self._steer) - 1
 
-    def enqueue_follow_up(
-        self, request_id: str, content: list[ContentBlock]
-    ) -> int:
+    def enqueue_follow_up(self, request_id: str, content: list[ContentBlock]) -> int:
         """Append a follow-up prompt; return 0-based queue position."""
         if not request_id.strip():
             raise ValueError("follow-up request_id must be non-empty")
@@ -147,13 +143,18 @@ class InputAdmission:
         self._follow_up.clear()
 
 
-def preview_text(content: list[ContentBlock], *, limit: int = 200) -> str:
-    """Short plain-text preview for observability events."""
+def join_text(content: list[ContentBlock]) -> str:
+    """Full plain-text of ``Text`` blocks. Used by the goal ledger (verbatim)."""
     parts: list[str] = []
     for block in content:
         if isinstance(block, Text) and block.text.strip():
             parts.append(block.text.strip())
-    joined = " ".join(parts).strip()
+    return " ".join(parts).strip()
+
+
+def preview_text(content: list[ContentBlock], *, limit: int = 200) -> str:
+    """Short plain-text preview for observability events."""
+    joined = join_text(content)
     if len(joined) <= limit:
         return joined
     return joined[: limit - 1] + "…"
@@ -164,5 +165,6 @@ __all__ = [
     "FollowUpItem",
     "InputAdmission",
     "SteerItem",
+    "join_text",
     "preview_text",
 ]
