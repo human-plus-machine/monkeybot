@@ -941,6 +941,56 @@ def test_sealed_login_still_maps_unknown_error_to_login_failed(
     }
 
 
+@pytest.mark.parametrize("mfa", ["none", "completed", "needed"])
+def test_sealed_login_passes_through_known_mfa_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mfa: str
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps({"ok": True, "loggedIn": True, "mfa": mfa}).encode("utf-8")
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse(json.loads(payload))
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_login(None, None) == {"ok": True, "loggedIn": True, "mfa": mfa}
+
+
+def test_sealed_login_drops_unknown_mfa_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An allowlist, not a passthrough: an unrecognized mfa value must not reach the agent."""
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse({"ok": True, "loggedIn": True, "mfa": "not-a-real-value"})
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_login(None, None) == {"ok": True, "loggedIn": True}
+
+
+def test_sealed_login_needs_mfa_error_is_allowlisted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps(
+        {"ok": False, "loggedIn": True, "mfa": "needed", "error": "mfa needs your attention"}
+    ).encode("utf-8")
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        raise HTTPError(req.full_url, 400, "Bad Request", hdrs=None, fp=BytesIO(payload))
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_login(None, None) == {
+        "ok": False,
+        "loggedIn": True,
+        "mfa": "needed",
+        "error": "mfa needs your attention",
+    }
+
+
 def test_in_app_http_origin_keeps_https_for_wss() -> None:
     assert (
         login._in_app_http_origin("wss://127.0.0.1:9333/devtools/browser/monkeybot")

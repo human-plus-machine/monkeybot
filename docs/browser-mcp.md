@@ -191,7 +191,7 @@ synchronization layer.
 
 ## Tools
 
-Navigation, interaction, screenshots, tabs, waits, playbooks (`browser_list_playbooks`, `browser_read_playbook`, `browser_write_playbook`, `browser_run_playbook`), `browser_login` for Spaces-saved passwords (returns `{ok, loggedIn, origin}` — never the password), and `browser_stop` for daemon cleanup.
+Navigation, interaction, screenshots, tabs, waits, playbooks (`browser_list_playbooks`, `browser_read_playbook`, `browser_write_playbook`, `browser_run_playbook`), `browser_login` for Spaces-saved passwords (returns `{ok, loggedIn, origin, mfa?}` — never the password), and `browser_stop` for daemon cleanup.
 
 ### `browser_login` targets the focused tab
 
@@ -205,7 +205,15 @@ Errors raised by browser tools are scrubbed of `?token=` values before they reac
 
 ### `browser_login` fails closed
 
-Spaces verifies its own scrub before returning: after typing the password and submitting, it hashes every editable value left on the page and confirms none of them match what it just typed. If that check cannot be completed — the login did not clearly succeed or fail, an MFA interstitial appeared, or a same-origin iframe could not be checked — Spaces navigates the tab to the site's origin root itself and `browser_login` returns `login needs your attention` instead of guessing. Do not retry the call or attempt to type the password yourself when you see this error; tell the user to finish signing in in the Spaces browser. Calling `browser_get_text` or `browser_get_elements` afterward is safe either way: on this outcome, the page has already been navigated away from any form that held the secret.
+Spaces verifies its own scrub before returning: after typing the password (and a one-time code, if one was needed and available — see below) and submitting, it hashes every editable value left on the page and confirms none of them match what it just typed. If that check cannot be completed — the login did not clearly succeed or fail, or a same-origin iframe could not be checked — Spaces navigates the tab to the site's origin root itself and `browser_login` returns `login needs your attention` instead of guessing. Do not retry the call or attempt to type the password yourself when you see this error; tell the user to finish signing in in the Spaces browser. Calling `browser_get_text` or `browser_get_elements` afterward is safe either way: on this outcome, the page has already been navigated away from any form that held the secret.
+
+### One-time codes (TOTP)
+
+If the page shows a one-time-code field after the password step, `browser_login`'s result carries an `mfa` field:
+
+- `"none"` — no OTP field appeared; nothing to report.
+- `"completed"` — Spaces had a stored authenticator seed for this credential, generated the code, typed and submitted it itself. The password never left Spaces and neither did the code.
+- `"needed"` — an OTP field appeared but no seed is stored. `browser_login` also returns the error `mfa needs your attention`; tell the user to add an authenticator for this site in Spaces' "Connected sites" panel (paste the `otpauth://` URI or the base32 secret from the site's QR setup) or finish signing in themselves. Do not retry.
 
 ### Grants and "ask" mode
 

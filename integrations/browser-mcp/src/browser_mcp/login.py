@@ -27,10 +27,12 @@ _LOGIN_PUBLIC_ERRORS = frozenset(
         "waiting for your approval",
         "agent access denied for this site",
         "grant expired",
+        "mfa needs your attention",
         "unexpected login response",
         "login failed",
     }
 )
+_LOGIN_PUBLIC_MFA_VALUES = frozenset({"none", "completed", "needed"})
 # Passing ProxyHandler({}) makes urllib skip its default env-based proxy
 # handler. The empty handler itself is then dropped (no *_open methods),
 # so loopback requests never honor HTTP_PROXY.
@@ -88,6 +90,9 @@ def _public_login_result(body: dict[str, Any]) -> dict[str, Any]:
     # clicking another tab) makes the two diverge.
     if isinstance(origin, str) and origin:
         result["origin"] = origin
+    mfa = body.get("mfa")
+    if isinstance(mfa, str) and mfa in _LOGIN_PUBLIC_MFA_VALUES:
+        result["mfa"] = mfa
     if error:
         message = str(error)
         result["error"] = message if message in _LOGIN_PUBLIC_ERRORS else "login failed"
