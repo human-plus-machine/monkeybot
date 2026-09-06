@@ -23,6 +23,9 @@ class VerdictMailbox:
     def last(self, thread_id: str) -> VerifierVerdict | None:
         return self._last.get(thread_id)
 
+    def set_last(self, thread_id: str, verdict: VerifierVerdict) -> None:
+        self._last[thread_id] = verdict
+
     def put_nudge(self, thread_id: str, text: str) -> None:
         if text.strip():
             self._nudges[thread_id].append(text.strip())
