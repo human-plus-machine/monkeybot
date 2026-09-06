@@ -15,7 +15,7 @@ import os
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -102,6 +102,13 @@ from monkeybot.todo_list import TodoListStore, TodoListTool
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
 
+if TYPE_CHECKING:
+    from monkeybot.core.verifier.actuator import NudgeActuator
+    from monkeybot.core.verifier.judge import JudgeWorker
+    from monkeybot.core.verifier.ledger import GoalLedger
+    from monkeybot.core.verifier.mailbox import VerdictMailbox
+    from monkeybot.core.verifier.tracker import ProgressTracker
+
 logger = logging.getLogger(__name__)
 
 
@@ -184,11 +191,11 @@ class GatewayRuntime:
     loops_registry: LoopsToolRegistry = field(default_factory=LoopsToolRegistry)
     computer_tools: list[Any] = field(default_factory=list)
     computer_approvals_persist: Callable[[str, str], bool] | None = None
-    goal_ledger: Any | None = None
-    progress_tracker: Any | None = None
-    verdict_mailbox: Any | None = None
-    nudge_actuator: Any | None = None
-    judge_worker: Any | None = None
+    goal_ledger: GoalLedger | None = None
+    progress_tracker: ProgressTracker | None = None
+    verdict_mailbox: VerdictMailbox | None = None
+    nudge_actuator: NudgeActuator | None = None
+    judge_worker: JudgeWorker | None = None
 
     def build_inspectors(
         self, layout: AgentLayout, cfg: RuntimeConfig | None = None, *, fail_closed: bool = False
@@ -282,17 +289,13 @@ class GatewayRuntime:
         """Construct ledger and observe-only tracker from ``verifier:`` flags."""
         old = self.goal_ledger
         if old is not None:
-            close = getattr(old, "close", None)
-            if callable(close):
-                close()
+            old.close()
         self.goal_ledger = None
         self.progress_tracker = None
         self.verdict_mailbox = None
         old_judge = self.judge_worker
         if old_judge is not None:
-            close = getattr(old_judge, "close", None)
-            if callable(close):
-                close()
+            old_judge.close()
         self.judge_worker = None
         self.nudge_actuator = None
         if cfg is None or not cfg.verifier.enabled:
@@ -337,7 +340,10 @@ class GatewayRuntime:
                     config=cfg.verifier.judge,
                 )
                 self.judge_worker = judge
-                logger.info("verifier judge enabled")
+                logger.info(
+                    "verifier judge enabled %s",
+                    kv(model=cfg.verifier.judge.model),
+                )
             self.progress_tracker = ProgressTracker(
                 self.verdict_mailbox,
                 ledger_fn=lambda: self.goal_ledger,
@@ -1173,17 +1179,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
         raise
 
     gateway_runtime.build_verifier(cfg, storage=fastapi_app.state.storage)
-    if gateway_runtime.goal_ledger is not None or gateway_runtime.progress_tracker is not None or gateway_runtime.nudge_actuator is not None:
-        hook_mgr = gateway_runtime.hook_manager
-        if hook_mgr is None:
-            hook_mgr = HookManager()
-            gateway_runtime.hook_manager = hook_mgr
-        if gateway_runtime.goal_ledger is not None:
-            gateway_runtime.goal_ledger.register(hook_mgr)
-        if gateway_runtime.progress_tracker is not None:
-            gateway_runtime.progress_tracker.register(hook_mgr)
-        if gateway_runtime.nudge_actuator is not None:
-            gateway_runtime.nudge_actuator.register(hook_mgr)
+    gateway_runtime.rebuild_memory_hooks(cfg, fastapi_app)
 
     fastapi_app.state.gateway_runtime = gateway_runtime
 

@@ -14,6 +14,7 @@ from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.goal_ledger import ConstraintKind
 from monkeybot.core.runtime.events import VerifierVerdict
+from monkeybot.core.verifier.judge import JudgeWorker
 from monkeybot.core.verifier.ledger import GoalLedger
 from monkeybot.core.verifier.mailbox import VerdictMailbox
 from monkeybot.core.verifier.match import (
@@ -26,9 +27,6 @@ from monkeybot.core.verifier.match import (
 logger = logging.getLogger(__name__)
 
 _THREAD_STATE_CAP = 256
-_REWRITE_CHURN_N = 3
-_NO_PROGRESS_N = 3
-_ERROR_STREAK_N = 3
 _BUDGET_FRACTION = 0.5
 _LEDGER_SIGNALS = frozenset({"constraint_touch", "repeat_correction", "done_unmet"})
 # Session-lifetime token sums and tool-only inner turns fire on healthy
@@ -59,7 +57,7 @@ class ProgressTracker:
         *,
         ledger_fn: Callable[[], GoalLedger | None],
         config: VerifierTrackerConfig,
-        judge: Any | None = None,
+        judge: JudgeWorker | None = None,
     ) -> None:
         self._mailbox = mailbox
         self._ledger_fn = ledger_fn
@@ -129,13 +127,13 @@ class ProgressTracker:
         else:
             state.error_streak = 0
         signals: list[str] = []
-        if warm and state.error_streak >= _ERROR_STREAK_N:
+        if warm and state.error_streak >= self._config.suspicion_threshold:
             signals.append("error_streak")
         if warm and name in WRITE_TOOLS:
             unread = [p for p in paths if p not in state.files_read]
             if unread:
                 signals.append("write_without_read")
-            if any(state.write_counts.get(p, 0) >= _REWRITE_CHURN_N for p in paths):
+            if any(state.write_counts.get(p, 0) >= self._config.suspicion_threshold for p in paths):
                 signals.append("rewrite_churn")
         signals.extend(self._ledger_signals(payload.thread_id, name, args))
         state.seen_tool = True
@@ -152,6 +150,8 @@ class ProgressTracker:
                 payload.usage.get("output_tokens") or 0
             )
             state.tokens_used += call_tokens
+            if self._judge is not None and call_tokens:
+                self._judge.note_agent_tokens(payload.request_id, call_tokens)
         text = (payload.assistant_text or "").strip()
         has_tools = bool(payload.tool_requests)
         if has_tools and not text:
@@ -159,7 +159,7 @@ class ProgressTracker:
         else:
             state.no_text_turns = 0
         signals: list[str] = []
-        if warm and state.no_text_turns >= _NO_PROGRESS_N:
+        if warm and state.no_text_turns >= self._config.suspicion_threshold:
             signals.append("no_progress")
         window = payload.ctx.context_window_tokens
         if warm and window > 0 and call_tokens >= int(window * _BUDGET_FRACTION):
@@ -245,18 +245,14 @@ class ProgressTracker:
         if self._judge is not None:
             from monkeybot.core.verifier.port import EvidenceBundle
 
-            enqueue = getattr(self._judge, "enqueue", None)
-            if callable(enqueue):
-                ledger = self._ledger_fn()
-                enqueue(
-                    EvidenceBundle(
-                        thread_id=payload.thread_id,
-                        request_id=payload.request_id,
-                        inner_turn=inner,
-                        signals=tuple(signals),
-                        intent=ledger.resolved_intent(payload.thread_id) if ledger is not None else None,
-                    )
+            self._judge.enqueue(
+                EvidenceBundle(
+                    thread_id=payload.thread_id,
+                    request_id=payload.request_id,
+                    inner_turn=inner,
+                    signals=tuple(signals),
                 )
+            )
             state.emitted_this_turn = True
             return
         status = "stuck" if any(s in {"error_streak", "no_progress", "done_unmet"} for s in signals) else "drifting"
