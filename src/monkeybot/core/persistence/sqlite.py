@@ -204,7 +204,6 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
 )""",
     """CREATE UNIQUE INDEX IF NOT EXISTS idx_goal_ledger_thread_seq
     ON goal_ledger(thread_id, seq)""",
-    "DROP INDEX IF EXISTS idx_goal_ledger_thread",
     OUTBOX_DDL,
     OUTBOX_INDEX_DDL,
 )

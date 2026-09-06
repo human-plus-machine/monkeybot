@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import replace
 
 import pytest
 
@@ -148,6 +150,41 @@ def test_constraints_accumulate_across_goal_changes() -> None:
     view = resolve_intent([old, new], pending_classification=False)
     assert len(view.standing_constraints) == 1
     assert view.standing_constraints[0].pattern == "db/migrations/**"
+
+
+def test_later_constraint_replaces_same_key() -> None:
+    c1 = Constraint(
+        kind=ConstraintKind.PATH_GLOB,
+        pattern="db/migrations/**",
+        source_entry_id="e1",
+        verbatim="don't touch migrations",
+    )
+    c2 = Constraint(
+        kind=ConstraintKind.PATH_GLOB,
+        pattern="db/migrations/**",
+        source_entry_id="e2",
+        verbatim="don't touch migrations except squash",
+    )
+    old = _entry(
+        entry_id="e1",
+        verbatim="refactor auth",
+        seq=1,
+        status=Status.SUPERSEDED,
+        constraints=(c1,),
+    )
+    new = _entry(
+        entry_id="e2",
+        verbatim="allow squash",
+        intent=Intent.CORRECTION,
+        relates_to=old.entry_id,
+        seq=2,
+        constraints=(c2,),
+    )
+    view = resolve_intent([old, new], pending_classification=False)
+    assert len(view.standing_constraints) == 1
+    constraint = view.standing_constraints[0]
+    assert constraint.verbatim == "don't touch migrations except squash"
+    assert constraint.source_entry_id == "e2"
 
 
 def test_verifier_steer_excluded_from_intent() -> None:
@@ -520,6 +557,28 @@ async def test_sqlite_commit_classified_is_one_transaction() -> None:
         assert loaded[0].status == Status.SUPERSEDED
         assert loaded[1].entry_id == child.entry_id
         assert loaded[1].seq == 2
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_commit_classified_rolls_back_status_on_insert_failure() -> None:
+    backend = SQLiteStorageBackend("sqlite:///:memory:")
+    await backend.open()
+    try:
+        store = backend.goal_ledger()
+        parent = _entry(verbatim="old goal", seq=1)
+        await store.append(parent)
+        duplicate = replace(parent, seq=0)
+        with pytest.raises(sqlite3.IntegrityError):
+            await store.commit_classified(
+                duplicate,
+                status_updates=[(parent.entry_id, Status.SUPERSEDED)],
+            )
+        loaded = await store.list_entries("t1")
+        assert len(loaded) == 1
+        assert loaded[0].entry_id == parent.entry_id
+        assert loaded[0].status == Status.ACTIVE
     finally:
         await backend.close()
 

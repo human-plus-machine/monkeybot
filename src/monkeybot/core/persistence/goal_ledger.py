@@ -140,19 +140,14 @@ def resolve_intent(
     human = [e for e in entries if e.provenance == Provenance.HUMAN]
     active = next((e for e in reversed(human) if e.status == Status.ACTIVE), None)
     deferred = tuple(e for e in human if e.status == Status.DEFERRED)
-    standing: list[Constraint] = []
-    standing_seen: set[tuple[ConstraintKind, str]] = set()
+    standing_by_key: dict[tuple[ConstraintKind, str], Constraint] = {}
     for entry in human:
         for constraint in entry.constraints:
-            key = constraint.match_key
-            if key in standing_seen:
-                continue
-            standing_seen.add(key)
-            standing.append(constraint)
+            standing_by_key[constraint.match_key] = constraint
     return ResolvedIntent(
         active_goal=active,
         deferred_stack=deferred,
-        standing_constraints=tuple(standing),
+        standing_constraints=tuple(standing_by_key.values()),
         pending_classification=pending_classification,
     )
 
@@ -394,15 +389,16 @@ class SQLiteGoalLedgerStore:
         *,
         status_updates: Sequence[tuple[str, Status]] = (),
     ) -> GoalEntry:
-        cursor = await self._conn.execute(
-            "SELECT COALESCE(MAX(seq), 0) FROM goal_ledger WHERE thread_id = ?",
-            (entry.thread_id,),
-        )
-        row = await cursor.fetchone()
-        await cursor.close()
-        seq = (int(row[0]) if row is not None else 0) + 1
-        stamped = replace(entry, seq=seq)
+        await self._conn.execute("BEGIN IMMEDIATE")
         try:
+            cursor = await self._conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) FROM goal_ledger WHERE thread_id = ?",
+                (entry.thread_id,),
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            seq = (int(row[0]) if row is not None else 0) + 1
+            stamped = replace(entry, seq=seq)
             for entry_id, status in status_updates:
                 await self._conn.execute(
                     "UPDATE goal_ledger SET status = ? WHERE entry_id = ?",
