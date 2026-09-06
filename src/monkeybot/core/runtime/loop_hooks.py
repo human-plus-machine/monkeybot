@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Literal
 
 from monkeybot.core.context import TurnContext
+from monkeybot.core.context.secret_egress import SecretScanner, get_scanner, scan_and_redact
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.types.types_tools import ToolDef
+
+from .events import AgentEvent, CredentialEgressBlockedEvent, Error
 
 _HOOK_READ_TIMEOUT_S = 2.0
 _HOOK_PRE_TOOL_TIMEOUT_S = 1.5
@@ -106,6 +109,48 @@ def _apply_before_provider_hook(
     if payload.tools is None:
         return messages, turn_tools, False
     return messages, list(payload.tools), True
+
+
+async def _scan_and_redact_outbound(
+    request_id: str,
+    delta_messages: list[Message],
+    *,
+    scanner: SecretScanner | None = None,
+) -> tuple[list[Message], list[AgentEvent], bool]:
+    """Scans new assistant text / tool results before they reach the provider
+    (credential broker phase 5.3). `delta_messages` must be exactly the
+    messages appended to the provider request since the last call for this
+    turn stream — the caller owns that offset.
+
+    Returns `(possibly-redacted delta, events to yield, should_end_turn)`.
+    `should_end_turn` is true only when `MONKEYBOT_RUN_ID` is set (a
+    routine/queue task): interactive chats get a notice but keep running
+    with the secret withheld (phase 5.4's "surface a toast, do not kill the
+    session"); routines fail the turn visibly instead of silently sending a
+    scrubbed message to the provider.
+    """
+    outcome = scan_and_redact(delta_messages, scanner=scanner or get_scanner())
+    if not outcome.hits:
+        return delta_messages, [], False
+
+    scan_kind: Literal["secret", "canary"] = (
+        "canary" if any(h.kind == "canary" for h in outcome.hits) else "secret"
+    )
+    events: list[AgentEvent] = [
+        CredentialEgressBlockedEvent(request_id=request_id, scan_kind=scan_kind)
+    ]
+    is_routine = bool(os.environ.get("MONKEYBOT_RUN_ID"))
+    if is_routine:
+        events.append(
+            Error(
+                request_id=request_id,
+                error=(
+                    f"Blocked: a {scan_kind} was detected in text bound for the model and "
+                    "was not sent."
+                ),
+            )
+        )
+    return outcome.messages, events, is_routine
 
 
 async def _fire_after_provider_response(

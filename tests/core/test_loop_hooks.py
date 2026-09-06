@@ -655,3 +655,104 @@ def test_tools_dirty_reason_keeps_the_first_cause() -> None:
         [ToolDef("run_command", "Run shell", {}), ToolDef("read_file", "Read a file", {})],
     )
     assert state.tools_dirty_reason == "hook", "an unattributed change still records a cause"
+
+
+# --- Credential broker phase 5.3: outbound scan wired into the turn loop ---
+
+
+class _MarkerScanner:
+    """Reports a hit for any text containing MARKER, mirroring SecretScanner's shape."""
+
+    MARKER = "the-secret-value"
+
+    def scan(self, texts: list[str]) -> list[object]:
+        from monkeybot.core.context.secret_egress import Hit
+
+        return [
+            Hit(index=i, kind="secret") for i, t in enumerate(texts) if self.MARKER in t
+        ]
+
+
+@pytest.mark.asyncio
+async def test_credential_egress_blocked_redacts_before_next_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A secret in turn 1's assistant text never reaches turn 2's provider call."""
+    from monkeybot.core.runtime import loop_hooks
+
+    monkeypatch.setattr(loop_hooks, "get_scanner", lambda: _MarkerScanner())
+    monkeypatch.delenv("MONKEYBOT_RUN_ID", raising=False)
+
+    prov = CapturingProvider(
+        [
+            [
+                TextDelta(text=f"here is {_MarkerScanner.MARKER}"),
+                ToolCall(call_id="c1", name="run_command", args={"command": "ls"}),
+                Done(),
+            ],
+            [TextDelta(text="done"), Done()],
+        ]
+    )
+    events = [
+        e
+        async for e in run(
+            "go",
+            _ctx(),
+            provider=prov,
+            history=FakeHistory(),
+            inspectors=[AllowInspector()],
+            tool_executor=RecordingExecutor(result=("listing", None)),
+            max_turns=4,
+        )
+    ]
+
+    assert any(getattr(e, "kind", None) == "CredentialEgressBlocked" for e in events)
+    # Chat (no MONKEYBOT_RUN_ID): the turn continues to a second provider call.
+    assert len(prov.message_snapshots) == 2
+    assistant_msg = next(m for m in prov.message_snapshots[1] if m.role == "assistant")
+    body = "".join(b.text for b in assistant_msg.content if isinstance(b, Text))
+    assert _MarkerScanner.MARKER not in body
+    assert "[withheld: credential detected]" in body
+    assert any(getattr(e, "kind", None) == "TurnComplete" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_credential_egress_blocked_ends_routine_without_second_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With MONKEYBOT_RUN_ID set, a hit ends the turn instead of calling the provider again."""
+    from monkeybot.core.runtime import loop_hooks
+
+    monkeypatch.setattr(loop_hooks, "get_scanner", lambda: _MarkerScanner())
+    monkeypatch.setenv("MONKEYBOT_RUN_ID", "run-123")
+
+    prov = CapturingProvider(
+        [
+            [
+                TextDelta(text=f"here is {_MarkerScanner.MARKER}"),
+                ToolCall(call_id="c1", name="run_command", args={"command": "ls"}),
+                Done(),
+            ],
+            [TextDelta(text="done"), Done()],
+        ]
+    )
+    events = [
+        e
+        async for e in run(
+            "go",
+            _ctx(),
+            provider=prov,
+            history=FakeHistory(),
+            inspectors=[AllowInspector()],
+            tool_executor=RecordingExecutor(result=("listing", None)),
+            max_turns=4,
+        )
+    ]
+
+    assert any(getattr(e, "kind", None) == "CredentialEgressBlocked" for e in events)
+    assert any(
+        getattr(e, "kind", None) == "Error" and "Blocked" in (getattr(e, "error", None) or "")
+        for e in events
+    )
+    # The second provider call (which would have sent the secret) never happens.
+    assert len(prov.message_snapshots) == 1
