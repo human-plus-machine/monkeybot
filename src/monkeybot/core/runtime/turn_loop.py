@@ -71,6 +71,7 @@ from .events import (
     SystemPromptSnapshot,
     Thinking,
     UserSteered,
+    VerifierVerdict,
 )
 from .history_compaction import (
     HISTORY_LOAD_MAX,
@@ -211,33 +212,54 @@ async def _drain_steers(
     ctx: TurnContext,
 ) -> AsyncIterator[AgentEvent]:
     """Inject queued steer messages at a safe boundary (before next provider call)."""
-    if input_admission is None:
-        return
-    while True:
-        item = input_admission.pop_steer()
-        if item is None:
-            break
-        steered = item.content
-        await persist_message(
-            history,
-            Message(role="user", content=list(steered)),
-            thread_id=ctx.thread_id,
-            turn_id=ctx.request_id,
-            memory=ctx.memory,
-            ingest=True,
-        )
-        preview = preview_text(steered)
-        _admit_steer_to_ledger(ctx, preview, item)
-        logger.info(
-            "steer injected %s",
-            kv(
-                request_id=ctx.request_id,
+    if input_admission is not None:
+        while True:
+            item = input_admission.pop_steer()
+            if item is None:
+                break
+            steered = item.content
+            await persist_message(
+                history,
+                Message(role="user", content=list(steered)),
                 thread_id=ctx.thread_id,
-                preview=preview[:80],
-                provenance=item.provenance,
-            ),
+                turn_id=ctx.request_id,
+                memory=ctx.memory,
+                ingest=True,
+            )
+            preview = preview_text(steered)
+            _admit_steer_to_ledger(ctx, preview, item)
+            logger.info(
+                "steer injected %s",
+                kv(
+                    request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
+                    preview=preview[:80],
+                    provenance=item.provenance,
+                ),
+            )
+            yield UserSteered(request_id=ctx.request_id, text=preview)
+    for verdict_evt in _drain_verdicts(ctx):
+        yield verdict_evt
+
+
+def _drain_verdicts(ctx: TurnContext) -> list[AgentEvent]:
+    """Return ready observe-only verdicts. Never waits on a judge."""
+    mailbox = ctx.verdict_mailbox
+    if mailbox is None:
+        return []
+    take = getattr(mailbox, "take_ready", None)
+    if not callable(take):
+        return []
+    try:
+        ready = take(ctx.thread_id)
+    except Exception:
+        logger.warning(
+            "verdict mailbox drain failed %s",
+            kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+            exc_info=True,
         )
-        yield UserSteered(request_id=ctx.request_id, text=preview)
+        return []
+    return [v for v in ready if isinstance(v, VerifierVerdict)]
 
 
 def _admit_steer_to_ledger(ctx: TurnContext, preview: str, item: SteerItem) -> None:

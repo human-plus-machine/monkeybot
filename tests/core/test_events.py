@@ -35,6 +35,7 @@ from monkeybot.core.runtime.events import (
     TurnComplete,
     UsageTotals,
     UserSteered,
+    VerifierVerdict,
     event_from_json,
     event_to_json,
 )
@@ -357,6 +358,21 @@ def test_agent_event_roundtrip_user_steered() -> None:
     assert event_from_json(event_to_json(ev)) == ev
 
 
+def test_verifier_verdict_roundtrip() -> None:
+    ev = VerifierVerdict(
+        request_id="r1",
+        verdict_id="v1",
+        checkpoint_id="r1:3",
+        status="drifting",
+        severity="none",
+        confidence=0.9,
+        rationale="constraint_touch",
+        triggering_signals=("constraint_touch",),
+    )
+    assert event_from_json(event_to_json(ev)) == ev
+    assert VerifierVerdict in get_args(AgentEvent)
+
+
 @pytest.mark.parametrize("queue", ("steer", "follow_up"))
 def test_agent_event_roundtrip_queued_input_accepted(queue: str) -> None:
     q = cast(Literal["steer", "follow_up"], queue)
@@ -629,6 +645,13 @@ def test_is_subagent_forwardable_denylist() -> None:
             parent_call_id="c",
             run_id="r",
             child_thread_id="t",
+        ),
+        VerifierVerdict(
+            request_id="r",
+            verdict_id="v",
+            checkpoint_id="r:1",
+            status="drifting",
+            severity="none",
         ),
     ]
     assert all(not is_subagent_forwardable(ev) for ev in denylisted)
