@@ -143,6 +143,8 @@ class TurnContext:
     change this object; ``None`` when the caller did not pin a snapshot."""
     goal_ledger: GoalLedger | None = None
     """Optional goal ledger (Phase 1). None when verifier.ledger is off."""
+    verdict_mailbox: Any | None = None
+    """Optional verdict mailbox (Phase 2). None when verifier.tracker is off."""
 
 
 _log = logging.getLogger(__name__)
@@ -866,6 +868,7 @@ async def build_context(
     approvals_persist: Callable[[str, str], bool] | None = None,
     config: RuntimeConfig | None = None,
     goal_ledger: GoalLedger | None = None,
+    verdict_mailbox: Any | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -955,6 +958,7 @@ async def build_context(
         approvals_persist=approvals_persist,
         config=config,
         goal_ledger=goal_ledger,
+        verdict_mailbox=verdict_mailbox,
     )
 
 

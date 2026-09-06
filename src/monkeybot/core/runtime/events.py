@@ -372,6 +372,22 @@ class SubagentCompleted:
     tool_call_count: int = 0
 
 
+@dataclass(frozen=True)
+class VerifierVerdict:
+    """Observe-only (Phase 2) or actuating (Phase 4+) drift verdict."""
+
+    kind: Literal["VerifierVerdict"] = "VerifierVerdict"
+    request_id: str = ""
+    verdict_id: str = ""
+    checkpoint_id: str = ""
+    status: str = "on_track"
+    severity: str = "none"
+    confidence: float = 0.0
+    rationale: str = ""
+    correction: str | None = None
+    triggering_signals: tuple[str, ...] = ()
+
+
 AgentEvent: TypeAlias = (
     Thinking
     | AssistantDelta
@@ -405,6 +421,7 @@ AgentEvent: TypeAlias = (
     | SubagentStarted
     | SubagentEvent
     | SubagentCompleted
+    | VerifierVerdict
 )
 
 # Durable vs live-only (OpenCode V2-style). Conversation history persists
@@ -643,6 +660,20 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
         }
     if isinstance(event, UserSteered):
         return {**base, "text": event.text}
+    if isinstance(event, VerifierVerdict):
+        payload: dict[str, object] = {
+            **base,
+            "verdict_id": event.verdict_id,
+            "checkpoint_id": event.checkpoint_id,
+            "status": event.status,
+            "severity": event.severity,
+            "confidence": event.confidence,
+            "rationale": event.rationale,
+            "triggering_signals": list(event.triggering_signals),
+        }
+        if event.correction is not None:
+            payload["correction"] = event.correction
+        return payload
     if isinstance(event, QueuedInputAccepted):
         return {**base, "queue": event.queue, "position": event.position}
     if isinstance(event, ContextEpochStarted):
@@ -759,6 +790,7 @@ def event_to_json(event: AgentEvent) -> str:
             AttachmentDescriptorEvent,
             GroundingEvent,
             UserSteered,
+            VerifierVerdict,
             QueuedInputAccepted,
             ContextEpochStarted,
             SystemContextUpdated,
@@ -1058,6 +1090,24 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         text_raw = payload.get("text", "")
         text = text_raw if isinstance(text_raw, str) else ""
         return UserSteered(request_id=rid, text=text)
+    if t == "VerifierVerdict":
+        signals_raw = payload.get("triggering_signals") or []
+        signals = tuple(str(s) for s in signals_raw) if isinstance(signals_raw, list) else ()
+        corr_raw = payload.get("correction")
+        correction = corr_raw if isinstance(corr_raw, str) else None
+        conf_raw = payload.get("confidence", 0.0)
+        confidence = float(conf_raw) if isinstance(conf_raw, (int, float)) else 0.0
+        return VerifierVerdict(
+            request_id=rid,
+            verdict_id=str(payload.get("verdict_id") or ""),
+            checkpoint_id=str(payload.get("checkpoint_id") or ""),
+            status=str(payload.get("status") or ""),
+            severity=str(payload.get("severity") or "none"),
+            confidence=confidence,
+            rationale=str(payload.get("rationale") or ""),
+            correction=correction,
+            triggering_signals=signals,
+        )
     if t == "QueuedInputAccepted":
         q_raw = payload.get("queue", "follow_up")
         if q_raw not in ("steer", "follow_up"):
