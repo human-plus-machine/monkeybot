@@ -101,7 +101,7 @@ def test_redacted_thinking_roundtrip() -> None:
 
 @pytest.mark.parametrize(
     "notification_type",
-    ["thinkingMessage", "inlineMessage", "creditsExhausted"],
+    ["thinkingMessage", "inlineMessage", "creditsExhausted", "verifierVerdict"],
 )
 def test_system_notification_roundtrip(notification_type: SystemNotificationType) -> None:
     original = SystemNotification(notification_type=notification_type, msg="hello", data=None)

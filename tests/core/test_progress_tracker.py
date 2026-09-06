@@ -341,6 +341,7 @@ async def test_run_yields_queued_verifier_verdict_before_turn_complete() -> None
         ),
     )
     ctx = replace(loop_ctx(), verdict_mailbox=mailbox)
+    hist = FakeHistory()
     events = []
     async for event in run(
         "hello",
@@ -348,7 +349,7 @@ async def test_run_yields_queued_verifier_verdict_before_turn_complete() -> None
         provider=FakeProvider(
             [[TextDelta(text="hi"), UsageEvent(input_tokens=1, output_tokens=1), Done()]]
         ),
-        history=FakeHistory(),
+        history=hist,
         inspectors=[AllowInspector()],
         tool_executor=RecordingExecutor(),
         max_turns=3,
@@ -357,3 +358,9 @@ async def test_run_yields_queued_verifier_verdict_before_turn_complete() -> None
     kinds = [type(e) for e in events]
     assert VerifierVerdict in kinds
     assert kinds.index(VerifierVerdict) < kinds.index(TurnComplete)
+    system_rows = [m for m in hist.rows if m.role == "system"]
+    assert len(system_rows) == 1
+    from monkeybot.core.types.content_blocks import SystemNotification
+
+    assert isinstance(system_rows[0].content[0], SystemNotification)
+    assert system_rows[0].content[0].notification_type == "verifierVerdict"

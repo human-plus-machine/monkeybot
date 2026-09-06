@@ -194,9 +194,9 @@ class FrontendToolRequestEvent:
 class SystemNotificationEvent:
     kind: Literal["SystemNotificationEvent"] = "SystemNotificationEvent"
     request_id: str = ""
-    notification_type: Literal["thinkingMessage", "inlineMessage", "creditsExhausted"] = (
-        "inlineMessage"
-    )
+    notification_type: Literal[
+        "thinkingMessage", "inlineMessage", "creditsExhausted", "verifierVerdict"
+    ] = "inlineMessage"
     msg: str = ""
     data: dict[str, object] | None = None
 
@@ -387,6 +387,20 @@ class VerifierVerdict:
     correction: str | None = None
     triggering_signals: tuple[str, ...] = ()
 
+    def to_wire(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "verdictId": self.verdict_id,
+            "checkpointId": self.checkpoint_id,
+            "status": self.status,
+            "severity": self.severity,
+            "confidence": self.confidence,
+            "rationale": self.rationale,
+            "triggeringSignals": list(self.triggering_signals),
+        }
+        if self.correction is not None:
+            payload["correction"] = self.correction
+        return payload
+
 
 AgentEvent: TypeAlias = (
     Thinking
@@ -443,6 +457,7 @@ DURABLE_EVENT_KINDS: frozenset[str] = frozenset(
         "ToolConfirmationRequest",
         "GroundingEvent",
         "UserSteered",
+        "VerifierVerdict",  # history mirror = SystemNotification verifierVerdict
         "QueuedInputAccepted",
         "ContextEpochStarted",
         "SystemContextUpdated",
@@ -1030,9 +1045,17 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         )
     if t == "SystemNotificationEvent":
         nt_raw = payload.get("notification_type", "inlineMessage")
-        if nt_raw not in ("thinkingMessage", "inlineMessage", "creditsExhausted"):
+        if nt_raw not in (
+            "thinkingMessage",
+            "inlineMessage",
+            "creditsExhausted",
+            "verifierVerdict",
+        ):
             raise EventDecodeError("SystemNotificationEvent notification_type invalid")
-        nt = cast(Literal["thinkingMessage", "inlineMessage", "creditsExhausted"], nt_raw)
+        nt = cast(
+            Literal["thinkingMessage", "inlineMessage", "creditsExhausted", "verifierVerdict"],
+            nt_raw,
+        )
         msg_raw = payload.get("msg", "")
         msg = msg_raw if isinstance(msg_raw, str) else ""
         data_raw = payload.get("data")

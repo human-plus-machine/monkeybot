@@ -1,6 +1,6 @@
 {
-  "git_sha": "e3ee23fabe44c0be471f7e283f2c4646756c30d7",
-  "recorded_at": "2026-09-06T00:21:23.411664+00:00",
+  "git_sha": "1c4f195e5088256c6d13af8f2ec113dd3c6ed088",
+  "recorded_at": "2026-09-06T00:39:27.473225+00:00",
   "scenarios": [
     {
       "cache_creation_tokens": 0,
@@ -9,13 +9,13 @@
       "cost_usd": 0.0,
       "description": "Agent reads a trusted skill via the read_file core tool",
       "failure_reason": null,
-      "input_tokens": 12944,
+      "input_tokens": 12985,
       "latency_ms_by_turn": [
-        2794
+        3112
       ],
-      "latency_ms_total": 2794,
+      "latency_ms_total": 3112,
       "messages_count": 1,
-      "output_tokens": 152,
+      "output_tokens": 182,
       "pass_rate": null,
       "quality_reasons": {},
       "quality_scores": {},
@@ -43,13 +43,13 @@
       "cost_usd": 0.0,
       "description": "Agent creates a new file via the write_file core tool",
       "failure_reason": null,
-      "input_tokens": 18818,
+      "input_tokens": 18917,
       "latency_ms_by_turn": [
-        3719
+        3781
       ],
-      "latency_ms_total": 3719,
+      "latency_ms_total": 3781,
       "messages_count": 1,
-      "output_tokens": 228,
+      "output_tokens": 252,
       "pass_rate": null,
       "quality_reasons": {},
       "quality_scores": {},
@@ -78,13 +78,13 @@
       "cost_usd": 0.0,
       "description": "Agent runs a trivial shell command via the run_command core tool",
       "failure_reason": null,
-      "input_tokens": 12732,
+      "input_tokens": 12807,
       "latency_ms_by_turn": [
-        2746
+        2774
       ],
-      "latency_ms_total": 2746,
+      "latency_ms_total": 2774,
       "messages_count": 1,
-      "output_tokens": 227,
+      "output_tokens": 288,
       "pass_rate": null,
       "quality_reasons": {},
       "quality_scores": {},
@@ -112,14 +112,14 @@
       "cost_usd": 0.0,
       "description": "Agent uses an available skill when relevant",
       "failure_reason": null,
-      "input_tokens": 25909,
+      "input_tokens": 26051,
       "latency_ms_by_turn": [
-        2379,
-        7764
+        2531,
+        5865
       ],
-      "latency_ms_total": 10143,
+      "latency_ms_total": 8396,
       "messages_count": 2,
-      "output_tokens": 1217,
+      "output_tokens": 986,
       "pass_rate": null,
       "quality_reasons": {},
       "quality_scores": {},
@@ -148,13 +148,13 @@
       "cost_usd": 0.0,
       "description": "Agent delegates a focused sub-task to a subagent via the task tool and the run completes",
       "failure_reason": null,
-      "input_tokens": 15487,
+      "input_tokens": 14574,
       "latency_ms_by_turn": [
-        17889
+        13595
       ],
-      "latency_ms_total": 17889,
+      "latency_ms_total": 13595,
       "messages_count": 1,
-      "output_tokens": 711,
+      "output_tokens": 847,
       "pass_rate": null,
       "quality_reasons": {},
       "quality_scores": {},
@@ -181,14 +181,14 @@
       "cost_usd": 0.0,
       "description": "A fact stated earlier in the same session is recalled when asked about later",
       "failure_reason": null,
-      "input_tokens": 200886,
+      "input_tokens": 87345,
       "latency_ms_by_turn": [
-        62907,
-        2669
+        30026,
+        2301
       ],
-      "latency_ms_total": 65576,
+      "latency_ms_total": 32327,
       "messages_count": 2,
-      "output_tokens": 7856,
+      "output_tokens": 4336,
       "pass_rate": null,
       "quality_reasons": {},
       "quality_scores": {},
@@ -202,12 +202,14 @@
         "recall"
       ],
       "tool_calls_by_name": {
-        "glob": 2,
-        "read_file": 1,
-        "run_command": 20
+        "glob": 4,
+        "read_file": 2,
+        "run_command": 1,
+        "search": 1,
+        "write_file": 1
       },
-      "tool_calls_count": 23,
-      "tool_errors_count": 0,
+      "tool_calls_count": 9,
+      "tool_errors_count": 1,
       "trace_ids": [],
       "turns": []
     },
@@ -218,14 +220,14 @@
       "cost_usd": 0.0,
       "description": "A fact stated in one session is recallable from a brand-new session afterward",
       "failure_reason": null,
-      "input_tokens": 31895,
+      "input_tokens": 32013,
       "latency_ms_by_turn": [
-        7429,
-        3630
+        8159,
+        6342
       ],
-      "latency_ms_total": 11059,
+      "latency_ms_total": 14501,
       "messages_count": 2,
-      "output_tokens": 1379,
+      "output_tokens": 1974,
       "pass_rate": null,
       "quality_reasons": {},
       "quality_scores": {},
@@ -241,7 +243,8 @@
       ],
       "tool_calls_by_name": {
         "glob": 1,
-        "read_file": 3
+        "read_file": 2,
+        "replace_in_file": 1
       },
       "tool_calls_count": 4,
       "tool_errors_count": 0,
@@ -255,15 +258,15 @@
       "cost_usd": 0.0,
       "description": "Multi-turn conversation stays coherent across turns",
       "failure_reason": null,
-      "input_tokens": 51052,
+      "input_tokens": 105239,
       "latency_ms_by_turn": [
-        5071,
-        5954,
-        12731
+        12861,
+        7604,
+        9666
       ],
-      "latency_ms_total": 23756,
+      "latency_ms_total": 30131,
       "messages_count": 3,
-      "output_tokens": 3112,
+      "output_tokens": 3923,
       "pass_rate": null,
       "quality_reasons": {},
       "quality_scores": {},
@@ -277,11 +280,11 @@
         "coherence"
       ],
       "tool_calls_by_name": {
-        "glob": 3,
-        "read_file": 5,
-        "run_command": 1
+        "glob": 1,
+        "read_file": 8,
+        "run_command": 5
       },
-      "tool_calls_count": 9,
+      "tool_calls_count": 14,
       "tool_errors_count": 0,
       "trace_ids": [],
       "turns": []
@@ -293,13 +296,13 @@
       "cost_usd": 0.0,
       "description": "Agent invokes an MCP-provided tool (fixture server's echo tool) when asked to use it",
       "failure_reason": null,
-      "input_tokens": 18738,
+      "input_tokens": 12690,
       "latency_ms_by_turn": [
-        6852
+        2221
       ],
-      "latency_ms_total": 6852,
+      "latency_ms_total": 2221,
       "messages_count": 1,
-      "output_tokens": 853,
+      "output_tokens": 248,
       "pass_rate": null,
       "quality_reasons": {},
       "quality_scores": {},
@@ -312,9 +315,9 @@
         "mcp"
       ],
       "tool_calls_by_name": {
-        "fixture__echo": 2
+        "fixture__echo": 1
       },
-      "tool_calls_count": 2,
+      "tool_calls_count": 1,
       "tool_errors_count": 0,
       "trace_ids": [],
       "turns": []
@@ -326,13 +329,13 @@
       "cost_usd": 0.0,
       "description": "Agent lists and reads an MCP resource from the fixture server",
       "failure_reason": null,
-      "input_tokens": 18943,
+      "input_tokens": 25339,
       "latency_ms_by_turn": [
-        4964
+        4810
       ],
-      "latency_ms_total": 4964,
+      "latency_ms_total": 4810,
       "messages_count": 1,
-      "output_tokens": 562,
+      "output_tokens": 467,
       "pass_rate": null,
       "quality_reasons": {},
       "quality_scores": {},
@@ -345,10 +348,11 @@
         "mcp"
       ],
       "tool_calls_by_name": {
+        "enable_mcp": 1,
         "list_mcp_resources": 1,
         "read_mcp_resource": 1
       },
-      "tool_calls_count": 2,
+      "tool_calls_count": 3,
       "tool_errors_count": 0,
       "trace_ids": [],
       "turns": []
@@ -360,13 +364,13 @@
       "cost_usd": 0.0,
       "description": "Agent lists and fetches an MCP prompt from the fixture server",
       "failure_reason": null,
-      "input_tokens": 25444,
+      "input_tokens": 12930,
       "latency_ms_by_turn": [
-        4371
+        4662
       ],
-      "latency_ms_total": 4371,
+      "latency_ms_total": 4662,
       "messages_count": 1,
-      "output_tokens": 355,
+      "output_tokens": 923,
       "pass_rate": null,
       "quality_reasons": {},
       "quality_scores": {},
@@ -379,11 +383,10 @@
         "mcp"
       ],
       "tool_calls_by_name": {
-        "enable_mcp": 1,
         "get_mcp_prompt": 1,
         "list_mcp_prompts": 1
       },
-      "tool_calls_count": 3,
+      "tool_calls_count": 2,
       "tool_errors_count": 0,
       "trace_ids": [],
       "turns": []
@@ -394,12 +397,12 @@
   "suite_aggregate": {
     "errored_count": 0,
     "failed_count": 0,
-    "mean_latency_ms": 13988.09090909091,
+    "mean_latency_ms": 10937.272727272728,
     "mean_quality_by_metric": {},
-    "p95_latency_ms": 23756.0,
+    "p95_latency_ms": 30131.0,
     "passed_count": 11,
     "scenario_count": 11,
     "total_cost_usd": 0.0,
-    "total_tokens": 449500
+    "total_tokens": 375316
   }
 }

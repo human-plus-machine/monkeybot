@@ -1,6 +1,6 @@
 # Background Verifier Agent — Design
 
-**Status:** Phase 2 done on `feat/verifier-agent`. Next work is **Phase 3 — Durable record**.  
+**Status:** Phase 3 done on `feat/verifier-agent`. Next work is **Phase 4 — nudge**.  
 **Branch:** `feat/verifier-agent` — all phases commit here; no phase gets its own branch; do not push unless asked  
 **Audience:** MonkeyBot harness maintainers  
 **Related:** [Features & Design Reference](features.md) · `core/hooks/` · `core/runtime/turn_loop.py` · `core/knowledge/evidence_guard.py` · [live-evals.md](live-evals.md) · [smoke baseline](../evals/baselines/smoke.md)  
@@ -14,15 +14,15 @@
 
 ## Progress / handoff
 
-A new session should read this section, then Part 8 Phase 3, then Part 4 (durability). Do not re-do Phases 0–2.
+A new session should read this section, then Part 8 Phase 4, then Part 5 (escalation). Do not re-do Phases 0–3.
 
 | Phase | State |
 |---|---|
 | **0 — Measurement harness** | **Done.** Typed YAML-only `verifier:` parser, eval verdict capture, assertion keys, drift suite, `max_verdicts: 0` on smoke, pre-verifier live baseline committed. |
 | **1 — Goal ledger** | **Done.** `GoalLedgerStore` + SQLite, `USER_MESSAGE` + steer tap, typed `Constraint` classifier, `ResolvedIntent` into compaction and subagent context. Defaults still off. |
 | **2 — Tracker, observe-only** | **Done.** `ProgressTracker` on write-side hooks, `VerifierVerdict` at severity `none` (SSE + log only). Cold-state: no tool record → no accumulation signal. Ledger signals may fire immediately. |
-| 3 — Durable record | **Next.** `SystemNotification` `verifierVerdict`, drain at inner preamble and turn tail, compaction pin. |
-| 4–6 — `nudge` / `replan` / `block` | Not started. |
+| **3 — Durable record** | **Done.** `SystemNotification` `verifierVerdict`, drain at inner preamble and turn tail plus `run()` finally, compaction pin, `DURABLE_EVENT_KINDS`. |
+| 4–6 — `nudge` / `replan` / `block` | **Next:** Phase 4 `nudge`. |
 
 **Constraints for whoever picks this up:**
 
@@ -53,12 +53,18 @@ A new session should read this section, then Part 8 Phase 3, then Part 4 (durabi
 - Matcher: `src/monkeybot/core/verifier/match.py`.
 - Mailbox: `src/monkeybot/core/verifier/mailbox.py` (`take_ready` never waits).
 - Tracker: `src/monkeybot/core/verifier/tracker.py` on `POST_TOOL` / `AFTER_PROVIDER_RESPONSE` / `POST_TURN`. `budget_burn` and `no_progress` are logged only (they false-positive on healthy long tool loops); mailbox/SSE emits ledger signals plus `error_streak` / `rewrite_churn` / `write_without_read`.
-- Event: `VerifierVerdict` in `runtime/events.py` (not in `DURABLE_EVENT_KINDS` yet — Phase 3).
+- Event: `VerifierVerdict` in `runtime/events.py`. Phase 3 adds it to `DURABLE_EVENT_KINDS`.
 - Drain: `_drain_verdicts` at inner preamble (via `_drain_steers`) and `loop.py` `finally` before `TurnComplete`.
 - Gateway: `build_verifier` constructs mailbox + tracker when `tracker.enabled`; `build_context(..., verdict_mailbox=)`.
 - Tests: `tests/core/test_progress_tracker.py` plus `VerifierVerdict` roundtrip in `test_events.py`.
 
-**Not Phase 0 (Phase 2 acceptance):** zero-verdict smoke with the emitter on (`monkeybot.verifier-on.yaml`, `escalation.max_severity: none`). `max_verdicts: 0` is already pinned on every smoke scenario.
+**Phase 3 left in the tree (do not recreate):**
+
+- Wire type: `verifierVerdict` on `SystemNotificationType` and `SystemNotificationEvent`.
+- Persist: `_drain_verdicts` writes `role="system"` + `SystemNotification` with `ingest=False`.
+- Drain sites: inner preamble (via `_drain_steers`), after `_await_history_write`, and `loop.py` `finally` (POST_TURN `done_unmet`).
+- Compaction: `split_messages_for_compaction` ignores pinned notification rows; `rebuild_compacted_history` splices them back.
+- `VerifierVerdict` is in `DURABLE_EVENT_KINDS`, not `SUBAGENT_FORWARD_KINDS`.
 
 ---
 
@@ -746,7 +752,7 @@ Each phase is independently shippable and independently reversible: **one commit
 
 **Phase 2 — Tracker, observe-only. Done.** `ProgressTracker` on write-side hooks, `VerifierVerdict` event emitted at severity `none`, wired to logging and SSE only. Cold-state rule: no record → no signal. Acceptance: the Phase 0 zero-verdict smoke run is green (no verdicts, baseline gates hold), and the drift suite's `verifier_on` blocks show which deterministic signals fire on cases (a), (d), (e) while (b) and (c) stay silent. Then run over real sessions and measure. **This phase decides whether Tier 2 is needed at all.**
 
-**Phase 3 — Durable record.** `SystemNotification` verdict rows; `_drain_verdicts` at **both** call sites (inner-turn preamble and turn tail after `_await_history_write`, `grace_s=0`); `DURABLE_EVENT_KINDS` entry; frontend wire type (`verifierVerdict`). Compaction: pin provider-excluded / system-notification rows, exclude them from split accounting, splice back after `history.reset` (the token-budget "fires earlier" worry is false; the durability-through-compaction hole is real). HistoryStore append/load/reset tests for `role="system"`. Still no behavioral intervention.
+**Phase 3 — Durable record. Done.** `SystemNotification` verdict rows; `_drain_verdicts` at **both** call sites (inner-turn preamble and turn tail after `_await_history_write`, `grace_s=0`); `DURABLE_EVENT_KINDS` entry; frontend wire type (`verifierVerdict`). Compaction: pin provider-excluded / system-notification rows, exclude them from split accounting, splice back after `history.reset` (the token-budget "fires earlier" worry is false; the durability-through-compaction hole is real). HistoryStore append/load/reset tests for `role="system"`. Still no behavioral intervention.
 
 **Phase 4 — `nudge`.** Async `VerifierPort`, queue + mailbox with a verifier-owned worker (not `HookManager`-tracked), `PRE_TOOL` injection, rate limits, spend logging, `tail_grace_s` measurement for `done` verdicts.
 

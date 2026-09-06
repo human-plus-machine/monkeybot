@@ -8,11 +8,20 @@ from monkeybot.core.runtime.history_compaction import (
     SUMMARY_KEEP_TAIL_MIN,
     SUMMARY_KEEP_TAIL_RATIO,
     _estimate_message_tokens,
+    _is_pinned_history_row,
     protect_recent_count,
+    rebuild_compacted_history,
     split_messages_for_compaction,
 )
-from monkeybot.core.types.content_blocks import File, Image, Text, Thinking, ToolResponse
 from monkeybot.core.tools.spill_inventory import spill_budgets_from_window
+from monkeybot.core.types.content_blocks import (
+    File,
+    Image,
+    SystemNotification,
+    Text,
+    Thinking,
+    ToolResponse,
+)
 
 
 def _msgs(n: int, *, chars: int = 40) -> list[Message]:
@@ -118,3 +127,48 @@ def test_estimate_counts_image_thinking_and_file_payloads() -> None:
     # Type-name fallback would be ~5–8 tokens total; real payload is >> that.
     min_chars = len(image_data) + len(thinking_text) + len(file_data)
     assert tokens >= min_chars // 4
+
+
+def test_split_ignores_pinned_notification_for_tail_floor() -> None:
+    messages = _msgs(20, chars=40)
+    verdict = Message(
+        role="system",
+        content=[
+            SystemNotification(
+                notification_type="verifierVerdict",
+                msg="constraint_touch",
+            )
+        ],
+    )
+    with_verdict = [*messages, verdict]
+    head, middle, tail = split_messages_for_compaction(with_verdict, window_tokens=100)
+    assert verdict not in head + middle + tail
+    assert len(tail) >= SUMMARY_KEEP_TAIL_MIN
+    summary = Message(role="assistant", content=[Text(text="[Context Summary]: x")])
+    rebuilt = rebuild_compacted_history(
+        with_verdict, head=head, summary=summary, tail=tail
+    )
+    assert rebuilt[-1] is verdict
+    assert any(
+        isinstance(block, SystemNotification)
+        for msg in rebuilt
+        for block in msg.content
+    )
+
+
+def test_rebuild_keeps_middle_notification_typed() -> None:
+    messages = _msgs(12, chars=40)
+    verdict = Message(
+        role="system",
+        content=[
+            SystemNotification(notification_type="verifierVerdict", msg="done_unmet")
+        ],
+    )
+    original = [*messages[:5], verdict, *messages[5:]]
+    head, middle, tail = split_messages_for_compaction(original, window_tokens=100)
+    summary = Message(role="assistant", content=[Text(text="[Context Summary]: mid")])
+    rebuilt = rebuild_compacted_history(original, head=head, summary=summary, tail=tail)
+    pinned = [m for m in rebuilt if _is_pinned_history_row(m)]
+    assert len(pinned) == 1
+    assert isinstance(pinned[0].content[0], SystemNotification)
+    assert pinned[0].content[0].notification_type == "verifierVerdict"
