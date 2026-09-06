@@ -191,7 +191,7 @@ synchronization layer.
 
 ## Tools
 
-Navigation, interaction, screenshots, tabs, waits, playbooks (`browser_list_playbooks`, `browser_read_playbook`, `browser_write_playbook`, `browser_run_playbook`), `browser_login` for Spaces-saved passwords (returns `{ok, loggedIn, origin, mfa?}` — never the password), and `browser_stop` for daemon cleanup.
+Navigation, interaction, screenshots, tabs, waits, playbooks (`browser_list_playbooks`, `browser_read_playbook`, `browser_write_playbook`, `browser_run_playbook`), `browser_login` for Spaces-saved passwords (returns `{ok, loggedIn, origin, mfa?, mode?}` — never the password), and `browser_stop` for daemon cleanup.
 
 ### `browser_login` targets the focused tab
 
@@ -214,6 +214,10 @@ If the page shows a one-time-code field after the password step, `browser_login`
 - `"none"` — no OTP field appeared; nothing to report.
 - `"completed"` — Spaces had a stored authenticator seed for this credential, generated the code, typed and submitted it itself. The password never left Spaces and neither did the code.
 - `"needed"` — an OTP field appeared but no seed is stored. `browser_login` also returns the error `mfa needs your attention`; tell the user to add an authenticator for this site in Spaces' "Connected sites" panel (paste the `otpauth://` URI or the base32 secret from the site's QR setup) or finish signing in themselves. Do not retry.
+
+### How the password reaches the request
+
+`browser_login`'s result also carries a `mode` field: `"keystroke"` (the password was typed into the page, the default) or `"network"` (Spaces typed a harmless placeholder and rewrote the real password into the outgoing request itself, so the password never touched the page's DOM or JS). Both behave identically from the agent's side — this is informational only, set per credential in Spaces' "Connected sites" panel ("Auto" tries network first and remembers if a site doesn't support it).
 
 ### Grants and "ask" mode
 

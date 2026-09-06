@@ -991,6 +991,34 @@ def test_sealed_login_needs_mfa_error_is_allowlisted(
     }
 
 
+@pytest.mark.parametrize("mode", ["keystroke", "network"])
+def test_sealed_login_passes_through_known_mode_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps({"ok": True, "loggedIn": True, "mode": mode}).encode("utf-8")
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse(json.loads(payload))
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_login(None, None) == {"ok": True, "loggedIn": True, "mode": mode}
+
+
+def test_sealed_login_drops_unknown_mode_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse({"ok": True, "loggedIn": True, "mode": "not-a-real-mode"})
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_login(None, None) == {"ok": True, "loggedIn": True}
+
+
 def test_in_app_http_origin_keeps_https_for_wss() -> None:
     assert (
         login._in_app_http_origin("wss://127.0.0.1:9333/devtools/browser/monkeybot")

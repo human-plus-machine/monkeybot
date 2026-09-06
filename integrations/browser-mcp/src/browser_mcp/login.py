@@ -33,6 +33,7 @@ _LOGIN_PUBLIC_ERRORS = frozenset(
     }
 )
 _LOGIN_PUBLIC_MFA_VALUES = frozenset({"none", "completed", "needed"})
+_LOGIN_PUBLIC_MODE_VALUES = frozenset({"keystroke", "network"})
 # Passing ProxyHandler({}) makes urllib skip its default env-based proxy
 # handler. The empty handler itself is then dropped (no *_open methods),
 # so loopback requests never honor HTTP_PROXY.
@@ -93,6 +94,9 @@ def _public_login_result(body: dict[str, Any]) -> dict[str, Any]:
     mfa = body.get("mfa")
     if isinstance(mfa, str) and mfa in _LOGIN_PUBLIC_MFA_VALUES:
         result["mfa"] = mfa
+    mode = body.get("mode")
+    if isinstance(mode, str) and mode in _LOGIN_PUBLIC_MODE_VALUES:
+        result["mode"] = mode
     if error:
         message = str(error)
         result["error"] = message if message in _LOGIN_PUBLIC_ERRORS else "login failed"
