@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.evals.scenario_runner import load_scenario, run_scenario, tool_category
+from tests.evals.scenario_runner import check_assertions, load_scenario, run_scenario
 
 SCENARIO_DIR = Path(__file__).parent / "scenarios"
 
@@ -35,14 +35,4 @@ async def test_scenario(scenario_file: str) -> None:
     path = SCENARIO_DIR / scenario_file
     scenario = load_scenario(path)
     record = await run_scenario(scenario)
-    a = scenario.assertions
-
-    if a.turn_completed is True:
-        assert record.completed
-    if a.no_errors is True:
-        assert record.errors == []
-    if a.tool_categories_used:
-        cats = {tool_category(name) for name in record.tool_calls}
-        assert cats.intersection(set(a.tool_categories_used))
-    if a.memory_injected is True:
-        assert len(record.memory_injected_lines) > 0
+    check_assertions(record, scenario.assertions)

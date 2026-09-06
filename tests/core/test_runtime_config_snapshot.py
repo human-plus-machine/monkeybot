@@ -410,6 +410,62 @@ def test_subagent_settings_included_in_snapshot_and_diff(
     assert get_subagent_settings(config=reloaded).max_turns == 9
 
 
+def test_verifier_included_in_snapshot_and_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.settings import get_verifier_config
+
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(
+        tmp_path,
+        "model:\n  provider: fake\n"
+        "verifier:\n  enabled: true\n"
+        "  tracker:\n    suspicion_threshold: 5\n"
+        "  escalation:\n    max_severity: none\n",
+    )
+    apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    pinned = get_config_store().current()
+    assert pinned.verifier.enabled is True
+    assert pinned.verifier.tracker.suspicion_threshold == 5
+    assert pinned.verifier.escalation.max_severity == "none"
+    assert get_verifier_config(config=pinned).enabled is True
+
+    yaml_path.write_text(
+        "model:\n  provider: fake\n"
+        "verifier:\n  enabled: true\n"
+        "  tracker:\n    suspicion_threshold: 9\n"
+        "  escalation:\n    max_severity: nudge\n",
+        encoding="utf-8",
+    )
+    reloaded, diff = get_config_store().reload(config_path=yaml_path, agent_root=tmp_path)
+    assert not diff.noop
+    assert "verifier.*" in diff.changed_env_keys
+    assert ConfigTier.REBUILD in diff.tiers
+    assert reloaded.verifier.tracker.suspicion_threshold == 9
+    assert reloaded.verifier.escalation.max_severity == "nudge"
+    assert get_verifier_config(config=pinned).tracker.suspicion_threshold == 5
+    assert get_verifier_config(config=reloaded).tracker.suspicion_threshold == 9
+
+
+def test_invalid_verifier_section_does_not_abort_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from monkeybot.core.config.settings import get_verifier_config
+
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(
+        tmp_path,
+        "model:\n  provider: fake\nverifier:\n  enabled: 1\n",
+    )
+    with caplog.at_level("ERROR"):
+        apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    cfg = get_config_store().current()
+    assert cfg.verifier.enabled is False
+    assert "Ignoring invalid verifier section" in caplog.text
+    with pytest.raises(ConfigError, match="verifier.enabled must be true or false"):
+        get_verifier_config()
+
+
 def test_effective_max_turns_uses_pinned_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

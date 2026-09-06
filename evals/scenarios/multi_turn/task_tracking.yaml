@@ -9,3 +9,4 @@ assertions:
   # Deterministic floor alongside the judge metrics: the final answer must actually engage
   # with the FastAPI/routing context carried across turns, not just sound plausible in isolation.
   response_contains: ["route", "router", "fastapi", "endpoint"]
+  max_verdicts: 0

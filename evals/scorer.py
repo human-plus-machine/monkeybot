@@ -120,6 +120,17 @@ def _build_judge_model() -> Any | None:
             return None
         base_url = (os.environ.get("NVIDIA_BASE_URL") or "https://integrate.api.nvidia.com/v1").rstrip("/")
         return GPTModel(model=model, api_key=api_key, base_url=base_url, temperature=0)
+    if provider in ("ollama-cloud", "ollama_cloud"):
+        api_key = (os.environ.get("OLLAMA_API_KEY") or "").strip()
+        if not api_key:
+            _log.warning("JUDGE_PROVIDER=ollama-cloud requires OLLAMA_API_KEY; skipping judge")
+            return None
+        return GPTModel(
+            model=model,
+            api_key=api_key,
+            base_url="https://ollama.com/v1",
+            temperature=0,
+        )
     if provider in ("claude", "anthropic", "vertex-claude"):
         return AnthropicModel(model=model)
     if provider in ("bedrock", "aws"):

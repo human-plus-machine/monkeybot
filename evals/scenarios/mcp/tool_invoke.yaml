@@ -10,3 +10,4 @@ assertions:
   required_tools: [fixture__echo]
   min_tool_calls: 1
   max_tool_errors: 0
+  max_verdicts: 0
