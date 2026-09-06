@@ -39,6 +39,7 @@ from monkeybot.core.config.runtime_env import (
     ENV_MAP,
     ENV_TIERS,
     SUBAGENTS_DIFF_KEY,
+    VERIFIER_DIFF_KEY,
     YAML_ONLY_ENV_KEYS,
     ConfigTier,
     _flatten_config,
@@ -53,12 +54,17 @@ from monkeybot.core.config.settings import (
     ConfigError,
     SubagentConfig,
     SubagentSettings,
+    VerifierConfig,
     _parse_subagent_entries,
     _persona_registry,
     _subagents_section,
+    _verifier_section,
 )
 from monkeybot.core.config.settings import (
     subagent_settings_from_section as _subagent_settings_from_section,
+)
+from monkeybot.core.config.settings import (
+    verifier_config_from_section as _verifier_config_from_section,
 )
 from monkeybot.core.layout import (
     resolve_agent_path,
@@ -214,6 +220,7 @@ class RuntimeConfig:
     realtime: RealtimeConfig
     subagents: Mapping[str, SubagentConfig]
     subagent_settings: SubagentSettings
+    verifier: VerifierConfig
     env_values: Mapping[str, str]
 
     def __post_init__(self) -> None:
@@ -583,6 +590,7 @@ def build_runtime_config(
     content = _content_digests(env_values, anchor)
     digest = _compute_digest(merged=merged, pinned=pinned, content=content)
     subagents, subagent_settings = _parse_subagents(merged)
+    verifier = _parse_verifier(merged)
     return RuntimeConfig(
         revision=revision,
         digest=digest,
@@ -596,6 +604,7 @@ def build_runtime_config(
         realtime=realtime_config_from_doc(merged, env_values),
         subagents=subagents,
         subagent_settings=subagent_settings,
+        verifier=verifier,
         env_values=env_values,
     )
 
@@ -622,8 +631,13 @@ def diff_runtime_configs(old: RuntimeConfig, new: RuntimeConfig) -> ConfigDiff:
     if old.subagent_settings != new.subagent_settings:
         changed_content.add("subagent_settings")
         changed_env.add(SUBAGENTS_DIFF_KEY)
+    if old.verifier != new.verifier:
+        changed_content.add("verifier")
+        changed_env.add(VERIFIER_DIFF_KEY)
     tiers = {ENV_TIERS[k] for k in changed_env if k in ENV_TIERS}
     if SUBAGENTS_DIFF_KEY in changed_env:
+        tiers.add(ConfigTier.REBUILD)
+    if VERIFIER_DIFF_KEY in changed_env:
         tiers.add(ConfigTier.REBUILD)
     return ConfigDiff(
         noop=False,
@@ -945,6 +959,21 @@ def _parse_subagents(
         return {}, SubagentSettings()
     personas = _persona_registry(_parse_subagent_entries(section.get("personas")))
     return personas, settings
+
+
+def _parse_verifier(doc: Mapping[str, Any]) -> VerifierConfig:
+    """Parse ``verifier:`` for the snapshot.
+
+    Invalid shapes warn and fall back to defaults so a malformed section
+    cannot abort ``apply_monkeybot_runtime_env`` / ``bootstrap_agent_layout``.
+    ``get_verifier_config`` still raises when a caller actually reads the
+    section from disk.
+    """
+    try:
+        return _verifier_config_from_section(_verifier_section(dict(doc)))
+    except ConfigError as exc:
+        logger.warning("Ignoring invalid verifier section during snapshot load: %s", exc)
+        return VerifierConfig()
 
 
 __all__ = [

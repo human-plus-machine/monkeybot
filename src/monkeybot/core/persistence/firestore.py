@@ -1430,6 +1430,7 @@ class FirestoreStorageBackend:
         self._usage_store = FirestoreUsageStore(self._client, prefix)
         self._runs_store = FirestoreRunStore(self._client, prefix)
         self._scheduled_loops_store = FirestoreScheduledLoopStore(self._client, prefix)
+        logger.warning("goal ledger unavailable on Firestore; SQLite is the durable backend")
         self._session_turn_lock_store = FirestoreSessionTurnLockStore(self._client, prefix)
         self._outbox_store = FirestoreOutboxStore(self._client, prefix)
 
@@ -1464,6 +1465,9 @@ class FirestoreStorageBackend:
         if self._scheduled_loops_store is None:
             raise RuntimeError("FirestoreStorageBackend.open() has not been called")
         return self._scheduled_loops_store
+
+    def goal_ledger(self) -> None:
+        return None
 
     def session_turns(self) -> FirestoreSessionTurnLockStore:
         if self._session_turn_lock_store is None:

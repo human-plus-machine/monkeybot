@@ -35,9 +35,10 @@ def test_input_admission_steer_fifo() -> None:
     assert adm.enqueue_steer([Text(text="a")]) == 0
     assert adm.enqueue_steer([Text(text="b")]) == 1
     first = adm.pop_steer()
-    assert first is not None and isinstance(first[0], Text) and first[0].text == "a"
+    assert first is not None and isinstance(first.content[0], Text) and first.content[0].text == "a"
+    assert first.provenance == "human"
     second = adm.pop_steer()
-    assert second is not None and isinstance(second[0], Text) and second[0].text == "b"
+    assert second is not None and isinstance(second.content[0], Text) and second.content[0].text == "b"
     assert adm.pop_steer() is None
 
 

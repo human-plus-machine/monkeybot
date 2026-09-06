@@ -49,7 +49,7 @@ from .loop_hooks import _drain_hook_settlement
 from .loop_messages import _normalize_user_content
 from .loop_ports import ToolExecutorPort
 from .loop_usage import _effective_max_turns, _usage_to_totals
-from .turn_loop import _run_inner
+from .turn_loop import _drain_verdicts, _run_inner
 
 __all__ = [
     "SUMMARY_TRIGGER_RATIO",
@@ -146,6 +146,8 @@ async def run(
         yield Error(request_id=ctx.request_id, error=str(exc))
     finally:
         await _drain_hook_settlement(hook_manager)
+        async for verdict_evt in _drain_verdicts(ctx, history):
+            yield verdict_evt
         usage.duration_ms = int((time.monotonic() - t0) * 1000)
         logger.debug(
             "harness run end %s",

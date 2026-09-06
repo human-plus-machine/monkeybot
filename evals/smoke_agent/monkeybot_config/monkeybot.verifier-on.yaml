@@ -1,0 +1,53 @@
+# Live-eval smoke agent with verifier observe-only flags on.
+# Identical to monkeybot.yaml except for the verifier: block.
+# Selected at gateway boot via MONKEYBOT_CONFIG (bootstrap pointer, not a
+# config value). See docs/live-evals.md.
+
+runtime:
+  log_level: INFO
+  port: 8080
+  transcript_enabled: true
+
+paths:
+  agent_md: ./monkeybot_config/AGENT.md
+  memory_storage_uri: local://./memory
+  skills_path: ./skills
+  workspace_root: ./workspace
+  db_url: sqlite:///data/monkeybot.db
+  command_allowlist_config: ./monkeybot_config/command_allowlist.yaml
+
+harness:
+  mode: turn_based
+
+model:
+  provider: ollama-cloud
+  name: glm-5.3-flash
+  context_window: 128000
+  thinking_budget: -1
+
+gateway:
+  pending_response_timeout_sec: 300
+  sse_replay_max: 256
+  graceful_shutdown_timeout_sec: 5
+
+subagents:
+  timeout_sec: 600
+  max_turns: 25
+
+web_search:
+  backend: duckduckgo
+  max_results: 5
+
+sandbox:
+  enabled: false
+
+verifier:
+  enabled: true
+  ledger:
+    enabled: true
+  tracker:
+    enabled: true
+  judge:
+    enabled: false
+  escalation:
+    max_severity: none

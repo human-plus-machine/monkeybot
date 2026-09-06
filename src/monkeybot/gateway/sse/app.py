@@ -15,7 +15,7 @@ import os
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,7 +24,7 @@ from monkeybot.computer import build_computer_tools, should_enable_computer_tool
 from monkeybot.computer.permissions import build_computer_permission_inspector, build_persist_hook
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
-from monkeybot.core.config.runtime_env import SUBAGENTS_DIFF_KEY, ConfigTier
+from monkeybot.core.config.runtime_env import SUBAGENTS_DIFF_KEY, VERIFIER_DIFF_KEY, ConfigTier
 from monkeybot.core.config.settings import (
     ConfigError,
     SubagentConfig,
@@ -101,6 +101,13 @@ from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
 from monkeybot.todo_list import TodoListStore, TodoListTool
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
+
+if TYPE_CHECKING:
+    from monkeybot.core.verifier.actuator import NudgeActuator
+    from monkeybot.core.verifier.judge import JudgeWorker
+    from monkeybot.core.verifier.ledger import GoalLedger
+    from monkeybot.core.verifier.mailbox import VerdictMailbox
+    from monkeybot.core.verifier.tracker import ProgressTracker
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +191,11 @@ class GatewayRuntime:
     loops_registry: LoopsToolRegistry = field(default_factory=LoopsToolRegistry)
     computer_tools: list[Any] = field(default_factory=list)
     computer_approvals_persist: Callable[[str, str], bool] | None = None
+    goal_ledger: GoalLedger | None = None
+    progress_tracker: ProgressTracker | None = None
+    verdict_mailbox: VerdictMailbox | None = None
+    nudge_actuator: NudgeActuator | None = None
+    judge_worker: JudgeWorker | None = None
 
     def build_inspectors(
         self, layout: AgentLayout, cfg: RuntimeConfig | None = None, *, fail_closed: bool = False
@@ -243,6 +255,7 @@ class GatewayRuntime:
 
         inspectors.append(LoopStartInspector())
         self.inspectors = inspectors
+        self._attach_verifier_inspector()
 
     def build_provider(self, cfg: RuntimeConfig | None = None) -> None:
         self.provider = _resolve_provider(cfg)
@@ -267,6 +280,91 @@ class GatewayRuntime:
                 ", ".join(sorted(self.subagent_registry)),
             )
 
+    def build_verifier(
+        self,
+        cfg: RuntimeConfig | None,
+        *,
+        storage: StorageBackend | None,
+    ) -> None:
+        """Construct ledger and observe-only tracker from ``verifier:`` flags."""
+        old = self.goal_ledger
+        if old is not None:
+            old.close()
+        self.goal_ledger = None
+        self.progress_tracker = None
+        self.verdict_mailbox = None
+        old_judge = self.judge_worker
+        if old_judge is not None:
+            old_judge.close()
+        self.judge_worker = None
+        self.nudge_actuator = None
+        if cfg is None or not cfg.verifier.enabled:
+            self._attach_verifier_inspector()
+            return
+        if cfg.verifier.ledger.enabled:
+            if storage is None:
+                logger.warning("goal ledger skipped: no storage backend")
+            else:
+                store = storage.goal_ledger()
+                if store is None:
+                    logger.warning("goal ledger skipped: backend has no durable ledger")
+                else:
+                    from monkeybot.core.verifier import GoalLedger, ProviderClassifier
+
+                    classifier = ProviderClassifier(
+                        lambda: self.provider,
+                        model=cfg.verifier.ledger.model,
+                    )
+                    self.goal_ledger = GoalLedger(
+                        store,
+                        classifier,
+                        max_entries_per_thread=cfg.verifier.ledger.max_entries_per_thread,
+                    )
+                    logger.info(
+                        "goal ledger enabled %s",
+                        kv(model=cfg.verifier.ledger.model),
+                    )
+        if cfg.verifier.tracker.enabled:
+            from monkeybot.core.verifier.mailbox import VerdictMailbox
+            from monkeybot.core.verifier.tracker import ProgressTracker
+
+            self.verdict_mailbox = VerdictMailbox()
+            judge = None
+            if cfg.verifier.judge.enabled:
+                from monkeybot.core.verifier.judge import JudgeWorker, SignalJudge
+
+                judge = JudgeWorker(
+                    self.verdict_mailbox,
+                    SignalJudge(),
+                    ledger_fn=lambda: self.goal_ledger,
+                    config=cfg.verifier.judge,
+                )
+                self.judge_worker = judge
+                logger.info(
+                    "verifier judge enabled %s",
+                    kv(model=cfg.verifier.judge.model),
+                )
+            self.progress_tracker = ProgressTracker(
+                self.verdict_mailbox,
+                ledger_fn=lambda: self.goal_ledger,
+                config=cfg.verifier.tracker,
+                judge=judge,
+            )
+            from monkeybot.core.verifier.actuator import NudgeActuator
+
+            self.nudge_actuator = NudgeActuator(self.verdict_mailbox)
+            logger.info("progress tracker enabled")
+        self._attach_verifier_inspector()
+
+    def _attach_verifier_inspector(self) -> None:
+        """Keep ``VerifierInspector`` in the chain iff a mailbox exists."""
+        from monkeybot.core.verifier.inspector import VerifierInspector
+
+        kept = [insp for insp in self.inspectors if not isinstance(insp, VerifierInspector)]
+        if self.verdict_mailbox is not None:
+            kept.append(VerifierInspector(self.verdict_mailbox))
+        self.inspectors = kept
+
     def rebuild_memory_hooks(self, cfg: RuntimeConfig | None, fastapi_app: FastAPI | None) -> None:
         """Re-bind memory/knowledge hooks without reopening storage (URI is restart-only)."""
         enabled = env_flag(cfg, "MONKEYBOT_MEMORY_HOOK_ENABLED", default=True)
@@ -277,6 +375,15 @@ class GatewayRuntime:
             has_hooks = True
         if self.knowledge is not None:
             self.knowledge.register_hooks(mgr)
+            has_hooks = True
+        if self.goal_ledger is not None:
+            self.goal_ledger.register(mgr)
+            has_hooks = True
+        if self.progress_tracker is not None:
+            self.progress_tracker.register(mgr)
+            has_hooks = True
+        if self.nudge_actuator is not None:
+            self.nudge_actuator.register(mgr)
             has_hooks = True
         self.hook_manager = mgr if has_hooks else None
         if fastapi_app is None:
@@ -380,6 +487,15 @@ class GatewayRuntime:
             logger.info(
                 "config slice rebuilt %s",
                 kv(slice="memory_hooks", revision=cfg.revision),
+            )
+        if VERIFIER_DIFF_KEY in diff.changed_env_keys:
+            storage = getattr(fastapi_app.state, "storage", None) if fastapi_app is not None else None
+            self.build_verifier(cfg, storage=storage)
+            self.rebuild_memory_hooks(cfg, fastapi_app)
+            applied.append(VERIFIER_DIFF_KEY)
+            logger.info(
+                "config slice rebuilt %s",
+                kv(slice="verifier", revision=cfg.revision),
             )
         return applied, error
 
@@ -802,6 +918,8 @@ class GatewayLoopPort:
                     todo_store=todo_store,
                     approvals_persist=approvals_persist,
                     config=cfg,
+                    goal_ledger=gateway_runtime.goal_ledger,
+                    verdict_mailbox=gateway_runtime.verdict_mailbox,
                 )
             except Exception as exc:
                 logger.exception("build_context failed")
@@ -1060,6 +1178,9 @@ async def _startup(fastapi_app: FastAPI) -> None:
         logger.error("invalid subagents config: %s", exc)
         raise
 
+    gateway_runtime.build_verifier(cfg, storage=fastapi_app.state.storage)
+    gateway_runtime.rebuild_memory_hooks(cfg, fastapi_app)
+
     fastapi_app.state.gateway_runtime = gateway_runtime
 
     if otel_enabled:
@@ -1134,6 +1255,23 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
             fastapi_app.state.knowledge = None
         except Exception as exc:
             logger.warning("knowledge state clear failed: %s", exc)
+
+    if gateway_runtime.goal_ledger is not None:
+        try:
+            gateway_runtime.goal_ledger.close()
+        except Exception as exc:
+            logger.warning("goal ledger close failed: %s", exc)
+        gateway_runtime.goal_ledger = None
+
+    if gateway_runtime.judge_worker is not None:
+        try:
+            gateway_runtime.judge_worker.close()
+        except Exception as exc:
+            logger.warning("judge worker close failed: %s", exc)
+        gateway_runtime.judge_worker = None
+    gateway_runtime.progress_tracker = None
+    gateway_runtime.nudge_actuator = None
+    gateway_runtime.verdict_mailbox = None
 
     memory = gateway_runtime.memory or getattr(fastapi_app.state, "memory", None)
     if memory is not None:

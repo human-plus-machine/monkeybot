@@ -1591,6 +1591,7 @@ class PostgresStorageBackend:
         self._usage_store = PostgresUsageStore(self._pool)
         self._runs_store = PostgresRunStore(self._pool)
         self._scheduled_loops_store = PostgresScheduledLoopStore(self._pool)
+        logger.warning("goal ledger unavailable on Postgres; SQLite is the durable backend")
         self._session_turn_lock_store = PostgresSessionTurnLockStore(self._pool)
         self._outbox_store = PostgresOutboxStore(self._pool)
 
@@ -1624,6 +1625,9 @@ class PostgresStorageBackend:
         if self._scheduled_loops_store is None:
             raise RuntimeError("PostgresStorageBackend.open() has not been called")
         return self._scheduled_loops_store
+
+    def goal_ledger(self) -> None:
+        return None
 
     def session_turns(self) -> PostgresSessionTurnLockStore:
         if self._session_turn_lock_store is None:

@@ -47,12 +47,14 @@ from monkeybot.core.runtime.provider_stream_mapper import ProviderStreamMapper
 from monkeybot.core.tools.inspector import ToolInspector
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
+    SystemNotification,
     Text,
     ToolRequest,
     ToolResponse,
 )
 from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.core.verifier.mailbox import VerdictMailbox
 from monkeybot.providers._utils import note_anthropic_token_estimate_observation
 from monkeybot.providers.pricing import estimate_cost
 
@@ -71,16 +73,18 @@ from .events import (
     SystemPromptSnapshot,
     Thinking,
     UserSteered,
+    VerifierVerdict,
 )
 from .history_compaction import (
     HISTORY_LOAD_MAX,
     _await_history_write,
+    _intent_facts_from_ctx,
     _summarization_model_id,
     _summarization_viable,
     _summarize_history,
     protect_recent_count,
 )
-from .input_admission import InputAdmission, preview_text
+from .input_admission import InputAdmission, SteerItem, preview_text
 from .loop_hooks import (
     _HOOK_READ_TIMEOUT_S,
     _apply_before_provider_hook,
@@ -210,30 +214,198 @@ async def _drain_steers(
     ctx: TurnContext,
 ) -> AsyncIterator[AgentEvent]:
     """Inject queued steer messages at a safe boundary (before next provider call)."""
-    if input_admission is None:
-        return
-    while True:
-        steered = input_admission.pop_steer()
-        if steered is None:
-            break
-        await persist_message(
-            history,
-            Message(role="user", content=list(steered)),
-            thread_id=ctx.thread_id,
-            turn_id=ctx.request_id,
-            memory=ctx.memory,
-            ingest=True,
-        )
-        preview = preview_text(steered)
-        logger.info(
-            "steer injected %s",
-            kv(
-                request_id=ctx.request_id,
+    if input_admission is not None:
+        while True:
+            item = input_admission.pop_steer()
+            if item is None:
+                break
+            steered = item.content
+            await persist_message(
+                history,
+                Message(role="user", content=list(steered)),
                 thread_id=ctx.thread_id,
-                preview=preview[:80],
-            ),
+                turn_id=ctx.request_id,
+                memory=ctx.memory,
+                ingest=True,
+            )
+            preview = preview_text(steered)
+            _admit_steer_to_ledger(ctx, preview, item)
+            logger.info(
+                "steer injected %s",
+                kv(
+                    request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
+                    preview=preview[:80],
+                    provenance=item.provenance,
+                ),
+            )
+            yield UserSteered(request_id=ctx.request_id, text=preview)
+    async for verdict_evt in _drain_verdicts(ctx, history):
+        yield verdict_evt
+
+
+async def _take_ready(
+    mailbox: VerdictMailbox, thread_id: str, *, grace_s: float
+) -> list[VerifierVerdict]:
+    ready = mailbox.take_ready(thread_id)
+    if ready or grace_s <= 0:
+        return ready
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + grace_s
+    while loop.time() < deadline:
+        await asyncio.sleep(min(0.05, max(0.0, deadline - loop.time())))
+        ready = mailbox.take_ready(thread_id)
+        if ready:
+            return ready
+    return []
+
+
+async def _drain_verdicts(
+    ctx: TurnContext,
+    history: HistoryStore | None = None,
+    *,
+    grace_s: float = 0.0,
+) -> AsyncIterator[AgentEvent]:
+    """Commit ready verdicts at a safe boundary. Never waits on a judge unless ``grace_s``."""
+    mailbox = ctx.verdict_mailbox
+    if mailbox is None:
+        return
+    try:
+        ready = await _take_ready(mailbox, ctx.thread_id, grace_s=grace_s)
+        if not ready and grace_s > 0:
+            logger.info(
+                "verdict tail stale %s",
+                kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+            )
+            return
+    except Exception:
+        logger.warning(
+            "verdict mailbox drain failed %s",
+            kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+            exc_info=True,
         )
-        yield UserSteered(request_id=ctx.request_id, text=preview)
+        return
+    max_sev = "nudge"
+    if ctx.config is not None:
+        max_sev = ctx.config.verifier.escalation.max_severity
+    from monkeybot.core.verifier.severity import cap_severity
+
+    for verdict in ready:
+        if not isinstance(verdict, VerifierVerdict):
+            logger.warning(
+                "verdict drain skipped non-verdict %s",
+                kv(thread_id=ctx.thread_id, type=type(verdict).__name__),
+            )
+            continue
+        requested = verdict.severity
+        capped = cap_severity(requested, max_sev)
+        if capped != requested:
+            logger.info(
+                "verdict severity capped %s",
+                kv(
+                    thread_id=ctx.thread_id,
+                    requested=requested,
+                    capped=capped,
+                    maximum=max_sev,
+                ),
+            )
+            verdict = dataclasses.replace(verdict, severity=capped)
+        mailbox.set_last(ctx.thread_id, verdict)
+        if history is not None:
+            try:
+                await persist_message(
+                    history,
+                    Message(
+                        role="system",
+                        content=[
+                            SystemNotification(
+                                notification_type="verifierVerdict",
+                                msg=verdict.rationale,
+                                data=verdict.to_wire(),
+                            )
+                        ],
+                    ),
+                    thread_id=ctx.thread_id,
+                    turn_id=ctx.request_id,
+                    memory=ctx.memory,
+                    ingest=False,
+                )
+            except Exception:
+                logger.warning(
+                    "verdict persist failed %s",
+                    kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+                    exc_info=True,
+                )
+        _stash_escalation(mailbox, ctx.thread_id, capped, verdict)
+        yield verdict
+
+
+def _stash_escalation(
+    mailbox: VerdictMailbox, thread_id: str, capped: str, verdict: VerifierVerdict
+) -> None:
+    """Queue one-shot nudge/replan for the next inner turn. Fail-open."""
+    text = verdict.correction or f"[Verifier] {verdict.rationale}"
+    try:
+        if capped == "nudge":
+            mailbox.put_nudge(thread_id, text)
+        elif capped in ("replan", "steer"):
+            mailbox.put_replan(
+                thread_id,
+                f"{text}\nDo not call tools this turn. Restate the plan.",
+            )
+    except Exception:
+        logger.warning("verdict escalation stash failed %s", kv(thread_id=thread_id), exc_info=True)
+
+
+def _arm_replan_from_mailbox(state: _TurnState) -> None:
+    """Reuse doom-loop ``force_no_tools`` for a drained ``replan`` verdict."""
+    mailbox = state.ctx.verdict_mailbox
+    if mailbox is None:
+        return
+    try:
+        note = mailbox.take_replan(state.ctx.thread_id)
+    except Exception:
+        logger.warning(
+            "replan mailbox take failed %s",
+            kv(thread_id=state.ctx.thread_id, request_id=state.ctx.request_id),
+            exc_info=True,
+        )
+        return
+    if not note:
+        return
+    state.doom_tracker.force_no_tools = True
+    existing = state.doom_tracker.recovery_note
+    state.doom_tracker.recovery_note = f"{existing}\n\n{note}" if existing else note
+    logger.info(
+        "verifier replan armed %s",
+        kv(thread_id=state.ctx.thread_id, request_id=state.ctx.request_id),
+    )
+
+
+def _admit_steer_to_ledger(ctx: TurnContext, preview: str, item: SteerItem) -> None:
+    ledger = ctx.goal_ledger
+    if ledger is None or not preview:
+        return
+    from monkeybot.core.persistence.goal_ledger import Channel, Provenance
+
+    provenance = (
+        Provenance.VERIFIER_STEER
+        if item.provenance == Provenance.VERIFIER_STEER.value
+        else Provenance.HUMAN
+    )
+    try:
+        ledger.admit(
+            ctx.thread_id,
+            preview,
+            provenance=provenance,
+            channel=Channel.STEER,
+        )
+    except Exception:
+        logger.warning(
+            "goal_ledger steer tap failed %s",
+            kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+            exc_info=True,
+        )
 
 
 def _tools_schema_hash(tools: Sequence[ToolDef]) -> str:
@@ -339,6 +511,7 @@ async def _prepare_turn_context(
         yield epoch_evt
     system = _system_message_from_text(state.admit.leading_system_text)
     combined_extra = _combine_extras(state.pre_turn_extra, state.pre_tool_extra_next)
+    _arm_replan_from_mailbox(state)
     force_no_tools, doom_loop_note = state.doom_tracker.consume_recovery()
     combined_extra = _combine_extras(combined_extra, doom_loop_note)
     state.system = _append_extra_system_text(system, combined_extra)
@@ -494,6 +667,7 @@ async def _run_history_summarization(
                 provider,
                 _summarization_model_id(state.ctx),
                 window_tokens=state.ctx.context_window_tokens,
+                intent_facts=_intent_facts_from_ctx(state.ctx),
             )
         except Exception:
             logger.warning(
@@ -1502,6 +1676,12 @@ async def _run_inner_core(
     # Ensure the backgrounded assistant write has landed before any load/reset
     # below (freeze) so the assistant row is durable and not overwritten.
     await _await_history_write(state.assistant_write_task)
+
+    grace_s = 0.0
+    if state.ctx.config is not None:
+        grace_s = state.ctx.config.verifier.judge.tail_grace_s
+    async for verdict_evt in _drain_verdicts(state.ctx, history, grace_s=grace_s):
+        yield verdict_evt
 
     descriptor_events = await freeze_attachments_in_history(
         thread_id=state.ctx.thread_id,
