@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from fnmatch import fnmatch
 from typing import Any
 
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.goal_ledger import Constraint, ConstraintKind
+
+logger = logging.getLogger(__name__)
 
 _PATH_KEYS = ("path", "file_path", "file", "filename", "dest", "destination", "target")
 _PATH_LIST_KEYS = ("paths", "files")
@@ -74,5 +78,10 @@ def constraint_matches(
         try:
             return re.search(constraint.pattern, text) is not None
         except re.error:
+            logger.warning(
+                "constraint regex invalid %s",
+                kv(pattern=constraint.pattern),
+                exc_info=True,
+            )
             return False
     return False

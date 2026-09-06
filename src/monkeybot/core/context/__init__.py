@@ -26,6 +26,7 @@ from monkeybot.todo_list.store import TodoListStore
 if TYPE_CHECKING:
     from monkeybot.core.config.snapshot import RuntimeConfig
     from monkeybot.core.verifier.ledger import GoalLedger
+    from monkeybot.core.verifier.mailbox import VerdictMailbox
 
 
 @runtime_checkable
@@ -143,7 +144,7 @@ class TurnContext:
     change this object; ``None`` when the caller did not pin a snapshot."""
     goal_ledger: GoalLedger | None = None
     """Optional goal ledger (Phase 1). None when verifier.ledger is off."""
-    verdict_mailbox: Any | None = None
+    verdict_mailbox: VerdictMailbox | None = None
     """Optional verdict mailbox (Phase 2). None when verifier.tracker is off."""
 
 
@@ -868,7 +869,7 @@ async def build_context(
     approvals_persist: Callable[[str, str], bool] | None = None,
     config: RuntimeConfig | None = None,
     goal_ledger: GoalLedger | None = None,
-    verdict_mailbox: Any | None = None,
+    verdict_mailbox: VerdictMailbox | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
