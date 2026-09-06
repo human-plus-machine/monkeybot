@@ -185,6 +185,8 @@ class GatewayRuntime:
     computer_tools: list[Any] = field(default_factory=list)
     computer_approvals_persist: Callable[[str, str], bool] | None = None
     goal_ledger: Any | None = None
+    progress_tracker: Any | None = None
+    verdict_mailbox: Any | None = None
 
     def build_inspectors(
         self, layout: AgentLayout, cfg: RuntimeConfig | None = None, *, fail_closed: bool = False
@@ -274,36 +276,51 @@ class GatewayRuntime:
         *,
         storage: StorageBackend | None,
     ) -> None:
-        """Construct the goal ledger when ``verifier.enabled`` and ``ledger.enabled``."""
+        """Construct ledger and observe-only tracker from ``verifier:`` flags."""
         old = self.goal_ledger
         if old is not None:
             close = getattr(old, "close", None)
             if callable(close):
                 close()
         self.goal_ledger = None
-        if cfg is None or storage is None:
+        self.progress_tracker = None
+        self.verdict_mailbox = None
+        if cfg is None or not cfg.verifier.enabled:
             return
-        if not cfg.verifier.enabled or not cfg.verifier.ledger.enabled:
-            return
-        store = storage.goal_ledger()
-        if store is None:
-            logger.warning("goal ledger skipped: backend has no durable ledger")
-            return
-        from monkeybot.core.verifier import GoalLedger, ProviderClassifier
+        if cfg.verifier.ledger.enabled:
+            if storage is None:
+                logger.warning("goal ledger skipped: no storage backend")
+            else:
+                store = storage.goal_ledger()
+                if store is None:
+                    logger.warning("goal ledger skipped: backend has no durable ledger")
+                else:
+                    from monkeybot.core.verifier import GoalLedger, ProviderClassifier
 
-        classifier = ProviderClassifier(
-            lambda: self.provider,
-            model=cfg.verifier.ledger.model,
-        )
-        self.goal_ledger = GoalLedger(
-            store,
-            classifier,
-            max_entries_per_thread=cfg.verifier.ledger.max_entries_per_thread,
-        )
-        logger.info(
-            "goal ledger enabled %s",
-            kv(model=cfg.verifier.ledger.model),
-        )
+                    classifier = ProviderClassifier(
+                        lambda: self.provider,
+                        model=cfg.verifier.ledger.model,
+                    )
+                    self.goal_ledger = GoalLedger(
+                        store,
+                        classifier,
+                        max_entries_per_thread=cfg.verifier.ledger.max_entries_per_thread,
+                    )
+                    logger.info(
+                        "goal ledger enabled %s",
+                        kv(model=cfg.verifier.ledger.model),
+                    )
+        if cfg.verifier.tracker.enabled:
+            from monkeybot.core.verifier.mailbox import VerdictMailbox
+            from monkeybot.core.verifier.tracker import ProgressTracker
+
+            self.verdict_mailbox = VerdictMailbox()
+            self.progress_tracker = ProgressTracker(
+                self.verdict_mailbox,
+                ledger_fn=lambda: self.goal_ledger,
+                config=cfg.verifier.tracker,
+            )
+            logger.info("progress tracker enabled (observe-only)")
 
     def rebuild_memory_hooks(self, cfg: RuntimeConfig | None, fastapi_app: FastAPI | None) -> None:
         """Re-bind memory/knowledge hooks without reopening storage (URI is restart-only)."""
@@ -318,6 +335,9 @@ class GatewayRuntime:
             has_hooks = True
         if self.goal_ledger is not None:
             self.goal_ledger.register(mgr)
+            has_hooks = True
+        if self.progress_tracker is not None:
+            self.progress_tracker.register(mgr)
             has_hooks = True
         self.hook_manager = mgr if has_hooks else None
         if fastapi_app is None:
@@ -853,6 +873,7 @@ class GatewayLoopPort:
                     approvals_persist=approvals_persist,
                     config=cfg,
                     goal_ledger=gateway_runtime.goal_ledger,
+                    verdict_mailbox=gateway_runtime.verdict_mailbox,
                 )
             except Exception as exc:
                 logger.exception("build_context failed")
@@ -1112,12 +1133,15 @@ async def _startup(fastapi_app: FastAPI) -> None:
         raise
 
     gateway_runtime.build_verifier(cfg, storage=fastapi_app.state.storage)
-    if gateway_runtime.goal_ledger is not None:
+    if gateway_runtime.goal_ledger is not None or gateway_runtime.progress_tracker is not None:
         hook_mgr = gateway_runtime.hook_manager
         if hook_mgr is None:
             hook_mgr = HookManager()
             gateway_runtime.hook_manager = hook_mgr
-        gateway_runtime.goal_ledger.register(hook_mgr)
+        if gateway_runtime.goal_ledger is not None:
+            gateway_runtime.goal_ledger.register(hook_mgr)
+        if gateway_runtime.progress_tracker is not None:
+            gateway_runtime.progress_tracker.register(hook_mgr)
 
     fastapi_app.state.gateway_runtime = gateway_runtime
 
@@ -1200,6 +1224,9 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
         except Exception as exc:
             logger.warning("goal ledger close failed: %s", exc)
         gateway_runtime.goal_ledger = None
+
+    gateway_runtime.progress_tracker = None
+    gateway_runtime.verdict_mailbox = None
 
     memory = gateway_runtime.memory or getattr(fastapi_app.state, "memory", None)
     if memory is not None:

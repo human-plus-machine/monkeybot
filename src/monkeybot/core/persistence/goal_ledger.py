@@ -7,7 +7,7 @@ import logging
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
@@ -91,6 +91,7 @@ class ResolvedIntent:
     active_goal: GoalEntry | None
     deferred_stack: tuple[GoalEntry, ...]
     standing_constraints: tuple[Constraint, ...]
+    correction_history: Mapping[Constraint, int]
     pending_classification: bool
 
 
@@ -121,6 +122,7 @@ def empty_resolved(*, pending: bool) -> ResolvedIntent:
         active_goal=None,
         deferred_stack=(),
         standing_constraints=(),
+        correction_history={},
         pending_classification=pending,
     )
 
@@ -144,10 +146,19 @@ def resolve_intent(
     for entry in human:
         for constraint in entry.constraints:
             standing_by_key[constraint.match_key] = constraint
+    corr_counts: dict[tuple[ConstraintKind, str], tuple[Constraint, int]] = {}
+    for entry in human:
+        if entry.intent != Intent.CORRECTION:
+            continue
+        for constraint in entry.constraints:
+            key = constraint.match_key
+            prev = corr_counts.get(key)
+            corr_counts[key] = (constraint, (prev[1] if prev else 0) + 1)
     return ResolvedIntent(
         active_goal=active,
         deferred_stack=deferred,
         standing_constraints=tuple(standing_by_key.values()),
+        correction_history=dict(corr_counts.values()),
         pending_classification=pending_classification,
     )
 

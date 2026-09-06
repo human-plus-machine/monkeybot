@@ -1,4 +1,4 @@
-"""Background verifier package. Phase 1 ships the goal ledger only."""
+"""Background verifier package."""
 
 from monkeybot.core.persistence.goal_ledger import (
     Channel,
@@ -13,6 +13,8 @@ from monkeybot.core.persistence.goal_ledger import (
 )
 from monkeybot.core.verifier.classify import ClassifierPort, ProviderClassifier
 from monkeybot.core.verifier.ledger import GoalLedger
+from monkeybot.core.verifier.mailbox import VerdictMailbox
+from monkeybot.core.verifier.tracker import ProgressTracker
 
 __all__ = [
     "Channel",
@@ -23,8 +25,10 @@ __all__ = [
     "GoalEntry",
     "GoalLedger",
     "Intent",
+    "ProgressTracker",
     "Provenance",
     "ProviderClassifier",
     "ResolvedIntent",
     "Status",
+    "VerdictMailbox",
 ]
