@@ -54,6 +54,8 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.core.verifier.mailbox import VerdictMailbox
+from monkeybot.core.verifier.severity import cap_severity
 from monkeybot.providers._utils import note_anthropic_token_estimate_observation
 from monkeybot.providers.pricing import estimate_cost
 
@@ -72,6 +74,7 @@ from .events import (
     SystemPromptSnapshot,
     Thinking,
     UserSteered,
+    VerifierVerdict,
 )
 from .history_compaction import (
     HISTORY_LOAD_MAX,
@@ -243,16 +246,40 @@ async def _drain_steers(
         yield verdict_evt
 
 
+async def _take_ready(
+    mailbox: VerdictMailbox, thread_id: str, *, grace_s: float
+) -> list[VerifierVerdict]:
+    ready = mailbox.take_ready(thread_id)
+    if ready or grace_s <= 0:
+        return ready
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + grace_s
+    while loop.time() < deadline:
+        await asyncio.sleep(min(0.05, max(0.0, deadline - loop.time())))
+        ready = mailbox.take_ready(thread_id)
+        if ready:
+            return ready
+    return []
+
+
 async def _drain_verdicts(
     ctx: TurnContext,
     history: HistoryStore | None = None,
+    *,
+    grace_s: float = 0.0,
 ) -> AsyncIterator[AgentEvent]:
-    """Commit ready verdicts at a safe boundary. Never waits on a judge."""
+    """Commit ready verdicts at a safe boundary. Never waits on a judge unless ``grace_s``."""
     mailbox = ctx.verdict_mailbox
     if mailbox is None:
         return
     try:
-        ready = mailbox.take_ready(ctx.thread_id)
+        ready = await _take_ready(mailbox, ctx.thread_id, grace_s=grace_s)
+        if not ready and grace_s > 0:
+            logger.info(
+                "verdict tail stale %s",
+                kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+            )
+            return
     except Exception:
         logger.warning(
             "verdict mailbox drain failed %s",
@@ -260,7 +287,31 @@ async def _drain_verdicts(
             exc_info=True,
         )
         return
+    max_sev = "nudge"
+    if ctx.config is not None:
+        max_sev = ctx.config.verifier.escalation.max_severity
+
     for verdict in ready:
+        if not isinstance(verdict, VerifierVerdict):
+            logger.warning(
+                "verdict drain skipped non-verdict %s",
+                kv(thread_id=ctx.thread_id, type=type(verdict).__name__),
+            )
+            continue
+        requested = verdict.severity
+        capped = cap_severity(requested, max_sev)
+        if capped != requested:
+            logger.info(
+                "verdict severity capped %s",
+                kv(
+                    thread_id=ctx.thread_id,
+                    requested=requested,
+                    capped=capped,
+                    maximum=max_sev,
+                ),
+            )
+            verdict = dataclasses.replace(verdict, severity=capped)
+        mailbox.set_last(ctx.thread_id, verdict)
         if history is not None:
             try:
                 await persist_message(
@@ -286,7 +337,50 @@ async def _drain_verdicts(
                     kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
                     exc_info=True,
                 )
+        _stash_escalation(mailbox, ctx.thread_id, capped, verdict)
         yield verdict
+
+
+def _stash_escalation(
+    mailbox: VerdictMailbox, thread_id: str, capped: str, verdict: VerifierVerdict
+) -> None:
+    """Queue one-shot nudge/replan for the next inner turn. Fail-open."""
+    text = verdict.correction or f"[Verifier] {verdict.rationale}"
+    try:
+        if capped == "nudge":
+            mailbox.put_nudge(thread_id, text)
+        elif capped in ("replan", "steer"):
+            mailbox.put_replan(
+                thread_id,
+                f"{text}\nDo not call tools this turn. Restate the plan.",
+            )
+    except Exception:
+        logger.warning("verdict escalation stash failed %s", kv(thread_id=thread_id), exc_info=True)
+
+
+def _arm_replan_from_mailbox(state: _TurnState) -> None:
+    """Reuse doom-loop ``force_no_tools`` for a drained ``replan`` verdict."""
+    mailbox = state.ctx.verdict_mailbox
+    if mailbox is None:
+        return
+    try:
+        note = mailbox.take_replan(state.ctx.thread_id)
+    except Exception:
+        logger.warning(
+            "replan mailbox take failed %s",
+            kv(thread_id=state.ctx.thread_id, request_id=state.ctx.request_id),
+            exc_info=True,
+        )
+        return
+    if not note:
+        return
+    state.doom_tracker.force_no_tools = True
+    existing = state.doom_tracker.recovery_note
+    state.doom_tracker.recovery_note = f"{existing}\n\n{note}" if existing else note
+    logger.info(
+        "verifier replan armed %s",
+        kv(thread_id=state.ctx.thread_id, request_id=state.ctx.request_id),
+    )
 
 
 def _admit_steer_to_ledger(ctx: TurnContext, verbatim: str, item: SteerItem) -> None:
@@ -418,6 +512,7 @@ async def _prepare_turn_context(
         yield epoch_evt
     system = _system_message_from_text(state.admit.leading_system_text)
     combined_extra = _combine_extras(state.pre_turn_extra, state.pre_tool_extra_next)
+    _arm_replan_from_mailbox(state)
     force_no_tools, doom_loop_note = state.doom_tracker.consume_recovery()
     combined_extra = _combine_extras(combined_extra, doom_loop_note)
     state.system = _append_extra_system_text(system, combined_extra)
@@ -665,9 +760,7 @@ async def _apply_history_load_max_safety(
     if len(state.chat_messages) <= HISTORY_LOAD_MAX:
         return
     dropped = len(state.chat_messages) - HISTORY_LOAD_MAX
-    truncated = truncate_history_preserving_pins(
-        state.chat_messages, max_rows=HISTORY_LOAD_MAX
-    )
+    truncated = truncate_history_preserving_pins(state.chat_messages, max_rows=HISTORY_LOAD_MAX)
     logger.error(
         "history exceeds load max after compact attempt; truncating tail %s",
         kv(
@@ -1580,7 +1673,10 @@ async def _run_inner_core(
     # below (freeze) so the assistant row is durable and not overwritten.
     await _await_history_write(state.assistant_write_task)
 
-    async for verdict_evt in _drain_verdicts(state.ctx, history):
+    grace_s = 0.0
+    if state.ctx.config is not None:
+        grace_s = state.ctx.config.verifier.judge.tail_grace_s
+    async for verdict_evt in _drain_verdicts(state.ctx, history, grace_s=grace_s):
         yield verdict_evt
 
     descriptor_events = await freeze_attachments_in_history(

@@ -199,6 +199,7 @@ MCP_PROGRESSIVE_META_TOOL_DEFS: tuple[ToolDef, ...] = (
         "List MCP resources from connected servers. Optional server filter.",
         _MCP_SERVER_FILTER_SCHEMA,
         parallel_safe=True,
+        read_only=True,
     ),
     ToolDef(
         "read_mcp_resource",
@@ -218,12 +219,14 @@ MCP_PROGRESSIVE_META_TOOL_DEFS: tuple[ToolDef, ...] = (
             "required": ["server", "uri"],
         },
         parallel_safe=True,
+        read_only=True,
     ),
     ToolDef(
         "list_mcp_prompts",
         "List MCP prompt templates from connected servers. Optional server filter.",
         _MCP_SERVER_FILTER_SCHEMA,
         parallel_safe=True,
+        read_only=True,
     ),
     ToolDef(
         "get_mcp_prompt",
@@ -248,6 +251,7 @@ MCP_PROGRESSIVE_META_TOOL_DEFS: tuple[ToolDef, ...] = (
             "required": ["server", "prompt"],
         },
         parallel_safe=True,
+        read_only=True,
     ),
 )
 MCP_PROGRESSIVE_META_TOOLS = frozenset(t.name for t in MCP_PROGRESSIVE_META_TOOL_DEFS)
@@ -302,6 +306,7 @@ SCHEDULED_LOOP_TOOL_DEFS: tuple[ToolDef, ...] = (
             "required": [],
         },
         parallel_safe=True,
+        read_only=True,
         doom_loop_exempt=True,
     ),
     ToolDef(
@@ -647,6 +652,7 @@ def _core_tool_defs(
             ),
             read_schema,
             parallel_safe=True,
+        read_only=True,
         ),
         ToolDef(
             "write_file",
@@ -671,6 +677,7 @@ def _core_tool_defs(
             "(incomplete scans return ok:false / incomplete_scan — narrow root or pattern).",
             glob_schema,
             parallel_safe=True,
+        read_only=True,
         ),
         ToolDef(
             "grep",
@@ -681,6 +688,7 @@ def _core_tool_defs(
             "root or pass file_glob). Capped pages still report total_match_count and next_offset.",
             grep_schema,
             parallel_safe=True,
+        read_only=True,
         ),
         ToolDef(
             "apply_patch",
@@ -699,12 +707,14 @@ def _core_tool_defs(
             "questions prefer `glob`. Prefer `grep` for exact identifiers.",
             search_schema,
             parallel_safe=True,
+        read_only=True,
         ),
         ToolDef(
             "list_skills",
             "List installed skills with names, descriptions, and entry points.",
             list_skills_schema,
             parallel_safe=True,
+        read_only=True,
         ),
     ]
     if include_task_tool:

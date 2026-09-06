@@ -19,7 +19,7 @@ from monkeybot.core.persistence.goal_ledger import (
     Intent,
     Provenance,
 )
-from monkeybot.core.runtime.events import Error, TurnComplete, VerifierVerdict
+from monkeybot.core.runtime.events import Error, ToolCallResult, TurnComplete, VerifierVerdict
 from monkeybot.core.runtime.loop import run
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.core.verifier.ledger import GoalLedger
@@ -317,6 +317,7 @@ async def test_path_constraint_touch_from_ledger() -> None:
     verdicts = mailbox.take_ready("t1")
     assert len(verdicts) == 1
     assert "constraint_touch" in verdicts[0].triggering_signals
+    assert verdicts[0].severity == "none"
     ledger.close()
 
 
@@ -362,6 +363,201 @@ async def test_run_yields_queued_verifier_verdict_before_turn_complete() -> None
 
     assert isinstance(system_rows[0].content[0], SystemNotification)
     assert system_rows[0].content[0].notification_type == "verifierVerdict"
+
+
+def test_cap_severity() -> None:
+    from monkeybot.core.verifier.severity import cap_severity
+
+    assert cap_severity("block", "nudge") == "nudge"
+    assert cap_severity("nudge", "none") == "none"
+    assert cap_severity("none", "nudge") == "none"
+    assert cap_severity("replan", "replan") == "replan"
+
+
+@pytest.mark.asyncio
+async def test_nudge_reaches_next_system_message_once() -> None:
+    from monkeybot.core.hooks import HookManager
+    from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
+    from monkeybot.core.types.content_blocks import Text
+    from monkeybot.core.verifier.actuator import NudgeActuator
+
+    mailbox = VerdictMailbox()
+    mailbox.put(
+        "t1",
+        VerifierVerdict(
+            request_id="r1",
+            verdict_id="v1",
+            checkpoint_id="r1:1",
+            status="drifting",
+            severity="nudge",
+            rationale="constraint_touch",
+            triggering_signals=("constraint_touch",),
+            correction="[Verifier] leave the migrations alone",
+        ),
+    )
+    mgr = HookManager()
+    NudgeActuator(mailbox).register(mgr)
+    ctx = replace(loop_ctx(), verdict_mailbox=mailbox)
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                UsageEvent(input_tokens=1, output_tokens=1),
+                Done(),
+            ],
+            [TextDelta(text="ok"), UsageEvent(input_tokens=1, output_tokens=1), Done()],
+        ]
+    )
+    events = []
+    async for event in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+        hook_manager=mgr,
+    ):
+        events.append(event)
+    assert any(isinstance(e, VerifierVerdict) for e in events)
+    assert len(prov.stream_messages) >= 2
+    second = " ".join(
+        b.text for msg in prov.stream_messages[1] for b in msg.content if isinstance(b, Text)
+    )
+    assert "leave the migrations alone" in second
+
+
+@pytest.mark.asyncio
+async def test_replan_empties_tools_for_exactly_one_turn() -> None:
+    from monkeybot.core.config.settings import VerifierConfig, VerifierEscalationConfig
+    from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
+    from monkeybot.core.types.content_blocks import Text
+    from tests.core.test_doom_loop import ToolsRecordingProvider
+
+    class _Cfg:
+        env_values: dict[str, str] = {}
+        verifier = VerifierConfig(
+            escalation=VerifierEscalationConfig(max_severity="replan"),
+        )
+
+    mailbox = VerdictMailbox()
+    mailbox.put(
+        "t1",
+        VerifierVerdict(
+            request_id="r1",
+            verdict_id="v1",
+            checkpoint_id="r1:1",
+            status="drifting",
+            severity="replan",
+            rationale="constraint_touch",
+            triggering_signals=("constraint_touch",),
+            correction="[Verifier] leave the migrations alone",
+        ),
+    )
+    ctx = replace(loop_ctx(), verdict_mailbox=mailbox, config=_Cfg())  # type: ignore[arg-type]
+    prov = ToolsRecordingProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                UsageEvent(input_tokens=1, output_tokens=1),
+                Done(),
+            ],
+            [TextDelta(text="ok"), UsageEvent(input_tokens=1, output_tokens=1), Done()],
+        ]
+    )
+    events = []
+    async for event in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        events.append(event)
+    assert any(isinstance(e, VerifierVerdict) for e in events)
+    assert prov.stream_tools[0] == []
+    assert prov.stream_tools[1] == ["run_command"]
+    first = " ".join(
+        b.text for msg in prov.stream_messages[0] for b in msg.content if isinstance(b, Text)
+    )
+    assert "leave the migrations alone" in first
+    assert "Do not call tools this turn" in first
+
+
+@pytest.mark.asyncio
+async def test_block_denies_mutating_tool_and_allows_read_only() -> None:
+    from monkeybot.core.config.settings import VerifierConfig, VerifierEscalationConfig
+    from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
+    from monkeybot.core.verifier.inspector import VerifierInspector
+
+    class _Cfg:
+        env_values: dict[str, str] = {}
+        verifier = VerifierConfig(
+            escalation=VerifierEscalationConfig(max_severity="block"),
+        )
+
+    mailbox = VerdictMailbox()
+    mailbox.put(
+        "t1",
+        VerifierVerdict(
+            request_id="r1",
+            verdict_id="v1",
+            checkpoint_id="r1:1",
+            status="drifting",
+            severity="block",
+            rationale="constraint_touch",
+            triggering_signals=("constraint_touch",),
+            correction="[Verifier] leave the migrations alone",
+        ),
+    )
+    ctx = replace(
+        loop_ctx(),
+        verdict_mailbox=mailbox,
+        config=_Cfg(),  # type: ignore[arg-type]
+        tools=[
+            ToolDef("run_command", "Run shell", {}),
+            ToolDef("read_file", "Read", {}, parallel_safe=True, read_only=True),
+        ],
+    )
+    exe = RecordingExecutor()
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                UsageEvent(input_tokens=1, output_tokens=1),
+                Done(),
+            ],
+            [
+                ToolCall(call_id="c2", name="read_file", args={"path": "README.md"}),
+                UsageEvent(input_tokens=1, output_tokens=1),
+                Done(),
+            ],
+            [TextDelta(text="ok"), UsageEvent(input_tokens=1, output_tokens=1), Done()],
+        ]
+    )
+    events = []
+    async for event in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector(), VerifierInspector(mailbox)],
+        tool_executor=exe,
+        max_turns=4,
+    ):
+        events.append(event)
+    assert exe.calls and exe.calls[0].name == "read_file"
+    assert all(c.name != "run_command" for c in exe.calls)
+    assert any(
+        isinstance(e, ToolCallResult)
+        and e.tool == "run_command"
+        and isinstance(e.error, str)
+        and "leave the migrations alone" in e.error
+        for e in events
+    )
 
 
 @pytest.mark.asyncio
@@ -426,6 +622,31 @@ def test_mailbox_caps_per_thread_and_evicts_idle_threads() -> None:
         mailbox.put(f"t{i}", _verdict(i))
     assert mailbox.take_ready("t0") == []
     assert len(mailbox.take_ready(f"t{_THREAD_CAP}")) == 1
+
+
+def test_mailbox_nudge_overwrites_and_last_caps_after_drain() -> None:
+    from monkeybot.core.verifier.mailbox import _THREAD_CAP
+
+    mailbox = VerdictMailbox()
+    mailbox.put_nudge("t1", "first")
+    mailbox.put_nudge("t1", "second")
+    assert mailbox.take_nudge("t1") == "second"
+    assert mailbox.take_nudge("t1") is None
+
+    def _verdict(i: int) -> VerifierVerdict:
+        return VerifierVerdict(
+            request_id="r",
+            verdict_id=str(i),
+            checkpoint_id=f"r:{i}",
+            status="drifting",
+            severity="none",
+        )
+
+    for i in range(_THREAD_CAP + 1):
+        mailbox.put(f"t{i}", _verdict(i))
+        mailbox.take_ready(f"t{i}")
+    assert mailbox.last("t0") is None
+    assert mailbox.last(f"t{_THREAD_CAP}") is not None
 
 
 def test_done_when_requires_path_boundary() -> None:
