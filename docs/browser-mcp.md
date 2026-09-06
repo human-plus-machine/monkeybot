@@ -197,7 +197,7 @@ Navigation, interaction, screenshots, tabs, waits, playbooks (`browser_list_play
 
 A sealed login runs in the tab the **user** has focused, because typing the credential requires Spaces to detach CDP from that tab first. Ordinary `browser_*` calls address tabs by CDP session id, so after `browser_switch_tab` — or if the user clicks another tab — the tab the agent is driving and the tab that receives the password are different ones.
 
-Pass `expected_origin` to make the bridge refuse (`focused tab is on a different origin`) instead of signing in somewhere unintended, and check the returned `origin`. A saved credential is scoped to its own origin and must be marked for agent use, so a mismatch can never disclose another site's password — but it can still submit a login the user did not ask for.
+Pass `expected_origin` to make the bridge refuse (`focused tab is on a different origin`) instead of signing in somewhere unintended, and check the returned `origin`. A saved credential is scoped to its own origin and needs its own grant (`Never` / `Ask me` / `Always`) before the agent can use it, so a mismatch can never disclose another site's password — but it can still submit a login the user did not ask for.
 
 A Spaces build predating `expectedOrigin` support ignores it and echoes no `origin`. Since that login cannot be verified after the fact, `browser_login` reports `in-app browser could not verify the origin` rather than a confirmed success; update Spaces to get the check.
 
@@ -206,6 +206,18 @@ Errors raised by browser tools are scrubbed of `?token=` values before they reac
 ### `browser_login` fails closed
 
 Spaces verifies its own scrub before returning: after typing the password and submitting, it hashes every editable value left on the page and confirms none of them match what it just typed. If that check cannot be completed — the login did not clearly succeed or fail, an MFA interstitial appeared, or a same-origin iframe could not be checked — Spaces navigates the tab to the site's origin root itself and `browser_login` returns `login needs your attention` instead of guessing. Do not retry the call or attempt to type the password yourself when you see this error; tell the user to finish signing in in the Spaces browser. Calling `browser_get_text` or `browser_get_elements` afterward is safe either way: on this outcome, the page has already been navigated away from any form that held the secret.
+
+### Grants and "ask" mode
+
+Each saved credential has an agent-access grant: `Never` (default for imported passwords — the agent cannot use it at all), `Ask me` (the user is prompted every time, unless the request happens again within an already-approved run), or `Always` (a standing grant, replacing the old "Agent" checkbox). Grants can also be scoped to one run — an "Allow once" approval covers only the routine or chat that asked for it, and expires after 30 minutes or one use, whichever comes first.
+
+In `Ask me` mode, `browser_login` blocks — up to 150s — while Spaces shows the user a prompt ("*Run* wants to sign in to *origin* as *username*") with "Allow once", "Always allow", and "Don't allow" buttons, gated by a click plus Touch ID on macOS. Three outcomes reach the agent:
+
+- `waiting for your approval` — the user did not respond within the window, or another approval was already pending. Do not retry; tell the user their approval is (or was) needed.
+- `agent access denied for this site` — the user declined, or the credential's grant is `Never`.
+- `grant expired` — a scoped grant that once covered this exact run lapsed with no `Ask me` fallback to re-prompt through.
+
+Every credential use — granted, denied, or needing attention — is recorded in Spaces' "Connected sites" panel (reachable from the Saved passwords strip) along with which run used it.
 
 ### Default: indexed DOM interaction (no screenshots needed)
 

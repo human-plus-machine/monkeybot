@@ -24,6 +24,9 @@ _LOGIN_PUBLIC_ERRORS = frozenset(
         "no saved password for this site",
         "this password is not allowed for agent use",
         "login needs your attention",
+        "waiting for your approval",
+        "agent access denied for this site",
+        "grant expired",
         "unexpected login response",
         "login failed",
     }
@@ -32,7 +35,8 @@ _LOGIN_PUBLIC_ERRORS = frozenset(
 # handler. The empty handler itself is then dropped (no *_open methods),
 # so loopback requests never honor HTTP_PROXY.
 _LOOPBACK_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-_LOGIN_TIMEOUT_S = 90
+# 150s covers the bridge's 120s "ask" approval window plus normal login time.
+_LOGIN_TIMEOUT_S = 150
 
 
 def _format_loopback_host(hostname: str) -> str:
@@ -111,6 +115,7 @@ def _sealed_login(username: str | None, expected_origin: str | None) -> dict[str
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {token}",
+        **in_app_cdp._run_headers(),
     }
     req = urllib.request.Request(f"{http}/json/login", data=payload, headers=headers, method="POST")
     try:
