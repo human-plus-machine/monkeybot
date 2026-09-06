@@ -23,15 +23,16 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 
 from monkeybot.core.llm.provider import Message
-from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolResponse
+from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,11 @@ _BRIDGE_URL_FILE = Path.home() / ".monkeybot" / "runtime" / "in-app-cdp-url"
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 _SCAN_TIMEOUT_S = 5.0
 _SCAN_MAX_BATCH_BYTES = 2 * 1024 * 1024
+# A digest confirmed clean stops being trusted after this long: the process
+# holds this cache for the life of the gateway, and a password saved (or a
+# canary generated) mid-session must eventually be caught even though its
+# exact text was scanned clean earlier in that same session.
+_CLEAN_CACHE_TTL_S = 30.0
 
 # Passing ProxyHandler({}) makes urllib skip its default env-based proxy
 # handler, so loopback requests never honor HTTP_PROXY (mirrors login.py).
@@ -112,22 +118,30 @@ class SecretScanner:
     """POSTs new text to Spaces' `/json/scan` bridge endpoint.
 
     A content-hash cache skips re-scanning text already confirmed clean, so
-    unchanged history is not re-sent every turn. If Spaces is not running
-    (no bridge file, or the request fails), scanning is a no-op — logged
-    once at info — rather than blocking the agent: the egress gate is a
-    backstop, not a hard dependency the app must always satisfy.
+    unchanged history is not re-sent every turn. Each cache entry expires
+    after `_CLEAN_CACHE_TTL_S`: this process holds the cache for the whole
+    gateway lifetime, and the bridge's hot set can grow after a digest was
+    cached (a password saved, a canary registered) — an unbounded cache would
+    never catch that text again even though it now matches. If Spaces is not
+    running (no bridge file, or the request fails), scanning is a no-op —
+    logged once at info — rather than blocking the agent: the egress gate is
+    a backstop, not a hard dependency the app must always satisfy.
     """
 
-    def __init__(self) -> None:
-        self._clean_digests: set[str] = set()
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clean_digests: dict[str, float] = {}
         self._warned_no_app = False
+        self._clock = clock
 
     def scan(self, texts: Sequence[str]) -> list[Hit]:
         if not texts:
             return []
+        now = self._clock()
         to_check: list[tuple[int, str]] = []
         for i, text in enumerate(texts):
-            if hashlib.sha256(text.encode("utf-8")).hexdigest() in self._clean_digests:
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            cached_at = self._clean_digests.get(digest)
+            if cached_at is not None and now - cached_at < _CLEAN_CACHE_TTL_S:
                 continue
             to_check.append((i, text))
         if not to_check:
@@ -140,13 +154,34 @@ class SecretScanner:
                 self._warned_no_app = True
             return []
 
-        hits: list[Hit] = []
+        # A text whose JSON encoding alone would already exceed the batch cap
+        # can never be sent — the bridge enforces the same cap on the request
+        # body and returns 413, which `_scan_batch` treats as "unresolved"
+        # (retry later, don't assume clean). Left unhandled, an oversized text
+        # would silently never be scanned and would ride out unredacted on
+        # every turn. Fail closed instead: treat it as a hit without a round
+        # trip, since there is no way to confirm it clean.
+        oversized = [
+            (i, t) for i, t in to_check if len(t.encode("utf-8")) > _SCAN_MAX_BATCH_BYTES
+        ]
+        scannable = [
+            (i, t) for i, t in to_check if len(t.encode("utf-8")) <= _SCAN_MAX_BATCH_BYTES
+        ]
+        if oversized:
+            logger.warning(
+                "secret scan: %d text(s) exceed the %d-byte batch cap; redacting without a "
+                "scan round trip",
+                len(oversized),
+                _SCAN_MAX_BATCH_BYTES,
+            )
+        hits: list[Hit] = [Hit(index=i, kind="secret") for i, _ in oversized]
+
         # Both sets below are indices into the original `texts` argument
         # (never batch-local): each batch's tuples already carry that
         # original index, so results from every batch merge into one space.
-        hit_indices: set[int] = set()
+        hit_indices: set[int] = {i for i, _ in oversized}
         scanned_indices: set[int] = set()
-        for batch in _chunk_by_bytes(to_check, _SCAN_MAX_BATCH_BYTES):
+        for batch in _chunk_by_bytes(scannable, _SCAN_MAX_BATCH_BYTES):
             batch_hits, batch_hit_indices, batch_scanned_indices = self._scan_batch(
                 batch, http, token
             )
@@ -158,10 +193,13 @@ class SecretScanner:
         # request failed (or returned an unparseable body) contributes no
         # scanned indices, so its texts are neither cached as clean nor
         # reported as a hit — left unresolved to be retried on the next scan
-        # rather than assumed safe.
+        # rather than assumed safe. An oversized text is never in
+        # `scanned_indices` either, so it is likewise never cached as clean —
+        # every future scan of the same text redacts it again.
         for original_index, text in to_check:
             if original_index in scanned_indices and original_index not in hit_indices:
-                self._clean_digests.add(hashlib.sha256(text.encode("utf-8")).hexdigest())
+                digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                self._clean_digests[digest] = now
         return hits
 
     def _scan_batch(
@@ -247,10 +285,18 @@ class ScanUnit:
 
 
 def extract_scan_units(messages: Sequence[Message]) -> list[ScanUnit]:
-    """Assistant `Text` blocks, and `ToolResponse`-nested `Text` blocks only.
+    """Assistant `Text`/`ToolRequest` blocks, and `ToolResponse`-nested `Text`
+    blocks only.
 
-    Deliberately skips any `Text` block that is not inside a `ToolResponse` —
-    that is real user-authored text, which must never be scanned or redacted.
+    A `ToolRequest`'s `args` are scanned too: a call blocked by the phase 5.3
+    tool-argument gate (core_tool_executor.py) still leaves the model's
+    `ToolRequest` sitting in `messages` with the secret in its `args`, which
+    would otherwise ride out on the *next* provider call untouched by this
+    scan (only the tool's own dispatch was blocked, not the transcript).
+
+    Deliberately skips any `Text` block that is not inside a `ToolResponse` or
+    an assistant message — that is real user-authored text, which must never
+    be scanned or redacted.
     """
     units: list[ScanUnit] = []
     for m_idx, message in enumerate(messages):
@@ -258,6 +304,8 @@ def extract_scan_units(messages: Sequence[Message]) -> list[ScanUnit]:
             for b_idx, block in enumerate(message.content):
                 if isinstance(block, Text) and block.text:
                     units.append(ScanUnit(m_idx, (b_idx,), block.text))
+                elif isinstance(block, ToolRequest) and block.args:
+                    units.append(ScanUnit(m_idx, (b_idx,), json.dumps(block.args, ensure_ascii=False)))
         else:
             for b_idx, block in enumerate(message.content):
                 if isinstance(block, ToolResponse):
@@ -292,7 +340,15 @@ def redact_units(
         tool_response_paths: dict[int, set[int]] = {}
         for path in paths:
             if len(path) == 1:
-                new_content[path[0]] = Text(text=WITHHELD_TEXT)
+                block = new_content[path[0]]
+                if isinstance(block, ToolRequest):
+                    # Keep `id`/`name` intact — a later `ToolResponse` in this
+                    # same delta correlates back to this call's `id`, and the
+                    # provider rejects a tool_use/tool_result pair that
+                    # doesn't match up.
+                    new_content[path[0]] = replace(block, args={"redacted": WITHHELD_TEXT})
+                else:
+                    new_content[path[0]] = Text(text=WITHHELD_TEXT)
             else:
                 tool_response_paths.setdefault(path[0], set()).add(path[1])
         for b_idx, r_indices in tool_response_paths.items():

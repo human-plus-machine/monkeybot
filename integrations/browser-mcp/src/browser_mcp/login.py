@@ -47,6 +47,7 @@ _PASSKEY_PUBLIC_ERRORS = frozenset(
         "login needs your attention",
         "waiting for your approval",
         "agent access denied for this site",
+        "grant expired",
         "unexpected login response",
         "login failed",
     }

@@ -586,7 +586,7 @@
       "name": "browser_list_playbooks"
     },
     {
-      "description": "Log in with a saved Spaces password without revealing the credential.\n\nCall this only when the user asked to sign in. Do not type or read the\npassword. Returns {ok, loggedIn, origin} \u2014 never the password value.\n\nThis signs in to the tab the user has focused, which is not necessarily the\ntab your other browser_* calls address. Pass expected_origin (e.g.\n\"https://example.com\") to make the bridge refuse rather than sign in to a\ndifferent site; always check the returned origin before reporting success.\n",
+      "description": "Log in with a saved Spaces password without revealing the credential.\n\nCall this only when the user asked to sign in. Do not type or read the\npassword. Returns {ok, loggedIn, origin} \u2014 never the password value \u2014\nplus two optional fields:\n- mfa: \"none\" | \"completed\" | \"needed\" \u2014 whether the sealed login also\n  handled a one-time code, and whether the site still needs one from you.\n- mode: \"keystroke\" | \"network\" | \"passkey\" \u2014 how the credential was\n  delivered; informational only, does not change what you do next.\n\nThis signs in to the tab the user has focused, which is not necessarily the\ntab your other browser_* calls address. Pass expected_origin (e.g.\n\"https://example.com\") to make the bridge refuse rather than sign in to a\ndifferent site; always check the returned origin before reporting success.\n",
       "inputSchema": {
         "properties": {
           "expected_origin": {

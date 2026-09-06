@@ -208,7 +208,13 @@ def _scan_trace_values(attrs: dict[str, Any], *, scanner: SecretScanner) -> dict
     under a key the denylist above didn't recognize (e.g. embedded in prose, not
     named ``*_token``/``*_secret``). No-ops (logs once, at scanner level) when
     Spaces is not running — key-based filtering above remains the first line
-    regardless of whether this value-level scan can run."""
+    regardless of whether this value-level scan can run.
+
+    ``scanner.scan`` is synchronous urllib, called here unwrapped (unlike the
+    turn-loop and tool-arg call sites): `SqliteSpanExporter.export` runs on
+    `BatchSpanProcessor`'s own background thread, not the gateway's asyncio
+    event loop, so it is not on the hot path a slow scan could stall.
+    """
     string_keys = [k for k, v in attrs.items() if isinstance(v, str) and v]
     if not string_keys:
         return attrs

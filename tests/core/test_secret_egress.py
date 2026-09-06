@@ -74,11 +74,32 @@ def test_extract_scan_units_finds_tool_response_text_not_sibling_user_text() -> 
     assert units == [ScanUnit(message_index=0, block_path=(0, 0), text="leaked-value")]
 
 
-def test_extract_scan_units_ignores_non_text_blocks() -> None:
+def test_extract_scan_units_ignores_empty_tool_request_args() -> None:
     messages = [
         Message(role="assistant", content=[ToolRequest(id="c1", name="run_command", args={})]),
     ]
     assert extract_scan_units(messages) == []
+
+
+def test_extract_scan_units_finds_tool_request_args() -> None:
+    """A blocked tool call's ToolRequest still carries the secret in `args` —
+    it must be scanned too, not just the assistant text around it."""
+    messages = [
+        Message(
+            role="assistant",
+            content=[
+                ToolRequest(id="c1", name="run_command", args={"command": "echo the-secret"}),
+            ],
+        )
+    ]
+    units = extract_scan_units(messages)
+    assert units == [
+        ScanUnit(
+            message_index=0,
+            block_path=(0,),
+            text=json.dumps({"command": "echo the-secret"}, ensure_ascii=False),
+        )
+    ]
 
 
 def test_redact_units_replaces_assistant_text() -> None:
@@ -110,6 +131,25 @@ def test_redact_units_replaces_only_tool_response_result_not_other_content() -> 
     inner = tool_response.result[0]
     assert isinstance(inner, Text)
     assert inner.text == "[withheld: credential detected]"
+
+
+def test_redact_units_redacts_tool_request_args_keeping_id_and_name() -> None:
+    """`id`/`name` survive redaction so a sibling ToolResponse still correlates."""
+    messages = [
+        Message(
+            role="assistant",
+            content=[
+                ToolRequest(id="c1", name="run_command", args={"command": "echo the-secret"}),
+            ],
+        )
+    ]
+    units = extract_scan_units(messages)
+    redacted = redact_units(messages, units, {0})
+    block = redacted[0].content[0]
+    assert isinstance(block, ToolRequest)
+    assert block.id == "c1"
+    assert block.name == "run_command"
+    assert block.args == {"redacted": "[withheld: credential detected]"}
 
 
 def test_redact_units_leaves_unflagged_messages_untouched() -> None:
@@ -217,6 +257,38 @@ def test_scanner_caches_clean_texts_across_calls(
     assert call_count["n"] == 2
 
 
+def test_scanner_clean_cache_expires_after_ttl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A digest cached clean is re-scanned once the TTL elapses — e.g. a
+    password saved mid-session must eventually be caught even if its exact
+    text was scanned clean earlier in the same process lifetime."""
+    _publish_bridge(tmp_path, monkeypatch)
+    call_count = {"n": 0}
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeResponse:
+        call_count["n"] += 1
+        return _FakeResponse({"hits": []})
+
+    monkeypatch.setattr("monkeybot.core.context.secret_egress._LOOPBACK_OPENER.open", fake_open)
+
+    clock = {"t": 0.0}
+    scanner = SecretScanner(clock=lambda: clock["t"])
+
+    scanner.scan(["clean"])
+    assert call_count["n"] == 1
+
+    clock["t"] += 1.0  # well within the TTL
+    scanner.scan(["clean"])
+    assert call_count["n"] == 1
+
+    from monkeybot.core.context.secret_egress import _CLEAN_CACHE_TTL_S
+
+    clock["t"] += _CLEAN_CACHE_TTL_S
+    scanner.scan(["clean"])
+    assert call_count["n"] == 2
+
+
 def test_scanner_does_not_cache_a_failed_batch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -256,6 +328,38 @@ def test_scanner_batches_by_byte_size(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setattr("monkeybot.core.context.secret_egress._LOOPBACK_OPENER.open", fake_open)
 
     scanner = SecretScanner()
-    scanner.scan(["aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"])
+    # Each item (6 bytes) fits under the 10-byte cap on its own, but any two
+    # together (12 bytes) do not — so this still forces one item per batch,
+    # without tripping the separate oversized-single-item path.
+    scanner.scan(["aaaaaa", "bbbbbb", "cccccc"])
     assert len(calls) == 3
-    assert [c[0] for c in calls] == ["aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc"]
+    assert [c[0] for c in calls] == ["aaaaaa", "bbbbbb", "cccccc"]
+
+
+def test_scanner_fails_closed_on_text_too_large_to_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A text too big to fit in even its own batch is redacted without a
+    round trip, rather than silently passed through unscanned (and thus
+    unredacted) because the bridge would reject the oversized request."""
+    _publish_bridge(tmp_path, monkeypatch)
+    monkeypatch.setattr("monkeybot.core.context.secret_egress._SCAN_MAX_BATCH_BYTES", 10)
+    calls: list[list[str]] = []
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeResponse:
+        texts = json.loads(req.data.decode("utf-8"))["texts"]
+        calls.append(texts)
+        return _FakeResponse({"hits": []})
+
+    monkeypatch.setattr("monkeybot.core.context.secret_egress._LOOPBACK_OPENER.open", fake_open)
+
+    scanner = SecretScanner()
+    hits = scanner.scan(["short", "this-text-is-way-over-the-ten-byte-cap"])
+
+    assert hits == [Hit(index=1, kind="secret")]
+    # Only the scannable text is ever sent to the bridge.
+    assert calls == [["short"]]
+
+    # And it is never cached as clean, so a later scan redacts it again too.
+    hits_again = scanner.scan(["this-text-is-way-over-the-ten-byte-cap"])
+    assert hits_again == [Hit(index=0, kind="secret")]

@@ -672,7 +672,36 @@ def _built_in_tool_error(
 # provider-egress scan in loop_hooks.py, which only sees text already headed
 # to the provider.
 _EGRESS_SCAN_FILE_WRITE_TOOLS = frozenset({"write_file", "replace_in_file", "apply_patch"})
-_EGRESS_SCAN_BROWSER_TOOLS = frozenset({"browser_navigate", "browser_input"})
+
+# Every browser_* tool is scanned except this small read-only/no-exfil-path
+# set (and the sealed browser_login/browser_passkey pair, which never see raw
+# credential material — they take a grant-scoped username/origin, not a
+# secret). An allowlist of "the browser tools that can leak" bit-rots the
+# moment browser-mcp adds one; a denylist of "the ones that provably can't"
+# does not.
+_EGRESS_SCAN_BROWSER_EXEMPT = frozenset(
+    {
+        "browser_login",
+        "browser_passkey",
+        "browser_screenshot",
+        "browser_get_elements",
+        "browser_get_text",
+        "browser_page_info",
+        "browser_list_playbooks",
+        "browser_read_playbook",
+        "browser_read_tabs",
+        "browser_tabs",
+        "browser_wait_for",
+        "browser_wait_idle",
+        "browser_stop",
+        "browser_switch_tab",
+        "browser_close_tab",
+        "browser_click_by_index",
+        "browser_select_by_index",
+        "browser_press_key",
+        "browser_scroll",
+    }
+)
 
 
 def _bare_tool_name(name: str, mcp: MCPClientPort) -> str:
@@ -693,7 +722,9 @@ def _tool_needs_egress_scan(name: str, mcp: MCPClientPort) -> bool:
     if name == "run_command" or name in _EGRESS_SCAN_FILE_WRITE_TOOLS:
         return True
     bare = _bare_tool_name(name, mcp)
-    return bare.startswith("web_") or bare in _EGRESS_SCAN_BROWSER_TOOLS
+    if bare.startswith("web_"):
+        return True
+    return bare.startswith("browser_") and bare not in _EGRESS_SCAN_BROWSER_EXEMPT
 
 
 _EGRESS_BLOCKED_TOOL_ERROR = _built_in_tool_error(
@@ -716,7 +747,9 @@ async def _scan_tool_args_for_egress(
     """Returns a denial result if `args` trip the scan; ``None`` to proceed normally."""
     if not _tool_needs_egress_scan(name, mcp):
         return None
-    hits = (scanner or get_scanner()).scan([_j(args)])
+    # SecretScanner.scan is synchronous urllib — off the event loop so one
+    # slow /json/scan round trip can't stall every other in-flight turn.
+    hits = await asyncio.to_thread((scanner or get_scanner()).scan, [_j(args)])
     if not hits:
         return None
     scan_kind: Literal["secret", "canary"] = (

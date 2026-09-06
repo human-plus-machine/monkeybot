@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Sequence
 from typing import Any, Literal
@@ -123,13 +124,22 @@ async def _scan_and_redact_outbound(
     turn stream — the caller owns that offset.
 
     Returns `(possibly-redacted delta, events to yield, should_end_turn)`.
-    `should_end_turn` is true only when `MONKEYBOT_RUN_ID` is set (a
+    `should_end_turn` is true only when `MONKEYBOT_RUN_KIND=routine` (a
     routine/queue task): interactive chats get a notice but keep running
     with the secret withheld (phase 5.4's "surface a toast, do not kill the
     session"); routines fail the turn visibly instead of silently sending a
     scrubbed message to the provider.
+
+    `MONKEYBOT_RUN_ID` is grant scope, not execution kind — it is set to a
+    gateway session key for interactive chats too, so its mere presence
+    cannot distinguish a routine from a chat.
     """
-    outcome = scan_and_redact(delta_messages, scanner=scanner or get_scanner())
+    resolved_scanner = scanner or get_scanner()
+    # scan_and_redact -> SecretScanner.scan is synchronous urllib — off the
+    # event loop so one slow /json/scan round trip (up to the 5s timeout,
+    # times however many batches a large turn needs) can't stall the whole
+    # gateway process.
+    outcome = await asyncio.to_thread(scan_and_redact, delta_messages, scanner=resolved_scanner)
     if not outcome.hits:
         return delta_messages, [], False
 
@@ -139,7 +149,7 @@ async def _scan_and_redact_outbound(
     events: list[AgentEvent] = [
         CredentialEgressBlockedEvent(request_id=request_id, scan_kind=scan_kind)
     ]
-    is_routine = bool(os.environ.get("MONKEYBOT_RUN_ID"))
+    is_routine = os.environ.get("MONKEYBOT_RUN_KIND", "").strip().lower() == "routine"
     if is_routine:
         events.append(
             Error(

@@ -1143,6 +1143,28 @@ def test_sealed_passkey_reads_allowlisted_error_from_http_400(
     }
 
 
+def test_sealed_passkey_passes_through_grant_expired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Passkey shares the login grant check; a stale grant must read as 'grant
+    expired', not collapse to 'login failed' and prompt a pointless retry."""
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps({"ok": False, "loggedIn": False, "error": "grant expired"}).encode(
+        "utf-8"
+    )
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        raise HTTPError(req.full_url, 400, "Bad Request", hdrs=None, fp=BytesIO(payload))
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_passkey(None) == {
+        "ok": False,
+        "loggedIn": False,
+        "error": "grant expired",
+    }
+
+
 def test_sealed_passkey_drops_unallowlisted_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1127,7 +1127,7 @@ async def _scan_outbound_before_provider_call(state: _TurnState) -> AsyncIterato
     LLM provider. Runs before the transcript write too, so a caught secret
     never lands durably on disk either.
 
-    On a hit during a routine (``MONKEYBOT_RUN_ID`` set), sets
+    On a hit during a routine (``MONKEYBOT_RUN_KIND=routine``), sets
     ``state.action = "return"`` so the caller ends the turn without calling
     the provider at all — an interactive chat instead gets the notice and
     continues with the redacted messages.

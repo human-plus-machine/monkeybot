@@ -203,7 +203,12 @@ def browser_login(username: str | None = None, expected_origin: str | None = Non
     """Log in with a saved Spaces password without revealing the credential.
 
     Call this only when the user asked to sign in. Do not type or read the
-    password. Returns {ok, loggedIn, origin} — never the password value.
+    password. Returns {ok, loggedIn, origin} — never the password value —
+    plus two optional fields:
+    - mfa: "none" | "completed" | "needed" — whether the sealed login also
+      handled a one-time code, and whether the site still needs one from you.
+    - mode: "keystroke" | "network" | "passkey" — how the credential was
+      delivered; informational only, does not change what you do next.
 
     This signs in to the tab the user has focused, which is not necessarily the
     tab your other browser_* calls address. Pass expected_origin (e.g.

