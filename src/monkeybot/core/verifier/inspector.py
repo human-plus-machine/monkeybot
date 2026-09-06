@@ -18,12 +18,16 @@ logger = logging.getLogger(__name__)
 def _is_read_only(name: str, tools: Sequence[ToolDef]) -> bool:
     for tool in tools:
         if tool.name == name:
-            return tool.parallel_safe
+            return tool.read_only
     return False
 
 
 class VerifierInspector:
-    """Deny mutating tools when the latest capped verdict is ``block``. Fail-open."""
+    """Deny mutating tools when the latest capped verdict is ``block``. Fail-open.
+
+    A ``block`` is request-scoped: it expires when ``request_id`` changes so a
+    later user message is not stuck behind a stale deny.
+    """
 
     def __init__(self, mailbox: VerdictMailbox) -> None:
         self._mailbox = mailbox
@@ -32,6 +36,8 @@ class VerifierInspector:
         try:
             last = self._mailbox.last(ctx.thread_id)
             if last is None or last.severity == "none":
+                return Decision(kind="allow")
+            if last.request_id and last.request_id != ctx.request_id:
                 return Decision(kind="allow")
             max_sev = "nudge"
             if ctx.config is not None:

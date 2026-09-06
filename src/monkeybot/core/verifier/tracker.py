@@ -18,18 +18,20 @@ from monkeybot.core.verifier.judge import JudgeWorker
 from monkeybot.core.verifier.ledger import GoalLedger
 from monkeybot.core.verifier.mailbox import VerdictMailbox
 from monkeybot.core.verifier.match import (
+    LEDGER_SIGNALS,
     READ_TOOLS,
     WRITE_TOOLS,
     constraint_matches,
     glob_match,
     path_args,
+    verdict_status,
 )
+from monkeybot.core.verifier.port import EvidenceBundle
 
 logger = logging.getLogger(__name__)
 
 _THREAD_STATE_CAP = 256
 _BUDGET_FRACTION = 0.5
-_LEDGER_SIGNALS = frozenset({"constraint_touch", "repeat_correction", "done_unmet"})
 
 
 @dataclass
@@ -234,14 +236,12 @@ class ProgressTracker:
         if not signals or state.emitted_this_turn:
             return
         inner = payload.inner_turn or state.inner_turn or 1
-        ledger_hit = [s for s in signals if s in _LEDGER_SIGNALS]
-        other = [s for s in signals if s not in _LEDGER_SIGNALS]
+        ledger_hit = [s for s in signals if s in LEDGER_SIGNALS]
+        other = [s for s in signals if s not in LEDGER_SIGNALS]
         signals = ledger_hit if inner < self._config.min_turn_before_verdict else ledger_hit + other
         if not signals:
             return
         if self._judge is not None:
-            from monkeybot.core.verifier.port import EvidenceBundle
-
             self._judge.enqueue(
                 EvidenceBundle(
                     thread_id=payload.thread_id,
@@ -252,23 +252,16 @@ class ProgressTracker:
             )
             state.emitted_this_turn = True
             return
-        status = (
-            "stuck" if any(s in {"error_streak", "done_unmet"} for s in signals) else "drifting"
-        )
+        status, confidence = verdict_status(signals)
         verdict = VerifierVerdict(
             request_id=payload.request_id,
             verdict_id=str(uuid.uuid4()),
             checkpoint_id=f"{payload.request_id}:{inner}",
             status=status,
-            severity="nudge" if ledger_hit else "none",
-            confidence=0.9 if ledger_hit else 0.6,
+            severity="none",
+            confidence=confidence,
             rationale=", ".join(signals),
             triggering_signals=tuple(signals),
-            correction=(
-                f"[Verifier] {', '.join(signals)}. Stay on the user's stated goal."
-                if ledger_hit
-                else None
-            ),
         )
         self._mailbox.put(payload.thread_id, verdict)
         state.emitted_this_turn = True

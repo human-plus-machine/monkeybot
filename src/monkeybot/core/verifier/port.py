@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -18,7 +19,9 @@ class EvidenceBundle:
 
 
 class VerifierPort(Protocol):
-    async def verify(self, intent: ResolvedIntent | None, evidence: EvidenceBundle) -> VerifierVerdict:
+    async def verify(
+        self, intent: ResolvedIntent | None, evidence: EvidenceBundle
+    ) -> VerifierVerdict:
         """Return a verdict. Callers fail open if this raises."""
         ...
 
@@ -35,8 +38,6 @@ class ScriptedVerifier:
         self, intent: ResolvedIntent | None, evidence: EvidenceBundle
     ) -> VerifierVerdict:
         del intent
-        import asyncio
-
         self.calls.append(evidence)
         if self._delay_s > 0:
             await asyncio.sleep(self._delay_s)

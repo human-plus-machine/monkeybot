@@ -55,6 +55,7 @@ from monkeybot.core.types.content_blocks import (
 from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.core.verifier.mailbox import VerdictMailbox
+from monkeybot.core.verifier.severity import cap_severity
 from monkeybot.providers._utils import note_anthropic_token_estimate_observation
 from monkeybot.providers.pricing import estimate_cost
 
@@ -289,7 +290,6 @@ async def _drain_verdicts(
     max_sev = "nudge"
     if ctx.config is not None:
         max_sev = ctx.config.verifier.escalation.max_severity
-    from monkeybot.core.verifier.severity import cap_severity
 
     for verdict in ready:
         if not isinstance(verdict, VerifierVerdict):

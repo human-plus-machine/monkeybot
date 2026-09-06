@@ -79,7 +79,7 @@ A new session should read this section, then Part 8. Phases 0–6 are in the tre
 
 **Phase 6 left in the tree (do not recreate):**
 
-- `VerifierInspector` in `build_inspectors()` / `build_verifier()`; reads `mailbox.last`, caps with `max_severity`, denies non-`parallel_safe` tools.
+- `VerifierInspector` in `build_inspectors()` / `build_verifier()`; reads `mailbox.last`, caps with `max_severity`, denies non-`read_only` tools. A `block` is request-scoped (`last.request_id` must match).
 - Drain `set_last` so cached severity matches the cap.
 - Tests: `test_block_denies_mutating_tool_and_allows_read_only`.
 

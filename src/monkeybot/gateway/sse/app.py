@@ -15,7 +15,7 @@ import os
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -87,6 +87,13 @@ from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector,
 from monkeybot.core.tools.loop_inspector import LoopStartInspector
 from monkeybot.core.tools.permission import try_load_permission_inspector
 from monkeybot.core.types.content_blocks import ContentBlock, Text
+from monkeybot.core.verifier.actuator import NudgeActuator
+from monkeybot.core.verifier.classify import ProviderClassifier
+from monkeybot.core.verifier.inspector import VerifierInspector
+from monkeybot.core.verifier.judge import JudgeWorker, SignalJudge
+from monkeybot.core.verifier.ledger import GoalLedger
+from monkeybot.core.verifier.mailbox import VerdictMailbox
+from monkeybot.core.verifier.tracker import ProgressTracker
 from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env, log_gateway_startup
 from monkeybot.gateway.sse.loop_port import UsagePort
 from monkeybot.gateway.sse.models import AgentUsageResponse, SessionUsageResponse
@@ -101,13 +108,6 @@ from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
 from monkeybot.todo_list import TodoListStore, TodoListTool
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
-
-if TYPE_CHECKING:
-    from monkeybot.core.verifier.actuator import NudgeActuator
-    from monkeybot.core.verifier.judge import JudgeWorker
-    from monkeybot.core.verifier.ledger import GoalLedger
-    from monkeybot.core.verifier.mailbox import VerdictMailbox
-    from monkeybot.core.verifier.tracker import ProgressTracker
 
 logger = logging.getLogger(__name__)
 
@@ -309,8 +309,6 @@ class GatewayRuntime:
                 if store is None:
                     logger.warning("goal ledger skipped: backend has no durable ledger")
                 else:
-                    from monkeybot.core.verifier import GoalLedger, ProviderClassifier
-
                     classifier = ProviderClassifier(
                         lambda: self.provider,
                         model=cfg.verifier.ledger.model,
@@ -325,14 +323,9 @@ class GatewayRuntime:
                         kv(model=cfg.verifier.ledger.model),
                     )
         if cfg.verifier.tracker.enabled:
-            from monkeybot.core.verifier.mailbox import VerdictMailbox
-            from monkeybot.core.verifier.tracker import ProgressTracker
-
             self.verdict_mailbox = VerdictMailbox()
             judge = None
             if cfg.verifier.judge.enabled:
-                from monkeybot.core.verifier.judge import JudgeWorker, SignalJudge
-
                 judge = JudgeWorker(
                     self.verdict_mailbox,
                     SignalJudge(),
@@ -350,16 +343,12 @@ class GatewayRuntime:
                 config=cfg.verifier.tracker,
                 judge=judge,
             )
-            from monkeybot.core.verifier.actuator import NudgeActuator
-
             self.nudge_actuator = NudgeActuator(self.verdict_mailbox)
             logger.info("progress tracker enabled")
         self._attach_verifier_inspector()
 
     def _attach_verifier_inspector(self) -> None:
         """Keep ``VerifierInspector`` in the chain iff a mailbox exists."""
-        from monkeybot.core.verifier.inspector import VerifierInspector
-
         kept = [insp for insp in self.inspectors if not isinstance(insp, VerifierInspector)]
         if self.verdict_mailbox is not None:
             kept.append(VerifierInspector(self.verdict_mailbox))
@@ -489,7 +478,9 @@ class GatewayRuntime:
                 kv(slice="memory_hooks", revision=cfg.revision),
             )
         if VERIFIER_DIFF_KEY in diff.changed_env_keys:
-            storage = getattr(fastapi_app.state, "storage", None) if fastapi_app is not None else None
+            storage = (
+                getattr(fastapi_app.state, "storage", None) if fastapi_app is not None else None
+            )
             self.build_verifier(cfg, storage=storage)
             self.rebuild_memory_hooks(cfg, fastapi_app)
             applied.append(VERIFIER_DIFF_KEY)

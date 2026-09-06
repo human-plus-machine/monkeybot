@@ -317,6 +317,7 @@ async def test_path_constraint_touch_from_ledger() -> None:
     verdicts = mailbox.take_ready("t1")
     assert len(verdicts) == 1
     assert "constraint_touch" in verdicts[0].triggering_signals
+    assert verdicts[0].severity == "none"
     ledger.close()
 
 
@@ -518,7 +519,7 @@ async def test_block_denies_mutating_tool_and_allows_read_only() -> None:
         config=_Cfg(),  # type: ignore[arg-type]
         tools=[
             ToolDef("run_command", "Run shell", {}),
-            ToolDef("read_file", "Read", {}, parallel_safe=True),
+            ToolDef("read_file", "Read", {}, parallel_safe=True, read_only=True),
         ],
     )
     exe = RecordingExecutor()
@@ -621,6 +622,30 @@ def test_mailbox_caps_per_thread_and_evicts_idle_threads() -> None:
         mailbox.put(f"t{i}", _verdict(i))
     assert mailbox.take_ready("t0") == []
     assert len(mailbox.take_ready(f"t{_THREAD_CAP}")) == 1
+
+
+def test_mailbox_nudge_overwrites_and_last_is_capped() -> None:
+    from monkeybot.core.verifier.mailbox import _THREAD_CAP
+
+    mailbox = VerdictMailbox()
+    mailbox.put_nudge("t1", "first")
+    mailbox.put_nudge("t1", "second")
+    assert mailbox.take_nudge("t1") == "second"
+    assert mailbox.take_nudge("t1") is None
+
+    def _verdict(i: int) -> VerifierVerdict:
+        return VerifierVerdict(
+            request_id="r",
+            verdict_id=str(i),
+            checkpoint_id=f"r:{i}",
+            status="drifting",
+            severity="none",
+        )
+
+    for i in range(_THREAD_CAP + 1):
+        mailbox.set_last(f"t{i}", _verdict(i))
+    assert mailbox.last("t0") is None
+    assert mailbox.last(f"t{_THREAD_CAP}") is not None
 
 
 def test_done_when_requires_path_boundary() -> None:

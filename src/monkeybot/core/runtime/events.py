@@ -386,6 +386,7 @@ class VerifierVerdict:
     rationale: str = ""
     correction: str | None = None
     triggering_signals: tuple[str, ...] = ()
+    judge_tokens: int = 0
 
     def to_wire(self) -> dict[str, object]:
         payload: dict[str, object] = {
