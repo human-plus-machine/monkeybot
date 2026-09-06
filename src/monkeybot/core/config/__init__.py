@@ -18,6 +18,8 @@ from monkeybot.core.config.runtime_env import (
     reset_runtime_env_state_for_tests,
 )
 from monkeybot.core.config.settings import (
+    VERIFIER_SEVERITY_ORDER,
+    VERIFIER_SEVERITY_RANK,
     ConfigError,
     CustomMemoryFolder,
     ProviderConfig,
@@ -70,6 +72,8 @@ __all__ = [
     "ProviderConfig",
     "SubagentConfig",
     "SubagentSettings",
+    "VERIFIER_SEVERITY_ORDER",
+    "VERIFIER_SEVERITY_RANK",
     "VerifierConfig",
     "SUPPORTED_MODEL_PROVIDERS",
     "SUPPORTED_YAML_MODEL_PROVIDERS",
