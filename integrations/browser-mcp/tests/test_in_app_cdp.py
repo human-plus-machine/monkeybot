@@ -783,6 +783,53 @@ def test_sealed_login_keeps_allowlisted_bridge_error(
     }
 
 
+def test_sealed_login_passes_through_needs_attention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed-closed scrub must reach the agent verbatim, not as 'login failed'."""
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps(
+        {
+            "ok": False,
+            "loggedIn": False,
+            "origin": "https://example.com",
+            "error": "login needs your attention",
+        }
+    ).encode("utf-8")
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        raise HTTPError(req.full_url, 400, "Bad Request", hdrs=None, fp=BytesIO(payload))
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_login(None, None) == {
+        "ok": False,
+        "loggedIn": False,
+        "origin": "https://example.com",
+        "error": "login needs your attention",
+    }
+
+
+def test_sealed_login_still_maps_unknown_error_to_login_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps(
+        {"ok": False, "loggedIn": False, "error": "some brand new bridge error"}
+    ).encode("utf-8")
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        raise HTTPError(req.full_url, 400, "Bad Request", hdrs=None, fp=BytesIO(payload))
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_login(None, None) == {
+        "ok": False,
+        "loggedIn": False,
+        "error": "login failed",
+    }
+
+
 def test_in_app_http_origin_keeps_https_for_wss() -> None:
     assert (
         login._in_app_http_origin("wss://127.0.0.1:9333/devtools/browser/monkeybot")

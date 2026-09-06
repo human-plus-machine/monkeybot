@@ -203,6 +203,10 @@ A Spaces build predating `expectedOrigin` support ignores it and echoes no `orig
 
 Errors raised by browser tools are scrubbed of `?token=` values before they reach the agent: the in-app CDP token grants full control of the user's browser, and browser-harness echoes its endpoint in daemon log tails.
 
+### `browser_login` fails closed
+
+Spaces verifies its own scrub before returning: after typing the password and submitting, it hashes every editable value left on the page and confirms none of them match what it just typed. If that check cannot be completed — the login did not clearly succeed or fail, an MFA interstitial appeared, or a same-origin iframe could not be checked — Spaces navigates the tab to the site's origin root itself and `browser_login` returns `login needs your attention` instead of guessing. Do not retry the call or attempt to type the password yourself when you see this error; tell the user to finish signing in in the Spaces browser. Calling `browser_get_text` or `browser_get_elements` afterward is safe either way: on this outcome, the page has already been navigated away from any form that held the secret.
+
 ### Default: indexed DOM interaction (no screenshots needed)
 
 `browser_get_elements`, `browser_click_by_index`, `browser_input_by_index`, and `browser_select_by_index` give the agent a **text-based, indexed** view of the page instead of screenshot + pixel coordinates — ported from [alibaba/page-agent](https://github.com/alibaba/page-agent)'s DOM-extraction engine (MIT licensed; see `src/browser_mcp/dom_indexing.py` and `src/browser_mcp/assets/` for provenance).

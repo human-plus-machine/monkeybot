@@ -23,6 +23,7 @@ _LOGIN_PUBLIC_ERRORS = frozenset(
         "focused tab is on a different origin",
         "no saved password for this site",
         "this password is not allowed for agent use",
+        "login needs your attention",
         "unexpected login response",
         "login failed",
     }
