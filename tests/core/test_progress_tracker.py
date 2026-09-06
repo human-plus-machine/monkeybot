@@ -624,7 +624,7 @@ def test_mailbox_caps_per_thread_and_evicts_idle_threads() -> None:
     assert len(mailbox.take_ready(f"t{_THREAD_CAP}")) == 1
 
 
-def test_mailbox_nudge_overwrites_and_last_is_capped() -> None:
+def test_mailbox_nudge_overwrites_and_last_caps_after_drain() -> None:
     from monkeybot.core.verifier.mailbox import _THREAD_CAP
 
     mailbox = VerdictMailbox()
@@ -643,7 +643,8 @@ def test_mailbox_nudge_overwrites_and_last_is_capped() -> None:
         )
 
     for i in range(_THREAD_CAP + 1):
-        mailbox.set_last(f"t{i}", _verdict(i))
+        mailbox.put(f"t{i}", _verdict(i))
+        mailbox.take_ready(f"t{i}")
     assert mailbox.last("t0") is None
     assert mailbox.last(f"t{_THREAD_CAP}") is not None
 

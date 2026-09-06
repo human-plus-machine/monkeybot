@@ -37,10 +37,7 @@ class VerdictMailbox:
         bucket.append(verdict)
         self.set_last(thread_id, verdict)
         while len(self._ready) > _THREAD_CAP:
-            tid, _ = self._ready.popitem(last=False)
-            self._nudges.pop(tid, None)
-            self._replans.pop(tid, None)
-            self._last.pop(tid, None)
+            self._ready.popitem(last=False)
 
     def last(self, thread_id: str) -> VerifierVerdict | None:
         return self._last.get(thread_id)
