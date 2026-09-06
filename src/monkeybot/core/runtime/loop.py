@@ -146,7 +146,7 @@ async def run(
         yield Error(request_id=ctx.request_id, error=str(exc))
     finally:
         await _drain_hook_settlement(hook_manager)
-        for verdict_evt in _drain_verdicts(ctx):
+        async for verdict_evt in _drain_verdicts(ctx, history):
             yield verdict_evt
         usage.duration_ms = int((time.monotonic() - t0) * 1000)
         logger.debug(

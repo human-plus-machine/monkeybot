@@ -26,6 +26,7 @@ from monkeybot.core.types.content_blocks import (
     File,
     Image,
     RedactedThinking,
+    SystemNotification,
     Text,
     Thinking,
     ToolRequest,
@@ -184,7 +185,12 @@ def _estimate_message_tokens(message: Message) -> int:
     return estimate_tokens_from_char_count(_raw_message_char_count(message))
 
 
-def split_messages_for_compaction(
+def _is_pinned_history_row(msg: Message) -> bool:
+    """True for UI-only system notification rows that must survive compaction."""
+    return bool(msg.content) and all(isinstance(block, SystemNotification) for block in msg.content)
+
+
+def _split_accountable(
     messages: Sequence[Message],
     *,
     window_tokens: int,
@@ -219,6 +225,49 @@ def split_messages_for_compaction(
     tail = list(reversed(tail_rev))
     middle = list(messages[SUMMARY_KEEP_HEAD_COUNT : n - len(tail)])
     return head, middle, tail
+
+
+def split_messages_for_compaction(
+    messages: Sequence[Message],
+    *,
+    window_tokens: int,
+) -> tuple[list[Message], list[Message], list[Message]]:
+    """Split accountable rows only; pinned notification rows are spliced back later."""
+    accountable = [msg for msg in messages if not _is_pinned_history_row(msg)]
+    return _split_accountable(accountable, window_tokens=window_tokens)
+
+
+def rebuild_compacted_history(
+    original: Sequence[Message],
+    *,
+    head: Sequence[Message],
+    summary: Message,
+    tail: Sequence[Message],
+) -> list[Message]:
+    """Keep pinned notification rows in original relative order around compacted rows."""
+    head_ids = {id(msg) for msg in head}
+    tail_ids = {id(msg) for msg in tail}
+    result: list[Message] = []
+    summary_placed = False
+    for msg in original:
+        if _is_pinned_history_row(msg):
+            result.append(msg)
+            continue
+        if id(msg) in head_ids:
+            result.append(msg)
+            continue
+        if id(msg) in tail_ids:
+            if not summary_placed:
+                result.append(summary)
+                summary_placed = True
+            result.append(msg)
+            continue
+        if not summary_placed:
+            result.append(summary)
+            summary_placed = True
+    if not summary_placed:
+        result.append(summary)
+    return result
 
 
 def protect_recent_count(
@@ -414,14 +463,13 @@ async def _summarize_history(
         summary_body = f"[Context Summary]:\n{summary_text}"
     else:
         summary_body = f"[Context Summary]:\n{summary_text}\n\n{_POST_COMPACTION_STANDING}"
-    merged = [
-        *head,
-        Message(
-            role="assistant",
-            content=[Text(text=summary_body)],
-        ),
-        *tail,
-    ]
+    summary_row = Message(
+        role="assistant",
+        content=[Text(text=summary_body)],
+    )
+    merged = rebuild_compacted_history(
+        messages, head=head, summary=summary_row, tail=tail
+    )
     await history.reset(thread_id, merged)
     logger.debug(
         "history compaction reset %s",

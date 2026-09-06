@@ -47,6 +47,7 @@ from monkeybot.core.runtime.provider_stream_mapper import ProviderStreamMapper
 from monkeybot.core.tools.inspector import ToolInspector
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
+    SystemNotification,
     Text,
     ToolRequest,
     ToolResponse,
@@ -238,18 +239,21 @@ async def _drain_steers(
                 ),
             )
             yield UserSteered(request_id=ctx.request_id, text=preview)
-    for verdict_evt in _drain_verdicts(ctx):
+    async for verdict_evt in _drain_verdicts(ctx, history):
         yield verdict_evt
 
 
-def _drain_verdicts(ctx: TurnContext) -> list[AgentEvent]:
-    """Return ready observe-only verdicts. Never waits on a judge."""
+async def _drain_verdicts(
+    ctx: TurnContext,
+    history: HistoryStore | None = None,
+) -> AsyncIterator[AgentEvent]:
+    """Commit ready verdicts at a safe boundary. Never waits on a judge."""
     mailbox = ctx.verdict_mailbox
     if mailbox is None:
-        return []
+        return
     take = getattr(mailbox, "take_ready", None)
     if not callable(take):
-        return []
+        return
     try:
         ready = take(ctx.thread_id)
     except Exception:
@@ -258,8 +262,36 @@ def _drain_verdicts(ctx: TurnContext) -> list[AgentEvent]:
             kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
             exc_info=True,
         )
-        return []
-    return [v for v in ready if isinstance(v, VerifierVerdict)]
+        return
+    for verdict in ready:
+        if not isinstance(verdict, VerifierVerdict):
+            continue
+        if history is not None:
+            try:
+                await persist_message(
+                    history,
+                    Message(
+                        role="system",
+                        content=[
+                            SystemNotification(
+                                notification_type="verifierVerdict",
+                                msg=verdict.rationale,
+                                data=verdict.to_wire(),
+                            )
+                        ],
+                    ),
+                    thread_id=ctx.thread_id,
+                    turn_id=ctx.request_id,
+                    memory=ctx.memory,
+                    ingest=False,
+                )
+            except Exception:
+                logger.warning(
+                    "verdict persist failed %s",
+                    kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+                    exc_info=True,
+                )
+        yield verdict
 
 
 def _admit_steer_to_ledger(ctx: TurnContext, preview: str, item: SteerItem) -> None:
@@ -1555,6 +1587,9 @@ async def _run_inner_core(
     # Ensure the backgrounded assistant write has landed before any load/reset
     # below (freeze) so the assistant row is durable and not overwritten.
     await _await_history_write(state.assistant_write_task)
+
+    async for verdict_evt in _drain_verdicts(state.ctx, history):
+        yield verdict_evt
 
     descriptor_events = await freeze_attachments_in_history(
         thread_id=state.ctx.thread_id,
