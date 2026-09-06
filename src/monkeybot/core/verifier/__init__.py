@@ -11,7 +11,7 @@ from monkeybot.core.persistence.goal_ledger import (
     ResolvedIntent,
     Status,
 )
-from monkeybot.core.verifier.classify import ClassifierPort, ProviderClassifier, ScriptedClassifier
+from monkeybot.core.verifier.classify import ClassifierPort, ProviderClassifier
 from monkeybot.core.verifier.ledger import GoalLedger
 from monkeybot.core.verifier.mailbox import VerdictMailbox
 from monkeybot.core.verifier.tracker import ProgressTracker
@@ -29,7 +29,6 @@ __all__ = [
     "Provenance",
     "ProviderClassifier",
     "ResolvedIntent",
-    "ScriptedClassifier",
     "Status",
     "VerdictMailbox",
 ]

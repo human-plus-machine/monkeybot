@@ -964,15 +964,16 @@ def _parse_subagents(
 def _parse_verifier(doc: Mapping[str, Any]) -> VerifierConfig:
     """Parse ``verifier:`` for the snapshot.
 
-    Invalid shapes warn and fall back to defaults so a malformed section
-    cannot abort ``apply_monkeybot_runtime_env`` / ``bootstrap_agent_layout``.
+    Invalid shapes log at error and fall back to defaults-off so a malformed
+    section cannot abort ``apply_monkeybot_runtime_env`` / ``bootstrap_agent_layout``.
     ``get_verifier_config`` still raises when a caller actually reads the
-    section from disk.
+    section from disk. Phase 2 should also surface this fallback in the
+    snapshot diff; until then the error log is the only operator signal.
     """
     try:
         return _verifier_config_from_section(_verifier_section(dict(doc)))
     except ConfigError as exc:
-        logger.warning("Ignoring invalid verifier section during snapshot load: %s", exc)
+        logger.error("Ignoring invalid verifier section during snapshot load: %s", exc)
         return VerifierConfig()
 
 

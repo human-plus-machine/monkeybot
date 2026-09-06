@@ -83,7 +83,7 @@ from .history_compaction import (
     _summarize_history,
     protect_recent_count,
 )
-from .input_admission import InputAdmission, SteerItem, preview_text
+from .input_admission import InputAdmission, SteerItem, join_text, preview_text
 from .loop_hooks import (
     _HOOK_READ_TIMEOUT_S,
     _apply_before_provider_hook,
@@ -228,7 +228,7 @@ async def _drain_steers(
                 ingest=True,
             )
             preview = preview_text(steered)
-            _admit_steer_to_ledger(ctx, preview, item)
+            _admit_steer_to_ledger(ctx, join_text(steered), item)
             logger.info(
                 "steer injected %s",
                 kv(
@@ -294,9 +294,9 @@ async def _drain_verdicts(
         yield verdict
 
 
-def _admit_steer_to_ledger(ctx: TurnContext, preview: str, item: SteerItem) -> None:
+def _admit_steer_to_ledger(ctx: TurnContext, verbatim: str, item: SteerItem) -> None:
     ledger = ctx.goal_ledger
-    if ledger is None or not preview:
+    if ledger is None or not verbatim:
         return
     from monkeybot.core.persistence.goal_ledger import Channel, Provenance
 
@@ -308,7 +308,7 @@ def _admit_steer_to_ledger(ctx: TurnContext, preview: str, item: SteerItem) -> N
     try:
         ledger.admit(
             ctx.thread_id,
-            preview,
+            verbatim,
             provenance=provenance,
             channel=Channel.STEER,
         )
@@ -511,9 +511,7 @@ def _token_pressure_should_summarize(
     cap: int,
     window_tokens: int,
 ) -> bool:
-    return preflight >= cap and _summarization_viable(
-        chat_messages, window_tokens=window_tokens
-    )
+    return preflight >= cap and _summarization_viable(chat_messages, window_tokens=window_tokens)
 
 
 async def _preflight_prompt_tokens(
@@ -1162,9 +1160,7 @@ async def _persist_partial_assistant_on_abort(
     if not assist_blocks:
         return
     tool_text_fn = (
-        interrupted_tool_result_text
-        if state.provider_stream_failed
-        else cancelled_tool_result_text
+        interrupted_tool_result_text if state.provider_stream_failed else cancelled_tool_result_text
     )
     await persist_message(
         history,

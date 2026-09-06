@@ -22,11 +22,11 @@ from monkeybot.core.persistence.goal_ledger import (
 from monkeybot.core.runtime.events import TurnComplete, VerifierVerdict
 from monkeybot.core.runtime.loop import run
 from monkeybot.core.types.types_tools import ToolDef
-from monkeybot.core.verifier.classify import ScriptedClassifier
 from monkeybot.core.verifier.ledger import GoalLedger
 from monkeybot.core.verifier.mailbox import VerdictMailbox
 from monkeybot.core.verifier.match import constraint_matches, glob_match
 from monkeybot.core.verifier.tracker import ProgressTracker
+from tests.core.test_goal_ledger import ScriptedClassifier
 from tests.core.test_loop import AllowInspector, FakeHistory, FakeProvider, RecordingExecutor
 from tests.core.test_loop import _ctx as loop_ctx
 
@@ -252,7 +252,6 @@ async def test_free_text_never_fires_constraint_touch() -> None:
                             verbatim="don't be silly",
                         ),
                     ),
-                    done_when=(),
                 )
             ]
         ),
@@ -294,7 +293,6 @@ async def test_path_constraint_touch_from_ledger() -> None:
                             verbatim="don't touch migrations",
                         ),
                     ),
-                    done_when=(),
                 )
             ]
         ),

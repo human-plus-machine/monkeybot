@@ -46,15 +46,28 @@ def _event_matches_request(ev: dict[str, Any], request_id: str) -> bool:
     return str(rid) == request_id
 
 
+# Mirrors core_tool_executor aliases: path/file_path/file for read/write/replace,
+# root (and grep's path alias) for glob/grep, plus Codex patch headers.
+_PATH_ARG_KEYS = ("path", "file_path", "file", "paths", "root")
+_PATCH_PATH_RE = re.compile(
+    r"^\*\*\* (?:Add File|Delete File|Update File|Move to):\s*(.+)$",
+    re.MULTILINE,
+)
+
+
 def _path_args(args: dict[str, Any]) -> list[str]:
     """Extract path-like tool args for ``files_not_touched`` glob matching."""
     out: list[str] = []
-    for key in ("path", "file_path", "paths"):
+    for key in _PATH_ARG_KEYS:
         raw = args.get(key)
         if isinstance(raw, str) and raw:
             out.append(raw)
         elif isinstance(raw, list):
             out.extend(str(p) for p in raw if p)
+    for key in ("patch_text", "patch"):
+        raw = args.get(key)
+        if isinstance(raw, str) and raw:
+            out.extend(match.strip() for match in _PATCH_PATH_RE.findall(raw) if match.strip())
     return out
 
 

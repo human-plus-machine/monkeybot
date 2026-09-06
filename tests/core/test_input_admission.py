@@ -14,6 +14,8 @@ from monkeybot.core.runtime.events import UserSteered
 from monkeybot.core.runtime.input_admission import (
     AdmissionQueueFullError,
     InputAdmission,
+    join_text,
+    preview_text,
 )
 from monkeybot.core.runtime.loop import run
 from monkeybot.core.tools.types import ToolExecutionResult
@@ -21,7 +23,6 @@ from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.gateway.sse.routes import create_app
 from monkeybot.gateway.sse.session_bus import SessionRegistry
-
 from tests.core.test_loop import AllowInspector, FakeHistory, _ctx
 
 
@@ -38,7 +39,9 @@ def test_input_admission_steer_fifo() -> None:
     assert first is not None and isinstance(first.content[0], Text) and first.content[0].text == "a"
     assert first.provenance == "human"
     second = adm.pop_steer()
-    assert second is not None and isinstance(second.content[0], Text) and second.content[0].text == "b"
+    assert (
+        second is not None and isinstance(second.content[0], Text) and second.content[0].text == "b"
+    )
     assert adm.pop_steer() is None
 
 
@@ -47,6 +50,16 @@ def test_input_admission_full_raises() -> None:
     adm.enqueue_steer([Text(text="a")])
     with pytest.raises(AdmissionQueueFullError):
         adm.enqueue_steer([Text(text="b")])
+
+
+def test_join_text_keeps_full_steer_preview_truncates() -> None:
+    long_text = "leave the migrations alone. " + ("x" * 220)
+    content = [Text(text=long_text)]
+    assert join_text(content) == long_text
+    preview = preview_text(content)
+    assert len(preview) == 200
+    assert preview.endswith("…")
+    assert long_text.startswith(preview[:-1])
 
 
 @pytest.mark.asyncio
@@ -114,7 +127,10 @@ async def test_steer_injected_after_tool_batch_before_next_provider_call() -> No
     hist = FakeHistory()
     ctx = _ctx()
     ctx = TurnContext(
-        **{**ctx.__dict__, "tools": [ToolDef("read_file", "r", {"type": "object"}, parallel_safe=True)]}
+        **{
+            **ctx.__dict__,
+            "tools": [ToolDef("read_file", "r", {"type": "object"}, parallel_safe=True)],
+        }
     )
     events: list[object] = []
     async for e in run(
