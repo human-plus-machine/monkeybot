@@ -1625,6 +1625,9 @@ class PostgresStorageBackend:
             raise RuntimeError("PostgresStorageBackend.open() has not been called")
         return self._scheduled_loops_store
 
+    def goal_ledger(self) -> None:
+        return None
+
     def session_turns(self) -> PostgresSessionTurnLockStore:
         if self._session_turn_lock_store is None:
             raise RuntimeError("PostgresStorageBackend.open() has not been called")

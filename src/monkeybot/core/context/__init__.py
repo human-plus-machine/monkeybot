@@ -25,6 +25,7 @@ from monkeybot.todo_list.store import TodoListStore
 
 if TYPE_CHECKING:
     from monkeybot.core.config.snapshot import RuntimeConfig
+    from monkeybot.core.verifier.ledger import GoalLedger
 
 
 @runtime_checkable
@@ -140,6 +141,8 @@ class TurnContext:
     config: RuntimeConfig | None = None
     """Pinned ``RuntimeConfig`` for this turn. Mid-turn store reloads must not
     change this object; ``None`` when the caller did not pin a snapshot."""
+    goal_ledger: GoalLedger | None = None
+    """Optional goal ledger (Phase 1). None when verifier.ledger is off."""
 
 
 _log = logging.getLogger(__name__)
@@ -862,6 +865,7 @@ async def build_context(
     todo_store: TodoListStore | None = None,
     approvals_persist: Callable[[str, str], bool] | None = None,
     config: RuntimeConfig | None = None,
+    goal_ledger: GoalLedger | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -896,6 +900,7 @@ async def build_context(
             beyond the in-memory session cache; see ``TurnContext.approvals_persist``.
         config: Optional pinned ``RuntimeConfig`` for this turn. When omitted the
             turn is not snapshot-aware (tests / callers that only need env).
+        goal_ledger: Optional goal ledger for intent capture and compaction facts.
 
     Returns:
         Frozen :class:`TurnContext`.
@@ -949,6 +954,7 @@ async def build_context(
         todo_store=todo_store,
         approvals_persist=approvals_persist,
         config=config,
+        goal_ledger=goal_ledger,
     )
 
 

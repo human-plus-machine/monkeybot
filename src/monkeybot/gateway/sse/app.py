@@ -24,7 +24,7 @@ from monkeybot.computer import build_computer_tools, should_enable_computer_tool
 from monkeybot.computer.permissions import build_computer_permission_inspector, build_persist_hook
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
-from monkeybot.core.config.runtime_env import SUBAGENTS_DIFF_KEY, ConfigTier
+from monkeybot.core.config.runtime_env import SUBAGENTS_DIFF_KEY, VERIFIER_DIFF_KEY, ConfigTier
 from monkeybot.core.config.settings import (
     ConfigError,
     SubagentConfig,
@@ -184,6 +184,7 @@ class GatewayRuntime:
     loops_registry: LoopsToolRegistry = field(default_factory=LoopsToolRegistry)
     computer_tools: list[Any] = field(default_factory=list)
     computer_approvals_persist: Callable[[str, str], bool] | None = None
+    goal_ledger: Any | None = None
 
     def build_inspectors(
         self, layout: AgentLayout, cfg: RuntimeConfig | None = None, *, fail_closed: bool = False
@@ -267,6 +268,43 @@ class GatewayRuntime:
                 ", ".join(sorted(self.subagent_registry)),
             )
 
+    def build_verifier(
+        self,
+        cfg: RuntimeConfig | None,
+        *,
+        storage: StorageBackend | None,
+    ) -> None:
+        """Construct the goal ledger when ``verifier.enabled`` and ``ledger.enabled``."""
+        old = self.goal_ledger
+        if old is not None:
+            close = getattr(old, "close", None)
+            if callable(close):
+                close()
+        self.goal_ledger = None
+        if cfg is None or storage is None:
+            return
+        if not cfg.verifier.enabled or not cfg.verifier.ledger.enabled:
+            return
+        store = storage.goal_ledger()
+        if store is None:
+            logger.warning("goal ledger skipped: backend has no durable ledger")
+            return
+        from monkeybot.core.verifier import GoalLedger, ProviderClassifier
+
+        classifier = ProviderClassifier(
+            lambda: self.provider,
+            model=cfg.verifier.ledger.model,
+        )
+        self.goal_ledger = GoalLedger(
+            store,
+            classifier,
+            max_entries_per_thread=cfg.verifier.ledger.max_entries_per_thread,
+        )
+        logger.info(
+            "goal ledger enabled %s",
+            kv(model=cfg.verifier.ledger.model),
+        )
+
     def rebuild_memory_hooks(self, cfg: RuntimeConfig | None, fastapi_app: FastAPI | None) -> None:
         """Re-bind memory/knowledge hooks without reopening storage (URI is restart-only)."""
         enabled = env_flag(cfg, "MONKEYBOT_MEMORY_HOOK_ENABLED", default=True)
@@ -277,6 +315,9 @@ class GatewayRuntime:
             has_hooks = True
         if self.knowledge is not None:
             self.knowledge.register_hooks(mgr)
+            has_hooks = True
+        if self.goal_ledger is not None:
+            self.goal_ledger.register(mgr)
             has_hooks = True
         self.hook_manager = mgr if has_hooks else None
         if fastapi_app is None:
@@ -380,6 +421,15 @@ class GatewayRuntime:
             logger.info(
                 "config slice rebuilt %s",
                 kv(slice="memory_hooks", revision=cfg.revision),
+            )
+        if VERIFIER_DIFF_KEY in diff.changed_env_keys:
+            storage = getattr(fastapi_app.state, "storage", None) if fastapi_app is not None else None
+            self.build_verifier(cfg, storage=storage)
+            self.rebuild_memory_hooks(cfg, fastapi_app)
+            applied.append(VERIFIER_DIFF_KEY)
+            logger.info(
+                "config slice rebuilt %s",
+                kv(slice="verifier", revision=cfg.revision),
             )
         return applied, error
 
@@ -802,6 +852,7 @@ class GatewayLoopPort:
                     todo_store=todo_store,
                     approvals_persist=approvals_persist,
                     config=cfg,
+                    goal_ledger=gateway_runtime.goal_ledger,
                 )
             except Exception as exc:
                 logger.exception("build_context failed")
@@ -1060,6 +1111,14 @@ async def _startup(fastapi_app: FastAPI) -> None:
         logger.error("invalid subagents config: %s", exc)
         raise
 
+    gateway_runtime.build_verifier(cfg, storage=fastapi_app.state.storage)
+    if gateway_runtime.goal_ledger is not None:
+        hook_mgr = gateway_runtime.hook_manager
+        if hook_mgr is None:
+            hook_mgr = HookManager()
+            gateway_runtime.hook_manager = hook_mgr
+        gateway_runtime.goal_ledger.register(hook_mgr)
+
     fastapi_app.state.gateway_runtime = gateway_runtime
 
     if otel_enabled:
@@ -1134,6 +1193,13 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
             fastapi_app.state.knowledge = None
         except Exception as exc:
             logger.warning("knowledge state clear failed: %s", exc)
+
+    if gateway_runtime.goal_ledger is not None:
+        try:
+            gateway_runtime.goal_ledger.close()
+        except Exception as exc:
+            logger.warning("goal ledger close failed: %s", exc)
+        gateway_runtime.goal_ledger = None
 
     memory = gateway_runtime.memory or getattr(fastapi_app.state, "memory", None)
     if memory is not None:

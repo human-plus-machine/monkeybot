@@ -38,6 +38,21 @@ from .loop_usage import _prompt_input_tokens_for_history
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.history_compaction")
 
+
+def _intent_facts_from_ctx(ctx: TurnContext) -> str | None:
+    ledger = ctx.goal_ledger
+    if ledger is None:
+        return None
+    try:
+        return ledger.compaction_facts(ctx.thread_id)
+    except Exception:
+        logger.warning(
+            "goal_ledger compaction facts failed %s",
+            kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+            exc_info=True,
+        )
+        return None
+
 # Fixed harness policy — not env/YAML tunable.
 # Pure bug guard, not a normal-flow limit: row count is otherwise unbounded and
 # only the token-pressure trigger (SUMMARY_TRIGGER_RATIO) should ever compact
@@ -257,6 +272,7 @@ async def _compact_history_if_needed(
     provider: Provider,
     model: str,
     window_tokens: int,
+    intent_facts: str | None = None,
 ) -> int:
     """Summarize middle history when tool results exhausted headroom."""
     # Compaction persists via history.reset; use unrepaired rows so synthetic
@@ -271,6 +287,7 @@ async def _compact_history_if_needed(
         provider,
         model,
         window_tokens=window_tokens,
+        intent_facts=intent_facts,
     )
 
 
@@ -306,6 +323,7 @@ async def _append_budgeted_tool_responses(
                 provider=provider,
                 model=_summarization_model_id(ctx),
                 window_tokens=ctx.context_window_tokens,
+                intent_facts=_intent_facts_from_ctx(ctx),
             )
         except Exception:
             logger.warning(
@@ -348,6 +366,7 @@ async def _summarize_history(
     model: str,
     *,
     window_tokens: int,
+    intent_facts: str | None = None,
 ) -> int:
     """Compress middle history into one assistant summary row. Returns middle row count."""
     head, middle, tail = split_messages_for_compaction(
@@ -368,6 +387,9 @@ async def _summarize_history(
     )
     lines = [_summary_line_for_message(m, window_tokens=window_tokens) for m in middle]
     blob = "\n\n---\n\n".join(lines)
+    user_text = "Create a structured summary from the conversation segment below.\n\n" + blob
+    if intent_facts:
+        user_text = intent_facts + "\n\n" + user_text
     summarize_messages = [
         Message(
             role="system",
@@ -375,14 +397,7 @@ async def _summarize_history(
         ),
         Message(
             role="user",
-            content=[
-                Text(
-                    text=(
-                        "Create a structured summary from the conversation "
-                        "segment below.\n\n" + blob
-                    )
-                )
-            ],
+            content=[Text(text=user_text)],
         ),
     ]
     summary_text = ""
