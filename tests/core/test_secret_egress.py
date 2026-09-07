@@ -19,7 +19,13 @@ from monkeybot.core.context.secret_egress import (
     scan_and_redact,
 )
 from monkeybot.core.llm.provider import Message
-from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import (
+    RedactedThinking,
+    Text,
+    Thinking,
+    ToolRequest,
+    ToolResponse,
+)
 
 
 def _publish_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -102,6 +108,27 @@ def test_extract_scan_units_finds_tool_request_args() -> None:
     ]
 
 
+def test_extract_scan_units_finds_thinking() -> None:
+    messages = [
+        Message(
+            role="assistant",
+            content=[Thinking(thinking="the secret is X", signature="sig")],
+        )
+    ]
+    units = extract_scan_units(messages)
+    assert units == [ScanUnit(message_index=0, block_path=(0,), text="the secret is X")]
+
+
+def test_extract_scan_units_skips_redacted_thinking() -> None:
+    messages = [
+        Message(
+            role="assistant",
+            content=[RedactedThinking(data="opaque-blob")],
+        )
+    ]
+    assert extract_scan_units(messages) == []
+
+
 def test_redact_units_replaces_assistant_text() -> None:
     messages = [Message(role="assistant", content=[Text(text="the secret is X")])]
     units = extract_scan_units(messages)
@@ -150,6 +177,28 @@ def test_redact_units_redacts_tool_request_args_keeping_id_and_name() -> None:
     assert block.id == "c1"
     assert block.name == "run_command"
     assert block.args == {"redacted": "[withheld: credential detected]"}
+
+
+def test_redact_units_swaps_thinking_for_redacted_thinking() -> None:
+    """Replacing thinking text in place would break Anthropic's signature;
+    RedactedThinking is the wire type that path already knows how to send."""
+    messages = [
+        Message(
+            role="assistant",
+            content=[
+                Thinking(thinking="the secret is X", signature="sig-must-not-reuse"),
+                Text(text="ok"),
+            ],
+        )
+    ]
+    units = extract_scan_units(messages)
+    redacted = redact_units(messages, units, {0})
+    thinking = redacted[0].content[0]
+    text = redacted[0].content[1]
+    assert isinstance(thinking, RedactedThinking)
+    assert thinking.data == "[withheld: credential detected]"
+    assert isinstance(text, Text)
+    assert text.text == "[withheld: credential detected]"
 
 
 def test_redact_units_leaves_unflagged_messages_untouched() -> None:
@@ -315,9 +364,12 @@ def test_scanner_does_not_cache_a_failed_batch(
     assert captured["texts"] == ["maybe-secret"]
 
 
-def test_scanner_batches_by_byte_size(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_scanner_batches_by_json_body_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _publish_bridge(tmp_path, monkeypatch)
-    monkeypatch.setattr("monkeybot.core.context.secret_egress._SCAN_MAX_BATCH_BYTES", 10)
+    one_item = len(json.dumps({"texts": ["aaaaaa"]}).encode("utf-8"))
+    monkeypatch.setattr("monkeybot.core.context.secret_egress._SCAN_MAX_BATCH_BYTES", one_item)
     calls: list[list[str]] = []
 
     def fake_open(req: Request, timeout: object = None) -> _FakeResponse:
@@ -328,9 +380,8 @@ def test_scanner_batches_by_byte_size(tmp_path: Path, monkeypatch: pytest.Monkey
     monkeypatch.setattr("monkeybot.core.context.secret_egress._LOOPBACK_OPENER.open", fake_open)
 
     scanner = SecretScanner()
-    # Each item (6 bytes) fits under the 10-byte cap on its own, but any two
-    # together (12 bytes) do not — so this still forces one item per batch,
-    # without tripping the separate oversized-single-item path.
+    # One item's JSON body equals the cap; two items exceed it — so this
+    # still forces one item per batch, without tripping the oversized path.
     scanner.scan(["aaaaaa", "bbbbbb", "cccccc"])
     assert len(calls) == 3
     assert [c[0] for c in calls] == ["aaaaaa", "bbbbbb", "cccccc"]
@@ -339,11 +390,11 @@ def test_scanner_batches_by_byte_size(tmp_path: Path, monkeypatch: pytest.Monkey
 def test_scanner_fails_closed_on_text_too_large_to_scan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A text too big to fit in even its own batch is redacted without a
-    round trip, rather than silently passed through unscanned (and thus
-    unredacted) because the bridge would reject the oversized request."""
+    """A text whose JSON body does not fit even its own batch is redacted
+    without a round trip, rather than silently passed through unscanned."""
     _publish_bridge(tmp_path, monkeypatch)
-    monkeypatch.setattr("monkeybot.core.context.secret_egress._SCAN_MAX_BATCH_BYTES", 10)
+    short_body = len(json.dumps({"texts": ["short"]}).encode("utf-8"))
+    monkeypatch.setattr("monkeybot.core.context.secret_egress._SCAN_MAX_BATCH_BYTES", short_body)
     calls: list[list[str]] = []
 
     def fake_open(req: Request, timeout: object = None) -> _FakeResponse:
@@ -354,12 +405,62 @@ def test_scanner_fails_closed_on_text_too_large_to_scan(
     monkeypatch.setattr("monkeybot.core.context.secret_egress._LOOPBACK_OPENER.open", fake_open)
 
     scanner = SecretScanner()
-    hits = scanner.scan(["short", "this-text-is-way-over-the-ten-byte-cap"])
+    hits = scanner.scan(["short", "this-text-is-way-over-the-cap"])
 
     assert hits == [Hit(index=1, kind="secret")]
-    # Only the scannable text is ever sent to the bridge.
     assert calls == [["short"]]
 
-    # And it is never cached as clean, so a later scan redacts it again too.
-    hits_again = scanner.scan(["this-text-is-way-over-the-ten-byte-cap"])
+    hits_again = scanner.scan(["this-text-is-way-over-the-cap"])
     assert hits_again == [Hit(index=0, kind="secret")]
+
+
+def test_scanner_fails_closed_when_json_escaping_exceeds_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raw UTF-8 can fit the cap while the JSON-escaped body does not
+    (quotes become \\\"). Fail closed without a round trip."""
+    _publish_bridge(tmp_path, monkeypatch)
+    quoted = '"' * 20
+    assert len(quoted.encode("utf-8")) == 20
+    json_body = len(json.dumps({"texts": [quoted]}).encode("utf-8"))
+    assert json_body > 20
+    monkeypatch.setattr("monkeybot.core.context.secret_egress._SCAN_MAX_BATCH_BYTES", 30)
+    calls: list[list[str]] = []
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeResponse:
+        calls.append(json.loads(req.data.decode("utf-8"))["texts"])
+        return _FakeResponse({"hits": []})
+
+    monkeypatch.setattr("monkeybot.core.context.secret_egress._LOOPBACK_OPENER.open", fake_open)
+
+    scanner = SecretScanner()
+    hits = scanner.scan([quoted])
+    assert hits == [Hit(index=0, kind="secret")]
+    assert calls == []
+
+
+def test_scanner_fails_closed_on_http_413(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A 413 from the bridge (body over the cap despite chunking) redacts
+    the batch instead of treating the error as 'unresolved' / fail-open."""
+    _publish_bridge(tmp_path, monkeypatch)
+
+    def fail_413(req: Request, timeout: object = None) -> None:
+        raise HTTPError(req.full_url, 413, "payload too large", hdrs=None, fp=BytesIO(b""))  # type: ignore[arg-type]
+
+    monkeypatch.setattr("monkeybot.core.context.secret_egress._LOOPBACK_OPENER.open", fail_413)
+
+    scanner = SecretScanner()
+    assert scanner.scan(["maybe-secret"]) == [Hit(index=0, kind="secret")]
+
+    # Not cached as clean — a later working request re-checks it.
+    captured: dict[str, object] = {}
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeResponse:
+        captured["texts"] = json.loads(req.data.decode("utf-8"))["texts"]
+        return _FakeResponse({"hits": []})
+
+    monkeypatch.setattr("monkeybot.core.context.secret_egress._LOOPBACK_OPENER.open", fake_open)
+    assert scanner.scan(["maybe-secret"]) == []
+    assert captured["texts"] == ["maybe-secret"]

@@ -6,12 +6,13 @@ able to send it to the LLM provider — a network egress the sealed-window
 scrub and CDP deny lists (phase 1) cannot see, since it happens entirely
 inside monkeybot's own process.
 
-Only *new* assistant text and *new* tool results are scanned, and only
-those — never user-authored text. A message wrapping a real user Text block
-is left untouched; only `ToolResponse` blocks (tool results, which arrive
-wrapped in a role="user" message on the wire) and assistant `Text` blocks
-are ever scanned or redacted. This matches the acceptance criterion: pasting
-a saved password into a chat message manually does not trip the scanner.
+Only *new* assistant text (including `Thinking` blocks) and *new* tool
+results are scanned, and only those — never user-authored text. A message
+wrapping a real user Text block is left untouched; only `ToolResponse`
+blocks (tool results, which arrive wrapped in a role="user" message on the
+wire) and assistant `Text` / `Thinking` / `ToolRequest` blocks are ever
+scanned or redacted. This matches the acceptance criterion: pasting a
+saved password into a chat message manually does not trip the scanner.
 
 Scanning happens against Spaces' `/json/scan` bridge endpoint (phase 5.1) —
 the hot set of secrets and canaries never leaves the Electron main process,
@@ -32,7 +33,14 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 
 from monkeybot.core.llm.provider import Message
-from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import (
+    ContentBlock,
+    RedactedThinking,
+    Text,
+    Thinking,
+    ToolRequest,
+    ToolResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,18 +162,17 @@ class SecretScanner:
                 self._warned_no_app = True
             return []
 
-        # A text whose JSON encoding alone would already exceed the batch cap
-        # can never be sent — the bridge enforces the same cap on the request
-        # body and returns 413, which `_scan_batch` treats as "unresolved"
-        # (retry later, don't assume clean). Left unhandled, an oversized text
-        # would silently never be scanned and would ride out unredacted on
-        # every turn. Fail closed instead: treat it as a hit without a round
-        # trip, since there is no way to confirm it clean.
+        # Cap is on the JSON request body, not raw UTF-8: quotes/backslashes
+        # (and ensure_ascii `\uXXXX` escapes) inflate the payload past the
+        # bridge's 2 MB 413 threshold even when the raw string fits. A text
+        # whose own `{"texts":[t]}` encoding already exceeds the cap can never
+        # be sent — fail closed without a round trip rather than letting the
+        # 413 path treat it as "unresolved" and ride out unredacted.
         oversized = [
-            (i, t) for i, t in to_check if len(t.encode("utf-8")) > _SCAN_MAX_BATCH_BYTES
+            (i, t) for i, t in to_check if _scan_request_body_bytes([t]) > _SCAN_MAX_BATCH_BYTES
         ]
         scannable = [
-            (i, t) for i, t in to_check if len(t.encode("utf-8")) <= _SCAN_MAX_BATCH_BYTES
+            (i, t) for i, t in to_check if _scan_request_body_bytes([t]) <= _SCAN_MAX_BATCH_BYTES
         ]
         if oversized:
             logger.warning(
@@ -208,7 +215,7 @@ class SecretScanner:
         """Returns (hits, hit_indices, scanned_indices) — all indices are into
         the original `texts` argument passed to `scan`, via `batch`'s own
         `(original_index, text)` tuples."""
-        payload = json.dumps({"texts": [t for _, t in batch]}).encode("utf-8")
+        payload = _scan_request_body([t for _, t in batch])
         req = urllib.request.Request(
             f"{http}/json/scan",
             data=payload,
@@ -218,6 +225,27 @@ class SecretScanner:
         try:
             with _LOOPBACK_OPENER.open(req, timeout=_SCAN_TIMEOUT_S) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            # Drain the error body so the socket is not left hanging.
+            try:
+                exc.read()
+            except Exception:
+                pass
+            if getattr(exc, "code", None) == 413:
+                logger.warning(
+                    "secret scan: batch rejected as too large (413); redacting without a scan"
+                )
+                # Chunking is supposed to keep us under the cap; a 413 means it
+                # didn't. Fail closed — same as the oversized-single-item path —
+                # rather than sending the batch onward unredacted. Not cached
+                # as clean (scanned_indices stays empty).
+                return (
+                    [Hit(index=original_index, kind="secret") for original_index, _ in batch],
+                    {original_index for original_index, _ in batch},
+                    set(),
+                )
+            logger.warning("secret scan request failed", exc_info=True)
+            return [], set(), set()
         except Exception:
             logger.warning("secret scan request failed", exc_info=True)
             # Nothing in this batch was actually scanned — the caller must
@@ -247,21 +275,33 @@ class SecretScanner:
         return hits, hit_indices, scanned_indices
 
 
+def _scan_request_body(texts: Sequence[str]) -> bytes:
+    """JSON body posted to `/json/scan`. Encoding must match `_scan_batch`."""
+    return json.dumps({"texts": list(texts)}).encode("utf-8")
+
+
+def _scan_request_body_bytes(texts: Sequence[str]) -> int:
+    return len(_scan_request_body(texts))
+
+
 def _chunk_by_bytes(
     items: list[tuple[int, str]], max_bytes: int
 ) -> list[list[tuple[int, str]]]:
-    """Splits `items` into batches whose JSON-encoded text stays under `max_bytes`."""
+    """Splits `items` into batches whose JSON request body stays under `max_bytes`.
+
+    Callers must already have filtered out any single item whose own body
+    exceeds `max_bytes`. Size is the encoded `{"texts":[...]}` payload, not
+    raw string bytes, so escaping cannot push a batch over the bridge cap.
+    """
     batches: list[list[tuple[int, str]]] = []
     current: list[tuple[int, str]] = []
-    current_bytes = 0
     for item in items:
-        item_bytes = len(item[1].encode("utf-8"))
-        if current and current_bytes + item_bytes > max_bytes:
+        candidate = current + [item]
+        if current and _scan_request_body_bytes([t for _, t in candidate]) > max_bytes:
             batches.append(current)
-            current = []
-            current_bytes = 0
-        current.append(item)
-        current_bytes += item_bytes
+            current = [item]
+        else:
+            current = candidate
     if current:
         batches.append(current)
     return batches
@@ -285,14 +325,18 @@ class ScanUnit:
 
 
 def extract_scan_units(messages: Sequence[Message]) -> list[ScanUnit]:
-    """Assistant `Text`/`ToolRequest` blocks, and `ToolResponse`-nested `Text`
-    blocks only.
+    """Assistant `Text`/`Thinking`/`ToolRequest` blocks, and `ToolResponse`-nested
+    `Text` blocks only.
 
     A `ToolRequest`'s `args` are scanned too: a call blocked by the phase 5.3
     tool-argument gate (core_tool_executor.py) still leaves the model's
     `ToolRequest` sitting in `messages` with the secret in its `args`, which
     would otherwise ride out on the *next* provider call untouched by this
     scan (only the tool's own dispatch was blocked, not the transcript).
+
+    `Thinking` is scanned for the same reason: Gemini/Anthropic/Bedrock
+    round-trip reasoning on the next provider call. A hit is redacted to
+    `RedactedThinking` so Anthropic's signature check is not required.
 
     Deliberately skips any `Text` block that is not inside a `ToolResponse` or
     an assistant message — that is real user-authored text, which must never
@@ -304,6 +348,8 @@ def extract_scan_units(messages: Sequence[Message]) -> list[ScanUnit]:
             for b_idx, block in enumerate(message.content):
                 if isinstance(block, Text) and block.text:
                     units.append(ScanUnit(m_idx, (b_idx,), block.text))
+                elif isinstance(block, Thinking) and block.thinking:
+                    units.append(ScanUnit(m_idx, (b_idx,), block.thinking))
                 elif isinstance(block, ToolRequest) and block.args:
                     units.append(ScanUnit(m_idx, (b_idx,), json.dumps(block.args, ensure_ascii=False)))
         else:
@@ -347,6 +393,12 @@ def redact_units(
                     # provider rejects a tool_use/tool_result pair that
                     # doesn't match up.
                     new_content[path[0]] = replace(block, args={"redacted": WITHHELD_TEXT})
+                elif isinstance(block, Thinking):
+                    # Drop the signed thinking payload. Replacing `thinking`
+                    # in place would break Anthropic's signature check;
+                    # RedactedThinking is the wire type that path already
+                    # knows how to send (Gemini/Bedrock omit it).
+                    new_content[path[0]] = RedactedThinking(data=WITHHELD_TEXT)
                 else:
                     new_content[path[0]] = Text(text=WITHHELD_TEXT)
             else:
