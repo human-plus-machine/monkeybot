@@ -21,6 +21,7 @@ from monkeybot.core.tools.fs_isolation import (
     ISOLATION_ERROR_PREFIX,
     ISOLATION_FAILURE_EXIT_CODE,
     IsolationSupport,
+    JailRoots,
     isolation_support,
 )
 from monkeybot.core.tools.terminal import (
@@ -1008,3 +1009,131 @@ def test_process_group_helpers_skip_on_windows(monkeypatch) -> None:
     subprocess_groups.kill_process_group(999, proc)  # type: ignore[arg-type]
     assert calls == []
     assert proc.killed is True
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+class TestTerminalExecutorJailRoots:
+    """End-to-end: TerminalExecutor.execute(jail_roots=...) actually confines
+    the child process, exercised through the real subprocess path (not the
+    fs_isolation unit tests, which call jailed_argv directly)."""
+
+    @pytest.fixture
+    def home_and_workspace(self, tmp_path):
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+        secret = home / "Desktop" / "secret.pdf"
+        secret.parent.mkdir(parents=True)
+        secret.write_text("PDF-BYTES", encoding="utf-8")
+        (workspace / "in.txt").write_text("workspace-content", encoding="utf-8")
+        return home, workspace, secret
+
+    @pytest.mark.asyncio
+    async def test_jailed_command_cannot_read_outside_workspace(self, home_and_workspace):
+        """allowed_path_prefixes deliberately widened to include the secret's
+        literal path — the argv pre-flight (_validate_paths) would otherwise
+        reject it before the jail is ever reached. This isolates the jail as
+        the thing actually blocking the read, not the pre-flight screen."""
+        home, workspace, secret = home_and_workspace
+        executor = TerminalExecutor(
+            allowed_commands=["cat"], allowed_path_prefixes=[".", str(secret)]
+        )
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+
+        result = await executor.execute(
+            "cat", [str(secret)], cwd=workspace, jail_roots=roots
+        )
+
+        assert result.exit_code != 0
+        assert "PDF-BYTES" not in result.stdout
+
+    @pytest.mark.asyncio
+    async def test_jailed_command_reads_workspace_normally(self, home_and_workspace):
+        home, workspace, _ = home_and_workspace
+        executor = TerminalExecutor(allowed_commands=["cat"], allowed_path_prefixes=["."])
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+
+        result = await executor.execute("cat", ["in.txt"], cwd=workspace, jail_roots=roots)
+
+        assert result.exit_code == 0
+        assert "workspace-content" in result.stdout
+
+    @pytest.mark.asyncio
+    async def test_home_expansion_escape_is_closed_end_to_end(self, home_and_workspace):
+        """The exact reported bug: bash -c with $HOME expanded at exec time,
+        which no argv-string screening can catch. Must be blocked by the jail."""
+        home, workspace, secret = home_and_workspace
+        executor = TerminalExecutor(allowed_commands=["bash"], allowed_path_prefixes=["."])
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+
+        result = await executor.execute(
+            "bash",
+            ["-c", 'cp "$HOME/Desktop/secret.pdf" .'],
+            cwd=workspace,
+            jail_roots=roots,
+            env_overrides={"HOME": str(home)},
+        )
+
+        assert result.exit_code != 0
+        assert not (workspace / "secret.pdf").exists()
+
+    @pytest.mark.asyncio
+    async def test_no_jail_roots_is_unaffected(self, home_and_workspace):
+        """Omitting jail_roots (the default) must behave exactly as before —
+        callers that never opt in are untouched by this feature."""
+        home, workspace, secret = home_and_workspace
+        executor = TerminalExecutor(allowed_commands=["cat"], allowed_path_prefixes=["."])
+
+        result = await executor.execute("cat", ["in.txt"], cwd=workspace)
+
+        assert result.exit_code == 0
+        assert "workspace-content" in result.stdout
+
+
+class TestTerminalExecutorJailUnavailableFallback:
+    @pytest.mark.asyncio
+    async def test_jail_requested_but_unavailable_fails_open(self, tmp_path, monkeypatch):
+        """Unlike the memory-hide mechanism, an unavailable jail must not
+        block execution — see _isolate_jail's docstring for why."""
+        monkeypatch.setattr(
+            terminal_module,
+            "isolation_support",
+            lambda: IsolationSupport("none", "test-unavailable"),
+        )
+        terminal_module._jail_unavailable_warned = False
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "in.txt").write_text("ok", encoding="utf-8")
+        executor = TerminalExecutor(allowed_commands=["cat"], allowed_path_prefixes=["."])
+        roots = JailRoots(deny=(tmp_path,), read_write=(workspace,))
+
+        result = await executor.execute("cat", ["in.txt"], cwd=workspace, jail_roots=roots)
+
+        assert result.exit_code == 0
+        assert "ok" in result.stdout
+
+    @pytest.mark.asyncio
+    async def test_jail_unavailable_warning_logs_once(self, tmp_path, monkeypatch, caplog):
+        monkeypatch.setattr(
+            terminal_module,
+            "isolation_support",
+            lambda: IsolationSupport("none", "test-unavailable"),
+        )
+        terminal_module._jail_unavailable_warned = False
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "in.txt").write_text("ok", encoding="utf-8")
+        executor = TerminalExecutor(allowed_commands=["cat"], allowed_path_prefixes=["."])
+        roots = JailRoots(deny=(tmp_path,), read_write=(workspace,))
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="monkeybot.core.tools.terminal"):
+            await executor.execute("cat", ["in.txt"], cwd=workspace, jail_roots=roots)
+            await executor.execute("cat", ["in.txt"], cwd=workspace, jail_roots=roots)
+
+        warnings = [r for r in caplog.records if "WITHOUT the workspace jail" in r.message]
+        assert len(warnings) == 1

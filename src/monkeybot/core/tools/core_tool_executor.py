@@ -8,7 +8,8 @@ import contextlib
 import json
 import logging
 import os
-import shlex
+import sys
+import tempfile
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -84,8 +85,9 @@ from monkeybot.core.subprocess_groups import (
     process_group_id,
     stop_subagent_process,
 )
-from monkeybot.core.tools.fs_isolation import memory_hidden_paths
-from monkeybot.core.tools.inspector import coerce_run_command_argv
+from monkeybot.core.tools.fs_isolation import JailRoots, memory_hidden_paths
+from monkeybot.core.tools.grant_store import PATH_GRANT_TOOLS, GrantStoreCache
+from monkeybot.core.tools.inspector import parse_run_command
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.spill_inventory import (
     partial_output_tail,
@@ -729,8 +731,7 @@ def _tool_needs_egress_scan(name: str, mcp: MCPClientPort) -> bool:
 
 _EGRESS_BLOCKED_TOOL_ERROR = _built_in_tool_error(
     "credential_egress_blocked",
-    "This call's arguments contain a detected secret or canary and were refused before "
-    "running.",
+    "This call's arguments contain a detected secret or canary and were refused before running.",
     "Do not retry with the same or an equivalent argument. If you need this credential to "
     "sign in, use browser_login or browser_passkey instead of handling it directly.",
 )
@@ -798,7 +799,24 @@ def _incomplete_scan_envelope(
 def _workspace_error_envelope(exc: WorkspaceError) -> str:
     code = getattr(exc, "code", "workspace_error")
     msg = str(exc)
-    if code == "path_escape":
+    error_kind: Literal["validation", "policy", "runtime"] = "validation"
+    if code == "path_needs_grant":
+        # Distinct from a plain `..`/`~` mistake (invalid_path, below): this
+        # path is syntactically fine and points somewhere real, outside the
+        # workspace, with no grant covering it. The old hint here used to say
+        # "rewrite it as a relative path" — which is exactly the nudge that
+        # made copying the file into the workspace look like the sanctioned
+        # recovery. There is no relative spelling of a file outside the
+        # workspace; the only legitimate path forward is asking for access.
+        error_kind = "policy"
+        hint = (
+            "This is outside your workspace and not (yet) granted. Do not copy, "
+            "move, or symlink it into the workspace to get around this — that is "
+            "a policy violation, not a workaround. If you need it, say so and ask "
+            "the user for access to that folder; retrying with a rewritten path "
+            "will not help."
+        )
+    elif code == "path_escape":
         hint = (
             "Use a path relative to the workspace root with no `..` or `~` "
             '(e.g. {"path": "README.md"}).'
@@ -826,7 +844,7 @@ def _workspace_error_envelope(exc: WorkspaceError) -> str:
         hint = "Check disk permissions and path; retry after fixing the underlying issue."
     else:
         hint = "Fix the path or arguments per read_file/write_file rules, then retry once."
-    return _built_in_tool_error("validation", msg, hint, {"code": code})
+    return _built_in_tool_error(error_kind, msg, hint, {"code": code})
 
 
 def _run_command_parse_envelope(exc: ValueError) -> str:
@@ -873,60 +891,6 @@ def _str_arg(args: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
-_SHELL_OPERATOR_TOKENS = frozenset({"&&", "||", ";", "|", "&"})
-
-
-def _needs_shell_wrapper(stripped: str, parts: list[str]) -> bool:
-    if any(part in _SHELL_OPERATOR_TOKENS for part in parts):
-        return True
-    return any(op in stripped for op in _SHELL_OPERATOR_TOKENS)
-
-
-def _argv_from_command_string(stripped: str) -> tuple[str, list[str]]:
-    """Parse a command string; wrap in ``bash -c`` when shell operators are present."""
-    if not any(ch.isspace() for ch in stripped):
-        parts = shlex.split(stripped, posix=True)
-        if parts and _needs_shell_wrapper(stripped, parts):
-            return "bash", ["-c", stripped]
-        return stripped, []
-    parts = shlex.split(stripped, posix=True)
-    if not parts:
-        return stripped, []
-    if _needs_shell_wrapper(stripped, parts):
-        return "bash", ["-c", stripped]
-    return parts[0], parts[1:]
-
-
-def _parse_run_command(args: dict[str, Any]) -> tuple[str, list[str]]:
-    argv = coerce_run_command_argv(args.get("argv"))
-    if argv:
-        return argv[0], argv[1:]
-
-    cmd = args.get("command")
-    if isinstance(cmd, str) and cmd.strip():
-        extra = args.get("args")
-        if extra is None:
-            extra = args.get("arguments")
-        if isinstance(extra, list):
-            if extra:
-                return cmd.strip(), [str(x) for x in extra]
-            return _argv_from_command_string(cmd.strip())
-        return _argv_from_command_string(cmd.strip())
-
-    shell = args.get("shell") or args.get("script")
-    if isinstance(shell, str) and shell.strip():
-        stripped = shell.strip()
-        parts = shlex.split(stripped, posix=True)
-        if not parts:
-            raise ValueError("shell/script is empty after parsing")
-        return _argv_from_command_string(stripped)
-
-    raise ValueError(
-        "run_command needs one of: argv (non-empty list), command+args/arguments, "
-        "or shell/script (parsed with shlex)"
-    )
-
-
 class CoreToolExecutor(ToolExecutorPort):
     """Executes built-in tools and delegates ``server__tool`` calls to :class:`MCPClient`."""
 
@@ -949,6 +913,7 @@ class CoreToolExecutor(ToolExecutorPort):
         loops_registry: LoopsToolRegistry | None = None,
         knowledge: KnowledgeSubsystem | None = None,
         config: RuntimeConfig | None = None,
+        grants_path: Path | None = None,
     ) -> None:
         ws_settings = workspace_settings_from_config()
         self._skills_path = Path(skills_path).resolve()
@@ -1027,6 +992,7 @@ class CoreToolExecutor(ToolExecutorPort):
                     skills_path=self._skills_path,
                     artifacts_path=self._artifacts_path,
                     allowed_commands=cmds,
+                    allowed_path_prefixes=paths,
                 )
             else:
                 self._terminal = TerminalExecutor(
@@ -1043,6 +1009,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 allowed_path_prefixes=paths,
                 hidden_paths=hidden_paths,
             )
+        self._grants_cache = GrantStoreCache(grants_path) if grants_path is not None else None
         self._extra_tools: dict[str, Any] = {ct.tool_def.name: ct for ct in (extra_tools or [])}
 
     @staticmethod
@@ -1102,6 +1069,12 @@ class CoreToolExecutor(ToolExecutorPort):
     async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
         name = call.name
         args: dict[str, Any] = dict(call.args)
+        if name in PATH_GRANT_TOOLS:
+            read_roots: set[str] = set(ctx.turn_path_grants)
+            if self._grants_cache is not None:
+                read_roots |= {p.path for p in self._grants_cache.get().paths}
+            if read_roots:
+                self._workspace.sync_extra_read_roots(read_roots)
         egress_denial = await _scan_tool_args_for_egress(name, args, mcp=self._mcp, ctx=ctx)
         if egress_denial is not None:
             return egress_denial
@@ -1330,7 +1303,7 @@ class CoreToolExecutor(ToolExecutorPort):
 
     def _load_file_from_path(self, path: str, ctx: TurnContext) -> ToolExecutionResult:
         try:
-            fp = self._workspace._resolve_under_root(path, label="path")
+            fp = self._workspace.resolve_read_path(path, label="path")
         except WorkspaceError as exc:
             return ToolExecutionResult.err(_workspace_error_envelope(exc))
         if not fp.is_file():
@@ -1894,6 +1867,59 @@ class CoreToolExecutor(ToolExecutorPort):
             )
         return cwd
 
+    def _jail_roots(self, ctx: TurnContext) -> JailRoots:
+        """Deny-by-default filesystem policy for one `run_command` call.
+
+        `deny` is the user's home directory — the only boundary that
+        actually matters here (see `computer/safety.py::_allowed_roots`'s
+        identical convention). Everything a command legitimately needs is
+        named explicitly on top of that: the workspace and artifacts root
+        (read+write), the memory palace when memory is on (read+write, it's
+        a sibling of the workspace, not under it), OS temp dirs (read+write,
+        many toolchains stage there), skills and the interpreter's own
+        install prefix (read-only — the interpreter can live under $HOME for
+        a bundled desktop app), and any folder the user has granted read
+        access to, durably or for this turn (read-only).
+        """
+        read_write: list[Path] = [self._workspace.repo_root]
+        if self._artifacts_path is not None:
+            read_write.append(self._artifacts_path)
+        if self._memory is not None:
+            with contextlib.suppress(Exception):
+                read_write.append(self._memory.palace_path)
+
+        # OS temp dirs are `shared_write`, not `read_write`: generic
+        # infrastructure nobody deliberately chose, so — unlike the roots
+        # above — JailRoots keeps `deny` in force underneath them. A memory
+        # palace deliberately relocated under /tmp (a real deployment shape;
+        # see memory_hidden_paths) must stay hidden even though /tmp itself
+        # is writable.
+        shared_write: list[Path] = [Path(tempfile.gettempdir())]
+        for extra_tmp in ("/tmp", "/private/tmp"):
+            if os.path.isdir(extra_tmp):
+                shared_write.append(Path(extra_tmp))
+
+        read_only: list[Path] = [self._skills_path]
+        for prefix in (sys.prefix, sys.exec_prefix, sys.base_prefix, sys.base_exec_prefix):
+            read_only.append(Path(prefix))
+        read_only.append(Path(sys.executable).resolve().parent)
+        for grant in ctx.turn_path_grants:
+            read_only.append(Path(grant))
+        if self._grants_cache is not None:
+            for path_grant in self._grants_cache.get().paths:
+                read_only.append(Path(path_grant.path))
+
+        deny: list[Path] = []
+        with contextlib.suppress(RuntimeError):
+            deny.append(Path.home())
+
+        return JailRoots(
+            read_write=tuple(dict.fromkeys(p.resolve() for p in read_write)),
+            read_only=tuple(dict.fromkeys(p.resolve() for p in read_only if p.exists())),
+            shared_write=tuple(dict.fromkeys(p.resolve() for p in shared_write)),
+            deny=tuple(dict.fromkeys(p.resolve() for p in deny)),
+        )
+
     async def _tool_run_command(
         self,
         args: dict[str, Any],
@@ -1902,7 +1928,7 @@ class CoreToolExecutor(ToolExecutorPort):
         ctx: TurnContext,
     ) -> tuple[str | None, str | None]:
         try:
-            cmd, argv = _parse_run_command(args)
+            cmd, argv = parse_run_command(args)
         except ValueError as exc:
             return None, _run_command_parse_envelope(exc)
         try:
@@ -1922,11 +1948,19 @@ class CoreToolExecutor(ToolExecutorPort):
         executor = self._terminal
         if cmd == "mempalace" and self._host_terminal is not None:
             executor = self._host_terminal
+        extra_allowed_commands: set[str] = set(ctx.turn_command_grants)
+        if self._grants_cache is not None:
+            extra_allowed_commands = extra_allowed_commands | self._grants_cache.command_names()
         try:
             execute_kwargs: dict[str, Any] = {
                 "timeout": timeout,
                 "cwd": cwd,
+                "extra_allowed_commands": extra_allowed_commands,
             }
+            if isinstance(executor, TerminalExecutor):
+                # jail_roots is a TerminalExecutor-only concept — SandboxExecutor
+                # runs in a container that already isolates the host filesystem.
+                execute_kwargs["jail_roots"] = self._jail_roots(ctx)
             if (
                 cmd == "mempalace"
                 and self._memory is not None

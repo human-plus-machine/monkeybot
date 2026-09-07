@@ -42,6 +42,7 @@ class LivePolicySlices(Protocol):
     subagent_registry: dict[str, SubagentConfig]
     computer_tools: list[Any]
     computer_approvals_persist: Callable[[str, str], bool] | None
+    grants_persist: Callable[[str, str], bool] | None
 
 
 @dataclass
@@ -66,6 +67,7 @@ class RealtimeDependencies:
     loops_registry: LoopsToolRegistry = field(default_factory=LoopsToolRegistry)
     computer_tools: list[Any] = field(default_factory=list)
     computer_approvals_persist: Callable[[str, str], bool] | None = None
+    grants_persist: Callable[[str, str], bool] | None = None
     _frozen: bool = field(default=False, repr=False)
 
     def freeze(self) -> None:

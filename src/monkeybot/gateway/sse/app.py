@@ -83,8 +83,10 @@ from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
+from monkeybot.core.tools.grant_store import build_grants_persist_hook
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
 from monkeybot.core.tools.loop_inspector import LoopStartInspector
+from monkeybot.core.tools.path_grant_inspector import PathGrantInspector
 from monkeybot.core.tools.permission import try_load_permission_inspector
 from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.core.verifier.actuator import NudgeActuator
@@ -191,6 +193,8 @@ class GatewayRuntime:
     loops_registry: LoopsToolRegistry = field(default_factory=LoopsToolRegistry)
     computer_tools: list[Any] = field(default_factory=list)
     computer_approvals_persist: Callable[[str, str], bool] | None = None
+    grants_persist: Callable[[str, str], bool] | None = None
+    grants_path: Path | None = None
     goal_ledger: GoalLedger | None = None
     progress_tracker: ProgressTracker | None = None
     verdict_mailbox: VerdictMailbox | None = None
@@ -214,10 +218,14 @@ class GatewayRuntime:
         tiers_path = _resolved_cfg_path(
             cfg, "COMMAND_ALLOWLIST_CONFIG", layout.command_allowlist_path, layout.agent_root
         )
+        self.grants_path = _resolved_cfg_path(
+            cfg, "MONKEYBOT_GRANTS_CONFIG", layout.grants_path, layout.agent_root
+        )
+        self.grants_persist = build_grants_persist_hook(self.grants_path)
         had_policy = self.run_command_allowed_commands is not None
         inspectors: list[ToolInspector] = []
         try:
-            tier_insp = CommandTierInspector(tiers_path)
+            tier_insp = CommandTierInspector(tiers_path, grants_path=self.grants_path)
         except FileNotFoundError as exc:
             if fail_closed and had_policy:
                 raise ConfigError(
@@ -231,6 +239,10 @@ class GatewayRuntime:
             inspectors.append(tier_insp)
             self.run_command_allowed_commands = list(tier_insp.allowed_commands)
             self.run_command_allowed_path_prefixes = list(tier_insp.allowed_path_prefixes)
+
+        inspectors.append(
+            PathGrantInspector(workspace_root=layout.workspace_root, grants_path=self.grants_path)
+        )
 
         denied = _tool_denied_patterns(cfg)
         if denied:
@@ -831,6 +843,8 @@ class GatewayLoopPort:
                     gateway_runtime.run_command_allowed_path_prefixes
                 )
                 approvals_persist = gateway_runtime.computer_approvals_persist
+                grants_persist = gateway_runtime.grants_persist
+                grants_path = gateway_runtime.grants_path
 
             if mcp is None or provider is None:
                 logger.error("gateway deps not initialized")
@@ -908,6 +922,7 @@ class GatewayLoopPort:
                     loops_advertised=loops_advertised,
                     todo_store=todo_store,
                     approvals_persist=approvals_persist,
+                    grants_persist=grants_persist,
                     config=cfg,
                     goal_ledger=gateway_runtime.goal_ledger,
                     verdict_mailbox=gateway_runtime.verdict_mailbox,
@@ -940,6 +955,7 @@ class GatewayLoopPort:
                 subagent_registry=subagent_registry,
                 loops_registry=loops_registry,
                 config=cfg,
+                grants_path=grants_path,
             )
             if transcript_writer is not None:
                 await transcript_writer.write_user_message(

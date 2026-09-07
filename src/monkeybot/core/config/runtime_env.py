@@ -40,6 +40,7 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("paths", "mcp_config"): "MCP_CONFIG",
     ("paths", "command_allowlist_config"): "COMMAND_ALLOWLIST_CONFIG",
     ("paths", "permission_config"): "PERMISSION_CONFIG",
+    ("paths", "grants_config"): "MONKEYBOT_GRANTS_CONFIG",
     ("paths", "workspace_root"): "MONKEYBOT_WORKSPACE_ROOT",
     ("paths", "agent_id"): "MONKEYBOT_AGENT_ID",
     ("model", "provider"): "MODEL_PROVIDER",
@@ -158,6 +159,7 @@ ENV_SPEC: dict[str, tuple[ConfigTier, str]] = {
     "MONKEYBOT_TOOL_DENIED_PATTERNS": (ConfigTier.REBUILD, "tools.denied_patterns"),
     "MONKEYBOT_COMPUTER_TOOLS": (ConfigTier.REBUILD, "tools.computer_enabled"),
     "MONKEYBOT_APPROVALS_CONFIG": (ConfigTier.REBUILD, "paths.approvals_config"),
+    "MONKEYBOT_GRANTS_CONFIG": (ConfigTier.REBUILD, "paths.grants_config"),
     "SANDBOX_ENABLED": (ConfigTier.REBUILD, "tools.sandbox_enabled"),
     "SANDBOX_SERVER_URL": (ConfigTier.REBUILD, "tools.sandbox_server_url"),
     "SANDBOX_IMAGE": (ConfigTier.REBUILD, "tools.sandbox_image"),
@@ -253,6 +255,7 @@ _RETIRED_TOOLS_WARNINGS_OVERRIDES: dict[str, str] = {
     ),
 }
 
+
 def warn_retired_tools_keys(doc: Mapping[str, Any]) -> list[str]:
     """Log one warning per retired YAML key; return the keys found."""
     found: list[str] = []
@@ -299,9 +302,7 @@ def check_yaml_only_model_env(merged: Mapping[str, Any] | None = None) -> list[s
         return []
     model = merged.get("model") if isinstance(merged, Mapping) else None
     yaml_provider = model.get("provider") if isinstance(model, dict) else None
-    if "MODEL_PROVIDER" in found and not (
-        isinstance(yaml_provider, str) and yaml_provider.strip()
-    ):
+    if "MODEL_PROVIDER" in found and not (isinstance(yaml_provider, str) and yaml_provider.strip()):
         from monkeybot.core.config.settings import ConfigError
 
         raise ConfigError(

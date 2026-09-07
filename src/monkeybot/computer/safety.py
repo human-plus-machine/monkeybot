@@ -229,6 +229,19 @@ def _denied_dirs() -> tuple[Path, ...]:
     if config_dir:
         with contextlib.suppress(OSError):
             dirs.append(_expand_tilde(config_dir).resolve().parent)
+    # Unconditional, not just under MONKEYBOT_APP_HOME: the desktop app's own
+    # workspaces are already covered via app_home above, but a CLI-scaffolded
+    # agent's workspace_root can sit anywhere the user chose — including
+    # under $HOME — and has no app_home to fall back on. Without this,
+    # `computer_move`/`computer_trash` could relocate a file straight into
+    # (or out of) that workspace, one click away from smuggling the exact
+    # thing the read-only file tools' workspace boundary exists to prevent.
+    from monkeybot.core.config.snapshot import current_env
+
+    workspace_root = current_env("MONKEYBOT_WORKSPACE_ROOT", "")
+    if workspace_root:
+        with contextlib.suppress(OSError):
+            dirs.append(_expand_tilde(workspace_root).resolve())
     return tuple(dirs)
 
 

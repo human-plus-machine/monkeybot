@@ -21,6 +21,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
     monkeypatch.delenv("MONKEYBOT_APP_HOME", raising=False)
     monkeypatch.delenv("MONKEYBOT_CONFIG", raising=False)
+    monkeypatch.delenv("MONKEYBOT_WORKSPACE_ROOT", raising=False)
     return fake_home
 
 
@@ -111,6 +112,21 @@ class TestResolveUserPath:
         target = app_home / "agents" / "x" / "monkeybot_config" / "approvals.json"
         target.parent.mkdir(parents=True)
         target.write_text("{}")
+        with pytest.raises(safety.ComputerToolError) as exc:
+            safety.resolve_user_path(str(target))
+        assert exc.value.kind == "policy"
+
+    def test_rejects_workspace_root_without_app_home(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A CLI-scaffolded agent has no MONKEYBOT_APP_HOME to fall back on,
+        but its workspace_root can still sit under $HOME — computer_move
+        must not be able to relocate a file straight into (or out of) it."""
+        workspace = home / "my-agent" / "workspace"
+        workspace.mkdir(parents=True)
+        monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(workspace))
+        target = workspace / "smuggled.txt"
+        target.write_text("x")
         with pytest.raises(safety.ComputerToolError) as exc:
             safety.resolve_user_path(str(target))
         assert exc.value.kind == "policy"

@@ -21,6 +21,21 @@ Mechanisms, in order of preference:
 
 When neither is available the caller is told so and must decide; this module
 never silently pretends a path is hidden.
+
+``jailed_argv`` builds the same two mechanisms into a *deny-by-default*
+profile instead: read is allowed everywhere except a set of ``deny`` roots
+(the user's home directory, primarily), read+write is granted on top for a
+small set of ``read_write`` roots (the workspace, artifacts, memory palace,
+OS temp dirs), and read-only for ``read_only`` roots (skills, the interpreter
+prefix, granted folders) even when those happen to sit inside a denied root —
+which is the common case for a desktop app whose workspace and bundled
+Python both live under the user's home directory. Validated empirically
+against real `python3`, `git`, `uv`, and `bash` invocations under
+`sandbox-exec` on macOS; the Linux mount-namespace path follows the same
+allow-on-top-of-deny structure but has not been exercised on a real Linux
+host as part of this change — see the fail-closed contract on
+``jail_available`` below, which means a bug here degrades to "run_command
+refuses to run" rather than a silent bypass.
 """
 
 from __future__ import annotations
@@ -151,16 +166,14 @@ def _seatbelt_subpath(path: str) -> str:
     """
     if _SEATBELT_PATH_METACHARS.intersection(path):
         raise ValueError(
-            "hidden path contains seatbelt metacharacters and cannot be isolated: "
-            + repr(path)
+            "hidden path contains seatbelt metacharacters and cannot be isolated: " + repr(path)
         )
     return path
 
 
 def _sandbox_exec_profile(hidden: Sequence[str]) -> str:
     denies = "\n".join(
-        f'(deny file-read* file-write* (subpath "{_seatbelt_subpath(path)}"))'
-        for path in hidden
+        f'(deny file-read* file-write* (subpath "{_seatbelt_subpath(path)}"))' for path in hidden
     )
     return f"(version 1)\n(allow default)\n{denies}\n"
 
@@ -314,3 +327,333 @@ def memory_hidden_paths(workspace_root: Path) -> tuple[Path, ...]:
         if path not in resolved:
             resolved.append(path)
     return tuple(resolved)
+
+
+# Single-file, low-sensitivity exceptions to a `deny` root, needed because
+# common tools read them unconditionally during startup — empirically found
+# by running `git --version`/`git status`/`git commit` under a deny-$HOME
+# seatbelt profile: git reads its own global identity/preferences before
+# doing anything else, and fails hard (not gracefully) if that read is
+# denied rather than simply absent. Deliberately narrow: only per-user
+# *preferences* (name, email, aliases, ignore patterns), never credential
+# material — `.git-credentials`, SSH keys, and `gh`'s `hosts.yml` stay
+# denied, matching the credential-path philosophy already established in
+# `computer/safety.py`'s denylist.
+_HOME_DOTFILE_READ_EXCEPTIONS: tuple[str, ...] = (
+    ".gitconfig",
+    ".config/git/config",
+    ".config/git/ignore",
+)
+
+# Always-needed device nodes: stdio redirection, /dev/null discards,
+# randomness for anything that seeds a PRNG (uv, git object hashing tools,
+# TLS). None of these leak filesystem contents.
+_JAIL_DEVICE_NODES: tuple[str, ...] = (
+    "/dev/null",
+    "/dev/zero",
+    "/dev/urandom",
+    "/dev/random",
+    "/dev/tty",
+    "/dev/dtracehelper",
+    "/dev/stdin",
+    "/dev/stdout",
+    "/dev/stderr",
+)
+
+
+@dataclass(frozen=True)
+class JailRoots:
+    """Deny-by-default filesystem policy for one command.
+
+    ``deny`` roots (typically just the user's home directory) are unreadable
+    and unwritable by default. Everywhere outside every ``deny`` root stays
+    readable (the host's normal files aren't secret) but is never writable
+    unless explicitly granted — the write restriction is unconditional, not
+    scoped to ``deny``, so a command cannot write into arbitrary host
+    locations it happens to have OS permission for.
+
+    Two different kinds of grant sit on top of ``deny``, and they resolve a
+    nested conflict oppositely on purpose:
+
+    ``read_write`` / ``read_only``
+        Specific, deliberate roots — the workspace, artifacts, the memory
+        palace, skills, the interpreter's own install prefix, a folder the
+        user explicitly granted. These *always* win over ``deny``, including
+        when nested inside it — the normal case for a desktop app whose
+        workspace and bundled Python both live under the user's home
+        directory, or a folder grant, which by definition lives inside home.
+
+    ``shared_write``
+        Broad, generic infrastructure roots — OS temp directories — that
+        many toolchains stage into but that nobody deliberately chose. These
+        respect ``deny``: a memory palace explicitly relocated under
+        ``/tmp`` (a real, supported deployment shape — see
+        ``memory_hidden_paths``) must stay hidden even though ``/tmp``
+        itself is writable. Putting temp dirs in ``read_write`` instead
+        would silently reopen exactly that case.
+    """
+
+    read_write: tuple[Path, ...] = ()
+    read_only: tuple[Path, ...] = ()
+    shared_write: tuple[Path, ...] = ()
+    deny: tuple[Path, ...] = ()
+
+    def is_empty(self) -> bool:
+        return not (self.read_write or self.read_only or self.shared_write or self.deny)
+
+
+def _resolved_strs(paths: Sequence[Path]) -> list[str]:
+    return [str(Path(p).expanduser().resolve()) for p in paths]
+
+
+def _seatbelt_jail_profile(roots: JailRoots) -> str:
+    deny = _resolved_strs(roots.deny)
+    read_write = _resolved_strs(roots.read_write)
+    read_only = _resolved_strs(roots.read_only)
+    shared_write = _resolved_strs(roots.shared_write)
+    deny_excludes = " ".join(f'(require-not (subpath "{_seatbelt_subpath(p)}"))' for p in deny)
+
+    lines = [
+        "(version 1)",
+        "(deny default)",
+        "(allow process-fork)",
+        "(allow process-exec)",
+        "(allow signal (target self))",
+        "(allow mach-lookup)",
+        "(allow sysctl-read)",
+        "(allow file-read-metadata)",
+        "(allow ipc-posix-shm)",
+    ]
+    if deny:
+        lines.append(f'(allow file-read* (require-all (subpath "/") {deny_excludes}))')
+    else:
+        lines.append('(allow file-read* (subpath "/"))')
+
+    device_literals = " ".join(f'(literal "{p}")' for p in _JAIL_DEVICE_NODES)
+    lines.append(f"(allow file-read* file-write* {device_literals})")
+
+    for rel in _HOME_DOTFILE_READ_EXCEPTIONS:
+        try:
+            home_path = (Path.home() / rel).resolve()
+        except RuntimeError:
+            continue
+        lines.append(f'(allow file-read* (literal "{_seatbelt_subpath(str(home_path))}"))')
+
+    lines.append("(allow network*)")
+
+    # Explicit, deliberate roots always win over `deny`, including nested
+    # inside it (see JailRoots docstring).
+    for p in read_write:
+        lines.append(f'(allow file-read* file-write* (subpath "{_seatbelt_subpath(p)}"))')
+    for p in read_only:
+        lines.append(f'(allow file-read* (subpath "{_seatbelt_subpath(p)}"))')
+
+    # Generic infrastructure roots respect `deny` — a memory palace
+    # deliberately relocated under /tmp must stay hidden even though /tmp
+    # itself is writable (see JailRoots docstring).
+    for p in shared_write:
+        subpath = _seatbelt_subpath(p)
+        if deny:
+            lines.append(
+                f'(allow file-read* file-write* (require-all (subpath "{subpath}") {deny_excludes}))'
+            )
+        else:
+            lines.append(f'(allow file-read* file-write* (subpath "{subpath}"))')
+
+    return "\n".join(lines) + "\n"
+
+
+def _sandbox_exec_jail_argv(executable: str, args: Sequence[str], roots: JailRoots) -> list[str]:
+    return ["sandbox-exec", "-p", _seatbelt_jail_profile(roots), executable, *args]
+
+
+# Same single-threaded-bootstrap constraint as `_LINUX_BOOTSTRAP` (unshare
+# rejects multi-threaded callers). Structure, in order:
+#   1. unshare + uid/gid map + detach mount propagation — identical to the
+#      hide-only bootstrap.
+#   2. Bind-mount "/" onto itself, then remount that bind read-only,
+#      recursively. A plain mount cannot have its flags changed to read-only
+#      directly; making it a bind mount of itself first is the standard
+#      (bubblewrap-style) two-step this requires.
+#   3. Mount an empty read-only tmpfs over each `deny` root (same primitive
+#      as the hide-only bootstrap).
+#   4. Bind-mount each `read_write` root onto itself (a fresh bind mount is
+#      read-write regardless of the read-only tree it sits inside or the
+#      tmpfs it may be nested under), and each `read_only` root onto itself
+#      then remounted read-only (bind-mounting with MS_RDONLY set on the
+#      initial call is ignored by the kernel; it needs the same two-step).
+# Unvalidated on a real Linux host as part of this change (see module
+# docstring) — every mount() call is checked and calls `_fail()` (exit 126,
+# the isolation-failure marker) on error, so a bug here means "refuses to
+# run", never a silent bypass.
+_LINUX_JAIL_BOOTSTRAP = r"""
+import ctypes, json, os, sys
+
+CLONE_NEWNS = 0x00020000
+CLONE_NEWUSER = 0x10000000
+MS_RDONLY = 1
+MS_NOSUID = 2
+MS_NODEV = 4
+MS_REC = 16384
+MS_BIND = 4096
+MS_REMOUNT = 32
+MS_PRIVATE = 1 << 18
+PREFIX = "monkeybot-isolation:"
+
+
+def _fail(message):
+    sys.stderr.write(PREFIX + " " + message + "\n")
+    raise SystemExit(126)
+
+
+spec = json.loads(sys.argv[1])
+deny = spec["deny"]
+read_write = spec["read_write"]
+read_only = spec["read_only"]
+shared_write = spec["shared_write"]
+argv = sys.argv[2:]
+if not argv:
+    _fail("no command to execute")
+
+libc = ctypes.CDLL(None, use_errno=True)
+libc.unshare.argtypes = [ctypes.c_int]
+libc.mount.argtypes = [
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+    ctypes.c_char_p,
+    ctypes.c_ulong,
+    ctypes.c_void_p,
+]
+
+uid = os.getuid()
+gid = os.getgid()
+if libc.unshare(CLONE_NEWNS | CLONE_NEWUSER) != 0:
+    _fail("unshare failed: " + os.strerror(ctypes.get_errno()))
+try:
+    with open("/proc/self/setgroups", "w") as fh:
+        fh.write("deny")
+except OSError:
+    pass
+try:
+    with open("/proc/self/uid_map", "w") as fh:
+        fh.write("0 %d 1" % uid)
+    with open("/proc/self/gid_map", "w") as fh:
+        fh.write("0 %d 1" % gid)
+except OSError as exc:
+    _fail("cannot map namespace user: " + str(exc))
+if libc.mount(b"none", b"/", None, MS_REC | MS_PRIVATE, None) != 0:
+    _fail("cannot detach mount namespace: " + os.strerror(ctypes.get_errno()))
+
+if libc.mount(b"/", b"/", None, MS_BIND | MS_REC, None) != 0:
+    _fail("cannot self-bind root: " + os.strerror(ctypes.get_errno()))
+if libc.mount(None, b"/", None, MS_REMOUNT | MS_BIND | MS_REC | MS_RDONLY, None) != 0:
+    _fail("cannot make root read-only: " + os.strerror(ctypes.get_errno()))
+
+for target in deny:
+    if not os.path.isdir(target):
+        try:
+            os.makedirs(target, mode=0o700, exist_ok=True)
+        except OSError as exc:
+            _fail("cannot prepare deny mount point " + target + ": " + str(exc))
+    flags = MS_RDONLY | MS_NOSUID | MS_NODEV
+    if libc.mount(b"tmpfs", target.encode(), b"tmpfs", flags, b"size=0,mode=0500") != 0:
+        _fail("cannot deny " + target + ": " + os.strerror(ctypes.get_errno()))
+
+for target in read_write:
+    if not os.path.isdir(target):
+        try:
+            os.makedirs(target, mode=0o700, exist_ok=True)
+        except OSError as exc:
+            _fail("cannot prepare read_write mount point " + target + ": " + str(exc))
+    enc = target.encode()
+    if libc.mount(enc, enc, None, MS_BIND | MS_REC, None) != 0:
+        _fail("cannot expose read_write " + target + ": " + os.strerror(ctypes.get_errno()))
+
+for target in read_only:
+    if not os.path.isdir(target):
+        continue
+    enc = target.encode()
+    if libc.mount(enc, enc, None, MS_BIND | MS_REC, None) != 0:
+        _fail("cannot expose read_only " + target + ": " + os.strerror(ctypes.get_errno()))
+    if libc.mount(None, enc, None, MS_REMOUNT | MS_BIND | MS_REC | MS_RDONLY, None) != 0:
+        _fail("cannot make read_only " + target + ": " + os.strerror(ctypes.get_errno()))
+
+# shared_write roots (OS temp dirs) are generic infrastructure, not a
+# deliberate grant: expose them for write, then re-apply the deny mounts so
+# any deny root nested inside one (e.g. a memory palace relocated under
+# /tmp) stays hidden. Mount order determines precedence, so the re-hide
+# below — applied after shared_write is exposed — is what makes deny win
+# for exactly that nested case, matching the seatbelt profile's
+# require-not-deny treatment of shared_write.
+for target in shared_write:
+    if not os.path.isdir(target):
+        try:
+            os.makedirs(target, mode=0o700, exist_ok=True)
+        except OSError as exc:
+            _fail("cannot prepare shared_write mount point " + target + ": " + str(exc))
+    enc = target.encode()
+    if libc.mount(enc, enc, None, MS_BIND | MS_REC, None) != 0:
+        _fail("cannot expose shared_write " + target + ": " + os.strerror(ctypes.get_errno()))
+
+for target in deny:
+    nested_under_shared = any(
+        target == shared or target.startswith(shared.rstrip("/") + "/") for shared in shared_write
+    )
+    if not nested_under_shared:
+        continue
+    flags = MS_RDONLY | MS_NOSUID | MS_NODEV
+    if libc.mount(b"tmpfs", target.encode(), b"tmpfs", flags, b"size=0,mode=0500") != 0:
+        _fail("cannot re-deny " + target + ": " + os.strerror(ctypes.get_errno()))
+
+try:
+    if os.sep in argv[0]:
+        os.execv(argv[0], argv)
+    else:
+        os.execvp(argv[0], argv)
+except OSError as exc:
+    _fail("cannot exec " + argv[0] + ": " + str(exc))
+"""
+
+
+def _namespace_jail_argv(executable: str, args: Sequence[str], roots: JailRoots) -> list[str]:
+    spec = {
+        "deny": _resolved_strs(roots.deny),
+        "read_write": _resolved_strs(roots.read_write),
+        "read_only": _resolved_strs(roots.read_only),
+        "shared_write": _resolved_strs(roots.shared_write),
+    }
+    return [
+        sys.executable,
+        "-S",
+        "-E",
+        "-c",
+        _LINUX_JAIL_BOOTSTRAP,
+        json.dumps(spec),
+        executable,
+        *args,
+    ]
+
+
+def jailed_argv(
+    executable: str,
+    args: Sequence[str],
+    roots: JailRoots,
+    *,
+    support: IsolationSupport,
+) -> tuple[str, list[str]]:
+    """Rewrite an argv to run under a deny-by-default filesystem jail.
+
+    Raises ``ValueError`` when ``support`` is unavailable or any root
+    contains seatbelt metacharacters — callers should treat that the same as
+    a failed isolation attempt (see each caller's own fail-open/fail-closed
+    policy; this function itself has no opinion on that).
+    """
+    if not support.available:
+        raise ValueError(f"isolation is unavailable: {support.detail}")
+    if roots.is_empty():
+        return executable, list(args)
+    if support.mechanism == "namespace":
+        argv = _namespace_jail_argv(executable, args, roots)
+    else:
+        argv = _sandbox_exec_jail_argv(executable, args, roots)
+    return argv[0], argv[1:]

@@ -13,9 +13,11 @@ from monkeybot.core.tools.fs_isolation import (
     ISOLATION_ERROR_PREFIX,
     ISOLATION_FAILURE_EXIT_CODE,
     IsolationSupport,
+    JailRoots,
     isolated_argv,
     isolation_failed,
     isolation_support,
+    jailed_argv,
     memory_hidden_paths,
     reset_isolation_support_cache,
 )
@@ -240,3 +242,347 @@ class TestLinuxBootstrap:
         assert secret_dir.is_dir()
         assert secret_dir.stat().st_mode & 0o200
         (secret_dir / "init.txt").write_text("ok", encoding="utf-8")
+
+
+class TestJailRoots:
+    def test_is_empty(self):
+        assert JailRoots().is_empty()
+        assert not JailRoots(deny=(Path("/home/x"),)).is_empty()
+        assert not JailRoots(read_write=(Path("/ws"),)).is_empty()
+        assert not JailRoots(read_only=(Path("/skills"),)).is_empty()
+
+
+class TestJailedArgv:
+    def test_empty_roots_is_a_passthrough(self):
+        support = IsolationSupport("namespace", "test")
+        assert jailed_argv("/bin/cat", ["file"], JailRoots(), support=support) == (
+            "/bin/cat",
+            ["file"],
+        )
+
+    def test_unavailable_support_refuses_to_pretend(self):
+        roots = JailRoots(deny=(Path("/home/x"),))
+        with pytest.raises(ValueError, match="isolation is unavailable"):
+            jailed_argv("/bin/cat", [], roots, support=IsolationSupport("none", "x"))
+
+    def test_sandbox_exec_profile_denies_home_and_allows_workspace(self):
+        support = IsolationSupport("sandbox-exec", "test")
+        roots = JailRoots(
+            deny=(Path("/Users/x"),),
+            read_write=(Path("/Users/x/agent/workspace"),),
+            read_only=(Path("/Users/x/agent/skills"),),
+        )
+
+        executable, args = jailed_argv("/bin/bash", ["-c", "true"], roots, support=support)
+
+        assert executable == "sandbox-exec"
+        profile = args[1]
+        assert "(deny default)" in profile
+        assert '(require-not (subpath "/Users/x"))' in profile
+        assert '(allow file-read* file-write* (subpath "/Users/x/agent/workspace"))' in profile
+        assert '(allow file-read* (subpath "/Users/x/agent/skills"))' in profile
+        assert args[-2:] == ["/bin/bash", "-c"] or args[-3:] == ["/bin/bash", "-c", "true"]
+
+    def test_sandbox_exec_profile_allows_gitconfig_by_name(self, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: Path("/Users/x"))
+        support = IsolationSupport("sandbox-exec", "test")
+        roots = JailRoots(deny=(Path("/Users/x"),))
+
+        _, args = jailed_argv("/bin/true", [], roots, support=support)
+
+        profile = args[1]
+        assert '(allow file-read* (literal "/Users/x/.gitconfig"))' in profile
+
+    def test_sandbox_exec_profile_rejects_metacharacters(self):
+        support = IsolationSupport("sandbox-exec", "test")
+        roots = JailRoots(deny=(Path('/tmp/evil") (allow default) (deny file-read*'),))
+        with pytest.raises(ValueError, match="seatbelt metacharacters"):
+            jailed_argv("/bin/true", [], roots, support=support)
+
+    def test_namespace_argv_carries_full_spec(self):
+        support = IsolationSupport("namespace", "test")
+        roots = JailRoots(
+            deny=(Path("/home/x"),),
+            read_write=(Path("/home/x/ws"),),
+            read_only=(Path("/home/x/skills"),),
+        )
+
+        executable, args = jailed_argv("/bin/true", [], roots, support=support)
+
+        assert executable == sys.executable
+        bootstrap = args[args.index("-c") + 1]
+        assert "unshare" in bootstrap
+        spec_json = args[args.index("-c") + 2]
+        assert "/home/x/ws" in spec_json
+        assert "/home/x/skills" in spec_json
+        assert "/home/x" in spec_json
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="seatbelt jail is macOS-only")
+class TestMacJailBootstrap:
+    """Real `sandbox-exec` subprocess tests — see fs_isolation.py's module
+    docstring: this exact profile shape was validated by hand against real
+    python3/git/bash invocations before being written into code."""
+
+    def _run(self, roots: JailRoots, argv: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        executable, args = jailed_argv(
+            argv[0], argv[1:], roots, support=IsolationSupport("sandbox-exec", "test")
+        )
+        return subprocess.run(
+            [executable, *args], capture_output=True, text=True, timeout=30, cwd=str(cwd)
+        )
+
+    def test_denied_home_file_is_unreadable(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+        secret = home / "secret.txt"
+        secret.write_text("HOME-SECRET", encoding="utf-8")
+
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+        proc = self._run(roots, ["/bin/cat", str(secret)], cwd=workspace)
+
+        assert proc.returncode != 0
+        assert "HOME-SECRET" not in proc.stdout
+        assert secret.read_text(encoding="utf-8") == "HOME-SECRET"
+
+    def test_read_write_root_inside_deny_root_is_usable(self, tmp_path):
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+        (workspace / "in.txt").write_text("workspace-content", encoding="utf-8")
+
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+        read = self._run(roots, ["/bin/cat", "in.txt"], cwd=workspace)
+        assert read.returncode == 0
+        assert "workspace-content" in read.stdout
+
+        write = self._run(
+            roots, ["/bin/bash", "-c", "echo written > out.txt"], cwd=workspace
+        )
+        assert write.returncode == 0
+        assert (workspace / "out.txt").read_text(encoding="utf-8").strip() == "written"
+
+    def test_read_only_root_rejects_write(self, tmp_path):
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        skills = home / "agent" / "skills"
+        workspace.mkdir(parents=True)
+        skills.mkdir(parents=True)
+        (skills / "s.py").write_text("# skill", encoding="utf-8")
+
+        roots = JailRoots(deny=(home,), read_write=(workspace,), read_only=(skills,))
+        read = self._run(roots, ["/bin/cat", str(skills / "s.py")], cwd=workspace)
+        assert read.returncode == 0
+        assert "# skill" in read.stdout
+
+        write = self._run(
+            roots, ["/bin/bash", "-c", f"echo x > {skills}/new.py"], cwd=workspace
+        )
+        assert write.returncode != 0
+        assert not (skills / "new.py").exists()
+
+    def test_write_outside_every_allowed_root_is_denied(self, tmp_path):
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+        proc = self._run(
+            roots, ["/bin/bash", "-c", f"echo pwned > {outside}/pwned.txt"], cwd=workspace
+        )
+
+        assert proc.returncode != 0
+        assert not (outside / "pwned.txt").exists()
+
+    def test_home_expansion_escape_is_closed(self, tmp_path, monkeypatch):
+        """Regression test for the exact reported bug: a shell expression that
+        only resolves `$HOME` at exec time (defeating argv-string screening)
+        must still be blocked by the OS-level jail, not by argument parsing."""
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+        desktop = home / "Desktop"
+        desktop.mkdir()
+        (desktop / "secret.pdf").write_text("PDF-BYTES", encoding="utf-8")
+
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+        executable, args = jailed_argv(
+            "/bin/bash",
+            ["-c", 'cp "$HOME/Desktop/secret.pdf" .'],
+            roots,
+            support=IsolationSupport("sandbox-exec", "test"),
+        )
+        proc = subprocess.run(
+            [executable, *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=str(workspace),
+            env={**__import__("os").environ, "HOME": str(home)},
+        )
+
+        assert proc.returncode != 0
+        assert not (workspace / "secret.pdf").exists()
+
+    def test_python_interpreter_starts_under_the_jail(self, tmp_path):
+        """Regression test for the interpreter-bootstrap EPERM crash found
+        while validating this profile: Python's own startup scans sys.path,
+        and denying (rather than hiding) a stray entry under `deny` must not
+        turn into an uncaught PermissionError before user code even runs."""
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+        proc = self._run(roots, [sys.executable, "-c", "print('jail-ok')"], cwd=workspace)
+
+        assert proc.returncode == 0
+        assert "jail-ok" in proc.stdout
+
+    def test_git_commit_works_inside_jail(self, tmp_path):
+        """Regression test: git reads ~/.gitconfig unconditionally on
+        startup; without the narrow _HOME_DOTFILE_READ_EXCEPTIONS carve-out
+        this fails even for `git --version`."""
+        if subprocess.run(["which", "git"], capture_output=True).returncode != 0:
+            pytest.skip("git not installed")
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+        (workspace / "in.txt").write_text("x", encoding="utf-8")
+
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+        script = (
+            "git init -q && "
+            "git -c user.email=a@b.c -c user.name=a add in.txt && "
+            "git -c user.email=a@b.c -c user.name=a commit -q -m test && "
+            "git log --oneline"
+        )
+        proc = self._run(roots, ["/bin/bash", "-c", script], cwd=workspace)
+
+        assert proc.returncode == 0, proc.stderr
+        assert "test" in proc.stdout
+
+    def test_network_still_works_under_the_jail(self, tmp_path):
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+        proc = self._run(
+            roots,
+            [sys.executable, "-c", "import socket; socket.gethostbyname('localhost')"],
+            cwd=workspace,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+    def test_shared_write_root_is_usable(self, tmp_path):
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+        shared = tmp_path / "shared-tmp"
+        shared.mkdir()
+
+        roots = JailRoots(deny=(home,), read_write=(workspace,), shared_write=(shared,))
+        proc = self._run(
+            roots, ["/bin/bash", "-c", f"echo x > {shared}/out.txt"], cwd=workspace
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        assert (shared / "out.txt").read_text(encoding="utf-8").strip() == "x"
+
+    def test_deny_root_nested_inside_shared_write_stays_hidden(self, tmp_path):
+        """Regression test: a memory palace deliberately relocated under a
+        shared_write root (e.g. a FaaS deployment putting it under /tmp)
+        must stay hidden even though the shared_write root itself is
+        writable — see JailRoots' docstring on why this is a separate
+        category from read_write."""
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+        shared = tmp_path / "shared-tmp"
+        palace = shared / "faas" / "memory"
+        palace.mkdir(parents=True)
+        (palace / "secret.txt").write_text("PALACE-SECRET", encoding="utf-8")
+
+        roots = JailRoots(
+            deny=(home, palace), read_write=(workspace,), shared_write=(shared,)
+        )
+        read = self._run(roots, ["/bin/cat", str(palace / "secret.txt")], cwd=workspace)
+        assert read.returncode != 0
+        assert "PALACE-SECRET" not in read.stdout
+
+        # The rest of the shared_write root remains usable.
+        write = self._run(
+            roots, ["/bin/bash", "-c", f"echo x > {shared}/scratch.txt"], cwd=workspace
+        )
+        assert write.returncode == 0
+        assert (shared / "scratch.txt").exists()
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="namespace jail bootstrap is linux-only",
+)
+class TestLinuxJailBootstrap:
+    """Mirrors TestLinuxBootstrap's skip/probe discipline. Not exercised on
+    the darwin host this change was developed and validated on — see the
+    module docstring's fail-closed rationale."""
+
+    @pytest.fixture(autouse=True)
+    def _require_live_namespace(self):
+        reset_isolation_support_cache()
+        support = isolation_support()
+        if support.mechanism != "namespace":
+            pytest.skip(support.detail)
+
+    def _run(self, roots: JailRoots, argv: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+        executable, args = jailed_argv(
+            argv[0], argv[1:], roots, support=IsolationSupport("namespace", "test")
+        )
+        return subprocess.run(
+            [executable, *args], capture_output=True, text=True, timeout=60, cwd=str(cwd)
+        )
+
+    def test_denied_home_file_is_unreadable(self, tmp_path):
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+        secret = home / "secret.txt"
+        secret.write_text("HOME-SECRET", encoding="utf-8")
+
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+        proc = self._run(roots, ["/bin/cat", str(secret)], cwd=workspace)
+
+        assert proc.returncode != 0
+        assert "HOME-SECRET" not in proc.stdout
+
+    def test_read_write_root_inside_deny_root_is_usable(self, tmp_path):
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+        (workspace / "in.txt").write_text("content", encoding="utf-8")
+
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+        proc = self._run(roots, ["/bin/cat", "in.txt"], cwd=workspace)
+
+        assert proc.returncode == 0
+        assert "content" in proc.stdout
+
+    def test_write_outside_every_allowed_root_is_denied(self, tmp_path):
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+        proc = self._run(
+            roots, ["/bin/bash", "-c", f"echo pwned > {outside}/pwned.txt"], cwd=workspace
+        )
+
+        assert proc.returncode != 0
+        assert not (outside / "pwned.txt").exists()

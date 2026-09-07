@@ -2777,6 +2777,112 @@ async def test_loop_confirm_approve_executes_executor() -> None:
     )
 
 
+class GrantConfirmInspector:
+    """Emits a confirm carrying grant_key/grant_kind, like CommandTierInspector."""
+
+    async def check(self, call, ctx):
+        del ctx
+        if call.name == "run_command":
+            return Decision(
+                kind="confirm",
+                message="`ffmpeg` isn't allowed yet.",
+                grant_key="ffmpeg",
+                grant_kind="command",
+            )
+        return Decision(kind="allow")
+
+
+@pytest.mark.asyncio
+async def test_loop_confirm_always_routes_to_grants_persist_and_turn_grant() -> None:
+    """An "always" approval on a grant_kind="command" confirm must persist via
+    ctx.grants_persist (not approvals_persist) and record the grant on
+    ctx.turn_command_grants for the rest of the turn — see
+    core/tools/inspector.py::Decision.grant_key and tool_dispatch.py's confirm
+    branch."""
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "ffmpeg -version"}),
+                Done(),
+            ],
+        ]
+    )
+    hist = FakeHistory()
+    exe = RecordingExecutor()
+    approvals_persist_calls: list[tuple[str, str]] = []
+    grants_persist_calls: list[tuple[str, str]] = []
+
+    def _approvals_persist(tool: str, resource: str) -> bool:
+        approvals_persist_calls.append((tool, resource))
+        return True
+
+    def _grants_persist(tool: str, resource: str) -> bool:
+        grants_persist_calls.append((tool, resource))
+        return True
+
+    ctx = dataclasses.replace(
+        _ctx(),
+        sse_bus=PresetPendingBus({"c1": {"approved": True, "always": True}}),
+        approvals_persist=_approvals_persist,
+        grants_persist=_grants_persist,
+    )
+    async for _ in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[GrantConfirmInspector()],
+        tool_executor=exe,
+        max_turns=3,
+    ):
+        pass
+    assert exe.calls
+    assert grants_persist_calls == [("run_command", "ffmpeg")]
+    assert approvals_persist_calls == []
+    assert ctx.turn_command_grants == {"ffmpeg"}
+
+
+@pytest.mark.asyncio
+async def test_loop_confirm_allow_once_records_turn_grant_without_persist() -> None:
+    """"Allow once" (no ``always``) must still populate ``turn_command_grants``
+    so a second call to the same binary later this turn does not re-ask, but
+    must not durably persist anything."""
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "ffmpeg -version"}),
+                Done(),
+            ],
+        ]
+    )
+    hist = FakeHistory()
+    exe = RecordingExecutor()
+    grants_persist_calls: list[tuple[str, str]] = []
+
+    def _grants_persist(tool: str, resource: str) -> bool:
+        grants_persist_calls.append((tool, resource))
+        return True
+
+    ctx = dataclasses.replace(
+        _ctx(),
+        sse_bus=PresetPendingBus({"c1": {"approved": True}}),
+        grants_persist=_grants_persist,
+    )
+    async for _ in run(
+        "u",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[GrantConfirmInspector()],
+        tool_executor=exe,
+        max_turns=3,
+    ):
+        pass
+    assert exe.calls
+    assert grants_persist_calls == []
+    assert ctx.turn_command_grants == {"ffmpeg"}
+
+
 @pytest.mark.asyncio
 async def test_loop_confirm_deny_appends_error_response() -> None:
     prov = FakeProvider(

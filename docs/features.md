@@ -259,20 +259,20 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Default `ToolExecutorPort` — built-ins, MCP, custom tools, subagents.
 
-**Key files:** `core/tools/core_tool_executor.py`, `terminal.py`, `workspace_service.py`, `patch.py`, `sandbox_executor.py`, `spill_inventory.py`
+**Key files:** `core/tools/core_tool_executor.py`, `terminal.py`, `workspace_service.py`, `patch.py`, `sandbox_executor.py`, `spill_inventory.py`, `fs_isolation.py`, `grant_store.py`
 
 **Built-in tools** (from `context._core_tool_defs`):
 
 | Tool | Role |
 |------|------|
-| `read_file` / `write_file` | `skills/...` read-only or workspace-relative paths |
+| `read_file` / `write_file` | `skills/...` read-only or workspace-relative paths; `read_file`/`load_file` also accept an absolute path outside the workspace once the user grants that folder (see §5) — read in place, never copied in |
 | `replace_in_file` | Unique (or `replace_all`) substring edit; exact then light fuzzy match |
-| `glob` / `grep` | Path discovery / content regex search (prefer over shell) |
+| `glob` / `grep` | Path discovery / content regex search (prefer over shell); `root` accepts a granted external folder the same way `read_file` does |
 | `apply_patch` | Multi-file Codex-style Add/Update/Delete/Move; fail-closed before any write |
 | `search_memory` | Keyword search in memory tree |
 | `search` / `recall` | Local knowledge index (workspace + notes); **parallel-safe**. Gateway owns writes; subagents open the index **read-only**. Harness-as-library (Pattern B/C) callers can opt into read-only via `MONKEYBOT_KNOWLEDGE_READ_ONLY=1`; the gateway always ignores this flag and stays the writer |
 | `list_skills` | Skill discovery |
-| `run_command` | Allowlisted shell (host or OpenSandbox) |
+| `run_command` | Allowlisted **and OS-confined** shell (host or OpenSandbox) — see the workspace jail below |
 | `task` | Subagent subprocess (parent only) |
 | `enable_mcp` / `disable_mcp` | Catalog connect / disconnect (success includes status) |
 | `enable_loops` | Progressive advertise scheduled-loop tools |
@@ -296,6 +296,8 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Nested `task` disabled inside subagents.
 - Custom tools must not collide with core or MCP names.
 - `MONKEYBOT_KNOWLEDGE_READ_ONLY` (default off) opens the knowledge index read-only for `create_harness_deps` (Pattern B/C) callers; subagent workers are always read-only regardless of the flag. The gateway SSE app is the sole writer per workspace and ignores this flag, logging a warning if it is set.
+- **The workspace jail:** `run_command` runs under a deny-by-default OS filesystem policy (`fs_isolation.py::JailRoots`/`jailed_argv`), not just the `allowed_path_prefixes` argv screen (which a shell or interpreter defeats trivially — `bash -c 'cp "$HOME/Desktop/x" .'` never contains a literal `~`/`/` token an argv scanner can catch). The jail denies the user's home directory by default, then allows the workspace/artifacts/memory-palace/OS-temp-dirs back on top (read+write) and skills/interpreter-prefix/granted folders (read-only) — including when those sit inside the denied home directory, the normal case for a desktop app. Implemented for macOS `sandbox-exec`; the Linux mount-namespace path follows the same structure but is unvalidated on a real Linux host — both fail *closed* (refuse to run) if the OS mechanism can't be established, except that the jail itself (unlike the older memory-hide mechanism) fails *open*, once, with a logged warning, if neither OS mechanism is available at all — a default-on hardening that must not turn into "run_command stops working" on unsupported hosts.
+- **Folder read grants:** `read_file`/`load_file`/`glob`/`grep` on an absolute path outside the workspace ask via `PathGrantInspector` (§5) rather than dead-ending; an approved folder is read in place through `WorkspaceFileService.extra_read_roots` — nothing is copied into the workspace, and the same granted folders feed the jail's read-only set above so `run_command` and the file tools agree on what's reachable.
 
 ---
 
@@ -303,13 +305,14 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Purpose:** Pre-flight policy gates; supports user confirmation via SSE.
 
-**Key files:** `core/tools/inspector.py`, `core/tools/permission.py`, `core/tools/loop_inspector.py`
+**Key files:** `core/tools/inspector.py`, `core/tools/permission.py`, `core/tools/loop_inspector.py`, `core/tools/path_grant_inspector.py`, `core/tools/grant_store.py`
 
 **Inspectors wired at gateway startup (order matters — first deny/confirm wins):**
-1. `CommandTierInspector` — `command_allowlist.yaml` deny-regex preflight; execution allowlists stay on the executor
-2. `RulesInspector` — `MONKEYBOT_TOOL_DENIED_PATTERNS` substring deny list (backward compat)
-3. `PermissionInspector` — `permissions.yaml` last-match-wins `allow` / `ask` / `deny` ruleset (`PERMISSION_CONFIG`)
-4. `LoopStartInspector` — `start_loop` always asks for confirmation (rich plan preview)
+1. `CommandTierInspector` — `command_allowlist.yaml` deny-regex preflight (hard, never promotable), then a binary allow/ask gate: a binary already on the static allowlist, in `grants.json`, or granted "Allow once" earlier this turn is allowed and the chain continues (`permissions.yaml` can still ask/deny a finer-grained pattern on top, unchanged); any other binary asks (`confirm`, carrying `grant_key`=the binary) instead of silently falling through to a hard rejection at the executor
+2. `PathGrantInspector` — for `read_file`/`load_file`/`glob`/`grep`, an absolute/`~` path inside the workspace is a no-op (allow); on the credential denylist or outside `$HOME` it's a hard deny; already covered by a `grants.json`/turn-scoped folder grant it's allow; otherwise it asks (`confirm`, `grant_key`=the containing folder, `grant_kind="path"`)
+3. `RulesInspector` — `MONKEYBOT_TOOL_DENIED_PATTERNS` substring deny list (backward compat)
+4. `PermissionInspector` — `permissions.yaml` last-match-wins `allow` / `ask` / `deny` ruleset (`PERMISSION_CONFIG`)
+5. `LoopStartInspector` — `start_loop` always asks for confirmation (rich plan preview)
 
 **Permission ruleset (`permissions.yaml`):**
 - Rules are ordered; **last match wins** (OpenCode-style).
@@ -318,15 +321,17 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `default:` applies when nothing matches (shipped default: `allow`).
 - Session approvals: POST tool-confirmation with `{approved: true, always: true}` remembers tool+resource for the rest of the session (`SessionBus.session_approvals`).
 
-**Decision kinds:** `allow` | `deny` | `confirm` (requires `ctx.sse_bus` for pending UI response).
+**Decision kinds:** `allow` | `deny` | `confirm` (requires `ctx.sse_bus` for pending UI response). A `confirm` may carry `grant_key`/`grant_kind` (`"command"` | `"path"`) — what an "Allow once"/"Always allow" click actually remembers (a binary name or a folder, never the full resource string `resource_for_call()` would otherwise use, which would make a durable rule cover exactly one invocation). `tool_dispatch.py` routes an "always" approval to `ctx.grants_persist` (writing `grants.json`, shared by every agent) when `grant_kind` is set, instead of the `computer_*`-only `ctx.approvals_persist`; either way, "Allow once" also records the grant on `ctx.turn_command_grants`/`ctx.turn_path_grants` so a repeat call later in the same turn does not ask again even without a durable write.
 
-**Hard constraints underneath soft asks:** `allowed_commands` / `allowed_path_prefixes` + sandbox still enforce at execution time — permission `ask`/`allow` cannot bypass them.
+**`grants.json`** (`core/tools/grant_store.py`) is a home-level store — one file shared by every agent on the machine, deliberately distinct from the per-agent, `computer_*`-only `approvals.json` (§21). Same on-disk contract: JSON, mode `0600`, atomic replace, cross-process exclusive-create locking matched byte-for-byte with the Electron side (`electron/main/grants.ts`).
+
+**Hard constraints underneath soft asks:** `allowed_commands` / `allowed_path_prefixes` + sandbox still enforce at execution time — permission `ask`/`allow` cannot bypass them. Beyond the argv allowlist, `run_command` additionally runs inside a deny-by-default OS filesystem jail (§4) that a shell/interpreter cannot argue its way around by rewriting a path.
 
 **Invariants:**
 - Missing allowlist file → tier inspector skipped (logged); executor falls back to code defaults.
 - Missing `permissions.yaml` → soft ruleset disabled (logged).
-- Default deny patterns block package installs (`pip install`, `npm install`, etc.).
-- Confirm without `sse_bus` → deny.
+- Default deny patterns block package installs (`pip install`, `npm install`, etc.) and are never promotable to a confirm by any grant.
+- Confirm without `sse_bus` → deny (this is why a subagent, which has no interactive session, can use an already-durably-granted command/folder transparently but can never ask for a new one).
 
 ---
 
@@ -652,7 +657,7 @@ Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.
 
 **How it works:**
 - Off by default, macOS-only: `computer.enabled: true` in `monkeybot.yaml` → `MONKEYBOT_COMPUTER_TOOLS` env, combined with a hard `sys.platform == "darwin"` check (`should_enable_computer_tools()`). The desktop app sets the env var when it spawns a gateway with the feature turned on in Settings; no other deployment should ever set it.
-- **Hard security boundary lives in the tool bodies, not in `permissions.yaml`** (`safety.py`): every path is resolved and validated against the user's home directory after following symlinks; a fixed denylist blocks credential directories (`.ssh`, `.aws`, keychains, browser profiles, the app's own config) both at their canonical location *and* by directory-name anywhere in the tree; filenames matching credential patterns (`.env`, `*.pem`, `id_rsa*`, …) are always refused; `computer_open` refuses any path/app that would make `open` execute code (`.command`, `.app`, `.sh`, Terminal, script editors, …); trash never hard-deletes. `permissions.yaml` is fail-open (a broken file silently disables it), so none of this can depend on it.
+- **Hard security boundary lives in the tool bodies, not in `permissions.yaml`** (`safety.py`): every path is resolved and validated against the user's home directory after following symlinks; a fixed denylist blocks credential directories (`.ssh`, `.aws`, keychains, browser profiles, the app's own config) both at their canonical location *and* by directory-name anywhere in the tree; filenames matching credential patterns (`.env`, `*.pem`, `id_rsa*`, …) are always refused; `computer_open` refuses any path/app that would make `open` execute code (`.command`, `.app`, `.sh`, Terminal, script editors, …); trash never hard-deletes. `permissions.yaml` is fail-open (a broken file silently disables it), so none of this can depend on it. `_denied_dirs()` also always includes `MONKEYBOT_WORKSPACE_ROOT` (not only under `MONKEYBOT_APP_HOME`, which only the desktop app sets) — a CLI-scaffolded agent's workspace can sit anywhere under `$HOME` the user chose, and `computer_move`/`computer_trash` must not be able to relocate a file straight into or out of it, one click away from smuggling exactly what the workspace boundary (§4) exists to prevent. `computer_move`'s own description now says so, so the model doesn't reach for it as a `read_file`/`run_command` workaround.
 - **Every `computer_*` call asks by default**, via a built-in baseline rule (`COMPUTER_BASELINE_RULES` in `permissions.py`) — not a line in `permissions.yaml`, so it can't be silently defeated by a missing/broken config file. `ComputerAwarePermissionInspector` layers, last-match-wins: baseline `ask` < durable approvals overlay `allow` < the user's `permissions.yaml` (highest authority — a hand-written `deny` always wins).
 - **"Always allow" is durable and narrow**: `monkeybot_config/approvals.json` (machine-written, JSON — deliberately *not* appended into `permissions.yaml`, which is a comment-heavy file the app's Advanced settings save wholesale) stores one exact `(tool, resource)` pair per rule. Mutating tools (`computer_move`, `computer_trash`) are excluded from `ALWAYS_SCOPE` — their resource is the *source* path only, so an "always" rule would cover any destination — every call to them asks. The inspector re-`stat`s the overlay file on every check and reloads on change; on a genuine change it also clears the session-level approval cache, so a revoke in the app's Settings takes effect immediately rather than waiting for a gateway restart.
 - Registered via the standard `extra_tools` extension point in both the SSE (`gateway/sse/app.py`) and realtime (`gateway/realtime/routes.py`) gateways — same mechanism as `web_search`/`todo_list`. Never registered for subagents (`subagent_worker.py` builds its own `extra_tools` independently and never imports this package).

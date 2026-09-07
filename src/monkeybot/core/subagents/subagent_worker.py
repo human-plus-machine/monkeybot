@@ -57,6 +57,7 @@ from monkeybot.core.subagents.subagent_proto import (
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
+from monkeybot.core.tools.path_grant_inspector import PathGrantInspector
 from monkeybot.core.tools.permission import try_load_permission_inspector
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
@@ -313,12 +314,14 @@ async def _async_main() -> None:
         inspectors: list[ToolInspector] = []
         run_allow_cmds: list[str] | None = None
         run_allow_paths: list[str] | None = None
+        grants_path_str = current_env("MONKEYBOT_GRANTS_CONFIG", "").strip()
+        grants_path = Path(grants_path_str) if grants_path_str else None
         tiers_path = resolve_project_path(
             current_env("COMMAND_ALLOWLIST_CONFIG", "monkeybot_config/command_allowlist.yaml"),
             agent_root,
         )
         try:
-            tier_insp = CommandTierInspector(tiers_path)
+            tier_insp = CommandTierInspector(tiers_path, grants_path=grants_path)
             inspectors.append(tier_insp)
             run_allow_cmds = list(tier_insp.allowed_commands)
             run_allow_paths = list(tier_insp.allowed_path_prefixes)
@@ -345,6 +348,13 @@ async def _async_main() -> None:
         perm_insp = try_load_permission_inspector(perm_path, allow_ask=False)
         if perm_insp is not None:
             inspectors.append(perm_insp)
+
+        # Same no-interactive-session rule as above: an ungranted absolute
+        # path still hard-denies (confirm with no bus -> deny), but a folder
+        # already durably granted (Settings, or an earlier "Always allow" in
+        # the parent's chat) works transparently here too — that decision
+        # never needs to ask.
+        inspectors.append(PathGrantInspector(workspace_root=ws, grants_path=grants_path))
 
         provider = _resolve_provider()
         # Prefer parent-allocated id so SSE progress and the child transcript share one key.
@@ -432,6 +442,7 @@ async def _async_main() -> None:
             run_command_allowed_path_prefixes=run_allow_paths,
             knowledge=knowledge,
             config=cfg,
+            grants_path=grants_path,
         )
         history = backend.history()
 

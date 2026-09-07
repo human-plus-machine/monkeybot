@@ -202,6 +202,7 @@ async def _build_realtime_context(
             loops_advertised=loops_advertised,
             todo_store=todo_store,
             approvals_persist=live.computer_approvals_persist,
+            grants_persist=live.grants_persist,
             cancelled=cancelled,
             config=cfg,
         )
@@ -243,6 +244,7 @@ def _create_tool_executor(
         subagent_registry=live.subagent_registry,
         loops_registry=deps.loops_registry,
         config=config if config is not None else get_config_store().current_or_none(),
+        grants_path=AgentLayout.from_environment().grants_path,
     )
 
 

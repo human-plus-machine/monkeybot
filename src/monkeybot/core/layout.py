@@ -162,6 +162,26 @@ def resolve_memory_storage_uri(raw: str, agent_root: Path) -> str:
     return f"local://{resolve_agent_path(local_path or DEFAULT_LOCAL_MEMORY_RELPATH, agent_root)}"
 
 
+def _resolve_grants_path(agent_root: Path) -> Path:
+    """Resolve the cross-agent command/folder grant store.
+
+    An explicit ``MONKEYBOT_GRANTS_CONFIG`` always wins. Otherwise: when the
+    desktop app has set ``MONKEYBOT_APP_HOME`` (one store shared by every
+    agent on the machine — the whole point of "Always allow ffmpeg" covering
+    every agent, not just the one that asked first), default there; a
+    headless/CLI agent has no home concept, so it degrades to a per-agent
+    file under its own ``monkeybot_config/`` (each such agent keeps its own
+    grants, same as `command_allowlist.yaml` today).
+    """
+    explicit = os.environ.get("MONKEYBOT_GRANTS_CONFIG", "").strip()
+    if explicit:
+        return resolve_agent_path(explicit, agent_root)
+    app_home = os.environ.get("MONKEYBOT_APP_HOME", "").strip()
+    if app_home:
+        return (Path(app_home).expanduser() / "grants.json").resolve()
+    return resolve_agent_path("monkeybot_config/grants.json", agent_root)
+
+
 @dataclass(frozen=True)
 class AgentLayout:
     """Resolved canonical locations for a single agent process."""
@@ -178,6 +198,7 @@ class AgentLayout:
     command_allowlist_path: Path
     permission_config_path: Path
     approvals_path: Path
+    grants_path: Path
     db_url: str
     memory_storage_uri: str
     agent_id: str
@@ -227,6 +248,7 @@ class AgentLayout:
             approvals_path=path_env(
                 "MONKEYBOT_APPROVALS_CONFIG", "monkeybot_config/approvals.json"
             ),
+            grants_path=_resolve_grants_path(root),
             db_url=resolve_sqlite_url(
                 os.environ.get("DB_URL", "sqlite:///data/monkeybot.db"), root
             ),
@@ -252,6 +274,7 @@ class AgentLayout:
             "COMMAND_ALLOWLIST_CONFIG": str(self.command_allowlist_path),
             "PERMISSION_CONFIG": str(self.permission_config_path),
             "MONKEYBOT_APPROVALS_CONFIG": str(self.approvals_path),
+            "MONKEYBOT_GRANTS_CONFIG": str(self.grants_path),
             "DB_URL": self.db_url,
             "MEMORY_STORAGE_URI": self.memory_storage_uri,
             "MONKEYBOT_PYTHON": sys.executable,
