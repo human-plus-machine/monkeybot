@@ -652,7 +652,7 @@ def _core_tool_defs(
             ),
             read_schema,
             parallel_safe=True,
-        read_only=True,
+            read_only=True,
         ),
         ToolDef(
             "write_file",
@@ -677,7 +677,7 @@ def _core_tool_defs(
             "(incomplete scans return ok:false / incomplete_scan — narrow root or pattern).",
             glob_schema,
             parallel_safe=True,
-        read_only=True,
+            read_only=True,
         ),
         ToolDef(
             "grep",
@@ -688,7 +688,7 @@ def _core_tool_defs(
             "root or pass file_glob). Capped pages still report total_match_count and next_offset.",
             grep_schema,
             parallel_safe=True,
-        read_only=True,
+            read_only=True,
         ),
         ToolDef(
             "apply_patch",
@@ -707,14 +707,14 @@ def _core_tool_defs(
             "questions prefer `glob`. Prefer `grep` for exact identifiers.",
             search_schema,
             parallel_safe=True,
-        read_only=True,
+            read_only=True,
         ),
         ToolDef(
             "list_skills",
             "List installed skills with names, descriptions, and entry points.",
             list_skills_schema,
             parallel_safe=True,
-        read_only=True,
+            read_only=True,
         ),
     ]
     if include_task_tool:

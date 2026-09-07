@@ -365,6 +365,23 @@ async def test_run_yields_queued_verifier_verdict_before_turn_complete() -> None
     assert system_rows[0].content[0].notification_type == "verifierVerdict"
 
 
+@pytest.mark.asyncio
+async def test_tail_grace_is_skipped_when_no_judge_call_is_pending() -> None:
+    import time
+
+    from monkeybot.core.runtime.turn_loop import _take_ready
+
+    mailbox = VerdictMailbox()
+    started = time.monotonic()
+    assert await _take_ready(mailbox, "t1", "r1", grace_s=1.0) == []
+    assert time.monotonic() - started < 0.2
+
+    mailbox.mark_pending("t1")
+    started = time.monotonic()
+    assert await _take_ready(mailbox, "t1", "r1", grace_s=0.2) == []
+    assert time.monotonic() - started >= 0.2
+
+
 def test_cap_severity() -> None:
     from monkeybot.core.verifier.severity import cap_severity
 
@@ -485,6 +502,60 @@ async def test_replan_empties_tools_for_exactly_one_turn() -> None:
     )
     assert "leave the migrations alone" in first
     assert "Do not call tools this turn" in first
+
+
+@pytest.mark.asyncio
+async def test_replan_from_a_finished_request_does_not_leak_into_the_next() -> None:
+    """A note stashed by a tail drain has no inner turn left in its own request;
+    it must be dropped, not applied to the next user message."""
+    from monkeybot.core.config.settings import VerifierConfig, VerifierEscalationConfig
+    from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
+    from monkeybot.core.types.content_blocks import Text
+    from tests.core.test_doom_loop import ToolsRecordingProvider
+
+    class _Cfg:
+        env_values: dict[str, str] = {}
+        verifier = VerifierConfig(
+            escalation=VerifierEscalationConfig(max_severity="replan"),
+        )
+
+    mailbox = VerdictMailbox()
+    mailbox.put_replan(
+        "t1",
+        "r1",
+        "[Verifier] leave the migrations alone\nDo not call tools this turn.",
+    )
+    ctx = replace(
+        loop_ctx(),
+        request_id="r2",
+        verdict_mailbox=mailbox,
+        config=_Cfg(),  # type: ignore[arg-type]
+    )
+    prov = ToolsRecordingProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "date"}),
+                UsageEvent(input_tokens=1, output_tokens=1),
+                Done(),
+            ],
+            [TextDelta(text="ok"), UsageEvent(input_tokens=1, output_tokens=1), Done()],
+        ]
+    )
+    async for _ in run(
+        "what is the weather",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+    ):
+        pass
+    assert prov.stream_tools[0] == ["run_command"]
+    first = " ".join(
+        b.text for msg in prov.stream_messages[0] for b in msg.content if isinstance(b, Text)
+    )
+    assert "leave the migrations alone" not in first
 
 
 @pytest.mark.asyncio
@@ -628,10 +699,18 @@ def test_mailbox_nudge_overwrites_and_last_caps_after_drain() -> None:
     from monkeybot.core.verifier.mailbox import _THREAD_CAP
 
     mailbox = VerdictMailbox()
-    mailbox.put_nudge("t1", "first")
-    mailbox.put_nudge("t1", "second")
-    assert mailbox.take_nudge("t1") == "second"
-    assert mailbox.take_nudge("t1") is None
+    mailbox.put_nudge("t1", "r1", "first")
+    mailbox.put_nudge("t1", "r1", "second")
+    assert mailbox.take_nudge("t1", "r1") == "second"
+    assert mailbox.take_nudge("t1", "r1") is None
+
+    # A note is scoped to the request that produced it: a later, unrelated
+    # request must not pick up a leftover from a finished one.
+    mailbox.put_nudge("t1", "r1", "stale")
+    assert mailbox.take_nudge("t1", "r2") is None
+    assert mailbox.take_nudge("t1", "r1") is None
+    mailbox.put_replan("t1", "r1", "stale")
+    assert mailbox.take_replan("t1", "r2") is None
 
     def _verdict(i: int) -> VerifierVerdict:
         return VerifierVerdict(

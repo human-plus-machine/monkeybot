@@ -247,10 +247,11 @@ async def _drain_steers(
 
 
 async def _take_ready(
-    mailbox: VerdictMailbox, thread_id: str, *, grace_s: float
+    mailbox: VerdictMailbox, thread_id: str, request_id: str, *, grace_s: float
 ) -> list[VerifierVerdict]:
+    """Pop ready verdicts, waiting out ``grace_s`` only while a judge call is in flight."""
     ready = mailbox.take_ready(thread_id)
-    if ready or grace_s <= 0:
+    if ready or grace_s <= 0 or not mailbox.pending(thread_id):
         return ready
     loop = asyncio.get_running_loop()
     deadline = loop.time() + grace_s
@@ -259,6 +260,10 @@ async def _take_ready(
         ready = mailbox.take_ready(thread_id)
         if ready:
             return ready
+    logger.info(
+        "verdict tail stale %s",
+        kv(thread_id=thread_id, request_id=request_id),
+    )
     return []
 
 
@@ -273,13 +278,7 @@ async def _drain_verdicts(
     if mailbox is None:
         return
     try:
-        ready = await _take_ready(mailbox, ctx.thread_id, grace_s=grace_s)
-        if not ready and grace_s > 0:
-            logger.info(
-                "verdict tail stale %s",
-                kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
-            )
-            return
+        ready = await _take_ready(mailbox, ctx.thread_id, ctx.request_id, grace_s=grace_s)
     except Exception:
         logger.warning(
             "verdict mailbox drain failed %s",
@@ -311,7 +310,6 @@ async def _drain_verdicts(
                 ),
             )
             verdict = dataclasses.replace(verdict, severity=capped)
-        mailbox.set_last(ctx.thread_id, verdict)
         if history is not None:
             try:
                 await persist_message(
@@ -344,14 +342,18 @@ async def _drain_verdicts(
 def _stash_escalation(
     mailbox: VerdictMailbox, thread_id: str, capped: str, verdict: VerifierVerdict
 ) -> None:
-    """Queue one-shot nudge/replan for the next inner turn. Fail-open."""
+    """Queue one-shot nudge/replan for the next inner turn of the verdict's own
+    request. Request-scoped like ``block``: a note whose request has already
+    finished is dropped rather than applied to the next user message. Fail-open.
+    """
     text = verdict.correction or f"[Verifier] {verdict.rationale}"
     try:
         if capped == "nudge":
-            mailbox.put_nudge(thread_id, text)
+            mailbox.put_nudge(thread_id, verdict.request_id, text)
         elif capped in ("replan", "steer"):
             mailbox.put_replan(
                 thread_id,
+                verdict.request_id,
                 f"{text}\nDo not call tools this turn. Restate the plan.",
             )
     except Exception:
@@ -364,7 +366,7 @@ def _arm_replan_from_mailbox(state: _TurnState) -> None:
     if mailbox is None:
         return
     try:
-        note = mailbox.take_replan(state.ctx.thread_id)
+        note = mailbox.take_replan(state.ctx.thread_id, state.ctx.request_id)
     except Exception:
         logger.warning(
             "replan mailbox take failed %s",

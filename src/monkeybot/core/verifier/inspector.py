@@ -26,7 +26,8 @@ class VerifierInspector:
     """Deny mutating tools when the latest capped verdict is ``block``. Fail-open.
 
     A ``block`` is request-scoped: it expires when ``request_id`` changes so a
-    later user message is not stuck behind a stale deny.
+    later user message is not stuck behind a stale deny. A verdict with no
+    ``request_id`` counts as expired rather than as never expiring.
     """
 
     def __init__(self, mailbox: VerdictMailbox) -> None:
@@ -37,7 +38,7 @@ class VerifierInspector:
             last = self._mailbox.last(ctx.thread_id)
             if last is None or last.severity == "none":
                 return Decision(kind="allow")
-            if last.request_id and last.request_id != ctx.request_id:
+            if last.request_id != ctx.request_id:
                 return Decision(kind="allow")
             max_sev = "nudge"
             if ctx.config is not None:

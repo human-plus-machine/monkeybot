@@ -55,6 +55,24 @@ async def test_block_expires_when_request_id_changes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_block_without_request_id_is_treated_as_expired() -> None:
+    mailbox = VerdictMailbox()
+    mailbox.put("t1", replace(_block(), request_id=""))
+    inspector = VerifierInspector(mailbox)
+    ctx = replace(
+        loop_ctx(),
+        verdict_mailbox=mailbox,
+        config=_cfg(),  # type: ignore[arg-type]
+        tools=[ToolDef("run_command", "Run shell", {})],
+    )
+    decision = await inspector.check(
+        InspectorToolCall(call_id="c1", name="run_command", args={}),
+        ctx,
+    )
+    assert decision.kind == "allow"
+
+
+@pytest.mark.asyncio
 async def test_block_denies_parallel_safe_mutating_tool() -> None:
     mailbox = VerdictMailbox()
     mailbox.put("t1", _block("r1"))

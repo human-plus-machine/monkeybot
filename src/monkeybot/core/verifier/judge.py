@@ -90,6 +90,12 @@ class JudgeWorker:
             self._queue.put_nowait(evidence)
         except asyncio.QueueFull:
             logger.warning("judge queue full %s", kv(thread_id=thread_id))
+            return
+        # Count the attempt now, not when the call returns: a slow port would
+        # otherwise let every in-flight turn past both rate limits.
+        self._bump(self._verdicts_this_request, request_id, 1)
+        self._store(self._last_turn, request_id, evidence.inner_turn)
+        self._mailbox.mark_pending(thread_id)
 
     async def _run(self) -> None:
         while True:
@@ -99,11 +105,14 @@ class JudgeWorker:
             except asyncio.CancelledError:
                 raise
             except Exception:
+                self._refund(evidence)
                 logger.warning(
                     "judge handle failed %s",
                     kv(thread_id=evidence.thread_id, request_id=evidence.request_id),
                     exc_info=True,
                 )
+            finally:
+                self._mailbox.clear_pending(evidence.thread_id)
 
     async def _handle(self, evidence: EvidenceBundle) -> None:
         ledger = self._ledger_fn()
@@ -111,6 +120,7 @@ class JudgeWorker:
         try:
             verdict = await self._port.verify(intent, evidence)
         except Exception:
+            self._refund(evidence)
             logger.warning(
                 "judge failed %s",
                 kv(thread_id=evidence.thread_id, request_id=evidence.request_id),
@@ -118,14 +128,13 @@ class JudgeWorker:
             )
             return
         if not isinstance(verdict, VerifierVerdict):
+            self._refund(evidence)
             logger.warning(
                 "judge skipped non-verdict %s",
                 kv(thread_id=evidence.thread_id, type=type(verdict).__name__),
             )
             return
         self._mailbox.put(evidence.thread_id, verdict)
-        self._bump(self._verdicts_this_request, evidence.request_id, 1)
-        self._store(self._last_turn, evidence.request_id, evidence.inner_turn)
         self._bump(self._spend, evidence.request_id, max(0, verdict.judge_tokens))
         agent = self._agent_spend.get(evidence.request_id, 0)
         logger.info(
@@ -136,6 +145,12 @@ class JudgeWorker:
                 agent_tokens=agent,
             ),
         )
+
+    def _refund(self, evidence: EvidenceBundle) -> None:
+        """Give back the verdict budget charged at enqueue when no verdict landed."""
+        charged = self._verdicts_this_request.get(evidence.request_id, 0)
+        if charged > 0:
+            self._store(self._verdicts_this_request, evidence.request_id, charged - 1)
 
     @staticmethod
     def _store(store: OrderedDict[str, int], key: str, value: int) -> None:

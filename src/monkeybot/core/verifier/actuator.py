@@ -22,7 +22,7 @@ class NudgeActuator:
 
     async def on_pre_tool(self, payload: HookPayload) -> None:
         try:
-            text = self._mailbox.take_nudge(payload.thread_id)
+            text = self._mailbox.take_nudge(payload.thread_id, payload.request_id)
             if not text:
                 return
             existing = (payload.inject_text or "").rstrip()

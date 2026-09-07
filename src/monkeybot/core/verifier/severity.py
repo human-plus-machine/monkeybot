@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-_ORDER = ("none", "nudge", "replan", "steer", "block")
+from monkeybot.core.config.settings import VERIFIER_SEVERITY_ORDER as _ORDER
 
 
 def cap_severity(requested: str, maximum: str) -> str:

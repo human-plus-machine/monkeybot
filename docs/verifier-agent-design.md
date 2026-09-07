@@ -68,19 +68,24 @@ A new session should read this section, then Part 8. Phases 0–6 are in the tre
 
 - `VerifierPort` / `ScriptedVerifier` / `SignalJudge` / `JudgeWorker` (off-loop queue).
 - `NudgeActuator` on `PRE_TOOL`; drain caps severity and stashes one nudge.
-- `tail_grace_s` on the turn-tail drain only.
+- `tail_grace_s` on the turn-tail drain only, and only while the judge has a call in flight
+  (`mailbox.pending`) — an idle turn never pays the grace.
+- Nudge/replan notes are request-scoped (`put_nudge`/`take_nudge` take a `request_id`): a note
+  whose request has already finished is dropped, not applied to the next user message.
+- Judge rate limits are charged at `enqueue` and refunded when no verdict lands, so a slow port
+  cannot slip past `max_verdicts_per_message` while a call is in flight.
 - Tests: `tests/core/test_progress_tracker.py` (`test_nudge_reaches_next_system_message_once`), `tests/evals/test_verifier_port.py`.
 
 **Phase 5 left in the tree (do not recreate):**
 
-- Mailbox `put_replan` / `take_replan`; drain stashes when capped severity is `replan`.
+- Mailbox `put_replan` / `take_replan` (request-scoped); drain stashes when capped severity is `replan`.
 - `_arm_replan_from_mailbox` sets `_DoomLoopTracker.force_no_tools` + recovery note; `consume_recovery` empties tools for exactly one inner turn.
 - Tests: `test_replan_empties_tools_for_exactly_one_turn`.
 
 **Phase 6 left in the tree (do not recreate):**
 
-- `VerifierInspector` in `build_inspectors()` / `build_verifier()`; reads `mailbox.last`, caps with `max_severity`, denies non-`read_only` tools. A `block` is request-scoped (`last.request_id` must match).
-- Drain `set_last` so cached severity matches the cap.
+- `VerifierInspector` in `build_inspectors()` / `build_verifier()`; reads `mailbox.last`, caps with `max_severity`, denies non-`read_only` tools. A `block` is request-scoped (`last.request_id` must match exactly; a verdict with no `request_id` counts as expired).
+- `mailbox.put` sets `last`; the inspector re-applies the cap itself, so the drain must not write `last` back (that regresses it behind a verdict the judge deposited mid-drain).
 - Tests: `test_block_denies_mutating_tool_and_allows_read_only`.
 
 ---
