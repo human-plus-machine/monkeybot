@@ -203,7 +203,12 @@ def browser_login(username: str | None = None, expected_origin: str | None = Non
     """Log in with a saved Spaces password without revealing the credential.
 
     Call this only when the user asked to sign in. Do not type or read the
-    password. Returns {ok, loggedIn, origin} — never the password value.
+    password. Returns {ok, loggedIn, origin} — never the password value —
+    plus two optional fields:
+    - mfa: "none" | "completed" | "needed" — whether the sealed login also
+      handled a one-time code, and whether the site still needs one from you.
+    - mode: "keystroke" | "network" | "passkey" — how the credential was
+      delivered; informational only, does not change what you do next.
 
     This signs in to the tab the user has focused, which is not necessarily the
     tab your other browser_* calls address. Pass expected_origin (e.g.
@@ -211,6 +216,27 @@ def browser_login(username: str | None = None, expected_origin: str | None = Non
     different site; always check the returned origin before reporting success.
     """
     result = login._sealed_login(username, expected_origin)
+    return results.json_text(result)
+
+
+@mcp.tool()
+@_public_tool
+def browser_passkey(expected_origin: str | None = None) -> str:
+    """Sign in with a saved Spaces passkey without revealing any key material.
+
+    Call this only when the user asked to sign in and a passkey (not a saved
+    password) is what's stored for the site. Returns {ok, loggedIn, origin,
+    mode: "passkey"} — never any credential material.
+
+    UNVERIFIED (phase 4.4): this has not been exercised against a live
+    browser or a real passkey-enabled site — see docs/credential-broker.md
+    in the Spaces repo. Prefer browser_login when a saved password exists.
+
+    Signs in to the tab the user has focused, same caveat as browser_login:
+    pass expected_origin to make the bridge refuse a mismatched site, and
+    always check the returned origin before reporting success.
+    """
+    result = login._sealed_passkey(expected_origin)
     return results.json_text(result)
 
 

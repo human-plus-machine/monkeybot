@@ -140,6 +140,56 @@ def test_apply_in_app_cdp_url_http_file_keeps_query_token(
     assert bound == "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=from-url"
 
 
+def test_apply_in_app_cdp_url_attaches_run_param_when_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cdp_file = tmp_path / "in-app-cdp-url"
+    cdp_file.write_text("ws://127.0.0.1:9333/devtools/browser/monkeybot", encoding="utf-8")
+    (tmp_path / "in-app-cdp-token").write_text("secret-token", encoding="utf-8")
+    monkeypatch.setattr(in_app_cdp, "_IN_APP_CDP_URL_FILE", cdp_file)
+    monkeypatch.setenv("MONKEYBOT_RUN_ID", "run-123")
+
+    bound = in_app_cdp._apply_in_app_cdp_url()
+    assert bound == "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret-token&run=run-123"
+
+
+def test_apply_in_app_cdp_url_omits_run_param_without_run_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cdp_file = tmp_path / "in-app-cdp-url"
+    cdp_file.write_text("ws://127.0.0.1:9333/devtools/browser/monkeybot", encoding="utf-8")
+    (tmp_path / "in-app-cdp-token").write_text("secret-token", encoding="utf-8")
+    monkeypatch.setattr(in_app_cdp, "_IN_APP_CDP_URL_FILE", cdp_file)
+    monkeypatch.delenv("MONKEYBOT_RUN_ID", raising=False)
+
+    bound = in_app_cdp._apply_in_app_cdp_url()
+    assert bound == "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret-token"
+    assert "run=" not in bound
+
+
+def test_run_headers_empty_without_run_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MONKEYBOT_RUN_ID", raising=False)
+    assert in_app_cdp._run_headers() == {}
+
+
+def test_run_headers_include_label_when_run_id_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MONKEYBOT_RUN_ID", "run-123")
+    monkeypatch.setenv("MONKEYBOT_RUN_LABEL", "Routine: Nightly export")
+    assert in_app_cdp._run_headers() == {
+        "X-Monkeybot-Run": "run-123",
+        "X-Monkeybot-Run-Label": "Routine: Nightly export",
+    }
+
+
+def test_run_headers_default_label_is_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MONKEYBOT_RUN_ID", "session-key")
+    monkeypatch.delenv("MONKEYBOT_RUN_LABEL", raising=False)
+    assert in_app_cdp._run_headers() == {
+        "X-Monkeybot-Run": "session-key",
+        "X-Monkeybot-Run-Label": "Chat",
+    }
+
+
 def test_apply_in_app_cdp_url_ignores_stale_token_without_url_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -562,6 +612,48 @@ def test_sealed_login_forwards_expected_origin(
     }
 
 
+def test_sealed_login_sends_run_headers_when_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    monkeypatch.setenv("MONKEYBOT_RUN_ID", "run-123")
+    monkeypatch.setenv("MONKEYBOT_RUN_LABEL", "Routine: Nightly export")
+    captured: dict[str, object] = {}
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        captured["req"] = req
+        return _FakeHttpResponse({"ok": True, "loggedIn": True})
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    login._sealed_login(None, None)
+
+    req = captured["req"]
+    assert isinstance(req, Request)
+    assert req.get_header("X-Monkeybot-Run".capitalize()) == "run-123"
+    assert req.get_header("X-Monkeybot-Run-Label".capitalize()) == "Routine: Nightly export"
+
+
+def test_sealed_login_omits_run_headers_without_run_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    monkeypatch.delenv("MONKEYBOT_RUN_ID", raising=False)
+    captured: dict[str, object] = {}
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        captured["req"] = req
+        return _FakeHttpResponse({"ok": True, "loggedIn": True})
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    login._sealed_login(None, None)
+
+    req = captured["req"]
+    assert isinstance(req, Request)
+    assert req.get_header("X-Monkeybot-Run".capitalize()) is None
+
+
 def test_sealed_login_surfaces_origin_mismatch_with_actual_origin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -783,9 +875,331 @@ def test_sealed_login_keeps_allowlisted_bridge_error(
     }
 
 
+def test_sealed_login_passes_through_needs_attention(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed-closed scrub must reach the agent verbatim, not as 'login failed'."""
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps(
+        {
+            "ok": False,
+            "loggedIn": False,
+            "origin": "https://example.com",
+            "error": "login needs your attention",
+        }
+    ).encode("utf-8")
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        raise HTTPError(req.full_url, 400, "Bad Request", hdrs=None, fp=BytesIO(payload))
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_login(None, None) == {
+        "ok": False,
+        "loggedIn": False,
+        "origin": "https://example.com",
+        "error": "login needs your attention",
+    }
+
+
+@pytest.mark.parametrize(
+    "error",
+    ["waiting for your approval", "agent access denied for this site", "grant expired"],
+)
+def test_sealed_login_passes_through_grant_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: str
+) -> None:
+    """The grant-flow error strings must reach the agent verbatim."""
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps({"ok": False, "loggedIn": False, "error": error}).encode("utf-8")
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        raise HTTPError(req.full_url, 400, "Bad Request", hdrs=None, fp=BytesIO(payload))
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_login(None, None) == {"ok": False, "loggedIn": False, "error": error}
+
+
+def test_sealed_login_still_maps_unknown_error_to_login_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps(
+        {"ok": False, "loggedIn": False, "error": "some brand new bridge error"}
+    ).encode("utf-8")
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        raise HTTPError(req.full_url, 400, "Bad Request", hdrs=None, fp=BytesIO(payload))
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_login(None, None) == {
+        "ok": False,
+        "loggedIn": False,
+        "error": "login failed",
+    }
+
+
+@pytest.mark.parametrize("mfa", ["none", "completed", "needed"])
+def test_sealed_login_passes_through_known_mfa_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mfa: str
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps({"ok": True, "loggedIn": True, "mfa": mfa}).encode("utf-8")
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse(json.loads(payload))
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_login(None, None) == {"ok": True, "loggedIn": True, "mfa": mfa}
+
+
+def test_sealed_login_drops_unknown_mfa_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An allowlist, not a passthrough: an unrecognized mfa value must not reach the agent."""
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse({"ok": True, "loggedIn": True, "mfa": "not-a-real-value"})
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_login(None, None) == {"ok": True, "loggedIn": True}
+
+
+def test_sealed_login_needs_mfa_error_is_allowlisted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps(
+        {"ok": False, "loggedIn": True, "mfa": "needed", "error": "mfa needs your attention"}
+    ).encode("utf-8")
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        raise HTTPError(req.full_url, 400, "Bad Request", hdrs=None, fp=BytesIO(payload))
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_login(None, None) == {
+        "ok": False,
+        "loggedIn": True,
+        "mfa": "needed",
+        "error": "mfa needs your attention",
+    }
+
+
+@pytest.mark.parametrize("mode", ["keystroke", "network"])
+def test_sealed_login_passes_through_known_mode_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps({"ok": True, "loggedIn": True, "mode": mode}).encode("utf-8")
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse(json.loads(payload))
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_login(None, None) == {"ok": True, "loggedIn": True, "mode": mode}
+
+
+def test_sealed_login_drops_unknown_mode_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse({"ok": True, "loggedIn": True, "mode": "not-a-real-mode"})
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_login(None, None) == {"ok": True, "loggedIn": True}
+
+
 def test_in_app_http_origin_keeps_https_for_wss() -> None:
     assert (
         login._in_app_http_origin("wss://127.0.0.1:9333/devtools/browser/monkeybot")
         == "https://127.0.0.1:9333"
     )
+
+
+# --- Phase 4.4 (passkeys) — UNVERIFIED against a live browser -------------
+# These only cover the bridge-request/response plumbing on the monkeybot
+# side (mirroring the _sealed_login tests above), not the WebAuthn CDP
+# mechanics in Spaces itself. See docs/credential-broker.md there.
+
+
+def test_sealed_passkey_posts_bearer_and_strips_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    captured: dict[str, object] = {}
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        captured["req"] = req
+        return _FakeHttpResponse(
+            {"ok": True, "loggedIn": True, "origin": "https://example.com", "mode": "passkey"}
+        )
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    result = login._sealed_passkey(None)
+
+    req = captured["req"]
+    assert isinstance(req, Request)
+    assert result == {"ok": True, "loggedIn": True, "origin": "https://example.com", "mode": "passkey"}
+    assert req.full_url == "http://127.0.0.1:9333/json/passkey"
+    assert req.get_header("Authorization") == "Bearer secret-token"
+    assert req.get_method() == "POST"
+
+
+def test_browser_passkey_tool_returns_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse({"ok": True, "loggedIn": True, "mode": "passkey"})
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert json.loads(server.browser_passkey()) == {"ok": True, "loggedIn": True, "mode": "passkey"}
+
+
+def test_sealed_passkey_forwards_expected_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    captured: dict[str, object] = {}
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        captured["req"] = req
+        return _FakeHttpResponse({"ok": True, "loggedIn": True, "origin": "https://example.com"})
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    login._sealed_passkey("https://example.com")
+
+    req = captured["req"]
+    assert isinstance(req, Request)
+    assert req.data is not None
+    assert json.loads(req.data.decode("utf-8")) == {"expectedOrigin": "https://example.com"}
+
+
+def test_sealed_passkey_fails_when_bridge_cannot_verify_expected_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        return _FakeHttpResponse({"ok": True, "loggedIn": True})
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_passkey("https://example.com") == {
+        "ok": False,
+        "loggedIn": True,
+        "error": "in-app browser could not verify the origin",
+    }
+
+
+def test_sealed_passkey_maps_unknown_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        raise HTTPError(req.full_url, 500, "boom", hdrs=None, fp=None)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_passkey(None) == {
+        "ok": False,
+        "loggedIn": False,
+        "error": "login failed",
+    }
+
+
+def test_sealed_passkey_reads_allowlisted_error_from_http_400(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps(
+        {"ok": False, "loggedIn": False, "error": "no saved passkey for this site"}
+    ).encode("utf-8")
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        raise HTTPError(req.full_url, 400, "Bad Request", hdrs=None, fp=BytesIO(payload))
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_passkey(None) == {
+        "ok": False,
+        "loggedIn": False,
+        "error": "no saved passkey for this site",
+    }
+
+
+def test_sealed_passkey_passes_through_grant_expired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Passkey shares the login grant check; a stale grant must read as 'grant
+    expired', not collapse to 'login failed' and prompt a pointless retry."""
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps({"ok": False, "loggedIn": False, "error": "grant expired"}).encode(
+        "utf-8"
+    )
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        raise HTTPError(req.full_url, 400, "Bad Request", hdrs=None, fp=BytesIO(payload))
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_passkey(None) == {
+        "ok": False,
+        "loggedIn": False,
+        "error": "grant expired",
+    }
+
+
+def test_sealed_passkey_drops_unallowlisted_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An error string not in the passkey allowlist (e.g. a password-only one) is not leaked."""
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    payload = json.dumps(
+        {"ok": False, "loggedIn": False, "error": "this password is not allowed for agent use"}
+    ).encode("utf-8")
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
+        raise HTTPError(req.full_url, 400, "Bad Request", hdrs=None, fp=BytesIO(payload))
+
+    monkeypatch.setattr(login, "_loopback_open", fake_open)
+
+    assert login._sealed_passkey(None) == {
+        "ok": False,
+        "loggedIn": False,
+        "error": "login failed",
+    }
+
+
+def test_sealed_passkey_refuses_when_agentcore_is_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _publish_loopback_bridge(tmp_path, monkeypatch)
+    backend._bound_cdp = "agentcore"
+
+    def fail_open(*args: object, **kwargs: object) -> None:
+        raise AssertionError("must not POST passkey while AgentCore is bound")
+
+    monkeypatch.setattr(login, "_loopback_open", fail_open)
+
+    assert login._sealed_passkey(None) == {
+        "ok": False,
+        "loggedIn": False,
+        "error": "in-app browser is not available",
+    }
     assert login._in_app_http_origin("wss://cloud.example/cdp") is None

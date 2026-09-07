@@ -90,6 +90,7 @@ from .loop_hooks import (
     _drain_hook_settlement,
     _fire_after_provider_response,
     _fire_hook,
+    _scan_and_redact_outbound,
 )
 from .loop_messages import (
     _admit_system_context,
@@ -344,6 +345,11 @@ class _TurnState:
     turn_index: int = 0
     needs_followup_after_tools: bool = False
     provider_messages_written: int = 0
+    # Independent of provider_messages_written: that counter only advances
+    # when a transcript_writer is configured (see
+    # _write_transcript_provider_request), but the egress scan must run
+    # every turn regardless of whether transcripts are enabled.
+    provider_messages_scanned: int = 0
     tools_dirty: bool = False
     assistant_write_task: asyncio.Task[None] | None = None
     pre_turn_extra: str | None = None
@@ -1193,6 +1199,34 @@ async def _persist_partial_assistant_on_abort(
         state.turn_output_text = cleaned
 
 
+async def _scan_outbound_before_provider_call(state: _TurnState) -> AsyncIterator[AgentEvent]:
+    """Credential broker phase 5.3: scan + redact new assistant text / tool
+    results in ``state.provider_messages`` before they are ever sent to the
+    LLM provider. Runs before the transcript write too, so a caught secret
+    never lands durably on disk either.
+
+    On a hit during a routine (``MONKEYBOT_RUN_KIND=routine``), sets
+    ``state.action = "return"`` so the caller ends the turn without calling
+    the provider at all — an interactive chat instead gets the notice and
+    continues with the redacted messages.
+    """
+    if state.provider_messages_scanned >= len(state.provider_messages):
+        delta = state.provider_messages
+        offset = 0
+    else:
+        delta = state.provider_messages[state.provider_messages_scanned :]
+        offset = state.provider_messages_scanned
+    if not delta:
+        return
+    redacted, events, should_end = await _scan_and_redact_outbound(state.ctx.request_id, delta)
+    state.provider_messages[offset:] = redacted
+    state.provider_messages_scanned = len(state.provider_messages)
+    for evt in events:
+        yield evt
+    if should_end:
+        state.action = "return"
+
+
 async def _stream_provider_turn(
     state: _TurnState,
     *,
@@ -1204,6 +1238,10 @@ async def _stream_provider_turn(
     cancelled: asyncio.Event | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Stream provider events; fill ``state.pending`` / text fields. May set action=return."""
+    async for evt in _scan_outbound_before_provider_call(state):
+        yield evt
+    if state.action == "return":
+        return
     await _write_transcript_provider_request(state, transcript_writer=transcript_writer)
     stream_mapper = ProviderStreamMapper(state.ctx.request_id)
     async for evt in _consume_provider_stream_body(

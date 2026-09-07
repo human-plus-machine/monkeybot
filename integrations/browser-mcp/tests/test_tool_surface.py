@@ -14,4 +14,4 @@ def test_tool_surface_matches_golden() -> None:
     expected = json.loads(_GOLDEN.read_text(encoding="utf-8"))
     actual = tool_surface()
     assert actual == expected
-    assert len(actual["tools"]) == 30
+    assert len(actual["tools"]) == 31

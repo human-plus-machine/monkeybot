@@ -14,6 +14,7 @@ from monkeybot.core.runtime.events import (
     AssistantTextEnded,
     AssistantTextStarted,
     ContextUsage,
+    CredentialEgressBlockedEvent,
     Error,
     EventDecodeError,
     FrontendToolRequestEvent,
@@ -246,6 +247,18 @@ def test_grounding_event_roundtrip() -> None:
 def test_grounding_event_roundtrip_empty() -> None:
     ev = GroundingEvent(request_id="r1")
     assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_credential_egress_blocked_roundtrip_with_origin() -> None:
+    ev = CredentialEgressBlockedEvent(request_id="r1", scan_kind="canary", origin="https://a.com")
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_credential_egress_blocked_roundtrip_without_origin() -> None:
+    ev = CredentialEgressBlockedEvent(request_id="r1", scan_kind="secret")
+    raw = event_to_json(ev)
+    assert "origin" not in json.loads(raw)
+    assert event_from_json(raw) == ev
 
 
 def test_sse_image_block_roundtrip() -> None:
