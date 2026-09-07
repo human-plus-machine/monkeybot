@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -102,6 +103,10 @@ def _public_tool(fn: Callable[_P, str]) -> Callable[_P, str]:
                     rec.fail()
                     in_app_cdp._reraise_public_harness_error(exc)
 
+    # FastMCP copies fn.__doc__ as-is (not inspect.getdoc), so without this the
+    # model sees the 4-space body indent from the source. @mcp.tool() wraps
+    # this function, so the cleaned docstring is what list_tools returns.
+    wrapper.__doc__ = inspect.getdoc(fn)
     return wrapper
 
 

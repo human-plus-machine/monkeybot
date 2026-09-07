@@ -500,6 +500,7 @@ def test_public_tool_preserves_tool_schema() -> None:
     assert list(sig.parameters) == ["username", "expected_origin"]
     assert server.browser_login.__name__ == "browser_login"
     assert server.browser_login.__doc__ is not None
+    assert server.browser_login.__doc__ == inspect.getdoc(server.browser_login)
 
 
 def test_loopback_opener_ignores_http_proxy() -> None:
