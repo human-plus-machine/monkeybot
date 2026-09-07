@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -50,8 +51,20 @@ mcp = FastMCP(
         "Read markdown playbooks only for notes. On a failed_step, continue by hand and "
         "browser_write_playbook(..., append=true) with a corrected ```playbook fence. "
         "If the user asked to sign in on the Spaces in-app browser and a saved "
-        "password exists, call browser_login(expected_origin=...) — never read or "
-        "type the password yourself, and check the returned origin. "
+        "passkey exists for the site, prefer browser_passkey(expected_origin=...) "
+        "over browser_login — it never reads or types anything into the page. If "
+        "only a saved password exists, call browser_login(expected_origin=...) "
+        "instead — never read or type the password yourself, and check the "
+        "returned origin either way. If browser_login or browser_passkey returns "
+        "'login needs your attention', tell the user to finish signing in "
+        "themselves in the Spaces browser; do not retry and do not attempt to "
+        "type a password. It may block up to 150s if the user needs to approve "
+        "the sign-in. If the result is 'waiting for your approval', 'agent "
+        "access denied for this site', or 'grant expired', stop and tell the "
+        "user; do not retry. If the mfa field is 'needed', tell the user to add "
+        "an authenticator for this site in Spaces or finish signing in "
+        "themselves; if it is 'completed', the one-time code was handled "
+        "automatically and no further action is needed. "
         "Call browser_stop when done with remote/cloud sessions.\n"
         "\n"
         "Tabs: each tab has a short alias (t1, t2, …) or a name you pass to "
@@ -90,6 +103,10 @@ def _public_tool(fn: Callable[_P, str]) -> Callable[_P, str]:
                     rec.fail()
                     in_app_cdp._reraise_public_harness_error(exc)
 
+    # FastMCP copies fn.__doc__ as-is (not inspect.getdoc), so without this the
+    # model sees the 4-space body indent from the source. @mcp.tool() wraps
+    # this function, so the cleaned docstring is what list_tools returns.
+    wrapper.__doc__ = inspect.getdoc(fn)
     return wrapper
 
 

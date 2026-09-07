@@ -11,7 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from assertions import evaluate_assertions  # noqa: E402
-from models import EvalRun, Scenario, ToolCallRecord, TurnResult, UsageSummary  # noqa: E402
+from models import EvalRun, Scenario, ToolCallRecord, TurnResult, UsageSummary, VerdictRecord  # noqa: E402
 
 
 def _scenario(assertions: dict) -> Scenario:
@@ -156,6 +156,89 @@ def test_sessions_message_groups() -> None:
     assert single.message_groups() == [["x", "y"]]
     multi = Scenario(id="b", messages=[], sessions=[["x"], ["y", "z"]])
     assert multi.message_groups() == [["x"], ["y", "z"]]
+
+
+def _verdict_run(*verdicts: VerdictRecord, path_args: list[str] | None = None) -> EvalRun:
+    turn = TurnResult(
+        input="hi",
+        output="ok",
+        tool_calls=[ToolCallRecord(tool="write_file", path_args=path_args or [])],
+        verdicts=list(verdicts),
+    )
+    return EvalRun(run_id="r", scenario_id="s", turns=[turn])
+
+
+def test_max_verdicts_zero_pass() -> None:
+    run = _run()
+    assert evaluate_assertions(_scenario({"max_verdicts": 0}), run) == []
+
+
+def test_max_verdicts_fail() -> None:
+    run = _verdict_run(VerdictRecord(status="drifting", severity="nudge"))
+    bad = evaluate_assertions(_scenario({"max_verdicts": 0}), run)
+    assert len(bad) == 1 and "max_verdicts" in bad[0]
+
+
+def test_min_verdicts() -> None:
+    run = _verdict_run(VerdictRecord(status="drifting", severity="none"))
+    assert evaluate_assertions(_scenario({"min_verdicts": 1}), run) == []
+    bad = evaluate_assertions(_scenario({"min_verdicts": 2}), run)
+    assert len(bad) == 1 and "min_verdicts" in bad[0]
+
+
+def test_verdict_status_in() -> None:
+    run = _verdict_run(VerdictRecord(status="on_track", severity="none"))
+    assert evaluate_assertions(_scenario({"verdict_status_in": ["on_track", "drifting"]}), run) == []
+    bad = evaluate_assertions(_scenario({"verdict_status_in": ["on_track"]}), _verdict_run(
+        VerdictRecord(status="stuck", severity="replan")
+    ))
+    assert len(bad) == 1 and "verdict_status_in" in bad[0]
+
+
+def test_verdict_severity_max() -> None:
+    run = _verdict_run(VerdictRecord(status="drifting", severity="nudge"))
+    assert evaluate_assertions(_scenario({"verdict_severity_max": "nudge"}), run) == []
+    bad = evaluate_assertions(_scenario({"verdict_severity_max": "none"}), run)
+    assert len(bad) == 1 and "verdict_severity_max" in bad[0]
+
+
+def test_files_not_touched() -> None:
+    ok = _verdict_run(path_args=["src/app.py"])
+    assert evaluate_assertions(_scenario({"files_not_touched": ["db/migrations/**"]}), ok) == []
+    bad = _verdict_run(path_args=["db/migrations/001.sql"])
+    failures = evaluate_assertions(_scenario({"files_not_touched": ["db/migrations/**"]}), bad)
+    assert len(failures) == 1 and "files_not_touched" in failures[0]
+
+
+def test_verifier_mode_nested_blocks() -> None:
+    import os
+
+    scenario = _scenario({
+        "metrics": ["response_relevancy"],
+        "verifier_off": {"max_verdicts": 0},
+        "verifier_on": {"min_verdicts": 1},
+    })
+    with_verdict = _verdict_run(VerdictRecord(status="drifting", severity="none"))
+    empty = _run()
+
+    os.environ.pop("EVAL_VERIFIER_MODE", None)
+    assert evaluate_assertions(scenario, with_verdict) == []
+
+    os.environ["EVAL_VERIFIER_MODE"] = "off"
+    try:
+        bad = evaluate_assertions(scenario, with_verdict)
+        assert any("max_verdicts" in f for f in bad)
+        assert evaluate_assertions(scenario, empty) == []
+    finally:
+        os.environ.pop("EVAL_VERIFIER_MODE", None)
+
+    os.environ["EVAL_VERIFIER_MODE"] = "on"
+    try:
+        assert evaluate_assertions(scenario, with_verdict) == []
+        bad_on = evaluate_assertions(scenario, empty)
+        assert any("min_verdicts" in f for f in bad_on)
+    finally:
+        os.environ.pop("EVAL_VERIFIER_MODE", None)
 
 
 if __name__ == "__main__":

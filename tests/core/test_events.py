@@ -14,6 +14,7 @@ from monkeybot.core.runtime.events import (
     AssistantTextEnded,
     AssistantTextStarted,
     ContextUsage,
+    CredentialEgressBlockedEvent,
     Error,
     EventDecodeError,
     FrontendToolRequestEvent,
@@ -35,6 +36,7 @@ from monkeybot.core.runtime.events import (
     TurnComplete,
     UsageTotals,
     UserSteered,
+    VerifierVerdict,
     event_from_json,
     event_to_json,
 )
@@ -247,6 +249,18 @@ def test_grounding_event_roundtrip_empty() -> None:
     assert event_from_json(event_to_json(ev)) == ev
 
 
+def test_credential_egress_blocked_roundtrip_with_origin() -> None:
+    ev = CredentialEgressBlockedEvent(request_id="r1", scan_kind="canary", origin="https://a.com")
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_credential_egress_blocked_roundtrip_without_origin() -> None:
+    ev = CredentialEgressBlockedEvent(request_id="r1", scan_kind="secret")
+    raw = event_to_json(ev)
+    assert "origin" not in json.loads(raw)
+    assert event_from_json(raw) == ev
+
+
 def test_sse_image_block_roundtrip() -> None:
     ev = ImageBlock(request_id="r", image_id="c1:0", mime_type="image/png", data="abc")
     assert event_from_json(event_to_json(ev)) == ev
@@ -355,6 +369,21 @@ def test_config_reloaded_roundtrip() -> None:
 def test_agent_event_roundtrip_user_steered() -> None:
     ev = UserSteered(request_id="r1", text="nudge")
     assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_verifier_verdict_roundtrip() -> None:
+    ev = VerifierVerdict(
+        request_id="r1",
+        verdict_id="v1",
+        checkpoint_id="r1:3",
+        status="drifting",
+        severity="none",
+        confidence=0.9,
+        rationale="constraint_touch",
+        triggering_signals=("constraint_touch",),
+    )
+    assert event_from_json(event_to_json(ev)) == ev
+    assert VerifierVerdict in get_args(AgentEvent)
 
 
 @pytest.mark.parametrize("queue", ("steer", "follow_up"))
@@ -629,6 +658,13 @@ def test_is_subagent_forwardable_denylist() -> None:
             parent_call_id="c",
             run_id="r",
             child_thread_id="t",
+        ),
+        VerifierVerdict(
+            request_id="r",
+            verdict_id="v",
+            checkpoint_id="r:1",
+            status="drifting",
+            severity="none",
         ),
     ]
     assert all(not is_subagent_forwardable(ev) for ev in denylisted)

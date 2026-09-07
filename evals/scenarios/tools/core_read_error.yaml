@@ -8,3 +8,4 @@ messages:
 assertions:
   metrics: [response_relevancy]
   required_tools: [read_file]
+  max_verdicts: 0

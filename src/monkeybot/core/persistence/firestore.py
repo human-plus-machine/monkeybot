@@ -639,7 +639,9 @@ class FirestoreUsageStore:
                 cost_usd=sum(_field_float(r, "cost_usd") for r in group),
             )
 
-        def _series_point(bkey: str, model: str, group: list[dict[str, object]]) -> UsageSeriesPoint:
+        def _series_point(
+            bkey: str, model: str, group: list[dict[str, object]]
+        ) -> UsageSeriesPoint:
             return UsageSeriesPoint(
                 bucket=bkey,
                 model=model,
@@ -1464,6 +1466,9 @@ class FirestoreStorageBackend:
         if self._scheduled_loops_store is None:
             raise RuntimeError("FirestoreStorageBackend.open() has not been called")
         return self._scheduled_loops_store
+
+    def goal_ledger(self) -> None:
+        return None
 
     def session_turns(self) -> FirestoreSessionTurnLockStore:
         if self._session_turn_lock_store is None:

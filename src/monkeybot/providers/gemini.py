@@ -23,6 +23,7 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.content_blocks import (
     File,
     Image,
+    RedactedThinking,
     Text,
     Thinking,
     ToolRequest,
@@ -359,6 +360,11 @@ def _messages_to_contents(rest: Sequence[Message]) -> list[Any]:
                 if block.signature:
                     kwargs["thought_signature"] = _signature_wire_bytes(block.signature)
                 parts.append(types.Part(**kwargs))
+            elif isinstance(block, RedactedThinking):
+                # Vertex has no redacted-thinking wire type. Drop so a
+                # credential-egress redaction does not fail the next Gemini turn
+                # (mirrors Bedrock Converse omitting RedactedThinking).
+                continue
             elif isinstance(block, ToolRequest):
                 fc_kwargs: dict[str, Any] = {
                     "name": block.name,

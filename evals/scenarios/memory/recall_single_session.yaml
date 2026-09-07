@@ -9,3 +9,4 @@ messages:
 assertions:
   metrics: [response_relevancy]
   response_contains: ["silver-fox"]
+  max_verdicts: 0

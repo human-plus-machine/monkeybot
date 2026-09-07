@@ -7,7 +7,13 @@ import types
 import pytest
 
 from monkeybot.core.llm.provider import Message
-from monkeybot.core.types.content_blocks import Text, Thinking, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import (
+    RedactedThinking,
+    Text,
+    Thinking,
+    ToolRequest,
+    ToolResponse,
+)
 from monkeybot.core.types.interfaces import LLMError
 from monkeybot.providers.gemini import (
     SYNTHETIC_THOUGHT_SIGNATURE,
@@ -290,6 +296,26 @@ def test_gemini_replay_thinking_dropped_outside_active_loop() -> None:
     thinking_in_active = [p for p in contents[-1].parts if getattr(p, "thought", False)]
     assert len(thinking_in_active) == 1
     assert thinking_in_active[0].text == "new reasoning"
+
+
+def test_gemini_omits_redacted_thinking_instead_of_failing() -> None:
+    """Credential-egress redaction swaps Thinking for RedactedThinking.
+    Vertex has no wire type for that; omit it rather than raising."""
+    rest = [
+        Message(role="user", content=[Text(text="hi")]),
+        Message(
+            role="assistant",
+            content=[
+                RedactedThinking(data="[withheld: credential detected]"),
+                Text(text="ok"),
+            ],
+        ),
+    ]
+    contents = _messages_to_contents(rest)
+    assert contents[-1].role == "model"
+    texts = [p.text for p in contents[-1].parts if getattr(p, "text", None)]
+    assert texts == ["ok"]
+    assert all(not getattr(p, "thought", False) for p in contents[-1].parts)
 
 
 def test_tool_request_metadata_roundtrip() -> None:

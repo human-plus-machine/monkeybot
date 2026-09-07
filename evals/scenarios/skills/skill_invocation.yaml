@@ -8,3 +8,4 @@ assertions:
   # Deterministic gate: fails if the agent never actually calls list_skills, regardless of
   # how plausible the judge finds the prose (this was the false-confidence gap in the ticket).
   required_tools: [list_skills]
+  max_verdicts: 0

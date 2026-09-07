@@ -47,7 +47,11 @@ from .events import (
     ToolCallStarted,
     ToolConfirmationRequestEvent,
 )
-from .history_compaction import HISTORY_LOAD_MAX, _append_budgeted_tool_responses
+from .history_compaction import (
+    HISTORY_LOAD_MAX,
+    _append_budgeted_tool_responses,
+    truncate_history_preserving_pins,
+)
 from .loop_hooks import (
     _HOOK_PRE_TOOL_TIMEOUT_S,
     _fire_hook,
@@ -876,7 +880,9 @@ async def _post_batch_budget_and_registry(
                     load_max=HISTORY_LOAD_MAX,
                 ),
             )
-            chat_for_budget = chat_for_budget[-HISTORY_LOAD_MAX:]
+            chat_for_budget = truncate_history_preserving_pins(
+                chat_for_budget, max_rows=HISTORY_LOAD_MAX
+            )
         budget_used = usage.estimated_prompt_tokens
         try:
             budget_used = await _prompt_input_tokens_for_history(

@@ -44,7 +44,14 @@ class UsageSummary(BaseModel):
 class ToolCallRecord(BaseModel):
     tool: str
     args_summary: str = ""
+    path_args: list[str] = Field(default_factory=list)
     error: str | None = None
+
+
+class VerdictRecord(BaseModel):
+    status: str = ""
+    severity: str = ""
+    triggering_signals: list[str] = Field(default_factory=list)
 
 
 class TurnResult(BaseModel):
@@ -54,6 +61,7 @@ class TurnResult(BaseModel):
     usage: UsageSummary = Field(default_factory=UsageSummary)
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)
     summarizations_count: int = 0
+    verdicts: list[VerdictRecord] = Field(default_factory=list)
 
 
 class EvalRun(BaseModel):
@@ -100,6 +108,12 @@ class EvalRun(BaseModel):
 
     def summarizations_count(self) -> int:
         return sum(t.summarizations_count for t in self.turns)
+
+    def verdicts_count(self) -> int:
+        return sum(len(t.verdicts) for t in self.turns)
+
+    def verdicts(self) -> list[VerdictRecord]:
+        return [v for t in self.turns for v in t.verdicts]
 
     def usage_total(self) -> UsageSummary:
         total = UsageSummary()

@@ -182,7 +182,7 @@ def _notification_type_from_wire(
 ) -> SystemNotificationType:
     """Parse and validate ``notificationType``."""
     raw = _require_str(d, "notificationType", context=context)
-    if raw not in ("thinkingMessage", "inlineMessage", "creditsExhausted"):
+    if raw not in SYSTEM_NOTIFICATION_TYPES:
         raise ValueError(f"{context}: invalid notificationType: {raw!r}")
     return raw  # type: ignore[return-value]
 
@@ -250,7 +250,15 @@ ActionRequiredData: TypeAlias = (
     ToolConfirmationAction | ElicitationAction | ElicitationResponseAction
 )
 
-SystemNotificationType = Literal["thinkingMessage", "inlineMessage", "creditsExhausted"]
+SYSTEM_NOTIFICATION_TYPES: tuple[str, ...] = (
+    "thinkingMessage",
+    "inlineMessage",
+    "creditsExhausted",
+    "verifierVerdict",
+)
+SystemNotificationType = Literal[
+    "thinkingMessage", "inlineMessage", "creditsExhausted", "verifierVerdict"
+]
 
 
 @dataclass(frozen=True, kw_only=True)

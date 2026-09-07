@@ -194,9 +194,9 @@ class FrontendToolRequestEvent:
 class SystemNotificationEvent:
     kind: Literal["SystemNotificationEvent"] = "SystemNotificationEvent"
     request_id: str = ""
-    notification_type: Literal["thinkingMessage", "inlineMessage", "creditsExhausted"] = (
-        "inlineMessage"
-    )
+    notification_type: Literal[
+        "thinkingMessage", "inlineMessage", "creditsExhausted", "verifierVerdict"
+    ] = "inlineMessage"
     msg: str = ""
     data: dict[str, object] | None = None
 
@@ -357,6 +357,22 @@ class SubagentEvent:
 
 
 @dataclass(frozen=True)
+class CredentialEgressBlockedEvent:
+    """Outbound text to the LLM provider (or a tool-call argument) matched a
+    registered secret or canary and was withheld (credential broker phase 5).
+
+    The matched value itself never appears here — only that a match
+    happened, and where if known. `origin` is best-effort: a canary tripped
+    by a raw environment dump has no associated site.
+    """
+
+    kind: Literal["CredentialEgressBlocked"] = "CredentialEgressBlocked"
+    request_id: str = ""
+    scan_kind: Literal["secret", "canary"] = "secret"
+    origin: str | None = None
+
+
+@dataclass(frozen=True)
 class SubagentCompleted:
     """Lifecycle marker: nested subagent drain finished (success/error/timeout/cancel)."""
 
@@ -370,6 +386,37 @@ class SubagentCompleted:
     final_message: str = ""
     errors: list[str] = field(default_factory=list)
     tool_call_count: int = 0
+
+
+@dataclass(frozen=True)
+class VerifierVerdict:
+    """Observe-only (Phase 2) or actuating (Phase 4+) drift verdict."""
+
+    kind: Literal["VerifierVerdict"] = "VerifierVerdict"
+    request_id: str = ""
+    verdict_id: str = ""
+    checkpoint_id: str = ""
+    status: str = "on_track"
+    severity: str = "none"
+    confidence: float = 0.0
+    rationale: str = ""
+    correction: str | None = None
+    triggering_signals: tuple[str, ...] = ()
+    judge_tokens: int = 0
+
+    def to_wire(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "verdictId": self.verdict_id,
+            "checkpointId": self.checkpoint_id,
+            "status": self.status,
+            "severity": self.severity,
+            "confidence": self.confidence,
+            "rationale": self.rationale,
+            "triggeringSignals": list(self.triggering_signals),
+        }
+        if self.correction is not None:
+            payload["correction"] = self.correction
+        return payload
 
 
 AgentEvent: TypeAlias = (
@@ -405,6 +452,8 @@ AgentEvent: TypeAlias = (
     | SubagentStarted
     | SubagentEvent
     | SubagentCompleted
+    | CredentialEgressBlockedEvent
+    | VerifierVerdict
 )
 
 # Durable vs live-only (OpenCode V2-style). Conversation history persists
@@ -426,12 +475,14 @@ DURABLE_EVENT_KINDS: frozenset[str] = frozenset(
         "ToolConfirmationRequest",
         "GroundingEvent",
         "UserSteered",
+        "VerifierVerdict",  # history mirror = SystemNotification verifierVerdict
         "QueuedInputAccepted",
         "ContextEpochStarted",
         "SystemContextUpdated",
         "SubagentStarted",  # nested spawn boundary (parent SSE)
         "SubagentCompleted",  # nested drain boundary (parent SSE)
         # SubagentEvent is live-only; durable nested transcript is the child thread.
+        "CredentialEgressBlocked",
     }
 )
 
@@ -450,6 +501,7 @@ SUBAGENT_FORWARD_KINDS: frozenset[str] = frozenset(
         "ToolInputDelta",
         "Error",
         "TurnComplete",
+        "CredentialEgressBlocked",
     }
 )
 
@@ -643,6 +695,20 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
         }
     if isinstance(event, UserSteered):
         return {**base, "text": event.text}
+    if isinstance(event, VerifierVerdict):
+        payload: dict[str, object] = {
+            **base,
+            "verdict_id": event.verdict_id,
+            "checkpoint_id": event.checkpoint_id,
+            "status": event.status,
+            "severity": event.severity,
+            "confidence": event.confidence,
+            "rationale": event.rationale,
+            "triggering_signals": list(event.triggering_signals),
+        }
+        if event.correction is not None:
+            payload["correction"] = event.correction
+        return payload
     if isinstance(event, QueuedInputAccepted):
         return {**base, "queue": event.queue, "position": event.position}
     if isinstance(event, ContextEpochStarted):
@@ -671,6 +737,11 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             "tool": event.tool,
             "delta": event.delta,
         }
+    if isinstance(event, CredentialEgressBlockedEvent):
+        out = {**base, "scan_kind": event.scan_kind}
+        if event.origin:
+            out["origin"] = event.origin
+        return out
     raise AssertionError(f"_story5_event_dict: unsupported type {type(event)!r}")
 
 
@@ -759,6 +830,7 @@ def event_to_json(event: AgentEvent) -> str:
             AttachmentDescriptorEvent,
             GroundingEvent,
             UserSteered,
+            VerifierVerdict,
             QueuedInputAccepted,
             ContextEpochStarted,
             SystemContextUpdated,
@@ -766,6 +838,7 @@ def event_to_json(event: AgentEvent) -> str:
             AssistantTextEnded,
             ThinkingBlockStarted,
             ToolInputDeltaEvent,
+            CredentialEgressBlockedEvent,
         ),
     ):
         payload = _story5_event_dict(event)
@@ -998,9 +1071,17 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         )
     if t == "SystemNotificationEvent":
         nt_raw = payload.get("notification_type", "inlineMessage")
-        if nt_raw not in ("thinkingMessage", "inlineMessage", "creditsExhausted"):
+        if nt_raw not in (
+            "thinkingMessage",
+            "inlineMessage",
+            "creditsExhausted",
+            "verifierVerdict",
+        ):
             raise EventDecodeError("SystemNotificationEvent notification_type invalid")
-        nt = cast(Literal["thinkingMessage", "inlineMessage", "creditsExhausted"], nt_raw)
+        nt = cast(
+            Literal["thinkingMessage", "inlineMessage", "creditsExhausted", "verifierVerdict"],
+            nt_raw,
+        )
         msg_raw = payload.get("msg", "")
         msg = msg_raw if isinstance(msg_raw, str) else ""
         data_raw = payload.get("data")
@@ -1058,6 +1139,24 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         text_raw = payload.get("text", "")
         text = text_raw if isinstance(text_raw, str) else ""
         return UserSteered(request_id=rid, text=text)
+    if t == "VerifierVerdict":
+        signals_raw = payload.get("triggering_signals") or []
+        signals = tuple(str(s) for s in signals_raw) if isinstance(signals_raw, list) else ()
+        corr_raw = payload.get("correction")
+        correction = corr_raw if isinstance(corr_raw, str) else None
+        conf_raw = payload.get("confidence", 0.0)
+        confidence = float(conf_raw) if isinstance(conf_raw, (int, float)) else 0.0
+        return VerifierVerdict(
+            request_id=rid,
+            verdict_id=str(payload.get("verdict_id") or ""),
+            checkpoint_id=str(payload.get("checkpoint_id") or ""),
+            status=str(payload.get("status") or ""),
+            severity=str(payload.get("severity") or "none"),
+            confidence=confidence,
+            rationale=str(payload.get("rationale") or ""),
+            correction=correction,
+            triggering_signals=signals,
+        )
     if t == "QueuedInputAccepted":
         q_raw = payload.get("queue", "follow_up")
         if q_raw not in ("steer", "follow_up"):
@@ -1103,6 +1202,12 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
             tool=tool_raw if isinstance(tool_raw, str) else "",
             delta=delta_raw if isinstance(delta_raw, str) else "",
         )
+    if t == "CredentialEgressBlocked":
+        sk_raw = payload.get("scan_kind", "secret")
+        scan_kind = cast(Literal["secret", "canary"], sk_raw if sk_raw in ("secret", "canary") else "secret")
+        origin_raw = payload.get("origin")
+        origin = origin_raw if isinstance(origin_raw, str) and origin_raw else None
+        return CredentialEgressBlockedEvent(request_id=rid, scan_kind=scan_kind, origin=origin)
     if t == "SubagentStarted":
         parent_call_id, run_id, child_thread_id, subagent_type = _parse_subagent_correlation(
             payload

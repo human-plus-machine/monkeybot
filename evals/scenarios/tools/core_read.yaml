@@ -8,3 +8,4 @@ assertions:
   metrics: [response_relevancy, faithfulness]
   required_tools: [read_file]
   max_tool_errors: 0
+  max_verdicts: 0

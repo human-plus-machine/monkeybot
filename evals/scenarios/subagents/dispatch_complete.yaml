@@ -6,3 +6,4 @@ assertions:
   metrics: [response_relevancy]
   required_tools: [task]
   min_subagent_calls: 1
+  max_verdicts: 0

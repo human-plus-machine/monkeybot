@@ -6,6 +6,24 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Browser MCP
+
+#### Added
+
+- `browser_login` now returns fail-closed errors from the Spaces sealed-login path, scopes grants and errors per run (`MONKEYBOT_RUN_ID` / `MONKEYBOT_RUN_LABEL`), and surfaces TOTP outcome (`mfa`: `none` / `completed` / `needed`) plus injection mode (`mode`: `keystroke` / `network`).
+- `browser_passkey` requests a Spaces-saved passkey with the same allowlisted error surface as `browser_login`. Live passkey sites have not been verified yet.
+
+#### Fixed
+
+- Credential-broker JSON 413 responses fail closed instead of leaking a body, and thinking text is redacted on that path. Tool descriptions are `cleandoc`'d so the golden surface matches CI.
+
+## [core v3.2.0] - 2026-09-07
+
+#### Added
+
+- Opt-in background verifier (`verifier:` in YAML, defaults off, no env mapping). A SQLite goal ledger plus an off-loop classifier record the user's intent; an observe-only progress tracker emits `VerifierVerdict` events; verdicts persist as pinned `verifierVerdict` history rows through compaction. When `max_severity` allows it, the ladder can nudge on the next system extra, replan by emptying tools for one inner turn, or block mutating tools while `parallel_safe` reads still run. Firestore/Postgres have no ledger (fail closed). See `docs/verifier-agent-design.md`.
+- Credential-egress detection: new assistant text and tool results are scanned against Spaces' `/json/scan` before they reach the LLM, with a separate scan of outbound tool arguments (terminal, file write, browser navigation/input, `web_*`) and a local-SQLite-only trace-value scan. A hit is redacted in place; a routine turn ends visibly and an interactive chat continues with the secret withheld. User-authored text is never scanned. Emits `CredentialEgressBlocked`.
+
 ## [core v3.1.0] - 2026-09-05
 
 ### Breaking

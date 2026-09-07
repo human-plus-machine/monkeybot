@@ -150,6 +150,7 @@ class ComputerClipboardReadTool:
         "Read the current text on the user's clipboard.",
         {"type": "object", "properties": {}},
         parallel_safe=True,
+        read_only=True,
     )
 
     async def execute(self, args: dict[str, object]) -> str:
@@ -204,6 +205,7 @@ class ComputerListDirTool:
             "required": ["path"],
         },
         parallel_safe=True,
+        read_only=True,
     )
 
     async def execute(self, args: dict[str, object]) -> str:
@@ -272,6 +274,7 @@ class ComputerFindTool:
             "required": ["path", "query"],
         },
         parallel_safe=True,
+        read_only=True,
     )
 
     async def execute(self, args: dict[str, object]) -> str:

@@ -18,8 +18,8 @@ harness:
   mode: turn_based
 
 model:
-  provider: nvidia
-  name: thinkingmachines/inkling
+  provider: ollama-cloud
+  name: glm-5.3-flash
   context_window: 128000
   thinking_budget: -1
 

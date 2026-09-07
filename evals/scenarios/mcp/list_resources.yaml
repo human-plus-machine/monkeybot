@@ -10,3 +10,4 @@ assertions:
   required_tools: [list_mcp_resources, read_mcp_resource]
   min_tool_calls: 2
   max_tool_errors: 0
+  max_verdicts: 0

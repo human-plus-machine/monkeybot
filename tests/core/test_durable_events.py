@@ -27,6 +27,12 @@ def test_is_durable_event_classifies_settlement() -> None:
     assert is_durable_event(TurnComplete(request_id="r"))
     assert not is_durable_event(AssistantDelta(request_id="r", delta="hi"))
     assert "AssistantDelta" not in DURABLE_EVENT_KINDS
+    from monkeybot.core.runtime.events import VerifierVerdict
+
+    assert is_durable_event(
+        VerifierVerdict(request_id="r", verdict_id="v", status="drifting", severity="none")
+    )
+    assert "VerifierVerdict" in DURABLE_EVENT_KINDS
 
 
 def test_subagent_lifecycle_durable_classification() -> None:

@@ -47,12 +47,15 @@ from monkeybot.core.runtime.provider_stream_mapper import ProviderStreamMapper
 from monkeybot.core.tools.inspector import ToolInspector
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
+    SystemNotification,
     Text,
     ToolRequest,
     ToolResponse,
 )
 from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.core.verifier.mailbox import VerdictMailbox
+from monkeybot.core.verifier.severity import cap_severity
 from monkeybot.providers._utils import note_anthropic_token_estimate_observation
 from monkeybot.providers.pricing import estimate_cost
 
@@ -71,22 +74,26 @@ from .events import (
     SystemPromptSnapshot,
     Thinking,
     UserSteered,
+    VerifierVerdict,
 )
 from .history_compaction import (
     HISTORY_LOAD_MAX,
     _await_history_write,
+    _intent_facts_from_ctx,
     _summarization_model_id,
     _summarization_viable,
     _summarize_history,
     protect_recent_count,
+    truncate_history_preserving_pins,
 )
-from .input_admission import InputAdmission, preview_text
+from .input_admission import InputAdmission, SteerItem, join_text, preview_text
 from .loop_hooks import (
     _HOOK_READ_TIMEOUT_S,
     _apply_before_provider_hook,
     _drain_hook_settlement,
     _fire_after_provider_response,
     _fire_hook,
+    _scan_and_redact_outbound,
 )
 from .loop_messages import (
     _admit_system_context,
@@ -210,30 +217,199 @@ async def _drain_steers(
     ctx: TurnContext,
 ) -> AsyncIterator[AgentEvent]:
     """Inject queued steer messages at a safe boundary (before next provider call)."""
-    if input_admission is None:
-        return
-    while True:
-        steered = input_admission.pop_steer()
-        if steered is None:
-            break
-        await persist_message(
-            history,
-            Message(role="user", content=list(steered)),
-            thread_id=ctx.thread_id,
-            turn_id=ctx.request_id,
-            memory=ctx.memory,
-            ingest=True,
-        )
-        preview = preview_text(steered)
-        logger.info(
-            "steer injected %s",
-            kv(
-                request_id=ctx.request_id,
+    if input_admission is not None:
+        while True:
+            item = input_admission.pop_steer()
+            if item is None:
+                break
+            steered = item.content
+            await persist_message(
+                history,
+                Message(role="user", content=list(steered)),
                 thread_id=ctx.thread_id,
-                preview=preview[:80],
-            ),
+                turn_id=ctx.request_id,
+                memory=ctx.memory,
+                ingest=True,
+            )
+            preview = preview_text(steered)
+            _admit_steer_to_ledger(ctx, join_text(steered), item)
+            logger.info(
+                "steer injected %s",
+                kv(
+                    request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
+                    preview=preview[:80],
+                    provenance=item.provenance,
+                ),
+            )
+            yield UserSteered(request_id=ctx.request_id, text=preview)
+    async for verdict_evt in _drain_verdicts(ctx, history):
+        yield verdict_evt
+
+
+async def _take_ready(
+    mailbox: VerdictMailbox, thread_id: str, request_id: str, *, grace_s: float
+) -> list[VerifierVerdict]:
+    """Pop ready verdicts, waiting out ``grace_s`` only while a judge call is in flight."""
+    ready = mailbox.take_ready(thread_id)
+    if ready or grace_s <= 0 or not mailbox.pending(thread_id):
+        return ready
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + grace_s
+    while loop.time() < deadline:
+        await asyncio.sleep(min(0.05, max(0.0, deadline - loop.time())))
+        ready = mailbox.take_ready(thread_id)
+        if ready:
+            return ready
+    logger.info(
+        "verdict tail stale %s",
+        kv(thread_id=thread_id, request_id=request_id),
+    )
+    return []
+
+
+async def _drain_verdicts(
+    ctx: TurnContext,
+    history: HistoryStore | None = None,
+    *,
+    grace_s: float = 0.0,
+) -> AsyncIterator[AgentEvent]:
+    """Commit ready verdicts at a safe boundary. Never waits on a judge unless ``grace_s``."""
+    mailbox = ctx.verdict_mailbox
+    if mailbox is None:
+        return
+    try:
+        ready = await _take_ready(mailbox, ctx.thread_id, ctx.request_id, grace_s=grace_s)
+    except Exception:
+        logger.warning(
+            "verdict mailbox drain failed %s",
+            kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+            exc_info=True,
         )
-        yield UserSteered(request_id=ctx.request_id, text=preview)
+        return
+    max_sev = "nudge"
+    if ctx.config is not None:
+        max_sev = ctx.config.verifier.escalation.max_severity
+
+    for verdict in ready:
+        if not isinstance(verdict, VerifierVerdict):
+            logger.warning(
+                "verdict drain skipped non-verdict %s",
+                kv(thread_id=ctx.thread_id, type=type(verdict).__name__),
+            )
+            continue
+        requested = verdict.severity
+        capped = cap_severity(requested, max_sev)
+        if capped != requested:
+            logger.info(
+                "verdict severity capped %s",
+                kv(
+                    thread_id=ctx.thread_id,
+                    requested=requested,
+                    capped=capped,
+                    maximum=max_sev,
+                ),
+            )
+            verdict = dataclasses.replace(verdict, severity=capped)
+        if history is not None:
+            try:
+                await persist_message(
+                    history,
+                    Message(
+                        role="system",
+                        content=[
+                            SystemNotification(
+                                notification_type="verifierVerdict",
+                                msg=verdict.rationale,
+                                data=verdict.to_wire(),
+                            )
+                        ],
+                    ),
+                    thread_id=ctx.thread_id,
+                    turn_id=ctx.request_id,
+                    memory=ctx.memory,
+                    ingest=False,
+                )
+            except Exception:
+                logger.warning(
+                    "verdict persist failed %s",
+                    kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+                    exc_info=True,
+                )
+        _stash_escalation(mailbox, ctx.thread_id, capped, verdict)
+        yield verdict
+
+
+def _stash_escalation(
+    mailbox: VerdictMailbox, thread_id: str, capped: str, verdict: VerifierVerdict
+) -> None:
+    """Queue one-shot nudge/replan for the next inner turn of the verdict's own
+    request. Request-scoped like ``block``: a note whose request has already
+    finished is dropped rather than applied to the next user message. Fail-open.
+    """
+    text = verdict.correction or f"[Verifier] {verdict.rationale}"
+    try:
+        if capped == "nudge":
+            mailbox.put_nudge(thread_id, verdict.request_id, text)
+        elif capped in ("replan", "steer"):
+            mailbox.put_replan(
+                thread_id,
+                verdict.request_id,
+                f"{text}\nDo not call tools this turn. Restate the plan.",
+            )
+    except Exception:
+        logger.warning("verdict escalation stash failed %s", kv(thread_id=thread_id), exc_info=True)
+
+
+def _arm_replan_from_mailbox(state: _TurnState) -> None:
+    """Reuse doom-loop ``force_no_tools`` for a drained ``replan`` verdict."""
+    mailbox = state.ctx.verdict_mailbox
+    if mailbox is None:
+        return
+    try:
+        note = mailbox.take_replan(state.ctx.thread_id, state.ctx.request_id)
+    except Exception:
+        logger.warning(
+            "replan mailbox take failed %s",
+            kv(thread_id=state.ctx.thread_id, request_id=state.ctx.request_id),
+            exc_info=True,
+        )
+        return
+    if not note:
+        return
+    state.doom_tracker.force_no_tools = True
+    existing = state.doom_tracker.recovery_note
+    state.doom_tracker.recovery_note = f"{existing}\n\n{note}" if existing else note
+    logger.info(
+        "verifier replan armed %s",
+        kv(thread_id=state.ctx.thread_id, request_id=state.ctx.request_id),
+    )
+
+
+def _admit_steer_to_ledger(ctx: TurnContext, verbatim: str, item: SteerItem) -> None:
+    ledger = ctx.goal_ledger
+    if ledger is None or not verbatim:
+        return
+    from monkeybot.core.persistence.goal_ledger import Channel, Provenance
+
+    provenance = (
+        Provenance.VERIFIER_STEER
+        if item.provenance == Provenance.VERIFIER_STEER.value
+        else Provenance.HUMAN
+    )
+    try:
+        ledger.admit(
+            ctx.thread_id,
+            verbatim,
+            provenance=provenance,
+            channel=Channel.STEER,
+        )
+    except Exception:
+        logger.warning(
+            "goal_ledger steer tap failed %s",
+            kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+            exc_info=True,
+        )
 
 
 def _tools_schema_hash(tools: Sequence[ToolDef]) -> str:
@@ -265,6 +441,11 @@ class _TurnState:
     turn_index: int = 0
     needs_followup_after_tools: bool = False
     provider_messages_written: int = 0
+    # Independent of provider_messages_written: that counter only advances
+    # when a transcript_writer is configured (see
+    # _write_transcript_provider_request), but the egress scan must run
+    # every turn regardless of whether transcripts are enabled.
+    provider_messages_scanned: int = 0
     tools_dirty: bool = False
     assistant_write_task: asyncio.Task[None] | None = None
     pre_turn_extra: str | None = None
@@ -339,6 +520,7 @@ async def _prepare_turn_context(
         yield epoch_evt
     system = _system_message_from_text(state.admit.leading_system_text)
     combined_extra = _combine_extras(state.pre_turn_extra, state.pre_tool_extra_next)
+    _arm_replan_from_mailbox(state)
     force_no_tools, doom_loop_note = state.doom_tracker.consume_recovery()
     combined_extra = _combine_extras(combined_extra, doom_loop_note)
     state.system = _append_extra_system_text(system, combined_extra)
@@ -427,9 +609,7 @@ def _token_pressure_should_summarize(
     cap: int,
     window_tokens: int,
 ) -> bool:
-    return preflight >= cap and _summarization_viable(
-        chat_messages, window_tokens=window_tokens
-    )
+    return preflight >= cap and _summarization_viable(chat_messages, window_tokens=window_tokens)
 
 
 async def _preflight_prompt_tokens(
@@ -494,6 +674,7 @@ async def _run_history_summarization(
                 provider,
                 _summarization_model_id(state.ctx),
                 window_tokens=state.ctx.context_window_tokens,
+                intent_facts=_intent_facts_from_ctx(state.ctx),
             )
         except Exception:
             logger.warning(
@@ -587,7 +768,7 @@ async def _apply_history_load_max_safety(
     if len(state.chat_messages) <= HISTORY_LOAD_MAX:
         return
     dropped = len(state.chat_messages) - HISTORY_LOAD_MAX
-    truncated = state.chat_messages[-HISTORY_LOAD_MAX:]
+    truncated = truncate_history_preserving_pins(state.chat_messages, max_rows=HISTORY_LOAD_MAX)
     logger.error(
         "history exceeds load max after compact attempt; truncating tail %s",
         kv(
@@ -1077,9 +1258,7 @@ async def _persist_partial_assistant_on_abort(
     if not assist_blocks:
         return
     tool_text_fn = (
-        interrupted_tool_result_text
-        if state.provider_stream_failed
-        else cancelled_tool_result_text
+        interrupted_tool_result_text if state.provider_stream_failed else cancelled_tool_result_text
     )
     await persist_message(
         history,
@@ -1115,6 +1294,34 @@ async def _persist_partial_assistant_on_abort(
         state.turn_output_text = cleaned
 
 
+async def _scan_outbound_before_provider_call(state: _TurnState) -> AsyncIterator[AgentEvent]:
+    """Credential broker phase 5.3: scan + redact new assistant text / tool
+    results in ``state.provider_messages`` before they are ever sent to the
+    LLM provider. Runs before the transcript write too, so a caught secret
+    never lands durably on disk either.
+
+    On a hit during a routine (``MONKEYBOT_RUN_KIND=routine``), sets
+    ``state.action = "return"`` so the caller ends the turn without calling
+    the provider at all — an interactive chat instead gets the notice and
+    continues with the redacted messages.
+    """
+    if state.provider_messages_scanned >= len(state.provider_messages):
+        delta = state.provider_messages
+        offset = 0
+    else:
+        delta = state.provider_messages[state.provider_messages_scanned :]
+        offset = state.provider_messages_scanned
+    if not delta:
+        return
+    redacted, events, should_end = await _scan_and_redact_outbound(state.ctx.request_id, delta)
+    state.provider_messages[offset:] = redacted
+    state.provider_messages_scanned = len(state.provider_messages)
+    for evt in events:
+        yield evt
+    if should_end:
+        state.action = "return"
+
+
 async def _stream_provider_turn(
     state: _TurnState,
     *,
@@ -1126,6 +1333,10 @@ async def _stream_provider_turn(
     cancelled: asyncio.Event | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Stream provider events; fill ``state.pending`` / text fields. May set action=return."""
+    async for evt in _scan_outbound_before_provider_call(state):
+        yield evt
+    if state.action == "return":
+        return
     await _write_transcript_provider_request(state, transcript_writer=transcript_writer)
     stream_mapper = ProviderStreamMapper(state.ctx.request_id)
     async for evt in _consume_provider_stream_body(
@@ -1497,11 +1708,16 @@ async def _run_inner_core(
                 max_turns=state.effective_max,
             ),
         )
-        yield Error(request_id=state.ctx.request_id, error=MAX_TURNS_ERROR)
 
     # Ensure the backgrounded assistant write has landed before any load/reset
     # below (freeze) so the assistant row is durable and not overwritten.
     await _await_history_write(state.assistant_write_task)
+
+    grace_s = 0.0
+    if state.ctx.config is not None:
+        grace_s = state.ctx.config.verifier.judge.tail_grace_s
+    async for verdict_evt in _drain_verdicts(state.ctx, history, grace_s=grace_s):
+        yield verdict_evt
 
     descriptor_events = await freeze_attachments_in_history(
         thread_id=state.ctx.thread_id,
@@ -1526,3 +1742,5 @@ async def _run_inner_core(
     )
     # Settlement for POST_TURN / lingering POST_TOOL runs in run() finally
     # before TurnComplete — do not drain twice here.
+    if state.needs_followup_after_tools:
+        yield Error(request_id=state.ctx.request_id, error=MAX_TURNS_ERROR)

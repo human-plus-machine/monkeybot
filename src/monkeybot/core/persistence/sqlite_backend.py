@@ -12,6 +12,7 @@ from typing import Any
 import aiosqlite
 
 from monkeybot.core.persistence.durable_runs import SQLiteRunStore
+from monkeybot.core.persistence.goal_ledger import SQLiteGoalLedgerStore
 from monkeybot.core.persistence.history import SQLiteHistoryStore
 from monkeybot.core.persistence.scheduled_loops import SQLiteScheduledLoopStore
 from monkeybot.core.persistence.session_turn_locks import SQLiteSessionTurnLockStore
@@ -41,6 +42,7 @@ class SQLiteStorageBackend:
         self._usage_store: SQLiteUsageStore | None = None
         self._runs_store: SQLiteRunStore | None = None
         self._scheduled_loops_store: SQLiteScheduledLoopStore | None = None
+        self._goal_ledger_store: SQLiteGoalLedgerStore | None = None
         self._session_turn_lock_store: SQLiteSessionTurnLockStore | None = None
         self._outbox_store: Any | None = None
 
@@ -59,6 +61,7 @@ class SQLiteStorageBackend:
         self._usage_store = SQLiteUsageStore(self._conn, lock=self._tx_lock)
         self._runs_store = SQLiteRunStore(self._conn, lock=self._tx_lock)
         self._scheduled_loops_store = SQLiteScheduledLoopStore(self._conn, lock=self._tx_lock)
+        self._goal_ledger_store = SQLiteGoalLedgerStore(self._conn, lock=self._tx_lock)
         self._session_turn_lock_store = SQLiteSessionTurnLockStore(self._conn, lock=self._tx_lock)
         from monkeybot.core.memory.outbox import SqliteOutboxStore
 
@@ -74,6 +77,7 @@ class SQLiteStorageBackend:
             self._usage_store = None
             self._runs_store = None
             self._scheduled_loops_store = None
+            self._goal_ledger_store = None
             self._session_turn_lock_store = None
             self._outbox_store = None
 
@@ -96,6 +100,11 @@ class SQLiteStorageBackend:
         if self._scheduled_loops_store is None:
             raise RuntimeError("SQLiteStorageBackend.open() has not been called")
         return self._scheduled_loops_store
+
+    def goal_ledger(self) -> SQLiteGoalLedgerStore:
+        if self._goal_ledger_store is None:
+            raise RuntimeError("SQLiteStorageBackend.open() has not been called")
+        return self._goal_ledger_store
 
     def session_turns(self) -> SQLiteSessionTurnLockStore:
         if self._session_turn_lock_store is None:

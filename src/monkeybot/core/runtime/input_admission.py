@@ -51,6 +51,14 @@ class FollowUpItem:
     first_lock_fail_at_ms: int | None = None
 
 
+@dataclass(frozen=True)
+class SteerItem:
+    """One mid-turn steer. Provenance is tagged at enqueue, never inferred."""
+
+    content: list[ContentBlock]
+    provenance: str = "human"
+
+
 class InputAdmission:
     """Per-session steer + follow-up queues."""
 
@@ -61,16 +69,14 @@ class InputAdmission:
         max_follow_up: int | None = None,
     ) -> None:
         self.max_steer = (
-            max_steer
-            if max_steer is not None
-            else _queue_limit("MONKEYBOT_STEER_QUEUE_MAX", 8)
+            max_steer if max_steer is not None else _queue_limit("MONKEYBOT_STEER_QUEUE_MAX", 8)
         )
         self.max_follow_up = (
             max_follow_up
             if max_follow_up is not None
             else _queue_limit("MONKEYBOT_FOLLOW_UP_QUEUE_MAX", 16)
         )
-        self._steer: deque[list[ContentBlock]] = deque()
+        self._steer: deque[SteerItem] = deque()
         self._follow_up: deque[FollowUpItem] = deque()
 
     @property
@@ -81,7 +87,12 @@ class InputAdmission:
     def follow_up_depth(self) -> int:
         return len(self._follow_up)
 
-    def enqueue_steer(self, content: list[ContentBlock]) -> int:
+    def enqueue_steer(
+        self,
+        content: list[ContentBlock],
+        *,
+        provenance: str = "human",
+    ) -> int:
         """Append steer content; return 0-based queue position.
 
         Raises:
@@ -92,12 +103,10 @@ class InputAdmission:
             raise ValueError("steer content must be non-empty")
         if len(self._steer) >= self.max_steer:
             raise AdmissionQueueFullError("steer", self.max_steer)
-        self._steer.append(list(content))
+        self._steer.append(SteerItem(content=list(content), provenance=provenance))
         return len(self._steer) - 1
 
-    def enqueue_follow_up(
-        self, request_id: str, content: list[ContentBlock]
-    ) -> int:
+    def enqueue_follow_up(self, request_id: str, content: list[ContentBlock]) -> int:
         """Append a follow-up prompt; return 0-based queue position."""
         if not request_id.strip():
             raise ValueError("follow-up request_id must be non-empty")
@@ -108,7 +117,7 @@ class InputAdmission:
         self._follow_up.append(FollowUpItem(request_id=request_id, content=list(content)))
         return len(self._follow_up) - 1
 
-    def pop_steer(self) -> list[ContentBlock] | None:
+    def pop_steer(self) -> SteerItem | None:
         """Take the oldest steer message, or ``None`` if empty."""
         if not self._steer:
             return None
@@ -134,13 +143,18 @@ class InputAdmission:
         self._follow_up.clear()
 
 
-def preview_text(content: list[ContentBlock], *, limit: int = 200) -> str:
-    """Short plain-text preview for observability events."""
+def join_text(content: list[ContentBlock]) -> str:
+    """Full plain-text of ``Text`` blocks. Used by the goal ledger (verbatim)."""
     parts: list[str] = []
     for block in content:
         if isinstance(block, Text) and block.text.strip():
             parts.append(block.text.strip())
-    joined = " ".join(parts).strip()
+    return " ".join(parts).strip()
+
+
+def preview_text(content: list[ContentBlock], *, limit: int = 200) -> str:
+    """Short plain-text preview for observability events."""
+    joined = join_text(content)
     if len(joined) <= limit:
         return joined
     return joined[: limit - 1] + "…"
@@ -150,5 +164,7 @@ __all__ = [
     "AdmissionQueueFullError",
     "FollowUpItem",
     "InputAdmission",
+    "SteerItem",
+    "join_text",
     "preview_text",
 ]
