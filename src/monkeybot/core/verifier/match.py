@@ -17,6 +17,14 @@ _PATH_LIST_KEYS = ("paths", "files")
 _COMMAND_KEYS = ("command", "cmd", "script", "argv")
 WRITE_TOOLS = frozenset({"write_file", "edit_file", "apply_patch"})
 READ_TOOLS = frozenset({"read_file", "glob", "search"})
+LEDGER_SIGNALS = frozenset({"constraint_touch", "repeat_correction", "done_unmet"})
+
+
+def verdict_status(signals: tuple[str, ...] | list[str]) -> tuple[str, float]:
+    """Stuck/drifting plus confidence shared by the tracker and SignalJudge."""
+    ledger_hit = any(signal in LEDGER_SIGNALS for signal in signals)
+    stuck = any(signal in {"error_streak", "done_unmet"} for signal in signals)
+    return ("stuck" if stuck else "drifting", 0.9 if ledger_hit else 0.6)
 
 
 def path_args(args: dict[str, Any] | None) -> tuple[str, ...]:

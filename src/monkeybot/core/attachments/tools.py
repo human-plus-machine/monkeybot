@@ -38,4 +38,5 @@ def load_file_tool_def() -> ToolDef:
         ),
         LOAD_FILE_SCHEMA,
         parallel_safe=True,
+        read_only=True,
     )

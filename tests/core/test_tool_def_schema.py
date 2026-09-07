@@ -23,6 +23,7 @@ def test_to_model_schema_omits_harness_flags() -> None:
     }
     assert "parallel_safe" not in schema
     assert "doom_loop_exempt" not in schema
+    assert "read_only" not in schema
 
 
 def test_provider_converters_omit_harness_flags() -> None:
