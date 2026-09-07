@@ -8,9 +8,9 @@ import sys
 from pathlib import Path
 from typing import Any, cast
 
+import aiosqlite
 import pytest
 import pytest_asyncio
-import aiosqlite
 
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.persistence.history import SQLiteHistoryStore
@@ -20,7 +20,7 @@ from monkeybot.core.persistence.sqlite import (
     open_connection,
     sqlite_path_from_db_url,
 )
-from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import SystemNotification, Text, ToolRequest, ToolResponse
 
 # Legacy ChatMessage + tool_* columns removed in story-2-persistence; see design 1B §7.8.
 
@@ -255,9 +255,10 @@ async def test_history_load_malformed_json_logs_and_raises(history_db, caplog: p
         (thread_id, "user", "not-json", 1),
     )
     await conn.commit()
-    with caplog.at_level(logging.ERROR, logger="monkeybot.core.persistence.history"):
-        with pytest.raises(ValueError, match=r"history row \d+ unparseable"):
-            await history.load(thread_id)
+    with caplog.at_level(logging.ERROR, logger="monkeybot.core.persistence.history"), pytest.raises(
+        ValueError, match=r"history row \d+ unparseable"
+    ):
+        await history.load(thread_id)
     joined = " ".join(r.getMessage() for r in caplog.records)
     assert "not-json" not in joined
 
@@ -282,6 +283,30 @@ async def test_history_content_sqlite_json_extract(history_db) -> None:
     await cursor.close()
     assert row is not None
     assert row[0] == "text"
+
+
+@pytest.mark.asyncio
+async def test_history_system_notification_roundtrip_and_reset(history_db) -> None:
+    _conn, history = history_db
+    thread_id = "t-verdict"
+    row = Message(
+        role="system",
+        content=[
+            SystemNotification(
+                notification_type="verifierVerdict",
+                msg="constraint_touch",
+                data={"verdictId": "v1", "status": "drifting"},
+            )
+        ],
+    )
+    await history.append(thread_id, row)
+    loaded = await history.load(thread_id)
+    assert len(loaded) == 1
+    assert loaded[0].role == "system"
+    assert loaded[0].content == row.content
+    await history.reset(thread_id, loaded)
+    reloaded = await history.load(thread_id)
+    assert reloaded[0].content == row.content
 
 
 @pytest.mark.asyncio

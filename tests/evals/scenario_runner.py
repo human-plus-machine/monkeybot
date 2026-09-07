@@ -21,9 +21,7 @@ def tool_category(tool_name: str) -> str:
     """Map core tool names to coarse categories (single place to update on renames)."""
     read_tools = frozenset({"read_file", "list_files", "find_files"})
     write_tools = frozenset({"write_file", "create_file", "replace_in_file", "apply_patch"})
-    loop_tools = frozenset(
-        {"start_loop", "loop_status", "pause_loop", "resume_loop", "stop_loop"}
-    )
+    loop_tools = frozenset({"start_loop", "loop_status", "pause_loop", "resume_loop", "stop_loop"})
     code_search_tools = frozenset({"glob", "grep"})
     if tool_name in read_tools:
         return "read"
@@ -123,6 +121,19 @@ def load_scenario(path: Path) -> Scenario:
         memory_index=list(mem),
         assertions=assertions,
     )
+
+
+def check_assertions(record: EvalRecord, assertions: ScenarioAssertions) -> None:
+    """Raise AssertionError when a set assertion does not hold."""
+    if assertions.turn_completed is True:
+        assert record.completed
+    if assertions.no_errors is True:
+        assert record.errors == []
+    if assertions.tool_categories_used:
+        cats = {tool_category(name) for name in record.tool_calls}
+        assert cats.intersection(set(assertions.tool_categories_used))
+    if assertions.memory_injected is True:
+        assert len(record.memory_injected_lines) > 0
 
 
 def _make_turn_context(scenario: Scenario) -> TurnContext:

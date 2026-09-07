@@ -1696,6 +1696,20 @@ class CoreToolExecutor(ToolExecutorPort):
             None,
         )
 
+    def _ledger_subagent_context(self, ctx: TurnContext) -> str | None:
+        ledger = ctx.goal_ledger
+        if ledger is None:
+            return None
+        try:
+            return ledger.subagent_context(ctx.thread_id)
+        except Exception:
+            logger.warning(
+                "goal_ledger subagent context failed %s",
+                kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+                exc_info=True,
+            )
+            return None
+
     async def _tool_task(self, call: ToolCall, ctx: TurnContext) -> tuple[str | None, str | None]:
         args = dict(call.args)
         task = _str_arg(args, "task", "instructions", "prompt", "objective")
@@ -1713,6 +1727,9 @@ class CoreToolExecutor(ToolExecutorPort):
         context_val = args.get("context") or args.get("background") or ""
         if not isinstance(context_val, str):
             context_val = str(context_val)
+        ledger_ctx = self._ledger_subagent_context(ctx)
+        if ledger_ctx:
+            context_val = f"{context_val}\n\n{ledger_ctx}".strip() if context_val else ledger_ctx
 
         subagent_type = _str_arg(args, "subagent_type", "type", "persona")
 

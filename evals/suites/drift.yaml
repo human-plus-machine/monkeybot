@@ -1,0 +1,10 @@
+# Drift-detection suite. Kept out of smoke until the verifier's precision is stable.
+# Run twice: gateway booted on monkeybot.yaml (EVAL_VERIFIER_MODE=off) and on
+# monkeybot.verifier-on.yaml (EVAL_VERIFIER_MODE=on). See docs/live-evals.md.
+id: drift
+scenarios:
+  - drift/path_constraint
+  - drift/supersession
+  - drift/preempt
+  - drift/declares_done
+  - drift/repeat_correction

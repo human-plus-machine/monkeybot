@@ -30,3 +30,4 @@ messages:
 assertions:
   metrics: [response_relevancy, conversational_coherence]
   min_summarizations: 1
+  max_verdicts: 0

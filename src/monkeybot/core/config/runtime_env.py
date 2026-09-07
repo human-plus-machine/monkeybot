@@ -227,6 +227,8 @@ CONTENT_DIGEST_TIERS: dict[str, str] = {
 
 # Synthetic diff key for ``subagents.personas`` (not in ENV_MAP). Always REBUILD.
 SUBAGENTS_DIFF_KEY = "subagents.*"
+# Synthetic diff key for ``verifier:`` (not in ENV_MAP). Always REBUILD.
+VERIFIER_DIFF_KEY = "verifier.*"
 
 # YAML keys that used to map to env but are retired. Still accepted in the file
 # (no unknown-key rejection), but warn so configs are not silently ignored.

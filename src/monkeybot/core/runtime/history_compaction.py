@@ -26,6 +26,7 @@ from monkeybot.core.types.content_blocks import (
     File,
     Image,
     RedactedThinking,
+    SystemNotification,
     Text,
     Thinking,
     ToolRequest,
@@ -37,6 +38,21 @@ from .loop_messages import _load_agent_chat_history, _summary_line_for_message
 from .loop_usage import _prompt_input_tokens_for_history
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.history_compaction")
+
+
+def _intent_facts_from_ctx(ctx: TurnContext) -> str | None:
+    ledger = ctx.goal_ledger
+    if ledger is None:
+        return None
+    try:
+        return ledger.compaction_facts(ctx.thread_id)
+    except Exception:
+        logger.warning(
+            "goal_ledger compaction facts failed %s",
+            kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+            exc_info=True,
+        )
+        return None
 
 # Fixed harness policy — not env/YAML tunable.
 # Pure bug guard, not a normal-flow limit: row count is otherwise unbounded and
@@ -169,7 +185,22 @@ def _estimate_message_tokens(message: Message) -> int:
     return estimate_tokens_from_char_count(_raw_message_char_count(message))
 
 
-def split_messages_for_compaction(
+_PINNED_NOTIFICATION_TYPES = frozenset({"verifierVerdict"})
+
+
+def _is_pinned_history_row(msg: Message) -> bool:
+    """True for verifierVerdict rows that must survive compaction.
+
+    Other ``SystemNotification`` kinds (thinking / inline / credits) stay compactable.
+    """
+    return bool(msg.content) and all(
+        isinstance(block, SystemNotification)
+        and block.notification_type in _PINNED_NOTIFICATION_TYPES
+        for block in msg.content
+    )
+
+
+def _split_accountable(
     messages: Sequence[Message],
     *,
     window_tokens: int,
@@ -206,16 +237,99 @@ def split_messages_for_compaction(
     return head, middle, tail
 
 
+def split_messages_for_compaction(
+    messages: Sequence[Message],
+    *,
+    window_tokens: int,
+) -> tuple[list[Message], list[Message], list[Message]]:
+    """Split accountable rows only; pinned notification rows are spliced back later."""
+    accountable = [msg for msg in messages if not _is_pinned_history_row(msg)]
+    return _split_accountable(accountable, window_tokens=window_tokens)
+
+
+def rebuild_compacted_history(
+    original: Sequence[Message],
+    *,
+    head: Sequence[Message],
+    summary: Message,
+    tail: Sequence[Message],
+) -> list[Message]:
+    """Keep pinned notification rows in original relative order around compacted rows."""
+    head_ids = {id(msg) for msg in head}
+    tail_ids = {id(msg) for msg in tail}
+    result: list[Message] = []
+    summary_placed = False
+    for msg in original:
+        if _is_pinned_history_row(msg):
+            result.append(msg)
+            continue
+        if id(msg) in head_ids:
+            result.append(msg)
+            continue
+        if id(msg) in tail_ids:
+            if not summary_placed:
+                result.append(summary)
+                summary_placed = True
+            result.append(msg)
+            continue
+        if not summary_placed:
+            result.append(summary)
+            summary_placed = True
+    if not summary_placed:
+        result.append(summary)
+    return result
+
+
 def protect_recent_count(
     messages: Sequence[Message],
     *,
     window_tokens: int,
 ) -> int:
-    """How many newest rows pressure-shaping should leave verbatim."""
+    """How many newest *full-list* rows pressure-shaping should leave verbatim.
+
+    Tail length is computed over accountable rows, then expanded to the original
+    span so pinned verdicts interleaved in that tail do not shrink the window
+    the caller applies as ``len(messages) - protect_recent``.
+    """
     _, _, tail = split_messages_for_compaction(messages, window_tokens=window_tokens)
-    if tail:
-        return len(tail)
-    return min(len(messages), SUMMARY_KEEP_TAIL_MIN)
+    if not tail:
+        return min(len(messages), SUMMARY_KEEP_TAIL_MIN)
+    tail_ids = {id(msg) for msg in tail}
+    for i, msg in enumerate(messages):
+        if id(msg) in tail_ids:
+            return len(messages) - i
+    return len(tail)
+
+
+def truncate_history_preserving_pins(
+    messages: Sequence[Message],
+    *,
+    max_rows: int,
+) -> list[Message]:
+    """Keep newest accountable rows plus pinned verdicts, in original order."""
+    if max_rows <= 0:
+        return []
+    if len(messages) <= max_rows:
+        return list(messages)
+    pinned = [msg for msg in messages if _is_pinned_history_row(msg)]
+    accountable = [msg for msg in messages if not _is_pinned_history_row(msg)]
+    keep_accountable_n = max(0, max_rows - len(pinned))
+    keep_accountable = accountable[-keep_accountable_n:] if keep_accountable_n else []
+    keep_ids = {id(msg) for msg in keep_accountable}
+    keep_ids.update(id(msg) for msg in pinned)
+    kept = [msg for msg in messages if id(msg) in keep_ids]
+    if len(kept) <= max_rows:
+        return kept
+    overflow = len(kept) - max_rows
+    pinned_ids = {id(msg) for msg in pinned}
+    dropped = 0
+    trimmed: list[Message] = []
+    for msg in kept:
+        if dropped < overflow and id(msg) in pinned_ids:
+            dropped += 1
+            continue
+        trimmed.append(msg)
+    return trimmed
 
 
 def _summarization_viable(
@@ -257,6 +371,7 @@ async def _compact_history_if_needed(
     provider: Provider,
     model: str,
     window_tokens: int,
+    intent_facts: str | None = None,
 ) -> int:
     """Summarize middle history when tool results exhausted headroom."""
     # Compaction persists via history.reset; use unrepaired rows so synthetic
@@ -271,6 +386,7 @@ async def _compact_history_if_needed(
         provider,
         model,
         window_tokens=window_tokens,
+        intent_facts=intent_facts,
     )
 
 
@@ -306,6 +422,7 @@ async def _append_budgeted_tool_responses(
                 provider=provider,
                 model=_summarization_model_id(ctx),
                 window_tokens=ctx.context_window_tokens,
+                intent_facts=_intent_facts_from_ctx(ctx),
             )
         except Exception:
             logger.warning(
@@ -348,6 +465,7 @@ async def _summarize_history(
     model: str,
     *,
     window_tokens: int,
+    intent_facts: str | None = None,
 ) -> int:
     """Compress middle history into one assistant summary row. Returns middle row count."""
     head, middle, tail = split_messages_for_compaction(
@@ -368,6 +486,9 @@ async def _summarize_history(
     )
     lines = [_summary_line_for_message(m, window_tokens=window_tokens) for m in middle]
     blob = "\n\n---\n\n".join(lines)
+    user_text = "Create a structured summary from the conversation segment below.\n\n" + blob
+    if intent_facts:
+        user_text = intent_facts + "\n\n" + user_text
     summarize_messages = [
         Message(
             role="system",
@@ -375,14 +496,7 @@ async def _summarize_history(
         ),
         Message(
             role="user",
-            content=[
-                Text(
-                    text=(
-                        "Create a structured summary from the conversation "
-                        "segment below.\n\n" + blob
-                    )
-                )
-            ],
+            content=[Text(text=user_text)],
         ),
     ]
     summary_text = ""
@@ -399,14 +513,13 @@ async def _summarize_history(
         summary_body = f"[Context Summary]:\n{summary_text}"
     else:
         summary_body = f"[Context Summary]:\n{summary_text}\n\n{_POST_COMPACTION_STANDING}"
-    merged = [
-        *head,
-        Message(
-            role="assistant",
-            content=[Text(text=summary_body)],
-        ),
-        *tail,
-    ]
+    summary_row = Message(
+        role="assistant",
+        content=[Text(text=summary_body)],
+    )
+    merged = rebuild_compacted_history(
+        messages, head=head, summary=summary_row, tail=tail
+    )
     await history.reset(thread_id, merged)
     logger.debug(
         "history compaction reset %s",

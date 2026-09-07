@@ -8,11 +8,21 @@ from monkeybot.core.runtime.history_compaction import (
     SUMMARY_KEEP_TAIL_MIN,
     SUMMARY_KEEP_TAIL_RATIO,
     _estimate_message_tokens,
+    _is_pinned_history_row,
     protect_recent_count,
+    rebuild_compacted_history,
     split_messages_for_compaction,
+    truncate_history_preserving_pins,
 )
-from monkeybot.core.types.content_blocks import File, Image, Text, Thinking, ToolResponse
 from monkeybot.core.tools.spill_inventory import spill_budgets_from_window
+from monkeybot.core.types.content_blocks import (
+    File,
+    Image,
+    SystemNotification,
+    Text,
+    Thinking,
+    ToolResponse,
+)
 
 
 def _msgs(n: int, *, chars: int = 40) -> list[Message]:
@@ -118,3 +128,99 @@ def test_estimate_counts_image_thinking_and_file_payloads() -> None:
     # Type-name fallback would be ~5–8 tokens total; real payload is >> that.
     min_chars = len(image_data) + len(thinking_text) + len(file_data)
     assert tokens >= min_chars // 4
+
+
+def test_split_ignores_pinned_notification_for_tail_floor() -> None:
+    messages = _msgs(20, chars=40)
+    verdict = Message(
+        role="system",
+        content=[
+            SystemNotification(
+                notification_type="verifierVerdict",
+                msg="constraint_touch",
+            )
+        ],
+    )
+    with_verdict = [*messages, verdict]
+    head, middle, tail = split_messages_for_compaction(with_verdict, window_tokens=100)
+    assert verdict not in head + middle + tail
+    assert len(tail) >= SUMMARY_KEEP_TAIL_MIN
+    summary = Message(role="assistant", content=[Text(text="[Context Summary]: x")])
+    rebuilt = rebuild_compacted_history(
+        with_verdict, head=head, summary=summary, tail=tail
+    )
+    assert rebuilt[-1] is verdict
+    assert any(
+        isinstance(block, SystemNotification)
+        for msg in rebuilt
+        for block in msg.content
+    )
+
+
+def test_rebuild_keeps_middle_notification_typed() -> None:
+    messages = _msgs(12, chars=40)
+    verdict = Message(
+        role="system",
+        content=[
+            SystemNotification(notification_type="verifierVerdict", msg="done_unmet")
+        ],
+    )
+    original = [*messages[:5], verdict, *messages[5:]]
+    head, middle, tail = split_messages_for_compaction(original, window_tokens=100)
+    summary = Message(role="assistant", content=[Text(text="[Context Summary]: mid")])
+    rebuilt = rebuild_compacted_history(original, head=head, summary=summary, tail=tail)
+    pinned = [m for m in rebuilt if _is_pinned_history_row(m)]
+    assert len(pinned) == 1
+    assert isinstance(pinned[0].content[0], SystemNotification)
+    assert pinned[0].content[0].notification_type == "verifierVerdict"
+
+
+def test_inline_and_thinking_notifications_are_not_pinned() -> None:
+    messages = _msgs(12, chars=40)
+    inline = Message(
+        role="system",
+        content=[SystemNotification(notification_type="inlineMessage", msg="note")],
+    )
+    thinking = Message(
+        role="system",
+        content=[SystemNotification(notification_type="thinkingMessage", msg="…")],
+    )
+    mixed = [*messages[:4], inline, thinking, *messages[4:]]
+    assert not _is_pinned_history_row(inline)
+    assert not _is_pinned_history_row(thinking)
+    head, middle, tail = split_messages_for_compaction(mixed, window_tokens=100)
+    assert inline in head + middle + tail
+    assert thinking in head + middle + tail
+    summary = Message(role="assistant", content=[Text(text="[Context Summary]: x")])
+    rebuilt = rebuild_compacted_history(mixed, head=head, summary=summary, tail=tail)
+    assert not any(_is_pinned_history_row(m) for m in rebuilt)
+
+
+def test_protect_recent_count_covers_pinned_rows_in_tail_span() -> None:
+    messages = _msgs(20, chars=40)
+    pinned = Message(
+        role="system",
+        content=[SystemNotification(notification_type="verifierVerdict", msg="x")],
+    )
+    mixed = [*messages[:-2], pinned, *messages[-2:]]
+    _, _, tail = split_messages_for_compaction(mixed, window_tokens=50_000)
+    protected = protect_recent_count(mixed, window_tokens=50_000)
+    assert protected >= len(tail)
+    # The protected window is a suffix of the full list and includes the pin.
+    window = mixed[-protected:]
+    assert pinned in window
+    assert all(msg in window for msg in tail)
+
+
+def test_truncate_history_keeps_pinned_verdicts() -> None:
+    messages = _msgs(10, chars=20)
+    pinned = Message(
+        role="system",
+        content=[SystemNotification(notification_type="verifierVerdict", msg="keep")],
+    )
+    mixed = [pinned, *messages]
+    truncated = truncate_history_preserving_pins(mixed, max_rows=4)
+    assert len(truncated) == 4
+    assert pinned in truncated
+    assert truncated[-1] is messages[-1]
+    assert messages[0] not in truncated

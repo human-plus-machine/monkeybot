@@ -47,6 +47,7 @@ from monkeybot.core.runtime.provider_stream_mapper import ProviderStreamMapper
 from monkeybot.core.tools.inspector import ToolInspector
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
+    SystemNotification,
     Text,
     ToolRequest,
     ToolResponse,
@@ -75,12 +76,14 @@ from .events import (
 from .history_compaction import (
     HISTORY_LOAD_MAX,
     _await_history_write,
+    _intent_facts_from_ctx,
     _summarization_model_id,
     _summarization_viable,
     _summarize_history,
     protect_recent_count,
+    truncate_history_preserving_pins,
 )
-from .input_admission import InputAdmission, preview_text
+from .input_admission import InputAdmission, SteerItem, join_text, preview_text
 from .loop_hooks import (
     _HOOK_READ_TIMEOUT_S,
     _apply_before_provider_hook,
@@ -211,30 +214,106 @@ async def _drain_steers(
     ctx: TurnContext,
 ) -> AsyncIterator[AgentEvent]:
     """Inject queued steer messages at a safe boundary (before next provider call)."""
-    if input_admission is None:
-        return
-    while True:
-        steered = input_admission.pop_steer()
-        if steered is None:
-            break
-        await persist_message(
-            history,
-            Message(role="user", content=list(steered)),
-            thread_id=ctx.thread_id,
-            turn_id=ctx.request_id,
-            memory=ctx.memory,
-            ingest=True,
-        )
-        preview = preview_text(steered)
-        logger.info(
-            "steer injected %s",
-            kv(
-                request_id=ctx.request_id,
+    if input_admission is not None:
+        while True:
+            item = input_admission.pop_steer()
+            if item is None:
+                break
+            steered = item.content
+            await persist_message(
+                history,
+                Message(role="user", content=list(steered)),
                 thread_id=ctx.thread_id,
-                preview=preview[:80],
-            ),
+                turn_id=ctx.request_id,
+                memory=ctx.memory,
+                ingest=True,
+            )
+            preview = preview_text(steered)
+            _admit_steer_to_ledger(ctx, join_text(steered), item)
+            logger.info(
+                "steer injected %s",
+                kv(
+                    request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
+                    preview=preview[:80],
+                    provenance=item.provenance,
+                ),
+            )
+            yield UserSteered(request_id=ctx.request_id, text=preview)
+    async for verdict_evt in _drain_verdicts(ctx, history):
+        yield verdict_evt
+
+
+async def _drain_verdicts(
+    ctx: TurnContext,
+    history: HistoryStore | None = None,
+) -> AsyncIterator[AgentEvent]:
+    """Commit ready verdicts at a safe boundary. Never waits on a judge."""
+    mailbox = ctx.verdict_mailbox
+    if mailbox is None:
+        return
+    try:
+        ready = mailbox.take_ready(ctx.thread_id)
+    except Exception:
+        logger.warning(
+            "verdict mailbox drain failed %s",
+            kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+            exc_info=True,
         )
-        yield UserSteered(request_id=ctx.request_id, text=preview)
+        return
+    for verdict in ready:
+        if history is not None:
+            try:
+                await persist_message(
+                    history,
+                    Message(
+                        role="system",
+                        content=[
+                            SystemNotification(
+                                notification_type="verifierVerdict",
+                                msg=verdict.rationale,
+                                data=verdict.to_wire(),
+                            )
+                        ],
+                    ),
+                    thread_id=ctx.thread_id,
+                    turn_id=ctx.request_id,
+                    memory=ctx.memory,
+                    ingest=False,
+                )
+            except Exception:
+                logger.warning(
+                    "verdict persist failed %s",
+                    kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+                    exc_info=True,
+                )
+        yield verdict
+
+
+def _admit_steer_to_ledger(ctx: TurnContext, verbatim: str, item: SteerItem) -> None:
+    ledger = ctx.goal_ledger
+    if ledger is None or not verbatim:
+        return
+    from monkeybot.core.persistence.goal_ledger import Channel, Provenance
+
+    provenance = (
+        Provenance.VERIFIER_STEER
+        if item.provenance == Provenance.VERIFIER_STEER.value
+        else Provenance.HUMAN
+    )
+    try:
+        ledger.admit(
+            ctx.thread_id,
+            verbatim,
+            provenance=provenance,
+            channel=Channel.STEER,
+        )
+    except Exception:
+        logger.warning(
+            "goal_ledger steer tap failed %s",
+            kv(thread_id=ctx.thread_id, request_id=ctx.request_id),
+            exc_info=True,
+        )
 
 
 def _tools_schema_hash(tools: Sequence[ToolDef]) -> str:
@@ -433,9 +512,7 @@ def _token_pressure_should_summarize(
     cap: int,
     window_tokens: int,
 ) -> bool:
-    return preflight >= cap and _summarization_viable(
-        chat_messages, window_tokens=window_tokens
-    )
+    return preflight >= cap and _summarization_viable(chat_messages, window_tokens=window_tokens)
 
 
 async def _preflight_prompt_tokens(
@@ -500,6 +577,7 @@ async def _run_history_summarization(
                 provider,
                 _summarization_model_id(state.ctx),
                 window_tokens=state.ctx.context_window_tokens,
+                intent_facts=_intent_facts_from_ctx(state.ctx),
             )
         except Exception:
             logger.warning(
@@ -593,7 +671,9 @@ async def _apply_history_load_max_safety(
     if len(state.chat_messages) <= HISTORY_LOAD_MAX:
         return
     dropped = len(state.chat_messages) - HISTORY_LOAD_MAX
-    truncated = state.chat_messages[-HISTORY_LOAD_MAX:]
+    truncated = truncate_history_preserving_pins(
+        state.chat_messages, max_rows=HISTORY_LOAD_MAX
+    )
     logger.error(
         "history exceeds load max after compact attempt; truncating tail %s",
         kv(
@@ -1083,9 +1163,7 @@ async def _persist_partial_assistant_on_abort(
     if not assist_blocks:
         return
     tool_text_fn = (
-        interrupted_tool_result_text
-        if state.provider_stream_failed
-        else cancelled_tool_result_text
+        interrupted_tool_result_text if state.provider_stream_failed else cancelled_tool_result_text
     )
     await persist_message(
         history,
@@ -1535,11 +1613,13 @@ async def _run_inner_core(
                 max_turns=state.effective_max,
             ),
         )
-        yield Error(request_id=state.ctx.request_id, error=MAX_TURNS_ERROR)
 
     # Ensure the backgrounded assistant write has landed before any load/reset
     # below (freeze) so the assistant row is durable and not overwritten.
     await _await_history_write(state.assistant_write_task)
+
+    async for verdict_evt in _drain_verdicts(state.ctx, history):
+        yield verdict_evt
 
     descriptor_events = await freeze_attachments_in_history(
         thread_id=state.ctx.thread_id,
@@ -1564,3 +1644,5 @@ async def _run_inner_core(
     )
     # Settlement for POST_TURN / lingering POST_TOOL runs in run() finally
     # before TurnComplete — do not drain twice here.
+    if state.needs_followup_after_tools:
+        yield Error(request_id=state.ctx.request_id, error=MAX_TURNS_ERROR)

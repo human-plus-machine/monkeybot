@@ -49,7 +49,7 @@ from .loop_hooks import _drain_hook_settlement
 from .loop_messages import _normalize_user_content
 from .loop_ports import ToolExecutorPort
 from .loop_usage import _effective_max_turns, _usage_to_totals
-from .turn_loop import _run_inner
+from .turn_loop import _drain_verdicts, _run_inner
 
 __all__ = [
     "SUMMARY_TRIGGER_RATIO",
@@ -106,6 +106,7 @@ async def run(
             max_turns=effective_max,
         ),
     )
+    terminal_error: str | None = None
     try:
         async for evt in _run_inner(
             blocks,
@@ -137,15 +138,19 @@ async def run(
                 kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
                 exc_info=True,
             )
-        yield Error(request_id=ctx.request_id, error="Request cancelled")
+        terminal_error = "Request cancelled"
     except Exception as exc:
         logger.exception(
             "harness turn failed %s",
             kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
         )
-        yield Error(request_id=ctx.request_id, error=str(exc))
+        terminal_error = str(exc)
     finally:
         await _drain_hook_settlement(hook_manager)
+        async for verdict_evt in _drain_verdicts(ctx, history):
+            yield verdict_evt
+        if terminal_error is not None:
+            yield Error(request_id=ctx.request_id, error=terminal_error)
         usage.duration_ms = int((time.monotonic() - t0) * 1000)
         logger.debug(
             "harness run end %s",

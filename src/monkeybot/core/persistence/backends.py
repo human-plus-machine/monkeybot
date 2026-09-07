@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from monkeybot.core.llm.provider import Message
     from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageGranularity, UsageSummary
     from monkeybot.core.persistence.durable_runs import SubagentEnvelope, SubagentRunRow
+    from monkeybot.core.persistence.goal_ledger import GoalLedgerStore
     from monkeybot.core.persistence.scheduled_loops import (
         ScheduledLoopCreate,
         ScheduledLoopRow,
@@ -193,6 +194,8 @@ class StorageBackend(Protocol):
     def runs(self) -> RunStore: ...
 
     def scheduled_loops(self) -> ScheduledLoopStore: ...
+
+    def goal_ledger(self) -> GoalLedgerStore | None: ...
 
     def session_turns(self) -> SessionTurnLockStore: ...
 

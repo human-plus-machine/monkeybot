@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from monkeybot.core.config.yaml_loader import (
@@ -111,6 +111,66 @@ class SubagentSettings:
 
 
 _DEFAULT_SUBAGENT_SETTINGS = SubagentSettings()
+
+
+# Rank order is the source of truth. `steer` is reserved for an optional later
+# phase; Phases 4–6 ship nudge / replan / block.
+VERIFIER_SEVERITY_ORDER: tuple[str, ...] = ("none", "nudge", "replan", "steer", "block")
+VERIFIER_SEVERITY_RANK: dict[str, int] = {
+    name: index for index, name in enumerate(VERIFIER_SEVERITY_ORDER)
+}
+_VERIFIER_SEVERITIES = frozenset(VERIFIER_SEVERITY_ORDER)
+
+
+@dataclass(frozen=True)
+class VerifierLedgerConfig:
+    """``verifier.ledger`` — classifier that maintains the goal ledger."""
+
+    enabled: bool = False
+    model: str = "gemini-2.5-flash"
+    max_entries_per_thread: int = 64
+
+
+@dataclass(frozen=True)
+class VerifierTrackerConfig:
+    """``verifier.tracker`` — deterministic in-loop suspicion signals."""
+
+    enabled: bool = False
+    suspicion_threshold: int = 3
+    min_turn_before_verdict: int = 3
+
+
+@dataclass(frozen=True)
+class VerifierJudgeConfig:
+    """``verifier.judge`` — async LLM verdicts off the critical path."""
+
+    enabled: bool = False
+    model: str = "gemini-2.5-flash"
+    max_verdicts_per_message: int = 3
+    min_turns_between_verdicts: int = 2
+    max_spend_ratio: float = 0.25
+    tail_grace_s: float = 0.0
+
+
+@dataclass(frozen=True)
+class VerifierEscalationConfig:
+    """``verifier.escalation`` — cap on how hard the verifier may intervene."""
+
+    max_severity: str = "nudge"
+
+
+@dataclass(frozen=True)
+class VerifierConfig:
+    """YAML-only ``verifier:`` section. Absent or empty → every flag off."""
+
+    enabled: bool = False
+    ledger: VerifierLedgerConfig = field(default_factory=VerifierLedgerConfig)
+    tracker: VerifierTrackerConfig = field(default_factory=VerifierTrackerConfig)
+    judge: VerifierJudgeConfig = field(default_factory=VerifierJudgeConfig)
+    escalation: VerifierEscalationConfig = field(default_factory=VerifierEscalationConfig)
+
+
+_DEFAULT_VERIFIER_CONFIG = VerifierConfig()
 
 
 @dataclass(frozen=True)
@@ -432,6 +492,176 @@ def get_subagent_registry(
     if config is not None:
         return dict(config.subagents)
     return _persona_registry(get_subagent_configs(config_path))
+
+
+def _verifier_section(doc: dict[str, Any]) -> dict[str, Any]:
+    """Return the ``verifier:`` mapping, or empty dict when absent."""
+    section = doc.get("verifier")
+    if section is None:
+        return {}
+    if not isinstance(section, dict):
+        raise ConfigError(f"verifier must be a mapping, got {type(section).__name__}")
+    return section
+
+
+def _verifier_bool(raw: Any, label: str, default: bool) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    raise ConfigError(f"{label} must be true or false, got {raw!r}")
+
+
+def _verifier_int(raw: Any, label: str, default: int, *, min_value: int = 0) -> int:
+    if raw is None:
+        return default
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise ConfigError(f"{label} must be an integer, got {raw!r}")
+    if raw < min_value:
+        raise ConfigError(f"{label} must be >= {min_value}, got {raw}")
+    return raw
+
+
+def _verifier_float(raw: Any, label: str, default: float, *, min_value: float = 0.0) -> float:
+    if raw is None:
+        return default
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ConfigError(f"{label} must be a number, got {raw!r}")
+    value = float(raw)
+    if value < min_value:
+        raise ConfigError(f"{label} must be >= {min_value}, got {raw}")
+    return value
+
+
+def _verifier_str(raw: Any, label: str, default: str) -> str:
+    if raw is None:
+        return default
+    if not isinstance(raw, str) or not raw.strip():
+        raise ConfigError(f"{label} must be a non-empty string, got {raw!r}")
+    return raw.strip()
+
+
+def _verifier_nested(section: dict[str, Any], key: str) -> dict[str, Any]:
+    raw = section.get(key)
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError(f"verifier.{key} must be a mapping, got {type(raw).__name__}")
+    return raw
+
+
+def verifier_config_from_section(section: dict[str, Any]) -> VerifierConfig:
+    """Parse a ``verifier:`` mapping into :class:`VerifierConfig`.
+
+    Shared by :func:`get_verifier_config` and the ``RuntimeConfig`` snapshot
+    builder so the two never validate the section differently.
+    """
+    if not section:
+        return _DEFAULT_VERIFIER_CONFIG
+
+    defaults = _DEFAULT_VERIFIER_CONFIG
+    ledger_raw = _verifier_nested(section, "ledger")
+    tracker_raw = _verifier_nested(section, "tracker")
+    judge_raw = _verifier_nested(section, "judge")
+    escalation_raw = _verifier_nested(section, "escalation")
+
+    severity = _verifier_str(
+        escalation_raw.get("max_severity"),
+        "verifier.escalation.max_severity",
+        defaults.escalation.max_severity,
+    )
+    if severity not in _VERIFIER_SEVERITIES:
+        allowed = ", ".join(VERIFIER_SEVERITY_ORDER)
+        raise ConfigError(
+            f"verifier.escalation.max_severity must be one of {allowed}, got {severity!r}"
+        )
+
+    return VerifierConfig(
+        enabled=_verifier_bool(section.get("enabled"), "verifier.enabled", defaults.enabled),
+        ledger=VerifierLedgerConfig(
+            enabled=_verifier_bool(
+                ledger_raw.get("enabled"), "verifier.ledger.enabled", defaults.ledger.enabled
+            ),
+            model=_verifier_str(
+                ledger_raw.get("model"), "verifier.ledger.model", defaults.ledger.model
+            ),
+            max_entries_per_thread=_verifier_int(
+                ledger_raw.get("max_entries_per_thread"),
+                "verifier.ledger.max_entries_per_thread",
+                defaults.ledger.max_entries_per_thread,
+                min_value=1,
+            ),
+        ),
+        tracker=VerifierTrackerConfig(
+            enabled=_verifier_bool(
+                tracker_raw.get("enabled"),
+                "verifier.tracker.enabled",
+                defaults.tracker.enabled,
+            ),
+            suspicion_threshold=_verifier_int(
+                tracker_raw.get("suspicion_threshold"),
+                "verifier.tracker.suspicion_threshold",
+                defaults.tracker.suspicion_threshold,
+                min_value=1,
+            ),
+            min_turn_before_verdict=_verifier_int(
+                tracker_raw.get("min_turn_before_verdict"),
+                "verifier.tracker.min_turn_before_verdict",
+                defaults.tracker.min_turn_before_verdict,
+                min_value=0,
+            ),
+        ),
+        judge=VerifierJudgeConfig(
+            enabled=_verifier_bool(
+                judge_raw.get("enabled"), "verifier.judge.enabled", defaults.judge.enabled
+            ),
+            model=_verifier_str(
+                judge_raw.get("model"), "verifier.judge.model", defaults.judge.model
+            ),
+            max_verdicts_per_message=_verifier_int(
+                judge_raw.get("max_verdicts_per_message"),
+                "verifier.judge.max_verdicts_per_message",
+                defaults.judge.max_verdicts_per_message,
+                min_value=0,
+            ),
+            min_turns_between_verdicts=_verifier_int(
+                judge_raw.get("min_turns_between_verdicts"),
+                "verifier.judge.min_turns_between_verdicts",
+                defaults.judge.min_turns_between_verdicts,
+                min_value=0,
+            ),
+            max_spend_ratio=_verifier_float(
+                judge_raw.get("max_spend_ratio"),
+                "verifier.judge.max_spend_ratio",
+                defaults.judge.max_spend_ratio,
+                min_value=0.0,
+            ),
+            tail_grace_s=_verifier_float(
+                judge_raw.get("tail_grace_s"),
+                "verifier.judge.tail_grace_s",
+                defaults.judge.tail_grace_s,
+                min_value=0.0,
+            ),
+        ),
+        escalation=VerifierEscalationConfig(max_severity=severity),
+    )
+
+
+def get_verifier_config(
+    config_path: str | None = None,
+    *,
+    config: RuntimeConfig | None = None,
+) -> VerifierConfig:
+    """``verifier:`` section from monkeybot.yaml.
+
+    When ``config`` (a pinned ``RuntimeConfig`` snapshot) is given, its
+    ``verifier`` field is returned instead of re-reading the YAML file.
+    Only read from monkeybot.yaml — not from environment variables.
+    """
+    if config is not None:
+        return config.verifier
+    _, doc = load_monkeybot_yaml_dict(config_path)
+    return verifier_config_from_section(_verifier_section(doc))
 
 
 def _bool_config_flag(
