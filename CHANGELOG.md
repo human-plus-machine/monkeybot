@@ -6,7 +6,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Browser MCP
+## [browser v0.6.0] - 2026-09-07
 
 #### Added
 
