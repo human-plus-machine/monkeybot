@@ -357,6 +357,22 @@ class SubagentEvent:
 
 
 @dataclass(frozen=True)
+class CredentialEgressBlockedEvent:
+    """Outbound text to the LLM provider (or a tool-call argument) matched a
+    registered secret or canary and was withheld (credential broker phase 5).
+
+    The matched value itself never appears here — only that a match
+    happened, and where if known. `origin` is best-effort: a canary tripped
+    by a raw environment dump has no associated site.
+    """
+
+    kind: Literal["CredentialEgressBlocked"] = "CredentialEgressBlocked"
+    request_id: str = ""
+    scan_kind: Literal["secret", "canary"] = "secret"
+    origin: str | None = None
+
+
+@dataclass(frozen=True)
 class SubagentCompleted:
     """Lifecycle marker: nested subagent drain finished (success/error/timeout/cancel)."""
 
@@ -435,6 +451,7 @@ AgentEvent: TypeAlias = (
     | SubagentStarted
     | SubagentEvent
     | SubagentCompleted
+    | CredentialEgressBlockedEvent
     | VerifierVerdict
 )
 
@@ -464,6 +481,7 @@ DURABLE_EVENT_KINDS: frozenset[str] = frozenset(
         "SubagentStarted",  # nested spawn boundary (parent SSE)
         "SubagentCompleted",  # nested drain boundary (parent SSE)
         # SubagentEvent is live-only; durable nested transcript is the child thread.
+        "CredentialEgressBlocked",
     }
 )
 
@@ -482,6 +500,7 @@ SUBAGENT_FORWARD_KINDS: frozenset[str] = frozenset(
         "ToolInputDelta",
         "Error",
         "TurnComplete",
+        "CredentialEgressBlocked",
     }
 )
 
@@ -717,6 +736,11 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             "tool": event.tool,
             "delta": event.delta,
         }
+    if isinstance(event, CredentialEgressBlockedEvent):
+        out = {**base, "scan_kind": event.scan_kind}
+        if event.origin:
+            out["origin"] = event.origin
+        return out
     raise AssertionError(f"_story5_event_dict: unsupported type {type(event)!r}")
 
 
@@ -813,6 +837,7 @@ def event_to_json(event: AgentEvent) -> str:
             AssistantTextEnded,
             ThinkingBlockStarted,
             ToolInputDeltaEvent,
+            CredentialEgressBlockedEvent,
         ),
     ):
         payload = _story5_event_dict(event)
@@ -1176,6 +1201,12 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
             tool=tool_raw if isinstance(tool_raw, str) else "",
             delta=delta_raw if isinstance(delta_raw, str) else "",
         )
+    if t == "CredentialEgressBlocked":
+        sk_raw = payload.get("scan_kind", "secret")
+        scan_kind = cast(Literal["secret", "canary"], sk_raw if sk_raw in ("secret", "canary") else "secret")
+        origin_raw = payload.get("origin")
+        origin = origin_raw if isinstance(origin_raw, str) and origin_raw else None
+        return CredentialEgressBlockedEvent(request_id=rid, scan_kind=scan_kind, origin=origin)
     if t == "SubagentStarted":
         parent_call_id, run_id, child_thread_id, subagent_type = _parse_subagent_correlation(
             payload

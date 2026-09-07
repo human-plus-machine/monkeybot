@@ -636,6 +636,60 @@ def test_denied_keys_dropped_and_values_clipped(tmp_path: Path) -> None:
     assert len(events[0]["attributes"]["exception.stacktrace"]) < 5_000
 
 
+def test_value_scan_redacts_secret_under_an_unsuspicious_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 5.5: a secret embedded in prose under a key the denylist can't
+    recognize (not named *_token/*_secret/etc.) is still caught, by value."""
+    import monkeybot.observability.sqlite_exporter as sqlite_exporter_module
+
+    marker = "the-secret-value"
+
+    class _MarkerScanner:
+        def scan(self, texts: list[str]) -> list[object]:
+            from monkeybot.core.context.secret_egress import Hit
+
+            return [Hit(index=i, kind="secret") for i, t in enumerate(texts) if marker in t]
+
+    monkeypatch.setattr(sqlite_exporter_module, "get_scanner", lambda: _MarkerScanner())
+
+    db_path = tmp_path / "traces.db"
+    exporter = SqliteSpanExporter(_config(db_path))
+    _provider(exporter)
+    tracer = trace.get_tracer("test")
+    with tracer.start_as_current_span("monkeybot.run") as span:
+        span.set_attribute("tool.output", f"the file contains {marker} on line 3")
+        span.set_attribute("tool.name", "read_file")
+    exporter.shutdown()
+
+    conn = sqlite3.connect(db_path)
+    (attrs_json,) = conn.execute("select attributes_json from spans").fetchone()
+    conn.close()
+
+    attrs = json.loads(attrs_json)
+    assert marker not in attrs["tool.output"]
+    assert attrs["tool.output"] == "[withheld: credential detected]"
+    # A clean value under a different key is untouched.
+    assert attrs["tool.name"] == "read_file"
+
+
+def test_value_scan_is_noop_when_scanner_reports_no_hits(tmp_path: Path) -> None:
+    """No mocked scanner: the real SecretScanner no-ops without the app running,
+    so ordinary span persistence is unaffected in tests/CI."""
+    db_path = tmp_path / "traces.db"
+    exporter = SqliteSpanExporter(_config(db_path))
+    _provider(exporter)
+    tracer = trace.get_tracer("test")
+    with tracer.start_as_current_span("monkeybot.run") as span:
+        span.set_attribute("tool.output", "perfectly ordinary tool output")
+    exporter.shutdown()
+
+    conn = sqlite3.connect(db_path)
+    (attrs_json,) = conn.execute("select attributes_json from spans").fetchone()
+    conn.close()
+    assert json.loads(attrs_json)["tool.output"] == "perfectly ordinary tool output"
+
+
 def test_load_sqlite_exporter_config_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("MONKEYBOT_TRACES_DB", raising=False)
     assert load_sqlite_exporter_config() is None

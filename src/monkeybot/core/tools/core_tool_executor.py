@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from monkeybot.core.attachments.config import (
     ALLOWED_MIME_TYPES,
@@ -35,6 +35,7 @@ from monkeybot.core.context import (
     LoopsToolRegistry,
     TurnContext,
 )
+from monkeybot.core.context.secret_egress import SecretScanner, get_scanner
 from monkeybot.core.context.tool_result_ingress import (
     cap_tool_result_text,
     sanitize_tool_result_text,
@@ -56,6 +57,7 @@ from monkeybot.core.persistence.scheduled_loops import ScheduledLoopCreate
 from monkeybot.core.runtime.events import (
     AgentEvent,
     AssistantDelta,
+    CredentialEgressBlockedEvent,
     Error,
     SubagentCompleted,
     SubagentStarted,
@@ -663,6 +665,109 @@ def _built_in_tool_error(
     return _j(payload)
 
 
+# Credential broker phase 5.3: tool calls that can route a secret out of the
+# process without ever touching the LLM provider (a shell command, a file
+# write, a browser navigation/input, or an outbound web request) get their
+# serialized arguments scanned before dispatch — a distinct control from the
+# provider-egress scan in loop_hooks.py, which only sees text already headed
+# to the provider.
+_EGRESS_SCAN_FILE_WRITE_TOOLS = frozenset({"write_file", "replace_in_file", "apply_patch"})
+
+# Every browser_* tool is scanned except this small read-only/no-exfil-path
+# set (and the sealed browser_login/browser_passkey pair, which never see raw
+# credential material — they take a grant-scoped username/origin, not a
+# secret). An allowlist of "the browser tools that can leak" bit-rots the
+# moment browser-mcp adds one; a denylist of "the ones that provably can't"
+# does not.
+_EGRESS_SCAN_BROWSER_EXEMPT = frozenset(
+    {
+        "browser_login",
+        "browser_passkey",
+        "browser_screenshot",
+        "browser_get_elements",
+        "browser_get_text",
+        "browser_page_info",
+        "browser_list_playbooks",
+        "browser_read_playbook",
+        "browser_read_tabs",
+        "browser_tabs",
+        "browser_wait_for",
+        "browser_wait_idle",
+        "browser_stop",
+        "browser_switch_tab",
+        "browser_close_tab",
+        "browser_click_by_index",
+        "browser_select_by_index",
+        "browser_press_key",
+        "browser_scroll",
+    }
+)
+
+
+def _bare_tool_name(name: str, mcp: MCPClientPort) -> str:
+    """Strips an MCP ``server__`` prefix, if any, so tool-identity checks are prefix-agnostic.
+
+    Defensive against test doubles that implement only the subset of
+    ``MCPClientPort`` a given test needs: this runs on every tool call, far
+    more callers than originally exercised ``split_prefixed_tool``.
+    """
+    split = getattr(mcp, "split_prefixed_tool", None)
+    if split is None:
+        return name
+    pair = split(name)
+    return pair[1] if pair is not None else name
+
+
+def _tool_needs_egress_scan(name: str, mcp: MCPClientPort) -> bool:
+    if name == "run_command" or name in _EGRESS_SCAN_FILE_WRITE_TOOLS:
+        return True
+    bare = _bare_tool_name(name, mcp)
+    if bare.startswith("web_"):
+        return True
+    return bare.startswith("browser_") and bare not in _EGRESS_SCAN_BROWSER_EXEMPT
+
+
+_EGRESS_BLOCKED_TOOL_ERROR = _built_in_tool_error(
+    "credential_egress_blocked",
+    "This call's arguments contain a detected secret or canary and were refused before "
+    "running.",
+    "Do not retry with the same or an equivalent argument. If you need this credential to "
+    "sign in, use browser_login or browser_passkey instead of handling it directly.",
+)
+
+
+async def _scan_tool_args_for_egress(
+    name: str,
+    args: dict[str, Any],
+    *,
+    mcp: MCPClientPort,
+    ctx: TurnContext,
+    scanner: SecretScanner | None = None,
+) -> ToolExecutionResult | None:
+    """Returns a denial result if `args` trip the scan; ``None`` to proceed normally."""
+    if not _tool_needs_egress_scan(name, mcp):
+        return None
+    # SecretScanner.scan is synchronous urllib — off the event loop so one
+    # slow /json/scan round trip can't stall every other in-flight turn.
+    hits = await asyncio.to_thread((scanner or get_scanner()).scan, [_j(args)])
+    if not hits:
+        return None
+    scan_kind: Literal["secret", "canary"] = (
+        "canary" if any(h.kind == "canary" for h in hits) else "secret"
+    )
+    await safe_publish(
+        ctx.event_publisher,
+        CredentialEgressBlockedEvent(request_id=ctx.request_id, scan_kind=scan_kind),
+        fail_count=[0],
+        run_id="",
+    )
+    logger.warning(
+        "tool argument egress blocked %s",
+        kv(request_id=ctx.request_id, thread_id=ctx.thread_id, tool=name, scan_kind=scan_kind),
+    )
+    return ToolExecutionResult.err(_EGRESS_BLOCKED_TOOL_ERROR)
+
+
 _RUNTIME_NO_IDENTICAL_RETRY_HINT = (
     "Do not retry identical arguments. Fix the underlying cause if you can act on it; "
     "otherwise stop and report the blocker. If a spill or partial_output_path is present, "
@@ -997,6 +1102,9 @@ class CoreToolExecutor(ToolExecutorPort):
     async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
         name = call.name
         args: dict[str, Any] = dict(call.args)
+        egress_denial = await _scan_tool_args_for_egress(name, args, mcp=self._mcp, ctx=ctx)
+        if egress_denial is not None:
+            return egress_denial
         result_text: str | None = None
         err_text: str | None = None
         handler = _tool_handler_kind(name, mcp=self._mcp, extra_tools=self._extra_tools)

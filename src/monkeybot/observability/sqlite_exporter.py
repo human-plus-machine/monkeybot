@@ -23,6 +23,7 @@ from typing import Any
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
+from monkeybot.core.context.secret_egress import SecretScanner, WITHHELD_TEXT, get_scanner
 from monkeybot.observability.spans import (
     is_attr_truncation_exempt,
     is_denied_attribute_key,
@@ -202,14 +203,39 @@ def _coerce_json_value(value: Any, *, key: str | None = None) -> Any:
     return truncate(str(value), max_bytes=_MAX_PERSISTED_VALUE_BYTES)
 
 
-def _sanitize_attributes(attrs: Mapping[str, Any] | None) -> dict[str, Any]:
+def _scan_trace_values(attrs: dict[str, Any], *, scanner: SecretScanner) -> dict[str, Any]:
+    """Credential broker phase 5.5: catches a secret that reached a span attribute
+    under a key the denylist above didn't recognize (e.g. embedded in prose, not
+    named ``*_token``/``*_secret``). No-ops (logs once, at scanner level) when
+    Spaces is not running — key-based filtering above remains the first line
+    regardless of whether this value-level scan can run.
+
+    ``scanner.scan`` is synchronous urllib, called here unwrapped (unlike the
+    turn-loop and tool-arg call sites): `SqliteSpanExporter.export` runs on
+    `BatchSpanProcessor`'s own background thread, not the gateway's asyncio
+    event loop, so it is not on the hot path a slow scan could stall.
+    """
+    string_keys = [k for k, v in attrs.items() if isinstance(v, str) and v]
+    if not string_keys:
+        return attrs
+    hits = scanner.scan([attrs[k] for k in string_keys])
+    if not hits:
+        return attrs
+    hit_keys = {string_keys[h.index] for h in hits}
+    return {k: (WITHHELD_TEXT if k in hit_keys else v) for k, v in attrs.items()}
+
+
+def _sanitize_attributes(
+    attrs: Mapping[str, Any] | None, *, scanner: SecretScanner | None = None
+) -> dict[str, Any]:
     if not attrs:
         return {}
-    return {
+    coerced = {
         key: _coerce_json_value(val, key=key)
         for key, val in attrs.items()
         if not is_denied_attribute_key(key)
     }
+    return _scan_trace_values(coerced, scanner=scanner or get_scanner())
 
 
 def _serialize_attributes(attrs: Mapping[str, Any]) -> str:

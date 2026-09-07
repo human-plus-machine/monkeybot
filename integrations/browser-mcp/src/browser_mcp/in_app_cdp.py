@@ -90,6 +90,37 @@ def _with_query_token(url: str, token: str | None) -> str:
     return urlunparse(parsed._replace(query=urlencode(pairs)))
 
 
+def _run_id() -> str | None:
+    """Credential-grant scope: a run_id for routines/queue tasks, else the
+    interactive gateway session key. Set by Monkeyapp on gateway spawn."""
+    value = (os.environ.get("MONKEYBOT_RUN_ID") or "").strip()
+    return value or None
+
+
+def _run_label() -> str:
+    value = os.environ.get("MONKEYBOT_RUN_LABEL")
+    return value.strip() if value and value.strip() else "Chat"
+
+
+def _run_headers() -> dict[str, str]:
+    """Headers identifying this run to the in-app bridge's /json/login endpoint."""
+    run_id = _run_id()
+    if not run_id:
+        return {}
+    return {"X-Monkeybot-Run": run_id, "X-Monkeybot-Run-Label": _run_label()}
+
+
+def _with_run_param(url: str, run_id: str | None) -> str:
+    if not run_id:
+        return url
+    parsed = urlparse(url)
+    pairs = [
+        (key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key != "run"
+    ]
+    pairs.append(("run", run_id))
+    return urlunparse(parsed._replace(query=urlencode(pairs)))
+
+
 def _in_app_ws_url(url: str, token: str | None) -> str:
     """browser-harness treats HTTP 403 as Chrome's Allow-debugging popup.
 
@@ -108,7 +139,7 @@ def _in_app_ws_url(url: str, token: str | None) -> str:
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
         scheme = "wss" if parsed.scheme == "https" else "ws"
         url = f"{scheme}://{host}:{port}{_IN_APP_BROWSER_WS_PATH}"
-    return _with_query_token(url, attached)
+    return _with_run_param(_with_query_token(url, attached), _run_id())
 
 
 def _redact_cdp_token(message: str) -> str:
