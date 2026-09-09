@@ -1073,8 +1073,10 @@ class CoreToolExecutor(ToolExecutorPort):
             read_roots: set[str] = set(ctx.turn_path_grants)
             if self._grants_cache is not None:
                 read_roots |= {p.path for p in self._grants_cache.get().paths}
-            if read_roots:
-                self._workspace.sync_extra_read_roots(read_roots)
+            # Always sync, even when empty: sync_extra_read_roots now assigns
+            # rather than merges, so a revoked grant must clear the service's
+            # stale entry too, not just skip refreshing it.
+            self._workspace.sync_extra_read_roots(read_roots)
         egress_denial = await _scan_tool_args_for_egress(name, args, mcp=self._mcp, ctx=ctx)
         if egress_denial is not None:
             return egress_denial

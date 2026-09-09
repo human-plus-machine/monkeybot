@@ -317,16 +317,16 @@ def resolve_user_path(raw: str, *, must_exist: bool = False) -> Path:
     return resolved
 
 
-def is_path_denied(path: Path) -> bool:
-    """Non-raising check used to filter listing/search results.
+def is_credential_path(path: Path) -> bool:
+    """Non-raising credential/keychain/browser-profile/app-state denylist check.
 
-    ``list_dir``/``find`` must filter denied entries out of their results, not
-    merely refuse a denied *root* — otherwise listing a parent directory leaks
-    the existence and names of things inside a denied subdirectory.
+    Unlike ``is_path_denied``, this does *not* also enforce the home-directory
+    boundary — callers that already established (or don't need) that boundary
+    on their own, such as ``core/tools/workspace_service.py``'s per-result
+    filter for a granted external folder, use this to apply just the
+    credential-pattern half of the policy.
     """
     try:
-        if not any(is_within(path, root) or path == root for root in _allowed_roots()):
-            return True
         for denied_root in _denied_dirs():
             if path == denied_root or is_within(path, denied_root):
                 return True
@@ -339,6 +339,21 @@ def is_path_denied(path: Path) -> bool:
     except (OSError, ValueError):
         return True
     return False
+
+
+def is_path_denied(path: Path) -> bool:
+    """Non-raising check used to filter listing/search results.
+
+    ``list_dir``/``find`` must filter denied entries out of their results, not
+    merely refuse a denied *root* — otherwise listing a parent directory leaks
+    the existence and names of things inside a denied subdirectory.
+    """
+    try:
+        if not any(is_within(path, root) or path == root for root in _allowed_roots()):
+            return True
+    except (OSError, ValueError):
+        return True
+    return is_credential_path(path)
 
 
 def check_not_exec_surface(path: Path) -> None:

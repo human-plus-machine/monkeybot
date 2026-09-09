@@ -391,15 +391,30 @@ class JailRoots:
         ``memory_hidden_paths``) must stay hidden even though ``/tmp``
         itself is writable. Putting temp dirs in ``read_write`` instead
         would silently reopen exactly that case.
+
+    ``always_deny``
+        Roots that must stay hidden no matter what — including nested
+        inside ``read_write``/``read_only``/``shared_write``. This is the
+        opposite precedence from plain ``deny``, which ``read_write``/
+        ``read_only`` are deliberately allowed to override (a workspace
+        living under the denied home directory is the common case). Used
+        for the memory-off hide list (``TerminalExecutor._hidden_paths``):
+        a memory palace can be configured to live *inside* the workspace
+        (``MEMORY_PATH``/``MEMORY_STORAGE_URI`` pointing there), and folding
+        it into ``deny`` would let the workspace's own ``read_write`` grant
+        re-expose it.
     """
 
     read_write: tuple[Path, ...] = ()
     read_only: tuple[Path, ...] = ()
     shared_write: tuple[Path, ...] = ()
     deny: tuple[Path, ...] = ()
+    always_deny: tuple[Path, ...] = ()
 
     def is_empty(self) -> bool:
-        return not (self.read_write or self.read_only or self.shared_write or self.deny)
+        return not (
+            self.read_write or self.read_only or self.shared_write or self.deny or self.always_deny
+        )
 
 
 def _resolved_strs(paths: Sequence[Path]) -> list[str]:
@@ -411,6 +426,7 @@ def _seatbelt_jail_profile(roots: JailRoots) -> str:
     read_write = _resolved_strs(roots.read_write)
     read_only = _resolved_strs(roots.read_only)
     shared_write = _resolved_strs(roots.shared_write)
+    always_deny = _resolved_strs(roots.always_deny)
     deny_excludes = " ".join(f'(require-not (subpath "{_seatbelt_subpath(p)}"))' for p in deny)
 
     lines = [
@@ -459,6 +475,13 @@ def _seatbelt_jail_profile(roots: JailRoots) -> str:
             )
         else:
             lines.append(f'(allow file-read* file-write* (subpath "{subpath}"))')
+
+    # Emitted last so seatbelt's last-match-wins semantics make these win
+    # over every allow above, including `read_write`/`read_only` nested
+    # inside one of these roots (see JailRoots docstring's `always_deny`).
+    for p in always_deny:
+        subpath = _seatbelt_subpath(p)
+        lines.append(f'(deny file-read* file-write* (subpath "{subpath}"))')
 
     return "\n".join(lines) + "\n"
 
@@ -511,6 +534,7 @@ deny = spec["deny"]
 read_write = spec["read_write"]
 read_only = spec["read_only"]
 shared_write = spec["shared_write"]
+always_deny = spec["always_deny"]
 argv = sys.argv[2:]
 if not argv:
     _fail("no command to execute")
@@ -605,6 +629,17 @@ for target in deny:
     if libc.mount(b"tmpfs", target.encode(), b"tmpfs", flags, b"size=0,mode=0500") != 0:
         _fail("cannot re-deny " + target + ": " + os.strerror(ctypes.get_errno()))
 
+# always_deny must win unconditionally, including nesting inside
+# read_write/read_only/shared_write above — mount order determines
+# precedence, so mounting these last (unlike the nested-only re-deny for
+# `deny` above) is what makes them stick regardless of where they sit.
+for target in always_deny:
+    if not os.path.isdir(target):
+        continue
+    flags = MS_RDONLY | MS_NOSUID | MS_NODEV
+    if libc.mount(b"tmpfs", target.encode(), b"tmpfs", flags, b"size=0,mode=0500") != 0:
+        _fail("cannot deny " + target + ": " + os.strerror(ctypes.get_errno()))
+
 try:
     if os.sep in argv[0]:
         os.execv(argv[0], argv)
@@ -621,6 +656,7 @@ def _namespace_jail_argv(executable: str, args: Sequence[str], roots: JailRoots)
         "read_write": _resolved_strs(roots.read_write),
         "read_only": _resolved_strs(roots.read_only),
         "shared_write": _resolved_strs(roots.shared_write),
+        "always_deny": _resolved_strs(roots.always_deny),
     }
     return [
         sys.executable,

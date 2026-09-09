@@ -100,7 +100,12 @@ class TestReadFileWithGrant:
         assert exc.value.code == "invalid_path"
         assert not (desktop / "new.txt").exists()
 
-    def test_sync_extra_read_roots_adds_without_dropping_existing(self, tmp_path: Path) -> None:
+    def test_sync_extra_read_roots_replaces_the_granted_set(self, tmp_path: Path) -> None:
+        """The caller (``CoreToolExecutor.execute``) always passes the full
+        current set — this turn's grants plus the durable store's contents —
+        so ``sync`` assigns rather than merges: a grant revoked in Settings
+        must stop being readable on the very next call, not persist for the
+        life of the service (see ``sync_extra_read_roots`` docstring)."""
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         desktop = tmp_path / "Desktop"
@@ -113,8 +118,24 @@ class TestReadFileWithGrant:
 
         svc.sync_extra_read_roots([documents])
 
-        assert "A" in svc.read_file(str(desktop / "a.txt"))["content"]
         assert "B" in svc.read_file(str(documents / "b.txt"))["content"]
+        with pytest.raises(WorkspaceError) as exc:
+            svc.read_file(str(desktop / "a.txt"))
+        assert exc.value.code == "path_needs_grant"
+
+    def test_sync_extra_read_roots_can_clear_all_grants(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        desktop = tmp_path / "Desktop"
+        desktop.mkdir()
+        (desktop / "a.txt").write_text("A", encoding="utf-8")
+        svc = _svc(workspace, extra_read_roots=[desktop])
+
+        svc.sync_extra_read_roots([])
+
+        with pytest.raises(WorkspaceError) as exc:
+            svc.read_file(str(desktop / "a.txt"))
+        assert exc.value.code == "path_needs_grant"
 
 
 class TestGlobAndGrepWithGrant:
@@ -155,6 +176,49 @@ class TestGlobAndGrepWithGrant:
         result = svc.grep("TODO", root=str(desktop))
 
         assert result["match_count"] == 1
+
+    def test_glob_excludes_denied_files_in_a_granted_folder(self, tmp_path: Path) -> None:
+        """A folder grant is a directory grant by construction: granting
+        Desktop must not also expose Desktop/.env — glob must filter denied
+        entries out of its results, not just gate the granted root."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        desktop = tmp_path / "Desktop"
+        desktop.mkdir()
+        (desktop / ".env").write_text("AWS_SECRET_ACCESS_KEY=leaked", encoding="utf-8")
+        (desktop / "notes.txt").write_text("hello", encoding="utf-8")
+        svc = _svc(workspace, extra_read_roots=[desktop])
+
+        result = svc.glob_paths("*", root=str(desktop))
+
+        assert result["paths"] == [str((desktop / "notes.txt").resolve())]
+
+    def test_grep_excludes_denied_files_in_a_granted_folder(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        desktop = tmp_path / "Desktop"
+        desktop.mkdir()
+        (desktop / ".env").write_text("AWS_SECRET_ACCESS_KEY=leaked", encoding="utf-8")
+        (desktop / "notes.txt").write_text("AWS_SECRET_ACCESS_KEY mentioned here too")
+        svc = _svc(workspace, extra_read_roots=[desktop])
+
+        result = svc.grep("AWS_SECRET_ACCESS_KEY", root=str(desktop))
+
+        assert result["match_count"] == 1
+        assert result["matches"][0]["path"] == str((desktop / "notes.txt").resolve())
+
+    def test_grep_excludes_denied_subdir_in_a_granted_folder(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        desktop = tmp_path / "Desktop"
+        ssh_dir = desktop / ".ssh"
+        ssh_dir.mkdir(parents=True)
+        (ssh_dir / "id_rsa").write_text("SECRETKEY", encoding="utf-8")
+        svc = _svc(workspace, extra_read_roots=[desktop])
+
+        result = svc.grep("SECRETKEY", root=str(desktop))
+
+        assert result["match_count"] == 0
 
     def test_run_command_cwd_resolution_ignores_extra_read_roots(self, tmp_path: Path) -> None:
         """_resolve_root_dir (cwd for run_command) must stay workspace-only —

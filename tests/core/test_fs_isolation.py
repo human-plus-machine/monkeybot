@@ -250,6 +250,8 @@ class TestJailRoots:
         assert not JailRoots(deny=(Path("/home/x"),)).is_empty()
         assert not JailRoots(read_write=(Path("/ws"),)).is_empty()
         assert not JailRoots(read_only=(Path("/skills"),)).is_empty()
+        assert not JailRoots(shared_write=(Path("/tmp"),)).is_empty()
+        assert not JailRoots(always_deny=(Path("/ws/palace"),)).is_empty()
 
 
 class TestJailedArgv:
@@ -316,6 +318,41 @@ class TestJailedArgv:
         assert "/home/x/ws" in spec_json
         assert "/home/x/skills" in spec_json
         assert "/home/x" in spec_json
+
+    def test_always_deny_is_emitted_last_in_seatbelt_profile(self):
+        """`always_deny` must be able to override `read_write`/`read_only`
+        allows nested inside it — seatbelt is last-match-wins, so the deny
+        line has to come after those allows in the generated profile."""
+        support = IsolationSupport("sandbox-exec", "test")
+        roots = JailRoots(
+            deny=(Path("/Users/x"),),
+            read_write=(Path("/Users/x/agent/workspace"),),
+            always_deny=(Path("/Users/x/agent/workspace/palace"),),
+        )
+
+        _, args = jailed_argv("/bin/true", [], roots, support=support)
+
+        profile = args[1]
+        read_write_idx = profile.index(
+            '(allow file-read* file-write* (subpath "/Users/x/agent/workspace"))'
+        )
+        always_deny_idx = profile.index(
+            '(deny file-read* file-write* (subpath "/Users/x/agent/workspace/palace"))'
+        )
+        assert always_deny_idx > read_write_idx
+
+    def test_namespace_argv_carries_always_deny(self):
+        support = IsolationSupport("namespace", "test")
+        roots = JailRoots(
+            deny=(Path("/home/x"),),
+            read_write=(Path("/home/x/ws"),),
+            always_deny=(Path("/home/x/ws/palace"),),
+        )
+
+        _, args = jailed_argv("/bin/true", [], roots, support=support)
+
+        spec_json = args[args.index("-c") + 2]
+        assert "/home/x/ws/palace" in spec_json
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="seatbelt jail is macOS-only")
@@ -521,6 +558,31 @@ class TestMacJailBootstrap:
         )
         assert write.returncode == 0
         assert (shared / "scratch.txt").exists()
+
+    def test_always_deny_root_nested_inside_read_write_stays_hidden(self, tmp_path):
+        """Regression test: a memory palace can be configured to live
+        *inside* the workspace (`MEMORY_PATH`/`MEMORY_STORAGE_URI` pointing
+        there). Plain `deny` is deliberately allowed to lose to `read_write`
+        when nested inside it (the common case: a workspace under the
+        denied home directory) — but `always_deny` must win regardless,
+        since it's used for paths that must never be exposed no matter
+        where they end up."""
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        palace = workspace / "memory-palace"
+        palace.mkdir(parents=True)
+        (palace / "secret.txt").write_text("PALACE-SECRET", encoding="utf-8")
+
+        roots = JailRoots(deny=(home,), read_write=(workspace,), always_deny=(palace,))
+        read = self._run(roots, ["/bin/cat", str(palace / "secret.txt")], cwd=workspace)
+        assert read.returncode != 0
+        assert "PALACE-SECRET" not in read.stdout
+
+        # The rest of the workspace remains usable.
+        (workspace / "in.txt").write_text("workspace-content", encoding="utf-8")
+        other = self._run(roots, ["/bin/cat", "in.txt"], cwd=workspace)
+        assert other.returncode == 0
+        assert "workspace-content" in other.stdout
 
 
 @pytest.mark.skipif(

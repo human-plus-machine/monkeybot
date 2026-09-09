@@ -694,17 +694,22 @@ class WorkspaceFileService:
         self._settings = _coerce_workspace_settings(settings)
 
     def sync_extra_read_roots(self, roots: Iterable[Path | str]) -> None:
-        """Add to the granted-folder set without dropping what's already there.
+        """Replace the granted-folder set with ``roots``.
 
         Called at the top of every read-tool dispatch (see
         ``CoreToolExecutor.execute``) with the union of this turn's grants
         and the durable store's current contents, so a grant approved mid-
         session — or by another agent, for the durable case — takes effect
         on the very next call without reconstructing this service.
+
+        Assigns rather than merges: a grant revoked in Settings must stop
+        being readable on the very next call too. The realtime path builds
+        one call per assistant boundary against a per-connection
+        ``TurnContext`` (unlike the per-turn executor whose lifetime already
+        bounds a stale grant), so a merge-only ``sync`` would let an "Allow
+        once" survive an entire voice session after the user revoked it.
         """
-        self._extra_read_roots = tuple(
-            dict.fromkeys((*self._extra_read_roots, *(Path(p).resolve() for p in roots)))
-        )
+        self._extra_read_roots = tuple(dict.fromkeys(Path(p).resolve() for p in roots))
 
     @property
     def repo_root(self) -> Path:
@@ -796,6 +801,31 @@ class WorkspaceFileService:
             if candidate == root or root in candidate.parents:
                 return candidate
         return None
+
+    def _is_denied_extra_root_result(self, fp: Path) -> bool:
+        """Per-result credential-path filter for entries reached through a
+        granted external folder (``extra_read_roots``).
+
+        A folder grant is a directory grant by construction — granting
+        ``~/Desktop`` must not also expose ``~/Desktop/.env`` — so ``glob``/
+        ``grep`` must filter denied entries out of their *results*, the same
+        way ``computer_list_dir``/``computer_find`` filter denied entries
+        rather than merely refusing a denied root (see
+        ``computer/safety.py::is_credential_path``). Deliberately not
+        ``is_path_denied``: that also enforces the home-directory boundary,
+        which ``PathGrantInspector`` already applies before a folder is ever
+        granted — re-checking it here would wrongly deny a grant that (in
+        tests, or a future deployment shape) legitimately sits outside
+        ``$HOME``. Workspace/skills/artifacts results never reach this check
+        since they aren't under a granted root.
+        """
+        # Deferred import: `monkeybot.computer` (a package, not just this
+        # submodule) imports back into `core.tools` at package-init time, so
+        # a module-level import here would be circular.
+        from monkeybot.computer.safety import is_credential_path
+
+        resolved = fp.resolve()
+        return self._granted_read_path(resolved) is not None and is_credential_path(resolved)
 
     def _resolve_read_path(self, rel: str, *, label: str = "path") -> Path:
         """Same as ``_resolve_under_root``, except an absolute/``~`` path is
@@ -1150,6 +1180,8 @@ class WorkspaceFileService:
                 # ``Path.glob`` can yield the search root for patterns like ``.`` / ``*``.
                 if p.resolve() == base.resolve():
                     continue
+                if self._is_denied_extra_root_result(p):
+                    continue
                 try:
                     self._as_repo_rel(p)
                 except WorkspaceError:
@@ -1297,9 +1329,16 @@ class WorkspaceFileService:
             walk_iter = os.walk(base)
         for dirpath, dirnames, filenames in walk_iter:
             if not base.is_file():
-                dirnames[:] = sorted(d for d in dirnames if d not in _GREP_IGNORE_DIRS)
+                dirnames[:] = sorted(
+                    d
+                    for d in dirnames
+                    if d not in _GREP_IGNORE_DIRS
+                    and not self._is_denied_extra_root_result(Path(dirpath) / d)
+                )
             for name in sorted(filenames):
                 fp = Path(dirpath) / name
+                if self._is_denied_extra_root_result(fp):
+                    continue
                 try:
                     rel = self._as_repo_rel(fp)
                 except WorkspaceError:
@@ -1469,9 +1508,6 @@ class WorkspaceFileService:
                 # begin is emitted for files with ≥1 match (not every file searched).
                 files_begun += 1
             elif etype == "match":
-                total_match_count += 1
-                if total_match_count <= offset or len(matches) >= max_matches:
-                    continue
                 path_info = data.get("path") or {}
                 path_text = path_info.get("text") if isinstance(path_info, dict) else None
                 if not isinstance(path_text, str):
@@ -1479,6 +1515,11 @@ class WorkspaceFileService:
                 fp = Path(path_text)
                 if not fp.is_absolute():
                     fp = self._root / fp
+                if self._is_denied_extra_root_result(fp):
+                    continue
+                total_match_count += 1
+                if total_match_count <= offset or len(matches) >= max_matches:
+                    continue
                 try:
                     rel = self._as_repo_rel(fp.resolve())
                 except WorkspaceError:

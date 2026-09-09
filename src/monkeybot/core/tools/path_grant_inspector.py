@@ -20,15 +20,9 @@ inspector at all, since it can only ever resolve inside the workspace.
 
 from __future__ import annotations
 
-import fnmatch
 from pathlib import Path
 
-from monkeybot.computer.safety import (
-    _DENIED_BASENAMES_ANYWHERE,
-    _DENIED_FILENAME_PATTERNS,
-    _denied_dirs,
-    is_within,
-)
+from monkeybot.computer.safety import is_credential_path, is_within
 from monkeybot.core.context import TurnContext
 from monkeybot.core.tools.grant_store import PATH_GRANT_TOOLS, GrantStoreCache
 from monkeybot.core.tools.inspector import Decision, InspectorToolCall
@@ -46,18 +40,6 @@ def _candidate_path(call: InspectorToolCall) -> str | None:
 def _looks_absolute_or_home(raw: str) -> bool:
     s = raw.replace("\\", "/")
     return s.startswith("/") or s.startswith("~")
-
-
-def _is_denylisted(resolved: Path) -> bool:
-    for denied_root in _denied_dirs():
-        if resolved == denied_root or is_within(resolved, denied_root):
-            return True
-    if any(part in _DENIED_BASENAMES_ANYWHERE for part in resolved.parts):
-        return True
-    name = resolved.name
-    return any(
-        fnmatch.fnmatch(name.lower(), pattern.lower()) for pattern in _DENIED_FILENAME_PATTERNS
-    )
 
 
 class PathGrantInspector:
@@ -95,16 +77,6 @@ class PathGrantInspector:
             # deny or ask for something already fully in reach.
             return Decision(kind="allow")
 
-        if _is_denylisted(resolved):
-            return Decision(
-                kind="deny",
-                message=(
-                    "This path is inside a protected directory (credentials, "
-                    "keychains, browser profiles, or app-internal state) and "
-                    "is always denied, regardless of approval."
-                ),
-            )
-
         try:
             home = Path.home().resolve()
         except RuntimeError:
@@ -113,6 +85,21 @@ class PathGrantInspector:
             return Decision(
                 kind="deny",
                 message="This path is outside the user's home directory and is always denied.",
+            )
+
+        # The same credential/keychain/browser-profile denylist
+        # `computer_list_dir`/`computer_find` filter their results through
+        # (see `is_credential_path`), so grant-time and per-result
+        # enforcement (`WorkspaceFileService._is_denied_extra_root_result`)
+        # can never disagree about what's protected.
+        if is_credential_path(resolved):
+            return Decision(
+                kind="deny",
+                message=(
+                    "This path is inside a protected directory (credentials, "
+                    "keychains, browser profiles, or app-internal state) and "
+                    "is always denied, regardless of approval."
+                ),
             )
 
         folder = resolved if resolved.is_dir() else resolved.parent

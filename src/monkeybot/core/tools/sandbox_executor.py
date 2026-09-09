@@ -43,7 +43,8 @@ from monkeybot.core.tools.terminal import (
     ALLOWED_PATHS,
     ExecutionResult,
     SecurityError,
-    TerminalExecutor,
+    _path_candidates,
+    _resolved_path,
     build_skill_runtime_env,
     validate_mempalace_subcommand,
 )
@@ -143,8 +144,8 @@ class SandboxExecutor:
     @property
     def allowed_path_prefixes(self) -> tuple[str, ...]:
         """Path prefixes allowed for ``run_command`` — same argv pre-flight
-        screen as ``TerminalExecutor._validate_paths`` (reusing its static
-        helpers), applied here too so the two executors agree rather than
+        screen as ``TerminalExecutor._validate_paths`` (reusing the same
+        module-level helpers), applied here too so the two executors agree rather than
         the container's own mount layout being the only thing enforcing
         this. With the default ``shared_filesystem: true`` the container is
         incidentally confined to the bind-mounted workspace regardless; this
@@ -155,11 +156,10 @@ class SandboxExecutor:
     def _validate_paths(self, args: list[str], *, command: str, cwd: Path | str | None) -> None:
         base = Path(cwd).resolve() if cwd is not None else Path.cwd().resolve()
         allowed_roots = tuple(
-            TerminalExecutor._resolved_path(prefix, cwd=base)
-            for prefix in self._allowed_path_prefixes_value
+            _resolved_path(prefix, cwd=base) for prefix in self._allowed_path_prefixes_value
         )
-        for arg in TerminalExecutor._path_candidates(command, args):
-            candidate = TerminalExecutor._resolved_path(arg, cwd=base)
+        for arg in _path_candidates(command, args):
+            candidate = _resolved_path(arg, cwd=base)
             if any(candidate == root or root in candidate.parents for root in allowed_roots):
                 continue
             raise SecurityError(f"Path '{arg}' not allowed")

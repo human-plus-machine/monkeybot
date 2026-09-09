@@ -72,8 +72,13 @@ def _file_lock(path: Path) -> Iterator[None]:
             try:
                 age = time.time() - lock_path.stat().st_mtime
             except OSError:
-                continue
-            if age > _LOCK_STALE_S:
+                # Lock file vanished (or is otherwise unreadable) between the
+                # EEXIST and this stat — fall through to the deadline check
+                # and sleep below instead of `continue`ing straight back to
+                # `os.open`, which would spin hot with no backoff and never
+                # time out if this keeps happening.
+                age = None
+            if age is not None and age > _LOCK_STALE_S:
                 with contextlib.suppress(OSError):
                     lock_path.unlink()
                 continue

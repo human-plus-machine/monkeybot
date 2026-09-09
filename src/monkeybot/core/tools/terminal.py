@@ -309,6 +309,34 @@ async def _wait_for_exit(process: asyncio.subprocess.Process, timeout: float) ->
                 await wait_task
 
 
+def _path_candidates(command: str, args: list[str]) -> list[str]:
+    """Return direct and shell-embedded argv values that look like paths.
+
+    Module-level (not a ``TerminalExecutor`` method) so ``SandboxExecutor``'s
+    own ``_validate_paths`` can share this exact screen without reaching into
+    another class's private static methods.
+    """
+    values = list(args)
+    if command == "bash":
+        for index, arg in enumerate(args[:-1]):
+            if arg not in {"-c", "-lc"}:
+                continue
+            with contextlib.suppress(ValueError):
+                values.extend(shlex.split(args[index + 1], posix=True))
+    candidates: list[str] = []
+    for value in values:
+        candidate = value.split("=", 1)[1] if value.startswith("-") and "=" in value else value
+        if candidate.startswith(("./", "../", "/", "~/")):
+            candidates.append(candidate)
+    return candidates
+
+
+def _resolved_path(value: str, *, cwd: Path) -> Path:
+    """Expand and resolve ``value`` against ``cwd`` — shared with ``SandboxExecutor``."""
+    path = Path(value).expanduser()
+    return path.resolve() if path.is_absolute() else (cwd / path).resolve()
+
+
 class TerminalExecutor:
     """
     Secure terminal command executor with allowlist-based security.
@@ -453,23 +481,29 @@ class TerminalExecutor:
         """Wrap argv under the deny-by-default workspace jail.
 
         Folds ``self._hidden_paths`` (the memory-off hide list, when set) in
-        as additional ``deny`` roots — one profile per command, not two
-        stacked sandboxes. Unlike ``_isolate_hide``, an unavailable mechanism
-        here fails *open* (logged once, not per call): the jail is default-on
-        hardening for every deployment, not a narrow opt-out a user chose, so
-        failing closed would turn an upgrade into "run_command stops working
-        entirely" on any host lacking kernel support for either mechanism
-        (unprivileged user namespaces on Linux, sandbox-exec on macOS) — see
-        docs/features.md's "allowlists are defense-in-depth, not a full trust
-        boundary" framing. The path-grant inspector and tightened error hints
-        still redirect the model away from smuggling even where this specific
-        mechanism can't enforce it.
+        as ``always_deny`` roots — one profile per command, not two stacked
+        sandboxes. Unlike plain ``deny``, ``always_deny`` wins even when
+        nested inside a ``read_write``/``read_only``/``shared_write`` root
+        (see ``JailRoots`` docstring) — a memory palace can be configured to
+        live inside the workspace, and the workspace's own read-write grant
+        must not re-expose it. Unlike ``_isolate_hide``, an unavailable
+        mechanism here fails *open* (logged once, not per call): the jail is
+        default-on hardening for every deployment, not a narrow opt-out a
+        user chose, so failing closed would turn an upgrade into
+        "run_command stops working entirely" on any host lacking kernel
+        support for either mechanism (unprivileged user namespaces on Linux,
+        sandbox-exec on macOS) — see docs/features.md's "allowlists are
+        defense-in-depth, not a full trust boundary" framing. The path-grant
+        inspector and tightened error hints still redirect the model away
+        from smuggling even where this specific mechanism can't enforce it.
         """
-        merged_deny = tuple(dict.fromkeys((*jail_roots.deny, *self._hidden_paths)))
+        merged_always_deny = tuple(dict.fromkeys((*jail_roots.always_deny, *self._hidden_paths)))
         merged = JailRoots(
             read_write=jail_roots.read_write,
             read_only=jail_roots.read_only,
-            deny=merged_deny,
+            shared_write=jail_roots.shared_write,
+            deny=jail_roots.deny,
+            always_deny=merged_always_deny,
         )
         support = await asyncio.to_thread(isolation_support)
         if not support.available:
@@ -724,28 +758,6 @@ class TerminalExecutor:
             )
             raise SecurityError(error_msg)
 
-    @staticmethod
-    def _path_candidates(command: str, args: list[str]) -> list[str]:
-        """Return direct and shell-embedded argv values that look like paths."""
-        values = list(args)
-        if command == "bash":
-            for index, arg in enumerate(args[:-1]):
-                if arg not in {"-c", "-lc"}:
-                    continue
-                with contextlib.suppress(ValueError):
-                    values.extend(shlex.split(args[index + 1], posix=True))
-        candidates: list[str] = []
-        for value in values:
-            candidate = value.split("=", 1)[1] if value.startswith("-") and "=" in value else value
-            if candidate.startswith(("./", "../", "/", "~/")):
-                candidates.append(candidate)
-        return candidates
-
-    @staticmethod
-    def _resolved_path(value: str, *, cwd: Path) -> Path:
-        path = Path(value).expanduser()
-        return path.resolve() if path.is_absolute() else (cwd / path).resolve()
-
     def _validate_paths(
         self,
         args: list[str],
@@ -776,10 +788,10 @@ class TerminalExecutor:
 
         base = Path(cwd).resolve() if cwd is not None else Path.cwd().resolve()
         allowed_roots = tuple(
-            self._resolved_path(prefix, cwd=base) for prefix in self._allowed_path_prefixes
+            _resolved_path(prefix, cwd=base) for prefix in self._allowed_path_prefixes
         )
-        for arg in self._path_candidates(command, args):
-            candidate = self._resolved_path(arg, cwd=base)
+        for arg in _path_candidates(command, args):
+            candidate = _resolved_path(arg, cwd=base)
             if any(candidate == root or root in candidate.parents for root in allowed_roots):
                 continue
             error_msg = f"Path '{arg}' not allowed"

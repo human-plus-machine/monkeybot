@@ -1092,6 +1092,60 @@ class TestTerminalExecutorJailRoots:
         assert result.exit_code == 0
         assert "workspace-content" in result.stdout
 
+    @pytest.mark.asyncio
+    async def test_shared_write_survives_hidden_paths_merge(self, home_and_workspace):
+        """Regression test: `_isolate_jail` used to rebuild `JailRoots`
+        without carrying `shared_write` over, so anything staging through
+        `TMPDIR`/`mktemp` broke as soon as `hidden_paths` (memory-off) was
+        also set — even though the caller-supplied `jail_roots` had a
+        `shared_write` entry."""
+        home, workspace, _ = home_and_workspace
+        shared = home.parent / "shared-tmp"
+        shared.mkdir()
+        executor = TerminalExecutor(
+            allowed_commands=["bash"],
+            allowed_path_prefixes=[".", str(shared)],
+            hidden_paths=[home / "never-exists-palace"],
+        )
+        roots = JailRoots(deny=(home,), read_write=(workspace,), shared_write=(shared,))
+
+        result = await executor.execute(
+            "bash",
+            ["-c", f"echo x > {shared}/out.txt"],
+            cwd=workspace,
+            jail_roots=roots,
+        )
+
+        assert result.exit_code == 0, result.stderr
+        assert (shared / "out.txt").read_text(encoding="utf-8").strip() == "x"
+
+    @pytest.mark.asyncio
+    async def test_hidden_path_nested_in_workspace_stays_hidden(self, home_and_workspace):
+        """Regression test: folding `hidden_paths` into plain `deny` let a
+        memory palace configured to live *inside* the workspace
+        (`MEMORY_PATH`/`MEMORY_STORAGE_URI` pointing there) be re-exposed by
+        the workspace's own `read_write` grant, since `read_write` is
+        deliberately allowed to win over `deny` when nested inside it.
+        `hidden_paths` must win over `read_write` too — see `JailRoots`'
+        `always_deny`."""
+        home, workspace, _ = home_and_workspace
+        palace = workspace / "memory-palace"
+        palace.mkdir()
+        (palace / "secret.txt").write_text("PALACE-SECRET", encoding="utf-8")
+        executor = TerminalExecutor(
+            allowed_commands=["cat"],
+            allowed_path_prefixes=["."],
+            hidden_paths=[palace],
+        )
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+
+        result = await executor.execute(
+            "cat", ["memory-palace/secret.txt"], cwd=workspace, jail_roots=roots
+        )
+
+        assert result.exit_code != 0
+        assert "PALACE-SECRET" not in result.stdout
+
 
 class TestTerminalExecutorJailUnavailableFallback:
     @pytest.mark.asyncio

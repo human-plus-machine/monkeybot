@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
+import pytest
+
+from monkeybot.core.tools import grant_store
 from monkeybot.core.tools.grant_store import (
     GrantStoreCache,
+    _file_lock,
+    _lock_path,
     add_command_grant,
     add_path_grant,
     build_grants_persist_hook,
@@ -134,3 +140,44 @@ def test_persist_hook_noop_for_unowned_tool(tmp_path: Path) -> None:
     hook = build_grants_persist_hook(path)
     assert hook("write_file", "some/resource") is True
     assert not path.exists()
+
+
+def test_file_lock_times_out_with_backoff_when_stat_keeps_failing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: a lock file that keeps failing `stat()` (e.g.
+    disappears between the EEXIST and the stat call, then reappears — or is
+    otherwise unreadable) must still respect the deadline and back off with
+    `time.sleep`, not spin hot in a tight retry loop with no timeout."""
+    monkeypatch.setattr(grant_store, "_LOCK_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(grant_store, "_LOCK_POLL_S", 0.02)
+    path = tmp_path / "grants.json"
+    lock_path = _lock_path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text("held", encoding="utf-8")  # simulate another holder
+
+    sleep_calls = 0
+    real_sleep = time.sleep
+
+    def counting_sleep(seconds: float) -> None:
+        nonlocal sleep_calls
+        sleep_calls += 1
+        real_sleep(seconds)
+
+    monkeypatch.setattr(time, "sleep", counting_sleep)
+    real_stat = Path.stat
+
+    def failing_stat(self: Path, *args: object, **kwargs: object) -> object:
+        if self == lock_path:
+            raise OSError("stat unavailable")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", failing_stat)
+
+    start = time.monotonic()
+    with pytest.raises(TimeoutError), _file_lock(path):
+        pass
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 2.0
+    assert sleep_calls >= 1
