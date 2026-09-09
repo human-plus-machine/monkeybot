@@ -43,6 +43,8 @@ from monkeybot.core.tools.terminal import (
     ALLOWED_PATHS,
     ExecutionResult,
     SecurityError,
+    _path_candidates,
+    _resolved_path,
     build_skill_runtime_env,
     validate_mempalace_subcommand,
 )
@@ -117,6 +119,7 @@ class SandboxExecutor:
         skills_path: Path | None = None,
         artifacts_path: Path | None = None,
         allowed_commands: Sequence[str] | None = None,
+        allowed_path_prefixes: Sequence[str] | None = None,
     ) -> None:
         self._config = config
         self._workspace_root = Path(workspace_root).resolve()
@@ -128,6 +131,11 @@ class SandboxExecutor:
         self._allowed_commands: tuple[str, ...] = (
             tuple(allowed_commands) if allowed_commands is not None else tuple(ALLOWED_COMMANDS)
         )
+        self._allowed_path_prefixes_value: tuple[str, ...] = (
+            tuple(allowed_path_prefixes)
+            if allowed_path_prefixes is not None
+            else tuple(ALLOWED_PATHS)
+        )
 
     @property
     def allowed_commands(self) -> tuple[str, ...]:
@@ -135,8 +143,26 @@ class SandboxExecutor:
 
     @property
     def allowed_path_prefixes(self) -> tuple[str, ...]:
-        """Path prefixes allowed for ``run_command`` error hints (host uses :class:`TerminalExecutor`)."""
-        return tuple(ALLOWED_PATHS)
+        """Path prefixes allowed for ``run_command`` — same argv pre-flight
+        screen as ``TerminalExecutor._validate_paths`` (reusing the same
+        module-level helpers), applied here too so the two executors agree rather than
+        the container's own mount layout being the only thing enforcing
+        this. With the default ``shared_filesystem: true`` the container is
+        incidentally confined to the bind-mounted workspace regardless; this
+        is defense-in-depth, not the primary boundary (see BACKLOG "Sandbox
+        Workspace Protection")."""
+        return self._allowed_path_prefixes_value
+
+    def _validate_paths(self, args: list[str], *, command: str, cwd: Path | str | None) -> None:
+        base = Path(cwd).resolve() if cwd is not None else Path.cwd().resolve()
+        allowed_roots = tuple(
+            _resolved_path(prefix, cwd=base) for prefix in self._allowed_path_prefixes_value
+        )
+        for arg in _path_candidates(command, args):
+            candidate = _resolved_path(arg, cwd=base)
+            if any(candidate == root or root in candidate.parents for root in allowed_roots):
+                continue
+            raise SecurityError(f"Path '{arg}' not allowed")
 
     def _remote_requests_mounted_path(self, args: list[str], cwd: Path | str | None) -> bool:
         """Detect host layout paths before dispatching to a compute-only sandbox.
@@ -312,14 +338,17 @@ class SandboxExecutor:
         *,
         timeout: int = 60,
         cwd: Path | str | None = None,
+        extra_allowed_commands: Sequence[str] | None = None,
     ) -> ExecutionResult:
         """Execute a command inside the sandbox container.
 
-        Binary allowlist from ALLOWED_COMMANDS is enforced before the sandbox
-        is created or contacted. A blocked command raises SecurityError without
-        ever touching the OpenSandbox server.
+        Binary allowlist from ALLOWED_COMMANDS (plus any per-call
+        ``extra_allowed_commands`` grant — see ``TerminalExecutor._validate_command``)
+        is enforced before the sandbox is created or contacted. A blocked
+        command raises SecurityError without ever touching the OpenSandbox
+        server.
         """
-        if command not in self._allowed_commands:
+        if command not in self._allowed_commands and command not in (extra_allowed_commands or ()):
             raise SecurityError(f"Command '{command}' not allowed")
         if command == "mempalace":
             validate_mempalace_subcommand(args)
@@ -341,6 +370,10 @@ class SandboxExecutor:
             raise SecurityError(
                 "remote sandbox is compute-only and cannot access workspace or skills files"
             )
+        # Runs after the compute-only check above so that check's more specific
+        # "compute-only" message wins for that case; this is the general
+        # allowlist screen otherwise (see allowed_path_prefixes docstring).
+        self._validate_paths(args, command=command, cwd=cwd)
 
         await self._ensure_sandbox()
 

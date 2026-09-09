@@ -139,6 +139,23 @@ class TurnContext:
     to ``permission.remember_always_approval`` as its ``persist`` kwarg by
     ``tool_dispatch.py`` / ``realtime_loop.py``. None when no such hook is wired
     (the default for every deployment that doesn't enable computer tools)."""
+    grants_persist: Callable[[str, str], bool] | None = None
+    """Durable persist hook for command/path grants (``core/tools/grant_store.py``),
+    distinct from ``approvals_persist`` (the ``computer_*``-only overlay).
+    Selected by ``tool_dispatch.py`` when ``Decision.grant_kind`` is set,
+    rather than composed with ``approvals_persist`` — the two stores are
+    independent by design (see ``grant_store.py`` module docstring)."""
+    turn_command_grants: set[str] = dataclasses.field(default_factory=set)
+    """Binaries approved ("Allow once" or "Always allow") for ``run_command``
+    during this turn — checked by ``CommandTierInspector`` so a second call to
+    the same not-yet-allowlisted binary later in the same turn does not ask
+    again, without waiting for a durable write. Mutated in place by
+    ``tool_dispatch.py``; the dataclass is frozen, but this field's *contents*
+    are meant to change within a turn, same pattern as ``todo_store``."""
+    turn_path_grants: set[str] = dataclasses.field(default_factory=set)
+    """Folders approved for out-of-workspace reads during this turn — same
+    turn-scoped role as ``turn_command_grants``, checked by
+    ``PathGrantInspector``."""
     config: RuntimeConfig | None = None
     """Pinned ``RuntimeConfig`` for this turn. Mid-turn store reloads must not
     change this object; ``None`` when the caller did not pin a snapshot."""
@@ -633,7 +650,11 @@ def _core_tool_defs(
         ToolDef(
             "run_command",
             (
-                "Run an allowlisted shell command with optional timeout. "
+                "Run an allowlisted shell command with optional timeout. Confined "
+                "to the workspace — it cannot read or write outside it by any "
+                "spelling of the path, including `$HOME`-style expansion; do not "
+                "try to reach an outside file this way, and do not copy/move one "
+                "in first, ask for folder access instead (see read_file). "
                 'Pass argv as a list with the binary first (e.g. ["ls", "."]); '
                 "do not pass a combined string as the binary. Shell starts in "
                 "workspace root unless cwd (workspace-relative) is set. "
@@ -648,7 +669,10 @@ def _core_tool_defs(
                 f"Read a UTF-8 text file from the workspace with path validation. "
                 f"Without limit, returns up to {default_lines} lines from offset. "
                 f"Prefer that default (or a larger limit) over many small reads; "
-                f"use offset+limit only to continue from next_offset when truncated."
+                f"use offset+limit only to continue from next_offset when truncated. "
+                f"An absolute path outside the workspace is read in place once the "
+                f"user grants that folder — pass it directly rather than copying "
+                f"or moving the file into the workspace first."
             ),
             read_schema,
             parallel_safe=True,
@@ -877,6 +901,7 @@ async def build_context(
     loops_advertised: bool = False,
     todo_store: TodoListStore | None = None,
     approvals_persist: Callable[[str, str], bool] | None = None,
+    grants_persist: Callable[[str, str], bool] | None = None,
     config: RuntimeConfig | None = None,
     goal_ledger: GoalLedger | None = None,
     verdict_mailbox: VerdictMailbox | None = None,
@@ -912,6 +937,8 @@ async def build_context(
             ``## Todo list`` injection. Pass the same store to ``TodoListTool`` via ``extra_tools``.
         approvals_persist: Optional hook to durably persist "Always allow" approvals
             beyond the in-memory session cache; see ``TurnContext.approvals_persist``.
+        grants_persist: Optional hook to durably persist command/path grants;
+            see ``TurnContext.grants_persist``.
         config: Optional pinned ``RuntimeConfig`` for this turn. When omitted the
             turn is not snapshot-aware (tests / callers that only need env).
         goal_ledger: Optional goal ledger for intent capture and compaction facts.
@@ -967,6 +994,7 @@ async def build_context(
         scheduled_loops_available=scheduled_loops_available,
         todo_store=todo_store,
         approvals_persist=approvals_persist,
+        grants_persist=grants_persist,
         config=config,
         goal_ledger=goal_ledger,
         verdict_mailbox=verdict_mailbox,

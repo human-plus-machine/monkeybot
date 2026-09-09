@@ -10,7 +10,7 @@ import re
 import shutil
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NotRequired, TypedDict
@@ -52,9 +52,7 @@ _RG_TIMEOUT_SEC = 120
 # One-level or nested ``{a,b}`` groups in filename globs (fnmatch has no brace expansion).
 _BRACE_GLOB_RE = re.compile(r"\{([^{}]+)\}")
 # Python ``re`` features that the Rust regex crate (ripgrep) does not support.
-_RG_UNSUPPORTED_RE = re.compile(
-    r"\(\?[=!<]|\\[1-9]|\(\?P=|\\g<"
-)
+_RG_UNSUPPORTED_RE = re.compile(r"\(\?[=!<]|\\[1-9]|\(\?P=|\\g<")
 
 
 # Appended when a single line exceeds the whole char budget and had to be cut
@@ -359,9 +357,7 @@ def _raise_grep_max_files(
     )
 
 
-def _grep_classify(
-    fp: Path, max_file_bytes: int
-) -> tuple[str, bytes | None]:
+def _grep_classify(fp: Path, max_file_bytes: int) -> tuple[str, bytes | None]:
     """Classify a candidate as ``ok`` / ``oversized`` / ``binary`` / ``unreadable``."""
     try:
         st = fp.stat()
@@ -578,9 +574,7 @@ def _indentation_flexible_spans(content: str, find: str) -> list[tuple[int, int]
         if not nonempty:
             return text
         min_indent = min(len(ln) - len(ln.lstrip()) for ln in nonempty)
-        return "\n".join(
-            ln if not ln.strip() else ln[min_indent:] for ln in lines
-        )
+        return "\n".join(ln if not ln.strip() else ln[min_indent:] for ln in lines)
 
     normalized_find = deindent(find)
     content_lines = content.split("\n")
@@ -682,13 +676,40 @@ class WorkspaceFileService:
         *,
         skills_root: Path | None = None,
         artifacts_root: Path | None = None,
+        extra_read_roots: Sequence[Path] | None = None,
     ) -> None:
         self._root = Path(repo_root).resolve()
         self._skills_root = Path(skills_root).resolve() if skills_root is not None else None
         self._artifacts_root = (
             Path(artifacts_root).resolve() if artifacts_root is not None else None
         )
+        # Folders the user has explicitly granted read access to outside the
+        # workspace (Settings > Privacy & access, or an in-chat approval —
+        # see core/tools/path_grant_inspector.py). Read-only, by construction:
+        # nothing here ever reaches require_writable_path / _resolve_under_root,
+        # so a grant can never widen what write_file/replace_in_file can touch.
+        self._extra_read_roots: tuple[Path, ...] = tuple(
+            Path(p).resolve() for p in (extra_read_roots or ())
+        )
         self._settings = _coerce_workspace_settings(settings)
+
+    def sync_extra_read_roots(self, roots: Iterable[Path | str]) -> None:
+        """Replace the granted-folder set with ``roots``.
+
+        Called at the top of every read-tool dispatch (see
+        ``CoreToolExecutor.execute``) with the union of this turn's grants
+        and the durable store's current contents, so a grant approved mid-
+        session — or by another agent, for the durable case — takes effect
+        on the very next call without reconstructing this service.
+
+        Assigns rather than merges: a grant revoked in Settings must stop
+        being readable on the very next call too. The realtime path builds
+        one call per assistant boundary against a per-connection
+        ``TurnContext`` (unlike the per-turn executor whose lifetime already
+        bounds a stale grant), so a merge-only ``sync`` would let an "Allow
+        once" survive an entire voice session after the user revoked it.
+        """
+        self._extra_read_roots = tuple(dict.fromkeys(Path(p).resolve() for p in roots))
 
     @property
     def repo_root(self) -> Path:
@@ -734,7 +755,9 @@ class WorkspaceFileService:
         try:
             resolved.relative_to(root.resolve())
         except ValueError as exc:
-            raise WorkspaceError(f"Invalid {label}: path escapes its root", code="path_escape") from exc
+            raise WorkspaceError(
+                f"Invalid {label}: path escapes its root", code="path_escape"
+            ) from exc
         return path
 
     def _join_under_root(self, segments: tuple[str, ...], *, label: str) -> Path:
@@ -759,13 +782,120 @@ class WorkspaceFileService:
             raise WorkspaceError(f"{label} is required", code="missing_path")
         s = str(rel).strip().replace("\\", "/")
         if s.startswith("~") or s.startswith("/"):
-            raise WorkspaceError(f"Invalid {label}: absolute or home not allowed", code="invalid_path")
+            raise WorkspaceError(
+                f"Invalid {label}: absolute or home not allowed", code="invalid_path"
+            )
         segs = self._normalize_rel_segments(s.lstrip("/"), label=label)
         return self._join_under_root(segs, label=label)
 
     def resolve_workspace_path(self, rel: str, *, label: str = "path") -> Path:
         """Public path preflight: repo-relative → absolute path under the workspace root."""
         return self._resolve_under_root(rel, label=label)
+
+    def _granted_read_path(self, candidate: Path) -> Path | None:
+        """``candidate`` (already expanded+resolved) if it falls under an
+        ``extra_read_roots`` entry, else ``None``. ``_assert_realpath_under``-
+        style resolved-ancestry check, so a symlink inside a granted folder
+        pointing outside it cannot widen the grant."""
+        for root in self._extra_read_roots:
+            if candidate == root or root in candidate.parents:
+                return candidate
+        return None
+
+    def _is_denied_extra_root_result(self, fp: Path) -> bool:
+        """Per-result credential-path filter for entries reached through a
+        granted external folder (``extra_read_roots``).
+
+        A folder grant is a directory grant by construction — granting
+        ``~/Desktop`` must not also expose ``~/Desktop/.env`` — so ``glob``/
+        ``grep`` must filter denied entries out of their *results*, the same
+        way ``computer_list_dir``/``computer_find`` filter denied entries
+        rather than merely refusing a denied root (see
+        ``computer/safety.py::is_credential_path``). Deliberately not
+        ``is_path_denied``: that also enforces the home-directory boundary,
+        which ``PathGrantInspector`` already applies before a folder is ever
+        granted — re-checking it here would wrongly deny a grant that (in
+        tests, or a future deployment shape) legitimately sits outside
+        ``$HOME``. Workspace/skills/artifacts results never reach this check
+        since they aren't under a granted root.
+
+        ``extra_read_roots`` is empty for the overwhelming majority of calls
+        (no folder ever granted), so bail before the ``resolve()`` syscall
+        rather than paying a realpath lookup per file to answer a question
+        that's always "no" there.
+        """
+        if not self._extra_read_roots:
+            return False
+        # Deferred import: `monkeybot.computer` (a package, not just this
+        # submodule) imports back into `core.tools` at package-init time, so
+        # a module-level import here would be circular.
+        from monkeybot.computer.safety import is_credential_path
+
+        resolved = fp.resolve()
+        return self._granted_read_path(resolved) is not None and is_credential_path(resolved)
+
+    def _resolve_read_path(self, rel: str, *, label: str = "path") -> Path:
+        """Same as ``_resolve_under_root``, except an absolute/``~`` path is
+        allowed when it falls under a granted ``extra_read_roots`` entry.
+        Read-only call sites only (``read_file``, ``load_file``, ``glob``,
+        ``grep``) — never used for writes or for ``run_command``'s cwd.
+
+        Applies the same credential-path filter ``glob``/``grep`` apply to
+        their results: ``PathGrantInspector`` denies asking for a credential
+        path at grant time, but it isn't the only way to reach a durable
+        grant — ``core/bootstrap.py``'s pattern-BC harness runs with
+        ``inspectors=[]`` while still wiring a ``grants_path`` into this
+        executor, so a single-file read must not rely on the inspector
+        having run at all.
+        """
+        if rel is None or not str(rel).strip():
+            raise WorkspaceError(f"{label} is required", code="missing_path")
+        s = str(rel).strip().replace("\\", "/")
+        if s.startswith("~") or s.startswith("/"):
+            candidate = Path(s).expanduser().resolve()
+            granted = self._granted_read_path(candidate)
+            if granted is not None:
+                if self._is_denied_extra_root_result(granted):
+                    raise WorkspaceError(
+                        f"Invalid {label}: inside a protected directory "
+                        "(credentials, keychains, browser profiles, or "
+                        "app-internal state) and always denied",
+                        code="credential_denied",
+                    )
+                return granted
+            raise WorkspaceError(
+                f"Invalid {label}: outside the workspace and not granted",
+                code="path_needs_grant",
+            )
+        segs = self._normalize_rel_segments(s.lstrip("/"), label=label)
+        return self._join_under_root(segs, label=label)
+
+    def resolve_read_path(self, rel: str, *, label: str = "path") -> Path:
+        """Public preflight for a read-only call site — see ``_resolve_read_path``."""
+        return self._resolve_read_path(rel, label=label)
+
+    def _resolve_read_root_dir(self, rel: str | None) -> Path:
+        """Same as ``_resolve_root_dir``, except an absolute/``~`` root is
+        allowed when it falls under a granted ``extra_read_roots`` entry.
+        Used only by ``glob``/``grep``'s ``root`` argument — never by
+        ``run_command``'s cwd, which stays workspace-only via
+        ``_resolve_root_dir`` unchanged."""
+        if rel is None or not str(rel).strip() or str(rel).strip() in (".", "./"):
+            return self._root
+        s = str(rel).strip().replace("\\", "/")
+        if s.startswith("~") or s.startswith("/"):
+            candidate = Path(s).expanduser().resolve()
+            granted = self._granted_read_path(candidate)
+            if granted is not None:
+                if not granted.is_dir():
+                    raise WorkspaceError("Invalid root: not a directory", code="invalid_path")
+                return granted
+            raise WorkspaceError(
+                "Invalid root: outside the workspace and not granted",
+                code="path_needs_grant",
+            )
+        segs = self._normalize_rel_segments(s.lstrip("/"), label="root")
+        return self._join_under_root(segs, label="root")
 
     def _resolve_root_dir(self, rel: str | None) -> Path:
         if rel is None or not str(rel).strip() or str(rel).strip() in (".", "./"):
@@ -782,12 +912,7 @@ class WorkspaceFileService:
             return None
         raw = str(rel).strip().replace("\\", "/")
         s = raw.lstrip("/")
-        if (
-            not s
-            or ".." in s
-            or raw.startswith("~")
-            or raw.startswith("/")
-        ):
+        if not s or ".." in s or raw.startswith("~") or raw.startswith("/"):
             # Fail closed: a configured-but-invalid scope must not disable enforcement.
             raise WorkspaceError(
                 f"Invalid WORKSPACE_WRITE_SCOPE_REL: {rel!r} "
@@ -870,7 +995,7 @@ class WorkspaceFileService:
         elif limit > max_lines:
             # Char budget is the authority when present; otherwise clamp.
             limit = max_lines
-        fp = self._resolve_under_root(path)
+        fp = self._resolve_read_path(path)
         if not fp.is_file():
             raise WorkspaceError(f"Not a file: {path}", code="not_found")
         text = fp.read_text(encoding="utf-8", errors="replace")
@@ -1062,7 +1187,7 @@ class WorkspaceFileService:
         if root is None and self._skills_root is not None and pattern.startswith("skills/"):
             effective_root = "skills"
             effective_pattern = pattern.removeprefix("skills/") or "**/*"
-        base = self._resolve_root_dir(effective_root)
+        base = self._resolve_read_root_dir(effective_root)
         deadline = time.monotonic() + self._settings.WORKSPACE_GLOB_TIMEOUT_SEC
         max_paths = self._settings.WORKSPACE_GLOB_MAX_PATHS
         paths: list[str] = []
@@ -1077,6 +1202,8 @@ class WorkspaceFileService:
                     continue
                 # ``Path.glob`` can yield the search root for patterns like ``.`` / ``*``.
                 if p.resolve() == base.resolve():
+                    continue
+                if self._is_denied_extra_root_result(p):
                     continue
                 try:
                     self._as_repo_rel(p)
@@ -1140,8 +1267,10 @@ class WorkspaceFileService:
         except re.error as e:
             raise WorkspaceError(f"Invalid regex: {e}", code="invalid_regex") from e
         globs = _normalize_file_globs(file_glob)
-        base = self._resolve_root_dir(root)
-        max_m = max_matches if max_matches is not None else self._settings.WORKSPACE_GREP_MAX_MATCHES
+        base = self._resolve_read_root_dir(root)
+        max_m = (
+            max_matches if max_matches is not None else self._settings.WORKSPACE_GREP_MAX_MATCHES
+        )
         if max_m < 1:
             raise WorkspaceError("max_matches must be >= 1", code="invalid_max_matches")
         off = 0 if offset is None else int(offset)
@@ -1223,9 +1352,16 @@ class WorkspaceFileService:
             walk_iter = os.walk(base)
         for dirpath, dirnames, filenames in walk_iter:
             if not base.is_file():
-                dirnames[:] = sorted(d for d in dirnames if d not in _GREP_IGNORE_DIRS)
+                dirnames[:] = sorted(
+                    d
+                    for d in dirnames
+                    if d not in _GREP_IGNORE_DIRS
+                    and not self._is_denied_extra_root_result(Path(dirpath) / d)
+                )
             for name in sorted(filenames):
                 fp = Path(dirpath) / name
+                if self._is_denied_extra_root_result(fp):
+                    continue
                 try:
                     rel = self._as_repo_rel(fp)
                 except WorkspaceError:
@@ -1395,9 +1531,6 @@ class WorkspaceFileService:
                 # begin is emitted for files with ≥1 match (not every file searched).
                 files_begun += 1
             elif etype == "match":
-                total_match_count += 1
-                if total_match_count <= offset or len(matches) >= max_matches:
-                    continue
                 path_info = data.get("path") or {}
                 path_text = path_info.get("text") if isinstance(path_info, dict) else None
                 if not isinstance(path_text, str):
@@ -1405,6 +1538,11 @@ class WorkspaceFileService:
                 fp = Path(path_text)
                 if not fp.is_absolute():
                     fp = self._root / fp
+                if self._is_denied_extra_root_result(fp):
+                    continue
+                total_match_count += 1
+                if total_match_count <= offset or len(matches) >= max_matches:
+                    continue
                 try:
                     rel = self._as_repo_rel(fp.resolve())
                 except WorkspaceError:
@@ -1499,5 +1637,12 @@ class WorkspaceFileService:
         try:
             rel = p.resolve().relative_to(self._root).as_posix()
             return rel or "."
-        except ValueError as e:
-            raise WorkspaceError("path escapes workspace root", code="path_escape") from e
+        except ValueError:
+            pass
+        # A granted external folder (see extra_read_roots) has no meaningful
+        # repo-relative form — report the real absolute path rather than
+        # raising, so a read_file/glob/grep result on a granted file doesn't
+        # masquerade as a workspace-escape error.
+        if self._granted_read_path(p.resolve()) is not None:
+            return str(p.resolve())
+        raise WorkspaceError("path escapes workspace root", code="path_escape")

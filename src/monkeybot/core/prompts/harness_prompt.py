@@ -29,12 +29,15 @@ HARNESS_TOOL_CALL_PROTOCOL = """
 
 
 _RUN_COMMAND_EXEC_NOTE_HOST = (
-    "**Execution:** on the **gateway host** under the binary/path allowlist only "
-    "(no OpenSandbox / no extra VM)."
+    "**Execution:** on the **gateway host**, confined to the workspace and the "
+    "binary allowlist (no OpenSandbox / no extra VM). Confined means what it says: "
+    "a shell or interpreter cannot read or write outside the workspace by any "
+    "spelling of the path, including `$HOME`-style expansion."
 )
 _RUN_COMMAND_EXEC_NOTE_SANDBOX = (
     "**Execution:** via **OpenSandbox** (Docker-backed session container). "
-    "The workspace root is bind-mounted at the **same absolute path**; still subject to the allowlist."
+    "The workspace root is bind-mounted at the **same absolute path**; still confined "
+    "to the workspace and subject to the binary allowlist."
 )
 
 _HARNESS_BODY = """## monkeybot harness (fixed)
@@ -55,6 +58,7 @@ This block is injected by the host every turn. Prefer the **active JSON tool lis
 - `run_command`: {run_command_exec_note}
 - runtime (inside workspace): `.monkeybot/` — spill, knowledge index, transcripts. Not memory.
 {memory_paths_line}- workspace `data/` (if present) is ordinary project files — **not** the memory store.
+- **A file outside the workspace is read by requesting access, never by relocating it.** `read_file`/`load_file`/`glob`/`grep` accept an absolute path outside the workspace and will ask the user to grant that folder — say so and let the ask happen. Do not copy, move, or symlink an outside file into the workspace to route around this, and do not tell the user you are doing so as if it were the sanctioned recovery: that is a policy violation, not a workaround, and it will not work for `run_command` regardless (see above).
 - **Long multi-item tasks:** when a task has more than ~10 enumerable items (question lists, checklists), write incremental results to a workspace file early and update it as you go — context may be compacted mid-task.
 
 ### MCP

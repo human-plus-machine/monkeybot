@@ -40,12 +40,39 @@ from monkeybot.core.subprocess_groups import (
     process_group_id,
 )
 from monkeybot.core.tools.fs_isolation import (
+    JailRoots,
     isolated_argv,
     isolation_failed,
     isolation_support,
+    jailed_argv,
 )
 
 logger = logging.getLogger(__name__)
+
+_jail_unavailable_warned = False
+
+
+def _warn_jail_unavailable_once(detail: str) -> None:
+    """Log the jail-unavailable fallback once per process, not once per command.
+
+    A host lacking kernel support logs this on every single run_command call
+    otherwise — noisy, and the second call onward tells the operator nothing
+    the first one didn't.
+    """
+    global _jail_unavailable_warned
+    if _jail_unavailable_warned:
+        return
+    _jail_unavailable_warned = True
+    logger.warning(
+        "Filesystem isolation is unavailable on this host (%s); run_command "
+        "is running WITHOUT the workspace jail (no filesystem confinement "
+        "beyond the argument-string screening in _validate_paths, which a "
+        "shell or interpreter can defeat). Linux needs unprivileged user "
+        "namespaces; macOS needs sandbox-exec.",
+        detail,
+        extra={"component": "terminal_executor"},
+    )
+
 
 # After the child exits or is killed, wait at most this long for stdout/stderr EOF.
 # Descendants that keep pipes open must not block execute() forever.
@@ -282,6 +309,34 @@ async def _wait_for_exit(process: asyncio.subprocess.Process, timeout: float) ->
                 await wait_task
 
 
+def _path_candidates(command: str, args: list[str]) -> list[str]:
+    """Return direct and shell-embedded argv values that look like paths.
+
+    Module-level (not a ``TerminalExecutor`` method) so ``SandboxExecutor``'s
+    own ``_validate_paths`` can share this exact screen without reaching into
+    another class's private static methods.
+    """
+    values = list(args)
+    if command == "bash":
+        for index, arg in enumerate(args[:-1]):
+            if arg not in {"-c", "-lc"}:
+                continue
+            with contextlib.suppress(ValueError):
+                values.extend(shlex.split(args[index + 1], posix=True))
+    candidates: list[str] = []
+    for value in values:
+        candidate = value.split("=", 1)[1] if value.startswith("-") and "=" in value else value
+        if candidate.startswith(("./", "../", "/", "~/")):
+            candidates.append(candidate)
+    return candidates
+
+
+def _resolved_path(value: str, *, cwd: Path) -> Path:
+    """Expand and resolve ``value`` against ``cwd`` — shared with ``SandboxExecutor``."""
+    path = Path(value).expanduser()
+    return path.resolve() if path.is_absolute() else (cwd / path).resolve()
+
+
 class TerminalExecutor:
     """
     Secure terminal command executor with allowlist-based security.
@@ -370,7 +425,21 @@ class TerminalExecutor:
     async def aclose(self) -> None:
         """No-op — TerminalExecutor holds no persistent resources."""
 
-    async def _isolate(self, executable: str, args: list[str]) -> tuple[str, list[str]]:
+    async def _isolate(
+        self, executable: str, args: list[str], *, jail_roots: JailRoots | None = None
+    ) -> tuple[str, list[str]]:
+        """Wrap argv under the workspace jail when requested, else the
+        legacy hide-only mechanism (memory-off path, unchanged).
+
+        Dispatches on whether a caller opted into ``jail_roots`` at all —
+        not just whether it's empty — so a caller that never passes it keeps
+        exactly the prior hide-only behavior and fail-closed policy.
+        """
+        if jail_roots is not None and not jail_roots.is_empty():
+            return await self._isolate_jail(executable, args, jail_roots)
+        return await self._isolate_hide(executable, args)
+
+    async def _isolate_hide(self, executable: str, args: list[str]) -> tuple[str, list[str]]:
         """Wrap argv so hidden paths are absent from the child's filesystem.
 
         If this host cannot hide those paths, refuse to exec when any of them
@@ -406,6 +475,45 @@ class TerminalExecutor:
         except ValueError as exc:
             raise SecurityError(str(exc)) from exc
 
+    async def _isolate_jail(
+        self, executable: str, args: list[str], jail_roots: JailRoots
+    ) -> tuple[str, list[str]]:
+        """Wrap argv under the deny-by-default workspace jail.
+
+        Folds ``self._hidden_paths`` (the memory-off hide list, when set) in
+        as ``always_deny`` roots — one profile per command, not two stacked
+        sandboxes. Unlike plain ``deny``, ``always_deny`` wins even when
+        nested inside a ``read_write``/``read_only``/``shared_write`` root
+        (see ``JailRoots`` docstring) — a memory palace can be configured to
+        live inside the workspace, and the workspace's own read-write grant
+        must not re-expose it. Unlike ``_isolate_hide``, an unavailable
+        mechanism here fails *open* (logged once, not per call): the jail is
+        default-on hardening for every deployment, not a narrow opt-out a
+        user chose, so failing closed would turn an upgrade into
+        "run_command stops working entirely" on any host lacking kernel
+        support for either mechanism (unprivileged user namespaces on Linux,
+        sandbox-exec on macOS) — see docs/features.md's "allowlists are
+        defense-in-depth, not a full trust boundary" framing. The path-grant
+        inspector and tightened error hints still redirect the model away
+        from smuggling even where this specific mechanism can't enforce it.
+        """
+        merged_always_deny = tuple(dict.fromkeys((*jail_roots.always_deny, *self._hidden_paths)))
+        merged = JailRoots(
+            read_write=jail_roots.read_write,
+            read_only=jail_roots.read_only,
+            shared_write=jail_roots.shared_write,
+            deny=jail_roots.deny,
+            always_deny=merged_always_deny,
+        )
+        support = await asyncio.to_thread(isolation_support)
+        if not support.available:
+            _warn_jail_unavailable_once(support.detail)
+            return executable, args
+        try:
+            return jailed_argv(executable, args, merged, support=support)
+        except ValueError as exc:
+            raise SecurityError(str(exc)) from exc
+
     async def execute(
         self,
         command: str,
@@ -414,6 +522,8 @@ class TerminalExecutor:
         *,
         cwd: Path | str | None = None,
         env_overrides: Mapping[str, str] | None = None,
+        extra_allowed_commands: Sequence[str] | None = None,
+        jail_roots: JailRoots | None = None,
     ) -> ExecutionResult:
         """
         Execute a terminal command securely with allowlist validation.
@@ -448,7 +558,7 @@ class TerminalExecutor:
             - Output is truncated if it exceeds 1MB per stream
         """
         # CRITICAL: Validate command against allowlist
-        self._validate_command(command)
+        self._validate_command(command, extra_allowed_commands=extra_allowed_commands)
         if command == "mempalace":
             self._validate_mempalace_args(args)
         elif command == "rg":
@@ -479,7 +589,7 @@ class TerminalExecutor:
         if env_overrides is not None:
             run_env.update(env_overrides)
         executable, exec_args = _resolve_run_executable(command, args, run_env)
-        executable, exec_args = await self._isolate(executable, exec_args)
+        executable, exec_args = await self._isolate(executable, exec_args, jail_roots=jail_roots)
         if env is None:
             env = run_env
 
@@ -578,28 +688,38 @@ class TerminalExecutor:
             exit_code=exit_code,
         )
 
-    def _validate_command(self, command: str) -> None:
+    def _validate_command(
+        self, command: str, *, extra_allowed_commands: Sequence[str] | None = None
+    ) -> None:
         """
         Validate command against allowlist.
 
         Args:
             command: Command to validate
+            extra_allowed_commands: Per-call additions to the static allowlist —
+                binaries the user has granted (durably, via ``grants.json``, or
+                "Allow once" for the rest of this turn) since this executor was
+                built. Checked here, not folded into ``self._allowed_commands``,
+                so a grant never needs an executor rebuild to take effect.
 
         Raises:
-            SecurityError: If command is not in ALLOWED_COMMANDS
+            SecurityError: If command is neither in ALLOWED_COMMANDS nor granted
         """
-        if command not in self._allowed_commands:
-            error_msg = f"Command '{command}' not allowed"
-            logger.error(
-                f"Security violation: {error_msg}",
-                extra={
-                    "component": "terminal_executor",
-                    "severity": "SECURITY_VIOLATION",
-                    "command": command,
-                    "allowed_commands": list(self._allowed_commands),
-                },
-            )
-            raise SecurityError(error_msg)
+        if command in self._allowed_commands:
+            return
+        if extra_allowed_commands is not None and command in extra_allowed_commands:
+            return
+        error_msg = f"Command '{command}' not allowed"
+        logger.error(
+            f"Security violation: {error_msg}",
+            extra={
+                "component": "terminal_executor",
+                "severity": "SECURITY_VIOLATION",
+                "command": command,
+                "allowed_commands": list(self._allowed_commands),
+            },
+        )
+        raise SecurityError(error_msg)
 
     def _validate_mempalace_args(self, args: list[str]) -> None:
         try:
@@ -638,28 +758,6 @@ class TerminalExecutor:
             )
             raise SecurityError(error_msg)
 
-    @staticmethod
-    def _path_candidates(command: str, args: list[str]) -> list[str]:
-        """Return direct and shell-embedded argv values that look like paths."""
-        values = list(args)
-        if command == "bash":
-            for index, arg in enumerate(args[:-1]):
-                if arg not in {"-c", "-lc"}:
-                    continue
-                with contextlib.suppress(ValueError):
-                    values.extend(shlex.split(args[index + 1], posix=True))
-        candidates: list[str] = []
-        for value in values:
-            candidate = value.split("=", 1)[1] if value.startswith("-") and "=" in value else value
-            if candidate.startswith(("./", "../", "/", "~/")):
-                candidates.append(candidate)
-        return candidates
-
-    @staticmethod
-    def _resolved_path(value: str, *, cwd: Path) -> Path:
-        path = Path(value).expanduser()
-        return path.resolve() if path.is_absolute() else (cwd / path).resolve()
-
     def _validate_paths(
         self,
         args: list[str],
@@ -690,10 +788,10 @@ class TerminalExecutor:
 
         base = Path(cwd).resolve() if cwd is not None else Path.cwd().resolve()
         allowed_roots = tuple(
-            self._resolved_path(prefix, cwd=base) for prefix in self._allowed_path_prefixes
+            _resolved_path(prefix, cwd=base) for prefix in self._allowed_path_prefixes
         )
-        for arg in self._path_candidates(command, args):
-            candidate = self._resolved_path(arg, cwd=base)
+        for arg in _path_candidates(command, args):
+            candidate = _resolved_path(arg, cwd=base)
             if any(candidate == root or root in candidate.parents for root in allowed_roots):
                 continue
             error_msg = f"Path '{arg}' not allowed"
