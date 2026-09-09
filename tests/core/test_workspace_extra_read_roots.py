@@ -47,6 +47,25 @@ class TestReadFileWithGrant:
         # real absolute path instead of raising.
         assert result["path"] == str(target.resolve())
 
+    def test_read_file_denies_a_credential_file_in_a_granted_folder(self, tmp_path: Path) -> None:
+        """Regression test: `PathGrantInspector` denies asking for a
+        credential path at grant *time*, but it isn't the only way to reach
+        an already-durable grant — `core/bootstrap.py`'s pattern-BC harness
+        runs with `inspectors=[]` while still wiring a `grants_path` into
+        this executor. `read_file`/`load_file` must apply the same
+        credential filter `glob`/`grep` apply to their results, not rely
+        entirely on the inspector having run."""
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        desktop = tmp_path / "Desktop"
+        desktop.mkdir()
+        (desktop / ".env").write_text("AWS_SECRET_ACCESS_KEY=leaked", encoding="utf-8")
+        svc = _svc(workspace, extra_read_roots=[desktop])
+
+        with pytest.raises(WorkspaceError) as exc:
+            svc.read_file(str(desktop / ".env"))
+        assert exc.value.code == "credential_denied"
+
     def test_grant_covers_a_second_file_in_the_same_folder(self, tmp_path: Path) -> None:
         workspace = tmp_path / "workspace"
         workspace.mkdir()

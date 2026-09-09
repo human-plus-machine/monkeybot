@@ -818,7 +818,14 @@ class WorkspaceFileService:
         tests, or a future deployment shape) legitimately sits outside
         ``$HOME``. Workspace/skills/artifacts results never reach this check
         since they aren't under a granted root.
+
+        ``extra_read_roots`` is empty for the overwhelming majority of calls
+        (no folder ever granted), so bail before the ``resolve()`` syscall
+        rather than paying a realpath lookup per file to answer a question
+        that's always "no" there.
         """
+        if not self._extra_read_roots:
+            return False
         # Deferred import: `monkeybot.computer` (a package, not just this
         # submodule) imports back into `core.tools` at package-init time, so
         # a module-level import here would be circular.
@@ -831,7 +838,16 @@ class WorkspaceFileService:
         """Same as ``_resolve_under_root``, except an absolute/``~`` path is
         allowed when it falls under a granted ``extra_read_roots`` entry.
         Read-only call sites only (``read_file``, ``load_file``, ``glob``,
-        ``grep``) — never used for writes or for ``run_command``'s cwd."""
+        ``grep``) — never used for writes or for ``run_command``'s cwd.
+
+        Applies the same credential-path filter ``glob``/``grep`` apply to
+        their results: ``PathGrantInspector`` denies asking for a credential
+        path at grant time, but it isn't the only way to reach a durable
+        grant — ``core/bootstrap.py``'s pattern-BC harness runs with
+        ``inspectors=[]`` while still wiring a ``grants_path`` into this
+        executor, so a single-file read must not rely on the inspector
+        having run at all.
+        """
         if rel is None or not str(rel).strip():
             raise WorkspaceError(f"{label} is required", code="missing_path")
         s = str(rel).strip().replace("\\", "/")
@@ -839,6 +855,13 @@ class WorkspaceFileService:
             candidate = Path(s).expanduser().resolve()
             granted = self._granted_read_path(candidate)
             if granted is not None:
+                if self._is_denied_extra_root_result(granted):
+                    raise WorkspaceError(
+                        f"Invalid {label}: inside a protected directory "
+                        "(credentials, keychains, browser profiles, or "
+                        "app-internal state) and always denied",
+                        code="credential_denied",
+                    )
                 return granted
             raise WorkspaceError(
                 f"Invalid {label}: outside the workspace and not granted",
