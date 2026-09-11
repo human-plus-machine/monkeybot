@@ -52,6 +52,7 @@ async def _combined_lifespan(app: FastAPI) -> AsyncIterator[None]:
     deps.loops_registry = sse_runtime.loops_registry
     deps.computer_tools = sse_runtime.computer_tools
     deps.computer_approvals_persist = sse_runtime.computer_approvals_persist
+    deps.grants_persist = sse_runtime.grants_persist
     deps.bind_realtime_provider()
     deps.freeze()
 

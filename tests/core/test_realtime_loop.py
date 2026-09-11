@@ -396,6 +396,71 @@ class TestRunRealtimeTurn:
         assert result.error is None
         assert "Ada" in (result.result or "")
 
+    async def test_tool_confirm_always_routes_to_grants_persist(self) -> None:
+        """Mirrors the SSE-loop grant-routing test (test_loop.py): an
+        "always" approval on a grant_kind="command" confirm persists via
+        ctx.grants_persist, not approvals_persist, and records the grant on
+        ctx.turn_command_grants for the rest of the turn."""
+        import asyncio
+        import dataclasses
+
+        from monkeybot.core.tools.inspector import Decision
+
+        class GrantConfirmInspector:
+            async def check(self, call, ctx):  # type: ignore[no-untyped-def]
+                del ctx
+                if call.name == "run_command":
+                    return Decision(
+                        kind="confirm",
+                        message="`ffmpeg` isn't allowed yet.",
+                        grant_key="ffmpeg",
+                        grant_kind="command",
+                    )
+                return Decision(kind="allow")
+
+        class PresetBus:
+            def register_pending(self, pending_key: str):  # type: ignore[no-untyped-def]
+                del pending_key
+                fut: asyncio.Future[object] = asyncio.get_running_loop().create_future()
+                fut.set_result({"approved": True, "always": True})
+                return fut
+
+        history = FakeHistory()
+        executor = RecordingExecutor()
+        approvals_persist_calls: list[tuple[str, str]] = []
+        grants_persist_calls: list[tuple[str, str]] = []
+
+        def _approvals_persist(tool: str, resource: str) -> bool:
+            approvals_persist_calls.append((tool, resource))
+            return True
+
+        def _grants_persist(tool: str, resource: str) -> bool:
+            grants_persist_calls.append((tool, resource))
+            return True
+
+        ctx = dataclasses.replace(
+            _ctx(),
+            approvals_persist=_approvals_persist,
+            grants_persist=_grants_persist,
+        )
+        events = await _collect_events(
+            run_realtime_turn(
+                "run ffmpeg",
+                "",
+                [RealtimeToolCall(call_id="c1", name="run_command", args={"command": "ffmpeg -version"})],
+                ctx,
+                history=history,
+                tool_executor=executor,
+                inspectors=[GrantConfirmInspector()],
+                pending_bus=PresetBus(),
+            )
+        )
+        assert any(isinstance(e, ToolCallResult) for e in events)
+        assert executor.calls
+        assert grants_persist_calls == [("run_command", "ffmpeg")]
+        assert approvals_persist_calls == []
+        assert ctx.turn_command_grants == {"ffmpeg"}
+
     async def test_tool_confirm_future_cancel_settles(self) -> None:
         import asyncio
         import dataclasses

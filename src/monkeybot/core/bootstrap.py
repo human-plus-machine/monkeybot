@@ -86,6 +86,14 @@ def _resolve_run_command_allowlists() -> tuple[list[str] | None, list[str] | Non
         return None, None
 
 
+def _resolve_grants_path() -> Path | None:
+    """``MONKEYBOT_GRANTS_CONFIG`` when present, so a durably-granted binary works
+    here too (this harness has no ``sse_bus``, so it can never *ask* — only a
+    grant made elsewhere, e.g. via the app, has any effect on this path)."""
+    path_str = current_env("MONKEYBOT_GRANTS_CONFIG", "").strip()
+    return Path(path_str) if path_str else None
+
+
 async def create_harness_deps(
     db_url: str,
     memory_storage_uri: str | None = None,
@@ -257,6 +265,7 @@ async def run_pattern_bc_turn(
         run_command_allowed_commands=run_cmds,
         run_command_allowed_path_prefixes=run_paths,
         config=cfg,
+        grants_path=_resolve_grants_path(),
     )
 
     parts: list[str] = []

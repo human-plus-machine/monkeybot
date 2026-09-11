@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -120,8 +121,10 @@ class _MCPWithBlob:
         server_name: str,
         tool_name: str,
         args: dict[str, object],
+        *,
+        meta: object | None = None,
     ) -> str:
-        del server_name, tool_name, args
+        del server_name, tool_name, args, meta
         return self._payload
 
     def all_tools(self) -> list[ToolDef]:
@@ -148,6 +151,29 @@ class _MCPWithBlob:
 
     async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         del path, raise_on_error
+
+
+class _RecordingMCP(_NoMCP):
+    """Records ``call_tool`` arguments including request meta."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict[str, object], object]] = []
+
+    def split_prefixed_tool(self, prefixed_name: str) -> tuple[str, str] | None:
+        if prefixed_name == "browser__goto":
+            return ("browser", "goto")
+        return None
+
+    async def call_tool(
+        self,
+        server_name: str,
+        tool_name: str,
+        args: dict[str, object],
+        *,
+        meta: object | None = None,
+    ) -> str:
+        self.calls.append((server_name, tool_name, dict(args), meta))
+        return "ok"
 
 
 def _ctx(
@@ -221,6 +247,78 @@ async def test_read_file_and_write_file(tmp_path: Path) -> None:
         ctx=ctx,
     ))
     assert e2 is None and r2 is not None and "abc" in r2
+
+
+@pytest.mark.asyncio
+async def test_read_file_with_turn_path_grant_reads_in_place(tmp_path: Path) -> None:
+    """End-to-end regression test for the reported bug: given a folder grant
+    for this turn, read_file on an absolute out-of-workspace path succeeds
+    and the file is read where it sits — nothing gets copied into the
+    workspace first."""
+    workspace = tmp_path / "workspace"
+    skills = workspace / "skills"
+    skills.mkdir(parents=True)
+    desktop = tmp_path / "Desktop"
+    desktop.mkdir()
+    target = desktop / "report.pdf"
+    target.write_text("PDF-BYTES", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ctx = _ctx()
+    ctx.turn_path_grants.add(str(desktop.resolve()))
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="read_file", args={"path": str(target)}),
+            ctx=ctx,
+        )
+    )
+
+    assert err is None and out is not None
+    assert "PDF-BYTES" in out
+    # Nothing moved: still on the "Desktop", nothing new in the workspace.
+    assert target.exists()
+    assert list(workspace.iterdir()) == [skills]
+
+
+@pytest.mark.asyncio
+async def test_read_file_without_grant_still_rejects_absolute_path(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    skills = workspace / "skills"
+    skills.mkdir(parents=True)
+    desktop = tmp_path / "Desktop"
+    desktop.mkdir()
+    target = desktop / "report.pdf"
+    target.write_text("PDF-BYTES", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="read_file", args={"path": str(target)}),
+            ctx=_ctx(),
+        )
+    )
+
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    # Part 2c: the hint must steer toward asking for access, never toward
+    # "rewrite this as a relative path" (which is exactly the nudge that
+    # made copying the file into the workspace look sanctioned).
+    assert payload["error_kind"] == "policy"
+    assert payload["details"]["code"] == "path_needs_grant"
+    hint = payload["hint"].lower()
+    assert "ask" in hint or "access" in hint
+    assert "relative path" not in hint
 
 
 @pytest.mark.asyncio
@@ -1481,8 +1579,10 @@ async def test_direct_mempalace_route_is_owned_by_each_executor(
         *,
         cwd=None,
         env_overrides=None,
+        extra_allowed_commands=None,
+        jail_roots=None,
     ):
-        del self, command, args, timeout, cwd
+        del self, command, args, timeout, cwd, extra_allowed_commands, jail_roots
         seen.append(dict(env_overrides or {}))
         return ExecutionResult(stdout="ok", stderr="", exit_code=0)
 
@@ -1531,9 +1631,11 @@ async def test_direct_mempalace_route_is_owned_by_each_executor(
     [
         (["bash", "-c", "echo shell-ok"], "shell-ok"),
         (["python", "-c", "print('python-ok')"], "python-ok"),
+        # git needs its own ~/.gitconfig even for --version; the workspace
+        # jail carves out that one file by name (fs_isolation.py
+        # _HOME_DOTFILE_READ_EXCEPTIONS) precisely so this keeps working.
         (["git", "--version"], "git version"),
         (["uv", "--version"], "uv "),
-        (["gh", "--version"], "gh version"),
     ],
 )
 async def test_run_command_launchers_remain_available_without_memory(
@@ -1565,6 +1667,41 @@ async def test_run_command_launchers_remain_available_without_memory(
     payload = json.loads(out)
     assert payload["ok"] is True
     assert expected in payload["stdout"]
+
+
+@pytest.mark.skipif(
+    not isolation_support().available,
+    reason=f"host cannot isolate filesystems: {isolation_support().detail}",
+)
+@pytest.mark.asyncio
+async def test_run_command_gh_needs_its_own_credential_file_under_the_jail(tmp_path: Path) -> None:
+    """Intentional, not a bug: `gh` reads its own auth config
+    (`~/.config/gh/hosts.yml`, which can hold a plaintext OAuth token on
+    setups that don't use the keychain) unconditionally on startup. The
+    workspace jail denies $HOME by default and does not carve this out —
+    unlike `~/.gitconfig` (name/email/aliases only), `gh`'s config is
+    credential-adjacent, matching the denylist philosophy already
+    established in `computer/safety.py`. `gh` failing here is the jail
+    working as designed, not a regression to fix."""
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="gh-denied", name="run_command", args={"argv": ["gh", "--version"]}),
+            ctx=_ctx(),
+        )
+    )
+
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is False
 
 
 @pytest.mark.asyncio
@@ -1629,6 +1766,98 @@ async def test_run_command_uv_allowed_by_binary_allowlist(
     payload = json.loads(out)
     assert payload["ok"] is True
     assert payload["exit_code"] == 0
+
+
+@pytest.mark.asyncio
+async def test_run_command_turn_grant_allows_unlisted_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A binary approved this turn (``ctx.turn_command_grants``) bypasses the
+    static allowlist for this call, without needing a durable grant."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data" / "memory").mkdir(parents=True)
+    mem = tmp_path / "data" / "memory"
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    ctx = _ctx()
+    ctx.turn_command_grants.add("date")
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="run_command", args={"argv": ["date"]}),
+            ctx=ctx,
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_command_durable_grant_allows_unlisted_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A binary durably granted via ``grants.json`` bypasses the static
+    allowlist without any per-turn state."""
+    from monkeybot.core.tools.grant_store import add_command_grant
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data" / "memory").mkdir(parents=True)
+    mem = tmp_path / "data" / "memory"
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    grants_path = tmp_path / "grants.json"
+    add_command_grant(grants_path, command="date", created_at="2026-01-01T00:00:00+00:00")
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        grants_path=grants_path,
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="run_command", args={"argv": ["date"]}),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_run_command_no_grant_still_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sanity check for the two tests above: with neither a turn grant nor a
+    durable grant, the same unlisted binary is still blocked."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data" / "memory").mkdir(parents=True)
+    mem = tmp_path / "data" / "memory"
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="run_command", args={"argv": ["date"]}),
+            ctx=_ctx(),
+        )
+    )
+    assert out is None and err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["error_kind"] == "policy"
 
 
 @pytest.mark.asyncio
@@ -2412,6 +2641,38 @@ async def test_spill_writes_raw_payload_before_sanitize(
     # History is sanitized; raw base64 must not survive in the inline body.
     assert "omitted" in out
     assert parsed["data"][:80] not in out
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_call_carries_thread_id_from_turn_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prefixed MCP tools pass ``_meta.monkeybot.thread_id`` from ``TurnContext``."""
+    monkeypatch.setenv("MONKEYBOT_RUN_ID", "run-xyz")
+    mcp = _RecordingMCP()
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path, memory=_mem_sub(mem), skills_path=skills, mcp=mcp
+    )
+    ctx = dataclasses.replace(_ctx(), thread_id="sess-abc", request_id="req-1")
+
+    result_text, err_text = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="browser__goto", args={"url": "https://example.com"}),
+            ctx=ctx,
+        )
+    )
+    assert err_text is None
+    assert result_text == "ok"
+    assert len(mcp.calls) == 1
+    server, tool, args, meta = mcp.calls[0]
+    assert (server, tool, args) == ("browser", "goto", {"url": "https://example.com"})
+    assert meta == {
+        "monkeybot": {"thread_id": "sess-abc", "request_id": "req-1", "run_id": "run-xyz"}
+    }
 
 
 @pytest.mark.asyncio

@@ -391,12 +391,22 @@ async def _resolve_inspector_decision(
                     outcome.decision = (
                         "confirm_always" if payload.get("always") else "confirm_approved"
                     )
+                    grant_resource = decision.grant_key or resource_for_call(inspector_call)
+                    if decision.grant_kind == "command":
+                        ctx.turn_command_grants.add(grant_resource)
+                    elif decision.grant_kind == "path":
+                        ctx.turn_path_grants.add(grant_resource)
                     if payload.get("always"):
+                        grant_persist = (
+                            ctx.grants_persist
+                            if decision.grant_kind is not None
+                            else ctx.approvals_persist
+                        )
                         remember_always_approval(
                             bus,
                             call.name,
-                            resource_for_call(inspector_call),
-                            persist=ctx.approvals_persist,
+                            grant_resource,
+                            persist=grant_persist,
                         )
                         logger.debug(
                             "tool inspector confirm %s",

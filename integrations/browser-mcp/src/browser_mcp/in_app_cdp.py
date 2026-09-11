@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import NoReturn
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from browser_mcp import chat_scope
+
 logger = logging.getLogger(__name__)
 
 # Written by Monkeyapp when the in-app Electron CDP bridge is live. Prefer this over
@@ -150,9 +152,12 @@ def _redact_cdp_token(message: str) -> str:
 def _bind_in_app_endpoint(url: str, token: str | None) -> str:
     global _env_set_from_in_app_file
     endpoint = _in_app_ws_url(url, token)
+    prev = os.environ.get("BU_CDP_WS")
     os.environ["BU_CDP_WS"] = endpoint
     os.environ.pop("BU_CDP_URL", None)
     _env_set_from_in_app_file = True
+    if prev != endpoint:
+        chat_scope.reset()
     return endpoint
 
 

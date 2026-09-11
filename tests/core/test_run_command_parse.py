@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from monkeybot.core.tools.core_tool_executor import _parse_run_command
+from monkeybot.core.tools.inspector import parse_run_command as _parse_run_command
 from monkeybot.core.tools.inspector import coerce_run_command_argv
 
 

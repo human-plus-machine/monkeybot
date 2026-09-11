@@ -325,7 +325,14 @@ class ComputerFindTool:
 class ComputerMoveTool:
     tool_def = ToolDef(
         "computer_move",
-        "Move or rename a file or folder on the user's Mac.",
+        (
+            "Move or rename a file or folder on the user's Mac. Not a way to "
+            "read a file into the agent's workspace — if you need to read "
+            "something outside the workspace with read_file/glob/grep, ask for "
+            "folder access there instead of moving the file with this tool; "
+            "moving a file to route around the workspace boundary is a policy "
+            "violation, not a workaround."
+        ),
         {
             "type": "object",
             "properties": {
