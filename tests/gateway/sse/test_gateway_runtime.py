@@ -26,6 +26,7 @@ def _layout(tmp_path: Path, *, command_allowlist: Path) -> AgentLayout:
         command_allowlist_path=command_allowlist,
         permission_config_path=tmp_path / "permissions.yaml",
         approvals_path=tmp_path / "approvals.json",
+        grants_path=tmp_path / "grants.json",
         db_url="sqlite:///:memory:",
         memory_storage_uri="local://memory",
         agent_id="test",

@@ -73,10 +73,40 @@ async def test_inspector_restricted_curl_denied(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_inspector_unknown_command_allowed_at_preflight(tmp_path: Path) -> None:
-    """Deny-regex policy does not emulate an allow-regex tier; unknown invocations pass here."""
+async def test_inspector_unknown_command_asks_with_grant_key(tmp_path: Path) -> None:
+    """A binary outside every allowlist now asks (with a grant_key) instead of
+    silently falling through to a later hard rejection at the executor."""
     p = _write_policy(tmp_path)
     inspector = CommandTierInspector(p)
+    call = InspectorToolCall("1", "run_command", {"command": "touch a"})
+    d = await inspector.check(call, _minimal_ctx())
+    assert d.kind == "confirm"
+    assert d.grant_key == "touch"
+    assert d.grant_kind == "command"
+
+
+@pytest.mark.asyncio
+async def test_inspector_unknown_command_allowed_once_turn_grant(tmp_path: Path) -> None:
+    """A binary already granted this turn (an earlier "Allow once"/"Always
+    allow" click) is allowed without asking again."""
+    p = _write_policy(tmp_path)
+    inspector = CommandTierInspector(p)
+    call = InspectorToolCall("1", "run_command", {"command": "touch a"})
+    ctx = _minimal_ctx()
+    ctx.turn_command_grants.add("touch")
+    d = await inspector.check(call, ctx)
+    assert d.kind == "allow"
+
+
+@pytest.mark.asyncio
+async def test_inspector_unknown_command_allowed_via_durable_grant(tmp_path: Path) -> None:
+    """A binary durably granted via ``grants.json`` is allowed without asking."""
+    p = _write_policy(tmp_path)
+    grants_path = tmp_path / "grants.json"
+    from monkeybot.core.tools.grant_store import add_command_grant
+
+    add_command_grant(grants_path, command="touch", created_at="2026-01-01T00:00:00+00:00")
+    inspector = CommandTierInspector(p, grants_path=grants_path)
     call = InspectorToolCall("1", "run_command", {"command": "touch a"})
     d = await inspector.check(call, _minimal_ctx())
     assert d.kind == "allow"

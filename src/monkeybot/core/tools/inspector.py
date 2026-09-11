@@ -10,9 +10,11 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 import yaml
+
 from monkeybot.core.context import TurnContext
-from monkeybot.core.types.interfaces import MonkeybotError
+from monkeybot.core.tools.grant_store import GrantStoreCache
 from monkeybot.core.tools.terminal import ALLOWED_COMMANDS, ALLOWED_PATHS
+from monkeybot.core.types.interfaces import MonkeybotError
 
 # Default deny-regex lines when YAML omits ``deny_patterns``. Blocks package installs
 # via common verbs (pip, uv, npm, apt, brew, etc.) while leaving script execution allowed.
@@ -46,6 +48,18 @@ class Decision:
 
     kind: Literal["allow", "deny", "confirm"]
     message: str | None = None
+    grant_key: str | None = None
+    """What an "Always allow"/"Allow once" click on this ``confirm`` actually
+    remembers — e.g. a binary name (``"ffmpeg"``) or a folder
+    (``"/Users/x/Desktop"``), never the full resource string (a whole argv or
+    path would make a durable rule near-useless: it would cover exactly one
+    invocation). ``None`` means "fall back to ``resource_for_call()``", which
+    is what every inspector predating this field still does."""
+    grant_kind: Literal["command", "path"] | None = None
+    """Which grant store ``grant_key`` belongs to, so ``tool_dispatch.py`` can
+    route the "always" persist call to ``TurnContext.grants_persist`` instead
+    of ``TurnContext.approvals_persist`` (the ``computer_*``-only overlay).
+    ``None`` alongside a set ``grant_key`` is a caller bug, not a valid state."""
 
 
 @dataclass(frozen=True)
@@ -85,9 +99,7 @@ def _optional_nonempty_str_list(path: Path, data: dict[str, Any], key: str) -> l
     out: list[str] = []
     for i, item in enumerate(val):
         if not isinstance(item, str) or not item.strip():
-            raise CommandTierConfigError(
-                path, f"'{key}[{i}]' must be a non-empty string"
-            )
+            raise CommandTierConfigError(path, f"'{key}[{i}]' must be a non-empty string")
         out.append(item)
     return out
 
@@ -112,9 +124,7 @@ def coerce_run_command_argv(argv_raw: object) -> list[str] | None:
         if not stripped:
             return None
         if not stripped.startswith("["):
-            raise ValueError(
-                "argv must be an array (or JSON array string), got string"
-            )
+            raise ValueError("argv must be an array (or JSON array string), got string")
         try:
             parsed: object = json.loads(stripped)
         except json.JSONDecodeError as e:
@@ -125,15 +135,9 @@ def coerce_run_command_argv(argv_raw: object) -> list[str] | None:
         if isinstance(parsed, list) and parsed:
             return [str(x) for x in parsed]
         kind = type(parsed).__name__
-        raise ValueError(
-            "argv must be a non-empty array (or JSON array string), "
-            f"got JSON {kind}"
-        )
+        raise ValueError(f"argv must be a non-empty array (or JSON array string), got JSON {kind}")
 
-    raise ValueError(
-        "argv must be an array (or JSON array string), "
-        f"got {type(argv_raw).__name__}"
-    )
+    raise ValueError(f"argv must be an array (or JSON array string), got {type(argv_raw).__name__}")
 
 
 def norm_run_command_line(args: dict[str, object]) -> str | None:
@@ -164,6 +168,69 @@ def norm_run_command_line(args: dict[str, object]) -> str | None:
         return " ".join(shell.strip().split())
 
     return None
+
+
+_SHELL_OPERATOR_TOKENS = frozenset({"&&", "||", ";", "|", "&"})
+
+
+def _needs_shell_wrapper(stripped: str, parts: list[str]) -> bool:
+    if any(part in _SHELL_OPERATOR_TOKENS for part in parts):
+        return True
+    return any(op in stripped for op in _SHELL_OPERATOR_TOKENS)
+
+
+def _argv_from_command_string(stripped: str) -> tuple[str, list[str]]:
+    """Parse a command string; wrap in ``bash -c`` when shell operators are present."""
+    if not any(ch.isspace() for ch in stripped):
+        parts = shlex.split(stripped, posix=True)
+        if parts and _needs_shell_wrapper(stripped, parts):
+            return "bash", ["-c", stripped]
+        return stripped, []
+    parts = shlex.split(stripped, posix=True)
+    if not parts:
+        return stripped, []
+    if _needs_shell_wrapper(stripped, parts):
+        return "bash", ["-c", stripped]
+    return parts[0], parts[1:]
+
+
+def parse_run_command(args: dict[str, Any]) -> tuple[str, list[str]]:
+    """Resolve ``run_command`` args to ``(binary, rest_of_argv)``.
+
+    Single source of truth for "what binary is this call actually about" —
+    used both here (to decide whether to ask) and by
+    ``CoreToolExecutor._tool_run_command`` (to decide what actually runs).
+    Keeping one implementation means the inspector's confirm prompt and the
+    executor's allowlist check can never resolve a call to two different
+    binaries.
+    """
+    argv = coerce_run_command_argv(args.get("argv"))
+    if argv:
+        return argv[0], argv[1:]
+
+    cmd = args.get("command")
+    if isinstance(cmd, str) and cmd.strip():
+        extra = args.get("args")
+        if extra is None:
+            extra = args.get("arguments")
+        if isinstance(extra, list):
+            if extra:
+                return cmd.strip(), [str(x) for x in extra]
+            return _argv_from_command_string(cmd.strip())
+        return _argv_from_command_string(cmd.strip())
+
+    shell = args.get("shell") or args.get("script")
+    if isinstance(shell, str) and shell.strip():
+        stripped = shell.strip()
+        parts = shlex.split(stripped, posix=True)
+        if not parts:
+            raise ValueError("shell/script is empty after parsing")
+        return _argv_from_command_string(stripped)
+
+    raise ValueError(
+        "run_command needs one of: argv (non-empty list), command+args/arguments, "
+        "or shell/script (parsed with shlex)"
+    )
 
 
 def load_command_tier_policy(path: Path) -> CommandTierPolicy:
@@ -201,9 +268,7 @@ def load_command_tier_policy(path: Path) -> CommandTierPolicy:
                 )
         deny_patterns = tuple(str(x) for x in deny_raw)
     else:
-        raise CommandTierConfigError(
-            path, "'deny_patterns' must be a list of strings when present"
-        )
+        raise CommandTierConfigError(path, "'deny_patterns' must be a list of strings when present")
 
     allowed_commands = tuple(ac_raw) if ac_raw is not None else tuple(ALLOWED_COMMANDS)
     allowed_path_prefixes = tuple(ap_raw) if ap_raw is not None else tuple(ALLOWED_PATHS)
@@ -216,9 +281,20 @@ def load_command_tier_policy(path: Path) -> CommandTierPolicy:
 
 
 class CommandTierInspector:
-    """YAML policy: optional deny-regex preflight; execution allowlists are on the policy object."""
+    """YAML policy: deny-regex preflight, then an allow/ask gate on the binary.
 
-    def __init__(self, tier_config_path: Path) -> None:
+    A binary in ``allowed_commands`` (or durably granted via ``grants.json``,
+    or granted "Allow once" earlier this turn) is allowed and the chain
+    continues — ``permissions.yaml`` can still ask/deny a finer-grained
+    pattern on top, unchanged from before this gate existed. A binary that is
+    none of those now asks (``confirm``) instead of silently falling through
+    to ``TerminalExecutor``, which would have hard-rejected it with no way for
+    the user to grant it. This mirrors how ``deny_patterns`` already
+    short-circuits the chain before ``permissions.yaml`` is even evaluated —
+    the same "position in the chain is authority" convention, not a new one.
+    """
+
+    def __init__(self, tier_config_path: Path, *, grants_path: Path | None = None) -> None:
         self._path = tier_config_path
         self._policy = load_command_tier_policy(tier_config_path)
         compiled: list[re.Pattern[str]] = []
@@ -230,6 +306,7 @@ class CommandTierInspector:
                     tier_config_path, f"deny_patterns[{i}]: invalid regex: {e}"
                 ) from e
         self._deny_regexes = tuple(compiled)
+        self._grants_cache = GrantStoreCache(grants_path) if grants_path is not None else None
 
     @property
     def allowed_commands(self) -> tuple[str, ...]:
@@ -239,9 +316,15 @@ class CommandTierInspector:
     def allowed_path_prefixes(self) -> tuple[str, ...]:
         return self._policy.allowed_path_prefixes
 
+    def _binary_allowed(self, binary: str, ctx: TurnContext) -> bool:
+        if binary in self._policy.allowed_commands:
+            return True
+        if self._grants_cache is not None and binary in self._grants_cache.command_names():
+            return True
+        return binary in ctx.turn_command_grants
+
     async def check(self, call: InspectorToolCall, ctx: TurnContext) -> Decision:
-        """Deny if any ``deny_patterns`` matches the normalized invocation; else allow."""
-        del ctx
+        """Deny on ``deny_patterns``; else ask for a binary outside every allowlist."""
         if call.name != "run_command":
             return Decision(kind="allow")
 
@@ -259,7 +342,25 @@ class CommandTierInspector:
             if rx.search(cmd_norm):
                 return Decision(kind="deny", message="denied by run_command deny_patterns policy")
 
-        return Decision(kind="allow")
+        try:
+            binary, _rest = parse_run_command(call.args)
+        except ValueError:
+            # norm_run_command_line succeeded above, so this call shape is
+            # coherent; treat a parse mismatch here as non-fatal and let the
+            # rest of the chain (and TerminalExecutor's own validation) judge
+            # it, rather than denying a call the deny-regex preflight already
+            # accepted.
+            return Decision(kind="allow")
+
+        if self._binary_allowed(binary, ctx):
+            return Decision(kind="allow")
+
+        return Decision(
+            kind="confirm",
+            message=f"`{binary}` is not on the allowed-commands list yet.",
+            grant_key=binary,
+            grant_kind="command",
+        )
 
 
 class RulesInspector:

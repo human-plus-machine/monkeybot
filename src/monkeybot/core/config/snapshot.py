@@ -142,6 +142,7 @@ class PathsConfig:
     workspace_root: str | None = None
     agent_id: str | None = None
     approvals_config: str | None = None
+    grants_config: str | None = None
     agent_md_digest: str | None = None
     skills_digest: str | None = None
     mcp_config_digest: str | None = None
@@ -890,6 +891,7 @@ def _paths_from_env(env: Mapping[str, str], content: Mapping[str, str | None]) -
         workspace_root=env.get("MONKEYBOT_WORKSPACE_ROOT"),
         agent_id=env.get("MONKEYBOT_AGENT_ID"),
         approvals_config=env.get("MONKEYBOT_APPROVALS_CONFIG"),
+        grants_config=env.get("MONKEYBOT_GRANTS_CONFIG"),
         agent_md_digest=content.get("agent_md"),
         skills_digest=content.get("skills"),
         mcp_config_digest=content.get("mcp_config"),
