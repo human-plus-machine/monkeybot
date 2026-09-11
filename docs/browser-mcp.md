@@ -189,6 +189,39 @@ other ephemeral-workspace targets they reset when the instance is recycled. Use
 the memory storage contract for durable knowledge rather than adding a workspace
 synchronization layer.
 
+## In-app bridge extensions
+
+When the Spaces in-app browser is bound, each tool call may announce which chat
+it is acting for so new tabs stay attached to that chat. AgentCore and Browser
+Use Cloud backends never send this.
+
+### MCP request meta
+
+The gateway includes `_meta` on every `call_tool`:
+
+```json
+{ "monkeybot": { "thread_id": "<gateway thread id>", "request_id": "<turn request id>", "run_id": "<MONKEYBOT_RUN_ID or null>" } }
+```
+
+Servers that ignore `_meta` are unaffected. Older gateways send nothing; this
+server then announces `chatKey` as `null`.
+
+### `Monkeybot.setChatScope`
+
+Before the first CDP command of a tool call (and whenever the value changes on
+the current connection), the in-app backend sends:
+
+```json
+{ "id": 7, "method": "Monkeybot.setChatScope", "params": { "chatKey": "<thread_id or null>" } }
+```
+
+`chatKey` is the gateway `thread_id` from `_meta.monkeybot`, which equals the
+app's session ID. The bridge stores it on the WebSocket client until changed. An
+older app replies with an error; this server treats that as unsupported, stops
+sending the method for the rest of the connection, and continues normally.
+Rebinding the in-app daemon (including after Spaces `warmBrowserOnLaunch`)
+clears that disabled flag so a newer app gets a fresh attempt.
+
 ## Tools
 
 Navigation, interaction, screenshots, tabs, waits, playbooks (`browser_list_playbooks`, `browser_read_playbook`, `browser_write_playbook`, `browser_run_playbook`), `browser_login` for Spaces-saved passwords (returns `{ok, loggedIn, origin, mfa?, mode?}` — never the password), and `browser_stop` for daemon cleanup.

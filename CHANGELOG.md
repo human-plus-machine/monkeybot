@@ -6,6 +6,18 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [browser v0.7.0] - 2026-09-10
+
+#### Added
+
+- Announces the chat it is acting for to the Spaces in-app bridge (`Monkeybot.setChatScope`) so tabs stay attached to their chat; silently no-op on older apps.
+
+## [core v3.3.0] - 2026-09-10
+
+#### Added
+
+- MCP tool calls now carry `_meta.monkeybot` (`thread_id`, `request_id`, `run_id`) so servers can attribute work to a chat.
+
 ## [browser v0.6.0] - 2026-09-07
 
 #### Added

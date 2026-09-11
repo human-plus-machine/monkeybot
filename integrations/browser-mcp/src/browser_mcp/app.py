@@ -11,7 +11,7 @@ from typing import Any, ParamSpec
 
 from mcp.server.fastmcp import FastMCP
 
-from browser_mcp import backend, in_app_cdp, perf, results, tab_ops, tabs
+from browser_mcp import backend, chat_scope, in_app_cdp, perf, results, tab_ops, tabs
 from browser_mcp.observe import resolve_action_observe
 
 _P = ParamSpec("_P")
@@ -94,6 +94,10 @@ def _public_tool(fn: Callable[_P, str]) -> Callable[_P, str]:
     @functools.wraps(fn)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> str:
         with _TOOL_LOCK:
+            # Skip when unbound so playbook/login tools do not start the harness.
+            helpers = backend.in_app_helpers()
+            if helpers is not None:
+                chat_scope.announce_current(helpers)
             with perf.timed_tool(fn.__name__) as rec:
                 try:
                     result = fn(*args, **kwargs)

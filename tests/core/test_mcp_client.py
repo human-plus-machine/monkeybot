@@ -163,7 +163,18 @@ async def test_call_tool_returns_string() -> None:
     resolved = await client.call_tool("fs", "read_file", {})
 
     assert resolved == "ok"
-    sess.call_tool.assert_awaited_once()
+    sess.call_tool.assert_awaited_once_with("read_file", arguments={})
+
+    sess.call_tool.reset_mock()
+    meta = {"monkeybot": {"thread_id": "t1", "request_id": "r1", "run_id": None}}
+    resolved = await client.call_tool("fs", "read_file", {}, meta=meta)
+    assert resolved == "ok"
+    sess.call_tool.assert_awaited_once_with("read_file", arguments={}, meta=meta)
+
+    sess.call_tool.reset_mock()
+    resolved = await client.call_tool("fs", "read_file", {}, meta={})
+    assert resolved == "ok"
+    sess.call_tool.assert_awaited_once_with("read_file", arguments={})
 
 
 @pytest.mark.asyncio
@@ -219,6 +230,37 @@ async def test_disconnect_calls_browser_stop_before_teardown() -> None:
     await client.disconnect("browser")
 
     sess.call_tool.assert_awaited_once_with("browser_stop", arguments={})
+
+
+@pytest.mark.asyncio
+async def test_call_tool_drops_meta_when_sdk_lacks_keyword(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An older ClientSession without ``meta=`` must not fail the tool call."""
+    listing = SimpleNamespace(
+        tools=[SimpleNamespace(name="read_file", description="", inputSchema={})]
+    )
+
+    async def _call_tool(name: str, arguments: dict[str, object] | None = None) -> SimpleNamespace:
+        del name, arguments
+        return SimpleNamespace(content=[SimpleNamespace(type="text", text="ok")])
+
+    sess = SimpleNamespace()
+    sess.initialize = AsyncMock()
+    sess.list_tools = AsyncMock(return_value=listing)
+    sess.call_tool = _call_tool
+
+    client = MCPClient(hooks=_stub_hooks(sess))
+    await client.connect("fs", "python", [], {})
+    with caplog.at_level(logging.DEBUG, logger="monkeybot.core.mcp.mcp_client"):
+        resolved = await client.call_tool(
+            "fs",
+            "read_file",
+            {},
+            meta={"monkeybot": {"thread_id": "t1", "request_id": "r1", "run_id": None}},
+        )
+    assert resolved == "ok"
+    assert any("dropping request _meta" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
