@@ -163,7 +163,18 @@ async def test_call_tool_returns_string() -> None:
     resolved = await client.call_tool("fs", "read_file", {})
 
     assert resolved == "ok"
-    sess.call_tool.assert_awaited_once()
+    sess.call_tool.assert_awaited_once_with("read_file", arguments={})
+
+    sess.call_tool.reset_mock()
+    meta = {"monkeybot": {"thread_id": "t1", "request_id": "r1", "run_id": None}}
+    resolved = await client.call_tool("fs", "read_file", {}, meta=meta)
+    assert resolved == "ok"
+    sess.call_tool.assert_awaited_once_with("read_file", arguments={}, meta=meta)
+
+    sess.call_tool.reset_mock()
+    resolved = await client.call_tool("fs", "read_file", {}, meta={})
+    assert resolved == "ok"
+    sess.call_tool.assert_awaited_once_with("read_file", arguments={})
 
 
 @pytest.mark.asyncio

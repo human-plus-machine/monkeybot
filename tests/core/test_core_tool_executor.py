@@ -121,8 +121,10 @@ class _MCPWithBlob:
         server_name: str,
         tool_name: str,
         args: dict[str, object],
+        *,
+        meta: object | None = None,
     ) -> str:
-        del server_name, tool_name, args
+        del server_name, tool_name, args, meta
         return self._payload
 
     def all_tools(self) -> list[ToolDef]:
@@ -149,6 +151,29 @@ class _MCPWithBlob:
 
     async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         del path, raise_on_error
+
+
+class _RecordingMCP(_NoMCP):
+    """Records ``call_tool`` arguments including request meta."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict[str, object], object]] = []
+
+    def split_prefixed_tool(self, prefixed_name: str) -> tuple[str, str] | None:
+        if prefixed_name == "browser__goto":
+            return ("browser", "goto")
+        return None
+
+    async def call_tool(
+        self,
+        server_name: str,
+        tool_name: str,
+        args: dict[str, object],
+        *,
+        meta: object | None = None,
+    ) -> str:
+        self.calls.append((server_name, tool_name, dict(args), meta))
+        return "ok"
 
 
 def _ctx(
@@ -2616,6 +2641,38 @@ async def test_spill_writes_raw_payload_before_sanitize(
     # History is sanitized; raw base64 must not survive in the inline body.
     assert "omitted" in out
     assert parsed["data"][:80] not in out
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_call_carries_thread_id_from_turn_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Prefixed MCP tools pass ``_meta.monkeybot.thread_id`` from ``TurnContext``."""
+    monkeypatch.setenv("MONKEYBOT_RUN_ID", "run-xyz")
+    mcp = _RecordingMCP()
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path, memory=_mem_sub(mem), skills_path=skills, mcp=mcp
+    )
+    ctx = dataclasses.replace(_ctx(), thread_id="sess-abc", request_id="req-1")
+
+    result_text, err_text = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="1", name="browser__goto", args={"url": "https://example.com"}),
+            ctx=ctx,
+        )
+    )
+    assert err_text is None
+    assert result_text == "ok"
+    assert len(mcp.calls) == 1
+    server, tool, args, meta = mcp.calls[0]
+    assert (server, tool, args) == ("browser", "goto", {"url": "https://example.com"})
+    assert meta == {
+        "monkeybot": {"thread_id": "sess-abc", "request_id": "req-1", "run_id": "run-xyz"}
+    }
 
 
 @pytest.mark.asyncio

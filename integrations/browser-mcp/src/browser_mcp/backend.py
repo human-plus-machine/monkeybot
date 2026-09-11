@@ -6,7 +6,7 @@ import contextlib
 import logging
 from typing import Any
 
-from browser_mcp import agentcore, dom_indexing, in_app_cdp, perf, tabs
+from browser_mcp import agentcore, chat_scope, dom_indexing, in_app_cdp, perf, tabs
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,24 @@ _agentcore_admin: agentcore.AgentCoreAdmin | None = None
 def mark_unbound() -> None:
     global _bound_cdp
     _bound_cdp = None
+
+
+def in_app_backend_active() -> bool:
+    """True when the live binding is Monkeyapp's in-app CDP bridge."""
+    return (
+        _bh is not None
+        and _bound_cdp not in (None, "agentcore")
+        and in_app_cdp._env_set_from_in_app_file
+    )
+
+
+def in_app_helpers() -> Any | None:
+    """Return in-app CDP helpers when the in-app backend is bound, else None."""
+    if not in_app_backend_active():
+        return None
+    assert _bh is not None
+    helpers, _ = _bh
+    return helpers
 
 
 def teardown_bound_backend() -> None:
@@ -42,6 +60,7 @@ def teardown_bound_backend() -> None:
         tabs.registry().detach_all(helpers)
     _bh = None
     dom_indexing.clear_registered_targets()
+    chat_scope.reset()
     if is_agentcore:
         admin.stop_session()
         from browser_mcp import playwright_helpers
@@ -56,6 +75,12 @@ def teardown_bound_backend() -> None:
 def _with_perf_helpers(bh: tuple[Any, Any]) -> tuple[Any, Any]:
     helpers, admin = bh
     return perf.wrap_helpers(helpers), admin
+
+
+def _announce_in_app(helpers: Any) -> None:
+    """Scope the in-app bridge after bind. Playbook/login skip this by not binding."""
+    if in_app_cdp._env_set_from_in_app_file:
+        chat_scope.announce_current(helpers)
 
 
 def _reconnect_agentcore() -> tuple[str, dict[str, str]]:
@@ -105,7 +130,9 @@ def browser_harness() -> tuple[Any, Any]:
         return _with_perf_helpers(_agentcore_browser_harness())
 
     if _bh is not None and cdp == _bound_cdp:
-        return _with_perf_helpers(_bh)
+        wrapped = _with_perf_helpers(_bh)
+        _announce_in_app(wrapped[0])
+        return wrapped
 
     if _bound_cdp == "agentcore":
         teardown_bound_backend()
@@ -126,6 +153,9 @@ def browser_harness() -> tuple[Any, Any]:
     admin.ensure_daemon()
     _bh = (helpers, admin)
     _bound_cdp = cdp
+    if in_app_cdp._env_set_from_in_app_file:
+        chat_scope.reset()
+    _announce_in_app(helpers)
     return _with_perf_helpers(_bh)
 
 
@@ -153,6 +183,7 @@ def stop_active_backend_best_effort() -> None:
         with contextlib.suppress(Exception):
             tab_ops._close_agent_opened_tabs(helpers)
     _bh = None
+    chat_scope.reset()
     from browser_harness import admin
 
     admin.restart_daemon()

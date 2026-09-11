@@ -16,6 +16,22 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - **Folder read grants:** `read_file`/`load_file`/`glob`/`grep` on an absolute path outside the workspace now ask via a new `PathGrantInspector` rather than rejecting outright — denying credential paths and anything outside `$HOME` hard, never promotable. An approved folder is read in place through `WorkspaceFileService.extra_read_roots` (symlink-escape-protected, read-only — never widens what `write_file`/`replace_in_file` can touch); the same granted folders feed the `run_command` jail's read-only set so the shell tool and the file tools agree on what's reachable. Fixes the failure mode where the model, unable to read a file outside its workspace and told only "use a relative path," would narrate copying the file into the workspace to route around the boundary — tool descriptions, the harness prompt, and the `workspace_error_envelope` hint for this case now say to ask for access instead, explicitly calling relocating-to-route-around-the-boundary a policy violation.
 - Settings → Privacy & access gained **Allowed commands** and **Folder access** sections listing/revoking these new grants, alongside the existing per-agent `computer_*` rules.
 
+## [browser v0.7.0] - 2026-09-10
+
+#### Added
+
+- Announces the chat it is acting for to the Spaces in-app bridge (`Monkeybot.setChatScope`) so tabs stay attached to their chat; silently no-op on older apps.
+
+#### Fixed
+
+- Chat-switch tab drop now fires on real tool calls (`browser_harness()` reuse no longer forgets the last scoped chat).
+
+## [core v3.3.0] - 2026-09-10
+
+#### Added
+
+- MCP tool calls now carry `_meta.monkeybot` (`thread_id`, `request_id`, `run_id`) so servers can attribute work to a chat. Requires `mcp>=1.27.1` so `ClientSession.call_tool(meta=)` is always available.
+
 ## [browser v0.6.0] - 2026-09-07
 
 #### Added

@@ -152,6 +152,19 @@ _CORE_TOOL_NAMES = frozenset(
 _SPILL_SKIP_TOOLS = frozenset({"read_file", "load_file"})
 
 
+def _mcp_call_meta(ctx: TurnContext) -> dict[str, object]:
+    """Request ``_meta.monkeybot`` so MCP servers can attribute work to a chat."""
+    if not str(ctx.thread_id).strip():
+        logger.debug("mcp call _meta missing thread_id %s", kv(request_id=ctx.request_id))
+    return {
+        "monkeybot": {
+            "thread_id": ctx.thread_id,
+            "request_id": ctx.request_id,
+            "run_id": os.environ.get("MONKEYBOT_RUN_ID") or None,
+        }
+    }
+
+
 def _tool_handler_kind(name: str, *, mcp: MCPClientPort, extra_tools: dict[str, CustomTool]) -> str:
     if name in _CORE_TOOL_NAMES:
         return "core"
@@ -1176,7 +1189,9 @@ class CoreToolExecutor(ToolExecutorPort):
                 if mcp_pair is not None:
                     server_name, tool_name = mcp_pair
                     try:
-                        text = await self._mcp.call_tool(server_name, tool_name, args)
+                        text = await self._mcp.call_tool(
+                            server_name, tool_name, args, meta=_mcp_call_meta(ctx)
+                        )
                         result_text, err_text = text, None
                     except MCPServerNotConnectedError as exc:
                         result_text, err_text = None, str(exc)

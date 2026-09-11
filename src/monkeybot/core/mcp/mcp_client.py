@@ -900,12 +900,15 @@ class MCPClient:
         server_name: str,
         tool_name: str,
         args: Mapping[str, object],
+        *,
+        meta: Mapping[str, object] | None = None,
     ) -> str:
         """Invoke *unprefixed* ``tool_name`` on ``server_name``; return flattened text."""
         rec = self._servers.get(server_name)
         if rec is None:
             raise MCPServerNotConnectedError(server_name)
-        result = await rec.session.call_tool(tool_name, arguments=dict(args))
+        kwargs: dict[str, Any] = {"meta": dict(meta)} if meta else {}
+        result = await rec.session.call_tool(tool_name, arguments=dict(args), **kwargs)
         return _normalize_call_tool_result(result)
 
     def _require_connected(self, server_name: str) -> _ServerRecord:

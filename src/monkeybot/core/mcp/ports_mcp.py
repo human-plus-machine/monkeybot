@@ -60,6 +60,8 @@ class MCPClientPort(Protocol):
         server_name: str,
         tool_name: str,
         args: Mapping[str, object],
+        *,
+        meta: Mapping[str, object] | None = None,
     ) -> str:
         """Invoke a tool on a connected server; returns serialized result text."""
         ...
