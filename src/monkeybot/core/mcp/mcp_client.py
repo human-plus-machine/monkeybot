@@ -11,7 +11,6 @@ whose ``type`` is ``text``. Any other block is JSON-serialized via ``model_dump`
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import logging
 import os
@@ -37,34 +36,6 @@ from monkeybot.core.mcp.ports_mcp import MCPCatalogApplyResult
 from monkeybot.core.types.types_tools import ToolDef
 
 logger = logging.getLogger(__name__)
-
-
-def _session_call_tool_meta_kwargs(
-    call_tool: object,
-    meta: Mapping[str, object],
-    *,
-    server_name: str,
-    tool_name: str,
-) -> dict[str, Any]:
-    """Return ``{meta: ...}`` when the SDK session accepts it; otherwise drop it."""
-    try:
-        sig = inspect.signature(call_tool)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        logger.debug(
-            "mcp session.call_tool signature unavailable; dropping request _meta %s",
-            kv(server=server_name, tool=tool_name),
-        )
-        return {}
-    params = sig.parameters
-    if "meta" not in params and not any(
-        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
-    ):
-        logger.debug(
-            "mcp session.call_tool has no meta=; dropping request _meta %s",
-            kv(server=server_name, tool=tool_name),
-        )
-        return {}
-    return {"meta": dict(meta)}
 
 
 def _exception_group_leaves(exc: BaseException) -> list[BaseException]:
@@ -936,16 +907,7 @@ class MCPClient:
         rec = self._servers.get(server_name)
         if rec is None:
             raise MCPServerNotConnectedError(server_name)
-        kwargs = (
-            _session_call_tool_meta_kwargs(
-                rec.session.call_tool,
-                meta,
-                server_name=server_name,
-                tool_name=tool_name,
-            )
-            if meta
-            else {}
-        )
+        kwargs: dict[str, Any] = {"meta": dict(meta)} if meta else {}
         result = await rec.session.call_tool(tool_name, arguments=dict(args), **kwargs)
         return _normalize_call_tool_result(result)
 

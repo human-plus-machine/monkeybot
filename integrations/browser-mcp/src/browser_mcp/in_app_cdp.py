@@ -158,8 +158,6 @@ def _bind_in_app_endpoint(url: str, token: str | None) -> str:
     _env_set_from_in_app_file = True
     if prev != endpoint:
         chat_scope.reset()
-    else:
-        chat_scope.invalidate_last_sent()
     return endpoint
 
 

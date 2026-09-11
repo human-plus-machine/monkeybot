@@ -77,6 +77,12 @@ def _with_perf_helpers(bh: tuple[Any, Any]) -> tuple[Any, Any]:
     return perf.wrap_helpers(helpers), admin
 
 
+def _announce_in_app(helpers: Any) -> None:
+    """Scope the in-app bridge after bind. Playbook/login skip this by not binding."""
+    if in_app_cdp._env_set_from_in_app_file:
+        chat_scope.announce_current(helpers)
+
+
 def _reconnect_agentcore() -> tuple[str, dict[str, str]]:
     """Force a fresh AgentCore session (stop + restart) and return new ws creds.
 
@@ -124,7 +130,9 @@ def browser_harness() -> tuple[Any, Any]:
         return _with_perf_helpers(_agentcore_browser_harness())
 
     if _bh is not None and cdp == _bound_cdp:
-        return _with_perf_helpers(_bh)
+        wrapped = _with_perf_helpers(_bh)
+        _announce_in_app(wrapped[0])
+        return wrapped
 
     if _bound_cdp == "agentcore":
         teardown_bound_backend()
@@ -147,7 +155,7 @@ def browser_harness() -> tuple[Any, Any]:
     _bound_cdp = cdp
     if in_app_cdp._env_set_from_in_app_file:
         chat_scope.reset()
-        chat_scope.announce_current(helpers)
+    _announce_in_app(helpers)
     return _with_perf_helpers(_bh)
 
 

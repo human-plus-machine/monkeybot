@@ -233,37 +233,6 @@ async def test_disconnect_calls_browser_stop_before_teardown() -> None:
 
 
 @pytest.mark.asyncio
-async def test_call_tool_drops_meta_when_sdk_lacks_keyword(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """An older ClientSession without ``meta=`` must not fail the tool call."""
-    listing = SimpleNamespace(
-        tools=[SimpleNamespace(name="read_file", description="", inputSchema={})]
-    )
-
-    async def _call_tool(name: str, arguments: dict[str, object] | None = None) -> SimpleNamespace:
-        del name, arguments
-        return SimpleNamespace(content=[SimpleNamespace(type="text", text="ok")])
-
-    sess = SimpleNamespace()
-    sess.initialize = AsyncMock()
-    sess.list_tools = AsyncMock(return_value=listing)
-    sess.call_tool = _call_tool
-
-    client = MCPClient(hooks=_stub_hooks(sess))
-    await client.connect("fs", "python", [], {})
-    with caplog.at_level(logging.DEBUG, logger="monkeybot.core.mcp.mcp_client"):
-        resolved = await client.call_tool(
-            "fs",
-            "read_file",
-            {},
-            meta={"monkeybot": {"thread_id": "t1", "request_id": "r1", "run_id": None}},
-        )
-    assert resolved == "ok"
-    assert any("dropping request _meta" in r.message for r in caplog.records)
-
-
-@pytest.mark.asyncio
 async def test_disconnect_skips_browser_stop_when_tool_absent() -> None:
     """Servers without a ``browser_stop`` tool are unaffected (no spurious call_tool)."""
     listing = SimpleNamespace(

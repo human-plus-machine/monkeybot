@@ -208,8 +208,8 @@ server then announces `chatKey` as `null`.
 
 ### `Monkeybot.setChatScope`
 
-Before the first CDP command of a tool call (and whenever the value changes on
-the current connection), the in-app backend sends:
+On every in-app tool call, after the harness binds and before other CDP
+commands, the backend sends:
 
 ```json
 { "id": 7, "method": "Monkeybot.setChatScope", "params": { "chatKey": "<thread_id or null>" } }
