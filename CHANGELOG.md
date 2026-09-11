@@ -6,16 +6,6 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Breaking
-
-- `run_command` now runs inside a deny-by-default OS filesystem jail (macOS `sandbox-exec`; Linux mount-namespace, unvalidated on a real host as part of this change) on top of the existing binary/path allowlist. The user's home directory is denied by default; the workspace, artifacts, memory palace, and OS temp dirs stay read+write, and skills/the interpreter prefix/granted folders stay read-only, including when they sit inside the denied home directory (the normal case for a desktop app). This closes a real gap: the old argv-string path screen never caught indirect path expressions a shell or interpreter builds at runtime (`bash -c 'cp "$HOME/Desktop/x" .'`, or a Python `os.path.expanduser(...)` call), so a command that depended on reading/writing somewhere under `$HOME` outside the workspace — by accident or on purpose — will now fail where it previously succeeded. `git` keeps working via a narrow, explicit `~/.gitconfig`/`~/.config/git/ignore` read carve-out (needed even for `--version`); `gh` does not — its own auth config is credential-adjacent and is not carved out, matching the credential-path denylist already established for `computer_*` tools. If the OS jail mechanism itself is unavailable on a host (older kernels without unprivileged user namespaces, some hardened/CI Linux configs), `run_command` falls back to running **unconfined** (logged once, not per call) rather than refusing every command — a deliberate difference from the existing memory-off hide mechanism, which still fails closed, since this is default-on hardening for every deployment rather than a narrow, deliberate opt-out.
-
-#### Added
-
-- **Command grants:** an unlisted `run_command` binary now surfaces a "Needs your OK" approval card (`Decision.grant_key`/`grant_kind` on `CommandTierInspector`) instead of silently falling through to a hard `SecurityError` at the executor. "Allow once" covers the rest of the turn; "Always allow" writes a durable rule to a new home-level store, `grants.json` (`core/tools/grant_store.py`), shared by every agent on the machine — deliberately separate from the per-agent, `computer_*`-only `approvals.json`. Same on-disk contract (JSON, `0600`, atomic replace, cross-process exclusive-create locking matched with the Electron side).
-- **Folder read grants:** `read_file`/`load_file`/`glob`/`grep` on an absolute path outside the workspace now ask via a new `PathGrantInspector` rather than rejecting outright — denying credential paths and anything outside `$HOME` hard, never promotable. An approved folder is read in place through `WorkspaceFileService.extra_read_roots` (symlink-escape-protected, read-only — never widens what `write_file`/`replace_in_file` can touch); the same granted folders feed the `run_command` jail's read-only set so the shell tool and the file tools agree on what's reachable. Fixes the failure mode where the model, unable to read a file outside its workspace and told only "use a relative path," would narrate copying the file into the workspace to route around the boundary — tool descriptions, the harness prompt, and the `workspace_error_envelope` hint for this case now say to ask for access instead, explicitly calling relocating-to-route-around-the-boundary a policy violation.
-- Settings → Privacy & access gained **Allowed commands** and **Folder access** sections listing/revoking these new grants, alongside the existing per-agent `computer_*` rules.
-
 ## [browser v0.7.0] - 2026-09-10
 
 #### Added
@@ -26,11 +16,18 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 - Chat-switch tab drop now fires on real tool calls (`browser_harness()` reuse no longer forgets the last scoped chat).
 
-## [core v3.3.0] - 2026-09-10
+## [core v3.3.0] - 2026-09-11
 
-#### Added
+### Breaking
+
+- `run_command` now runs inside a deny-by-default OS filesystem jail (macOS `sandbox-exec`; Linux mount-namespace, unvalidated on a real host as part of this change) on top of the existing binary/path allowlist. The user's home directory is denied by default; the workspace, artifacts, memory palace, and OS temp dirs stay read+write, and skills/the interpreter prefix/granted folders stay read-only, including when they sit inside the denied home directory (the normal case for a desktop app). This closes a real gap: the old argv-string path screen never caught indirect path expressions a shell or interpreter builds at runtime (`bash -c 'cp "$HOME/Desktop/x" .'`, or a Python `os.path.expanduser(...)` call), so a command that depended on reading/writing somewhere under `$HOME` outside the workspace — by accident or on purpose — will now fail where it previously succeeded. `git` keeps working via a narrow, explicit `~/.gitconfig`/`~/.config/git/ignore` read carve-out (needed even for `--version`); `gh` does not — its own auth config is credential-adjacent and is not carved out, matching the credential-path denylist already established for `computer_*` tools. If the OS jail mechanism itself is unavailable on a host (older kernels without unprivileged user namespaces, some hardened/CI Linux configs), `run_command` falls back to running **unconfined** (logged once, not per call) rather than refusing every command — a deliberate difference from the existing memory-off hide mechanism, which still fails closed, since this is default-on hardening for every deployment rather than a narrow, deliberate opt-out.
+
+### Added
 
 - MCP tool calls now carry `_meta.monkeybot` (`thread_id`, `request_id`, `run_id`) so servers can attribute work to a chat. Requires `mcp>=1.27.1` so `ClientSession.call_tool(meta=)` is always available.
+- **Command grants:** an unlisted `run_command` binary now surfaces a "Needs your OK" approval card (`Decision.grant_key`/`grant_kind` on `CommandTierInspector`) instead of silently falling through to a hard `SecurityError` at the executor. "Allow once" covers the rest of the turn; "Always allow" writes a durable rule to a new home-level store, `grants.json` (`core/tools/grant_store.py`), shared by every agent on the machine — deliberately separate from the per-agent, `computer_*`-only `approvals.json`. Same on-disk contract (JSON, `0600`, atomic replace, cross-process exclusive-create locking matched with the Electron side).
+- **Folder read grants:** `read_file`/`load_file`/`glob`/`grep` on an absolute path outside the workspace now ask via a new `PathGrantInspector` rather than rejecting outright — denying credential paths and anything outside `$HOME` hard, never promotable. An approved folder is read in place through `WorkspaceFileService.extra_read_roots` (symlink-escape-protected, read-only — never widens what `write_file`/`replace_in_file` can touch); the same granted folders feed the `run_command` jail's read-only set so the shell tool and the file tools agree on what's reachable. Fixes the failure mode where the model, unable to read a file outside its workspace and told only "use a relative path," would narrate copying the file into the workspace to route around the boundary — tool descriptions, the harness prompt, and the `workspace_error_envelope` hint for this case now say to ask for access instead, explicitly calling relocating-to-route-around-the-boundary a policy violation.
+- Settings → Privacy & access gained **Allowed commands** and **Folder access** sections listing/revoking these new grants, alongside the existing per-agent `computer_*` rules.
 
 ## [browser v0.6.0] - 2026-09-07
 
