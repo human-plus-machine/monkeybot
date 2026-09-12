@@ -14,6 +14,7 @@ from monkeybot.core.llm.provider import Message, ProviderCallHints, UsageEvent
 from monkeybot.core.prompts.headings import (
     CURRENT_DATE_HEADING,
     CURRENT_REQUEST_HEADING,
+    INVOKED_SKILL_HEADING,
     MEMORY_INDEX_HEADING,
     MEMORY_NUDGE_HEADING,
     RUNTIME_NOTES_HEADING,
@@ -135,6 +136,7 @@ def test_volatile_markers_cover_every_heading_constant() -> None:
         MEMORY_NUDGE_HEADING,
         SKILLS_HEADING,
         TODO_LIST_HEADING,
+        INVOKED_SKILL_HEADING,
         CURRENT_REQUEST_HEADING,
         RUNTIME_NOTES_HEADING,
         SYSTEM_CONTEXT_UPDATE_HEADING,

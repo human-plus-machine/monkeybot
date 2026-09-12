@@ -19,7 +19,9 @@ from typing import Any
 
 _ALIAS_RE = re.compile(r"^[a-z][a-z0-9_-]{0,23}$")
 _CHROME_INTERNAL = ("chrome://", "chrome-untrusted://", "devtools://", "chrome-extension://")
-_SESSION_LOST = "session with given id"
+# Chrome: "Session with given id not found". Monkeyapp's flatten CDP bridge:
+# "unknown session" when the harness still holds a detached sessionId.
+_SESSION_GONE_MARKERS = ("session with given id", "unknown session")
 logger = logging.getLogger(__name__)
 _SINGLE_TAB_MARKERS = (
     "not allowed",
@@ -96,8 +98,18 @@ def _has_helper(helpers: Any, name: str) -> bool:
     return callable(getattr(helpers, name, None))
 
 
+def _message_has_marker(exc: BaseException, markers: tuple[str, ...]) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in markers)
+
+
 def _session_gone(exc: BaseException) -> bool:
-    return _SESSION_LOST in str(exc).lower()
+    return _message_has_marker(exc, _SESSION_GONE_MARKERS)
+
+
+def is_missing_page_error(exc: BaseException) -> bool:
+    """True when CDP has no live page (empty tabs). Fail-closed on unknown session."""
+    return "no page target" in str(exc).lower()
 
 
 def _log_detach_failure(session_id: str, exc: BaseException) -> None:
@@ -271,19 +283,25 @@ class TabHandle:
         return self.helpers.goto_url(url, target_id=self.state.target_id)
 
     def page_info(self) -> dict[str, Any]:
-        if self.focused or self.state is None:
-            info = self.helpers.page_info()
-            return info if isinstance(info, dict) else {}
-        raw = self.evaluate(_PAGE_INFO_JS)
-        if isinstance(raw, dict):
-            return raw
-        if isinstance(raw, str):
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError:
+        try:
+            if self.focused or self.state is None:
+                info = self.helpers.page_info()
+                return info if isinstance(info, dict) else {}
+            raw = self.evaluate(_PAGE_INFO_JS)
+            if isinstance(raw, dict):
+                return raw
+            if isinstance(raw, str):
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    return {}
+                return parsed if isinstance(parsed, dict) else {}
+            return {}
+        except Exception as exc:
+            if is_missing_page_error(exc):
+                logger.debug("page_info: no live page yet", exc_info=True)
                 return {}
-            return parsed if isinstance(parsed, dict) else {}
-        return {}
+            raise
 
     def capture_screenshot(
         self, path: str | None = None, full: bool = False, max_dim: int | None = None

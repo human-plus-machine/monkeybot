@@ -119,6 +119,36 @@ def test_act_stop_on_error_returns_completed_and_observation() -> None:
     assert result["observation"]["mode"] in {"diff", "full"}
 
 
+def test_act_goto_opens_tab_when_page_info_has_no_page() -> None:
+    """Empty in-app browser must not abort act/goto."""
+    helpers = MagicMock()
+    helpers.list_tabs.return_value = []
+    helpers.current_tab.return_value = None
+    helpers.js.return_value = True
+
+    def page_info() -> dict[str, str]:
+        if helpers.new_tab.called:
+            return {"url": "https://a.test/", "title": "A", "w": "800", "h": "600"}
+        raise RuntimeError("no page target")
+
+    helpers.page_info.side_effect = page_info
+    with (
+        _patch_harness(helpers),
+        patch.object(dom_indexing, "settle", return_value={"quiet": True, "navigated": False}),
+        patch.object(dom_indexing, "_register_driver_for_new_documents"),
+        patch.object(dom_indexing, "get_elements") as get_elements,
+    ):
+        result = json.loads(
+            server.browser_act(
+                [{"do": "goto", "url": "https://a.test/"}],
+                observe="none",
+            )
+        )
+    assert result["ok"] is True
+    helpers.new_tab.assert_called_once_with("https://a.test/")
+    get_elements.assert_not_called()
+
+
 def test_act_observe_none_skips_snapshot() -> None:
     helpers = _helpers()
     with (
