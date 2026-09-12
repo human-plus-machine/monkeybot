@@ -6,17 +6,17 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Core
-
-### Added
-
-- A leading `/slug` in the user turn pins that installed skill for the turn (`## Invoked skill`) without rewriting persisted chat text.
-
 ### Browser MCP
 
 #### Fixed
 
 - Empty in-app browsers report `no page target` so `browser_act` / `run_playbook` can `goto` instead of aborting. Stale sessions still fail closed when other tabs exist.
+
+## [core v3.4.0] - 2026-09-12
+
+### Added
+
+- A leading `/slug` in the user turn pins that installed skill for the turn (`## Invoked skill`) without rewriting persisted chat text.
 
 ## [browser v0.7.0] - 2026-09-10
 
