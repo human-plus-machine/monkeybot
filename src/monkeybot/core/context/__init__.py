@@ -163,6 +163,8 @@ class TurnContext:
     """Optional goal ledger (Phase 1). None when verifier.ledger is off."""
     verdict_mailbox: VerdictMailbox | None = None
     """Optional verdict mailbox (Phase 2). None when verifier.tracker is off."""
+    invoked_skill: SkillRef | None = None
+    """Installed skill the user explicitly invoked with a leading `/slug` this turn."""
 
 
 _log = logging.getLogger(__name__)

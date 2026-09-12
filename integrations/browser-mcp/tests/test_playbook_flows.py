@@ -144,6 +144,46 @@ def test_list_playbooks_includes_flows() -> None:
     assert listed["flows"] == [{"host": "a.test", "name": "signup", "params": ["nickname"]}]
 
 
+def test_run_playbook_opens_tab_when_page_info_has_no_page() -> None:
+    playbooks.write_playbook("a.test", _SIGNUP)
+    helpers = MagicMock()
+    helpers.list_tabs.return_value = []
+    helpers.current_tab.return_value = None
+    helpers.js.return_value = True
+
+    def page_info() -> dict[str, str]:
+        if helpers.new_tab.called:
+            return {"url": "https://a.test/form.html", "title": "A"}
+        raise RuntimeError("no page target")
+
+    helpers.page_info.side_effect = page_info
+    with (
+        _patch_harness(helpers),
+        patch.object(dom_indexing, "settle", return_value={"quiet": True, "navigated": False}),
+        patch.object(dom_indexing, "_register_driver_for_new_documents"),
+        patch.object(
+            actions,
+            "do_fill_form",
+            return_value={
+                "ok": True,
+                "filled": [{"label": "Nickname", "index": 1, "how": "label_for"}],
+                "unresolved": [],
+                "submitted": True,
+            },
+        ),
+        patch.object(playbooks, "check_expect", return_value=None),
+    ):
+        result = json.loads(
+            server.browser_run_playbook(
+                "a.test", "signup", {"nickname": "ada"}, observe="none"
+            )
+        )
+    assert result["ok"] is True
+    helpers.new_tab.assert_called_once_with("https://a.test/form.html")
+    assert result["name"] == "signup"
+    assert len(result["completed"]) == 2
+
+
 def test_run_playbook_success_and_expect() -> None:
     playbooks.write_playbook("a.test", _SIGNUP)
     helpers = _helpers()

@@ -15,6 +15,7 @@ from monkeybot.core.prompts.harness_prompt import (
 from monkeybot.core.prompts.headings import (
     CURRENT_DATE_HEADING,
     CURRENT_REQUEST_HEADING,
+    INVOKED_SKILL_HEADING,
     MEMORY_INDEX_HEADING,
     SKILLS_HEADING,
     TODO_LIST_HEADING,
@@ -114,6 +115,19 @@ def _skills_section(ctx: TurnContext) -> str:
     return f"{SKILLS_HEADING}{skills_block}" if skills_block else ""
 
 
+def _invoked_skill_section(ctx: TurnContext) -> str:
+    skill = ctx.invoked_skill
+    if skill is None:
+        return ""
+    return (
+        f"{INVOKED_SKILL_HEADING}"
+        f"The user explicitly invoked `{skill.name}`. "
+        "Use `list_skills` to get the skills root, then `read_file` that skill's "
+        f"`SKILL.md` (`skills/{skill.name}/SKILL.md`) and follow it before acting. "
+        "Text after the `/` command is the instruction for this invocation."
+    )
+
+
 def _todo_list_section(ctx: TurnContext) -> str:
     store = ctx.todo_store
     if store is None:
@@ -152,7 +166,7 @@ def compose_volatile_tail(
     *,
     chat_messages: Sequence[Message] | None = None,
 ) -> str:
-    """Volatile tail: current date + memory index + skills + current-request anchor."""
+    """Volatile tail: current date + memory index + skills + invoked skill + current-request anchor."""
     return "".join(compose_volatile_tail_parts(ctx, chat_messages=chat_messages).values())
 
 
@@ -165,12 +179,13 @@ def compose_volatile_tail_parts(
 
     Lets callers (e.g. ``ContextEpochTracker``) attribute a mid-epoch volatile
     change to the specific source that moved — current date, memory, skills,
-    todo list, or the current-request anchor — instead of a catch-all "volatile" label.
+    invoked skill, todo list, or the current-request anchor — instead of a catch-all "volatile" label.
     """
     return {
         "current_date": _current_date_block(),
         "memory": _memory_block(ctx),
         "skills": _skills_section(ctx),
+        "invoked_skill": _invoked_skill_section(ctx),
         "todos": _todo_list_section(ctx),
         "current_request": _current_request_block(chat_messages),
     }
@@ -191,6 +206,7 @@ def compose_system_prompt(
 
     Skill names are always taken from ``ctx.skills`` (zero-cost discovery); use
     ``list_skills``/``read_file`` for the skills root path and full ``SKILL.md`` procedure.
+    An explicit ``/slug`` invocation is listed under ``## Invoked skill`` for this turn.
     """
     stable = compose_stable_baseline(ctx, attachment_catalog=attachment_catalog)
     volatile = compose_volatile_tail(ctx, chat_messages=chat_messages)

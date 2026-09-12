@@ -46,6 +46,8 @@ from monkeybot.core.config.snapshot import (
     get_config_store,
 )
 from monkeybot.core.context import LoopsToolRegistry, build_context
+from monkeybot.core.context.common import text_from_blocks
+from monkeybot.core.context.slash_skills import apply_invoked_skill
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
 from monkeybot.core.knowledge.config import (
@@ -936,6 +938,8 @@ class GatewayLoopPort:
                     event_to_json(TurnComplete(request_id=request_id, usage=UsageTotals()))
                 )
                 return
+
+            ctx = apply_invoked_skill(ctx, text_from_blocks(user_content))
 
             executor = CoreToolExecutor(
                 workspace_root=workspace_root,

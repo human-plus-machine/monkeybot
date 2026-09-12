@@ -151,7 +151,10 @@ def prepare_action(
         )
     except tabs.UnknownTabError as exc:
         return PreparedAction(error=results.unknown_tab_result(exc), mode=mode)
-    before_url = str(handle.page_info().get("url") or "") if capture_url else ""
+    before_url = ""
+    if capture_url:
+        info = handle.page_info()
+        before_url = str(info.get("url") or "") if isinstance(info, dict) else ""
     return PreparedAction(
         error=None, helpers=helpers, handle=handle, mode=mode, before_url=before_url
     )

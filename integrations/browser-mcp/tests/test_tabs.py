@@ -208,6 +208,49 @@ def test_browser_stop_closes_agent_opened_tabs_at_cap(
     assert helpers.close_tab.call_count == 5
 
 
+def test_session_for_reattaches_on_unknown_session() -> None:
+    helpers = MagicMock()
+    helpers.cdp.side_effect = [
+        {"sessionId": "sid-1"},
+        {},
+        {},
+        RuntimeError("{'code': -32000, 'message': 'unknown session'}"),
+        {"sessionId": "sid-2"},
+        {},
+        {},
+        {"result": {"type": "string", "value": "ok"}},
+    ]
+    state = TabState(target_id="aaa", tab="t1", alias="t1")
+    tabs.reset_registry()
+    tabs.registry()._tabs["aaa"] = state
+    tabs.registry()._aliases["t1"] = "aaa"
+    handle = tabs.TabHandle(helpers, state, focused=False)
+    assert handle.evaluate("1+1") == "ok"
+    methods = [c.args[0] for c in helpers.cdp.call_args_list]
+    assert methods.count("Target.attachToTarget") == 2
+    assert state.session_id == "sid-2"
+
+
+def test_focused_page_info_returns_empty_on_no_page() -> None:
+    helpers = MagicMock()
+    helpers.page_info.side_effect = RuntimeError("no page target")
+    handle = tabs.TabHandle(helpers, None, focused=True)
+    assert handle.page_info() == {}
+    assert tabs.is_missing_page_error(RuntimeError("no page target"))
+    assert not tabs.is_missing_page_error(RuntimeError("unknown session"))
+    assert not tabs.is_missing_page_error(RuntimeError("tab sealed"))
+
+
+def test_focused_page_info_raises_on_unknown_session() -> None:
+    helpers = MagicMock()
+    helpers.page_info.side_effect = RuntimeError(
+        "{'code': -32000, 'message': 'unknown session'}"
+    )
+    handle = tabs.TabHandle(helpers, None, focused=True)
+    with pytest.raises(RuntimeError, match="unknown session"):
+        handle.page_info()
+
+
 def test_session_for_attaches_once_and_reattaches_on_lost_session() -> None:
     helpers = MagicMock()
     helpers.cdp.side_effect = [
