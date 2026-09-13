@@ -6,6 +6,12 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Browser MCP
+
+#### Fixed
+
+- Reuse the focused `about:blank` tab when opening a URL so agent `Target.createTarget` does not stack a leftover New tab next to the first real page.
+
 ## [browser v0.7.1] - 2026-09-12
 
 #### Fixed
