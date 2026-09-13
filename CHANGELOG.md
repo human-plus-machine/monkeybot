@@ -6,6 +6,12 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [browser v0.7.2] - 2026-09-13
+
+#### Fixed
+
+- Reuse the focused `about:blank` tab when opening a URL so agent `Target.createTarget` does not stack a leftover New tab next to the first real page.
+
 ## [browser v0.7.1] - 2026-09-12
 
 #### Fixed

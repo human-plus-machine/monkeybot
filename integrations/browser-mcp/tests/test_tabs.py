@@ -149,6 +149,27 @@ def test_user_opened_untouched_tabs_do_not_count_toward_cap(
     )
 
 
+def test_open_tab_reuses_focused_blank_instead_of_creating() -> None:
+    helpers = _helpers(tabs_list=[_tab("blank", "about:blank")], focused="blank")
+    helpers.cdp = MagicMock()
+
+    def goto_url(url: str, **_k: object) -> str:
+        helpers.current_tab.return_value = _tab("blank", url)
+        helpers.page_info.return_value = {"url": url, "title": "t", "w": 800, "h": 600}
+        return url
+
+    helpers.goto_url.side_effect = goto_url
+    with _patch_harness(helpers):
+        json.loads(server.browser_tabs())
+        result = json.loads(server.browser_open_tab("https://ex.test/new"))
+    assert result["ok"] is True
+    assert result["url"] == "https://ex.test/new"
+    assert all(
+        not (c.args and c.args[0] == "Target.createTarget")
+        for c in helpers.cdp.call_args_list
+    )
+
+
 def test_close_tab_then_retry_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BROWSER_MCP_MAX_TABS", "1")
     user = _tab("user", "https://user.test/")
