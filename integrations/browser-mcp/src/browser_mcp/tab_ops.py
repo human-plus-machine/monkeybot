@@ -76,8 +76,30 @@ def _close_target(helpers: Any, target_id: str) -> None:
     raise tabs.SingleTabBackendError()
 
 
+def _blank_target_id(helpers: Any) -> str | None:
+    """Reuse the focused about:blank tab instead of stacking a New tab."""
+    if not callable(getattr(helpers, "current_tab", None)):
+        return None
+    try:
+        row = helpers.current_tab()
+    except Exception:
+        logger.debug("current_tab failed while looking for a blank tab", exc_info=True)
+        return None
+    if not isinstance(row, dict):
+        return None
+    if not actions._is_blank_url(str(row.get("url") or "")):
+        return None
+    tid = row.get("targetId") or row.get("target_id")
+    return str(tid) if tid else None
+
+
 def _create_blank_target(helpers: Any, *, focus: bool, url: str = "about:blank") -> bool:
     """Create a tab. Returns True if ``url`` was already loaded by the helper."""
+    existing = _blank_target_id(helpers)
+    if existing:
+        if focus:
+            helpers.switch_tab(existing)
+        return actions._is_blank_url(url)
     if callable(getattr(helpers, "cdp", None)):
         try:
             result = helpers.cdp(
