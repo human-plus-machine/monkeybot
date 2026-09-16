@@ -13,6 +13,7 @@ from monkeybot.core.llm.provider import Done, Message, ProviderEvent, TextDelta,
 from monkeybot.core.runtime.events import UserSteered
 from monkeybot.core.runtime.input_admission import (
     AdmissionQueueFullError,
+    FollowUpNotFoundError,
     InputAdmission,
     join_text,
     preview_text,
@@ -50,6 +51,59 @@ def test_input_admission_full_raises() -> None:
     adm.enqueue_steer([Text(text="a")])
     with pytest.raises(AdmissionQueueFullError):
         adm.enqueue_steer([Text(text="b")])
+
+
+def test_promote_follow_up_moves_item_and_keeps_fifo() -> None:
+    adm = InputAdmission(max_steer=3, max_follow_up=3)
+    adm.enqueue_follow_up("a", [Text(text="one")])
+    adm.enqueue_follow_up("b", [Text(text="two")])
+    adm.enqueue_follow_up("c", [Text(text="three")])
+    assert adm.promote_follow_up("b") == 0
+    assert adm.follow_up_depth == 2
+    first = adm.pop_follow_up()
+    second = adm.pop_follow_up()
+    assert first is not None and first.request_id == "a"
+    assert second is not None and second.request_id == "c"
+    steered = adm.pop_steer()
+    assert steered is not None
+    assert steered.queued_request_id == "b"
+    assert isinstance(steered.content[0], Text) and steered.content[0].text == "two"
+
+
+def test_promote_follow_up_full_steer_leaves_follow_up() -> None:
+    adm = InputAdmission(max_steer=1, max_follow_up=2)
+    adm.enqueue_steer([Text(text="already")])
+    adm.enqueue_follow_up("q1", [Text(text="queued")])
+    with pytest.raises(AdmissionQueueFullError):
+        adm.promote_follow_up("q1")
+    assert adm.follow_up_depth == 1
+    remaining = adm.pop_follow_up()
+    assert remaining is not None and remaining.request_id == "q1"
+
+
+def test_promote_follow_up_missing_raises() -> None:
+    adm = InputAdmission()
+    with pytest.raises(FollowUpNotFoundError):
+        adm.promote_follow_up("missing")
+
+
+def test_drop_follow_up_removes_item_and_keeps_fifo() -> None:
+    adm = InputAdmission(max_follow_up=3)
+    adm.enqueue_follow_up("a", [Text(text="one")])
+    adm.enqueue_follow_up("b", [Text(text="two")])
+    adm.enqueue_follow_up("c", [Text(text="three")])
+    adm.drop_follow_up("b")
+    assert adm.follow_up_depth == 2
+    first = adm.pop_follow_up()
+    second = adm.pop_follow_up()
+    assert first is not None and first.request_id == "a"
+    assert second is not None and second.request_id == "c"
+
+
+def test_drop_follow_up_missing_raises() -> None:
+    adm = InputAdmission()
+    with pytest.raises(FollowUpNotFoundError):
+        adm.drop_follow_up("missing")
 
 
 def test_join_text_keeps_full_steer_preview_truncates() -> None:
@@ -119,7 +173,10 @@ async def test_steer_injected_after_tool_batch_before_next_provider_call() -> No
     class SteerOnExecute:
         async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
             del call, ctx
-            admission.enqueue_steer([Text(text="steer mid-tool")])
+            admission.enqueue_steer(
+                [Text(text="steer mid-tool")],
+                queued_request_id="q-steer",
+            )
             await asyncio.sleep(0.01)
             return ToolExecutionResult.ok_text("file ok")
 
@@ -148,6 +205,7 @@ async def test_steer_injected_after_tool_batch_before_next_provider_call() -> No
     steered = [e for e in events if isinstance(e, UserSteered)]
     assert len(steered) == 1
     assert steered[0].text == "steer mid-tool"
+    assert steered[0].queued_request_id == "q-steer"
     assert prov.calls == 2
     assert "steer mid-tool" in seen_user_msgs
     assert admission.pop_steer() is None
@@ -402,3 +460,177 @@ async def test_follow_up_dropped_after_lock_wait_budget(
         assert started == []
         assert bus.admission.follow_up_depth == 0
         assert bus.current_request_id is None
+
+
+@pytest.mark.asyncio
+async def test_promote_queue_to_steer_while_busy(registry: SessionRegistry) -> None:
+    hold = asyncio.Event()
+
+    class HoldingLoop:
+        async def start_turn(
+            self,
+            session_id: str,
+            request_id: str,
+            user_content: list[Text],
+        ) -> None:
+            _ = (session_id, request_id, user_content)
+            await hold.wait()
+
+    app = create_app(loop_port=HoldingLoop(), registry=registry)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        cr = await client.post("/sessions", json={})
+        sid = cr.json()["session_id"]
+        r1 = await client.post(
+            f"/sessions/{sid}/reply",
+            json={"request_id": "a", "message": "one"},
+        )
+        assert r1.status_code == 200
+        r2 = await client.post(
+            f"/sessions/{sid}/queue",
+            json={"request_id": "b", "message": "two"},
+        )
+        assert r2.status_code == 202
+        bus = registry.get(sid)
+        assert bus is not None
+        assert bus.admission.follow_up_depth == 1
+
+        promoted = await client.post(f"/sessions/{sid}/queue/b/steer")
+        assert promoted.status_code == 202
+        body = promoted.json()
+        assert body["queue"] == "steer"
+        assert body["request_id"] == "b"
+        assert body["position"] == 0
+        assert bus.admission.follow_up_depth == 0
+        assert bus.admission.steer_depth == 1
+        hold.set()
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_promote_queue_requires_busy_session(registry: SessionRegistry) -> None:
+    app = create_app(registry=registry)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        cr = await client.post("/sessions", json={})
+        sid = cr.json()["session_id"]
+        r = await client.post(f"/sessions/{sid}/queue/missing/steer")
+        assert r.status_code == 409
+        assert r.json()["error"]["code"] == "SESSION_IDLE"
+
+
+@pytest.mark.asyncio
+async def test_promote_unknown_follow_up_while_busy(registry: SessionRegistry) -> None:
+    hold = asyncio.Event()
+
+    class HoldingLoop:
+        async def start_turn(
+            self,
+            session_id: str,
+            request_id: str,
+            user_content: list[Text],
+        ) -> None:
+            _ = (session_id, request_id, user_content)
+            await hold.wait()
+
+    app = create_app(loop_port=HoldingLoop(), registry=registry)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        cr = await client.post("/sessions", json={})
+        sid = cr.json()["session_id"]
+        r1 = await client.post(
+            f"/sessions/{sid}/reply",
+            json={"request_id": "a", "message": "one"},
+        )
+        assert r1.status_code == 200
+        r = await client.post(f"/sessions/{sid}/queue/missing/steer")
+        assert r.status_code == 409
+        assert r.json()["error"]["code"] == "FOLLOW_UP_NOT_FOUND"
+        hold.set()
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_promote_steer_full_does_not_drop_follow_up(registry: SessionRegistry) -> None:
+    hold = asyncio.Event()
+
+    class HoldingLoop:
+        async def start_turn(
+            self,
+            session_id: str,
+            request_id: str,
+            user_content: list[Text],
+        ) -> None:
+            _ = (session_id, request_id, user_content)
+            await hold.wait()
+
+    app = create_app(loop_port=HoldingLoop(), registry=registry)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        cr = await client.post("/sessions", json={})
+        sid = cr.json()["session_id"]
+        r1 = await client.post(
+            f"/sessions/{sid}/reply",
+            json={"request_id": "a", "message": "one"},
+        )
+        assert r1.status_code == 200
+        bus = registry.get(sid)
+        assert bus is not None
+        bus.admission.max_steer = 1
+        bus.admission.enqueue_steer([Text(text="already")])
+        r2 = await client.post(
+            f"/sessions/{sid}/queue",
+            json={"request_id": "b", "message": "two"},
+        )
+        assert r2.status_code == 202
+        r = await client.post(f"/sessions/{sid}/queue/b/steer")
+        assert r.status_code == 429
+        assert r.json()["error"]["code"] == "STEER_QUEUE_FULL"
+        assert bus.admission.follow_up_depth == 1
+        hold.set()
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_drop_queued_follow_up_while_busy(registry: SessionRegistry) -> None:
+    hold = asyncio.Event()
+
+    class HoldingLoop:
+        async def start_turn(
+            self,
+            session_id: str,
+            request_id: str,
+            user_content: list[Text],
+        ) -> None:
+            _ = (session_id, request_id, user_content)
+            await hold.wait()
+
+    app = create_app(loop_port=HoldingLoop(), registry=registry)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        cr = await client.post("/sessions", json={})
+        sid = cr.json()["session_id"]
+        r1 = await client.post(
+            f"/sessions/{sid}/reply",
+            json={"request_id": "a", "message": "one"},
+        )
+        assert r1.status_code == 200
+        r2 = await client.post(
+            f"/sessions/{sid}/queue",
+            json={"request_id": "b", "message": "two"},
+        )
+        assert r2.status_code == 202
+        bus = registry.get(sid)
+        assert bus is not None
+        assert bus.admission.follow_up_depth == 1
+        dropped = await client.delete(f"/sessions/{sid}/queue/b")
+        assert dropped.status_code == 204
+        assert bus.admission.follow_up_depth == 0
+        hold.set()
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_drop_unknown_follow_up(registry: SessionRegistry) -> None:
+    app = create_app(loop_port=object(), registry=registry)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        cr = await client.post("/sessions", json={})
+        sid = cr.json()["session_id"]
+        r = await client.delete(f"/sessions/{sid}/queue/missing")
+        assert r.status_code == 409
+        assert r.json()["error"]["code"] == "FOLLOW_UP_NOT_FOUND"

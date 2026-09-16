@@ -371,6 +371,11 @@ def test_agent_event_roundtrip_user_steered() -> None:
     assert event_from_json(event_to_json(ev)) == ev
 
 
+def test_agent_event_roundtrip_user_steered_queued_request_id() -> None:
+    ev = UserSteered(request_id="r1", text="nudge", queued_request_id="q-1")
+    assert event_from_json(event_to_json(ev)) == ev
+
+
 def test_verifier_verdict_roundtrip() -> None:
     ev = VerifierVerdict(
         request_id="r1",

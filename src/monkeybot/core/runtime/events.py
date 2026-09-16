@@ -248,6 +248,7 @@ class UserSteered:
     kind: Literal["UserSteered"] = "UserSteered"
     request_id: str = ""
     text: str = ""
+    queued_request_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -694,7 +695,10 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             "search_queries": list(event.search_queries),
         }
     if isinstance(event, UserSteered):
-        return {**base, "text": event.text}
+        steered: dict[str, object] = {**base, "text": event.text}
+        if event.queued_request_id:
+            steered["queued_request_id"] = event.queued_request_id
+        return steered
     if isinstance(event, VerifierVerdict):
         payload: dict[str, object] = {
             **base,
@@ -1138,7 +1142,9 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
     if t == "UserSteered":
         text_raw = payload.get("text", "")
         text = text_raw if isinstance(text_raw, str) else ""
-        return UserSteered(request_id=rid, text=text)
+        qid_raw = payload.get("queued_request_id", "")
+        queued_request_id = qid_raw if isinstance(qid_raw, str) else ""
+        return UserSteered(request_id=rid, text=text, queued_request_id=queued_request_id)
     if t == "VerifierVerdict":
         signals_raw = payload.get("triggering_signals") or []
         signals = tuple(str(s) for s in signals_raw) if isinstance(signals_raw, list) else ()

@@ -28,6 +28,14 @@ class AdmissionQueueFullError(Exception):
         self.max_size = max_size
 
 
+class FollowUpNotFoundError(Exception):
+    """Raised when a follow-up ``request_id`` is not in the queue."""
+
+    def __init__(self, request_id: str) -> None:
+        super().__init__(f"follow-up {request_id} is not queued")
+        self.request_id = request_id
+
+
 def _queue_limit(env_name: str, default: int) -> int:
     raw = os.environ.get(env_name)
     if raw is None or raw.strip() == "":
@@ -57,6 +65,7 @@ class SteerItem:
 
     content: list[ContentBlock]
     provenance: str = "human"
+    queued_request_id: str | None = None
 
 
 class InputAdmission:
@@ -92,6 +101,7 @@ class InputAdmission:
         content: list[ContentBlock],
         *,
         provenance: str = "human",
+        queued_request_id: str | None = None,
     ) -> int:
         """Append steer content; return 0-based queue position.
 
@@ -103,7 +113,13 @@ class InputAdmission:
             raise ValueError("steer content must be non-empty")
         if len(self._steer) >= self.max_steer:
             raise AdmissionQueueFullError("steer", self.max_steer)
-        self._steer.append(SteerItem(content=list(content), provenance=provenance))
+        self._steer.append(
+            SteerItem(
+                content=list(content),
+                provenance=provenance,
+                queued_request_id=queued_request_id,
+            )
+        )
         return len(self._steer) - 1
 
     def enqueue_follow_up(self, request_id: str, content: list[ContentBlock]) -> int:
@@ -116,6 +132,55 @@ class InputAdmission:
             raise AdmissionQueueFullError("follow_up", self.max_follow_up)
         self._follow_up.append(FollowUpItem(request_id=request_id, content=list(content)))
         return len(self._follow_up) - 1
+
+    def promote_follow_up(self, request_id: str) -> int:
+        """Move a follow-up into the steer queue. Return 0-based steer position.
+
+        Capacity is checked before removal so a full steer queue cannot drop
+        the follow-up. Remaining follow-ups keep their FIFO order.
+
+        Raises:
+            FollowUpNotFoundError: when ``request_id`` is not queued.
+            AdmissionQueueFullError: when steer is at capacity (item stays queued).
+            ValueError: when ``request_id`` is empty.
+        """
+        if not request_id.strip():
+            raise ValueError("follow-up request_id must be non-empty")
+        if len(self._steer) >= self.max_steer:
+            raise AdmissionQueueFullError("steer", self.max_steer)
+        index = next(
+            (i for i, item in enumerate(self._follow_up) if item.request_id == request_id),
+            None,
+        )
+        if index is None:
+            raise FollowUpNotFoundError(request_id)
+        item = self._follow_up[index]
+        del self._follow_up[index]
+        self._steer.append(
+            SteerItem(
+                content=list(item.content),
+                provenance="human",
+                queued_request_id=item.request_id,
+            )
+        )
+        return len(self._steer) - 1
+
+    def drop_follow_up(self, request_id: str) -> None:
+        """Remove a follow-up without promoting it.
+
+        Raises:
+            FollowUpNotFoundError: when ``request_id`` is not queued.
+            ValueError: when ``request_id`` is empty.
+        """
+        if not request_id.strip():
+            raise ValueError("follow-up request_id must be non-empty")
+        index = next(
+            (i for i, item in enumerate(self._follow_up) if item.request_id == request_id),
+            None,
+        )
+        if index is None:
+            raise FollowUpNotFoundError(request_id)
+        del self._follow_up[index]
 
     def pop_steer(self) -> SteerItem | None:
         """Take the oldest steer message, or ``None`` if empty."""
@@ -163,6 +228,7 @@ def preview_text(content: list[ContentBlock], *, limit: int = 200) -> str:
 __all__ = [
     "AdmissionQueueFullError",
     "FollowUpItem",
+    "FollowUpNotFoundError",
     "InputAdmission",
     "SteerItem",
     "join_text",

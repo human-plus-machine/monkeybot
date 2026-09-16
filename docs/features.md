@@ -97,8 +97,10 @@ One **user message** may span multiple **inner turns** (model → tools → mode
 | Reply | `POST /sessions/{id}/reply` | Session idle | Starts a turn immediately (`SESSION_BUSY` if busy) |
 | Steer | `POST /sessions/{id}/steer` | Session busy | Injected after current tool batch / before next provider call |
 | Follow-up | `POST /sessions/{id}/queue` | Busy → enqueue; idle → start | FIFO drain after `TurnComplete` / lock release |
+| Promote | `POST /sessions/{id}/queue/{request_id}/steer` | Session busy and item still queued | Atomic move from follow-up → steer; injected at the next inner-turn boundary |
+| Drop | `DELETE /sessions/{id}/queue/{request_id}` | Item still in the follow-up queue | Removes it so it will not drain or promote |
 
-Do **not** conflate with HITL `ToolConfirmationRequest`. Cancel clears pending steer; follow-ups survive. Caps: `MONKEYBOT_STEER_QUEUE_MAX` (default 8), `MONKEYBOT_FOLLOW_UP_QUEUE_MAX` (default 16).
+Do **not** conflate with HITL `ToolConfirmationRequest`. Cancel clears pending steer; follow-ups survive. Caps: `MONKEYBOT_STEER_QUEUE_MAX` (default 8), `MONKEYBOT_FOLLOW_UP_QUEUE_MAX` (default 16). `UserSteered.queued_request_id` is set when the injected steer came from a promoted follow-up.
 
 **Process-local only:** steer/follow-up queues live on the in-process `SessionBus` (same constraint as the SSE registry). Multi-replica gateways do not share admission queues across instances — pin sticky sessions to one replica, or treat `/queue` as best-effort for single-process deployments. If drain cannot acquire the durable turn lock (another replica / stale claim), the item is requeued and retried on an interval (`MONKEYBOT_FOLLOW_UP_LOCK_RETRY_S`, default 1s) until the lock frees or the wait budget expires (`MONKEYBOT_FOLLOW_UP_LOCK_WAIT_MS`, default = session-turn stale window), after which that follow-up is dropped so the queue cannot wedge forever.
 

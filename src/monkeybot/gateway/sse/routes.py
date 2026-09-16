@@ -34,7 +34,11 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.usage_buckets import coerce_granularity, validate_hour_bucket_window
 from monkeybot.core.runtime.context_budget import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.events import QueuedInputAccepted, event_to_json
-from monkeybot.core.runtime.input_admission import AdmissionQueueFullError, FollowUpItem
+from monkeybot.core.runtime.input_admission import (
+    AdmissionQueueFullError,
+    FollowUpItem,
+    FollowUpNotFoundError,
+)
 from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
 from monkeybot.core.types.content_blocks import ContentBlock
 
@@ -766,6 +770,93 @@ def create_app(
             queue="follow_up",
             position=position,
         )
+
+    @api.post(
+        "/sessions/{session_id}/queue/{request_id}/steer",
+        response_model=AdmissionAcceptedResponse,
+        status_code=202,
+    )
+    async def post_promote_queue_to_steer(
+        session_id: str,
+        request_id: str,
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> AdmissionAcceptedResponse:
+        """Promote a queued follow-up into the in-flight turn's steer queue."""
+        bus = _require_bus(reg_dep, session_id)
+        current_request_id = bus.current_request_id
+        if current_request_id is None:
+            raise APIError(
+                409,
+                "SESSION_IDLE",
+                "Session is idle; queued follow-ups drain automatically",
+                uuid.uuid4().hex,
+            )
+        try:
+            position = bus.admission.promote_follow_up(request_id)
+        except FollowUpNotFoundError as exc:
+            raise APIError(
+                409,
+                "FOLLOW_UP_NOT_FOUND",
+                str(exc),
+                uuid.uuid4().hex,
+            ) from exc
+        except AdmissionQueueFullError as exc:
+            logger.warning(
+                "steer queue full on promote %s",
+                kv(session_id=session_id, request_id=request_id, max_size=exc.max_size),
+            )
+            raise APIError(
+                429,
+                "STEER_QUEUE_FULL",
+                str(exc),
+                uuid.uuid4().hex,
+            ) from exc
+        except ValueError as exc:
+            raise APIError(
+                400,
+                "BAD_REQUEST",
+                str(exc),
+                uuid.uuid4().hex,
+            ) from exc
+        return await _publish_admission_accepted(
+            bus,
+            request_id=request_id,
+            queue="steer",
+            position=position,
+        )
+
+    @api.delete(
+        "/sessions/{session_id}/queue/{request_id}",
+        status_code=204,
+    )
+    async def delete_queued_follow_up(
+        session_id: str,
+        request_id: str,
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> Response:
+        """Drop a queued follow-up so it will not drain or promote."""
+        bus = _require_bus(reg_dep, session_id)
+        try:
+            bus.admission.drop_follow_up(request_id)
+        except FollowUpNotFoundError as exc:
+            raise APIError(
+                409,
+                "FOLLOW_UP_NOT_FOUND",
+                str(exc),
+                uuid.uuid4().hex,
+            ) from exc
+        except ValueError as exc:
+            raise APIError(
+                400,
+                "BAD_REQUEST",
+                str(exc),
+                uuid.uuid4().hex,
+            ) from exc
+        logger.info(
+            "follow-up dropped %s",
+            kv(session_id=session_id, request_id=request_id),
+        )
+        return Response(status_code=204)
 
     @api.post(
         "/sessions/{session_id}/attachments",
