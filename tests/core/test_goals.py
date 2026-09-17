@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 
@@ -9,7 +10,8 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from monkeybot.core.context import GOAL_TOOL_DEFS, GOAL_TOOL_NAMES, SkillRef, build_context
-from monkeybot.core.goals.service import DurableGoalService, GoalConflictError
+from monkeybot.core.context.slash_skills import apply_invoked_skill
+from monkeybot.core.goals.service import DurableGoalService, GoalConflictError, GoalNotFoundError
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.persistence.scheduled_loops import (
     KIND_GOAL,
@@ -67,6 +69,23 @@ async def test_goal_create_is_idempotent_and_one_per_session(store) -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_goal_creation_keeps_one_open_goal(store) -> None:
+    service = DurableGoalService(store)
+    results = await asyncio.gather(
+        service.create(objective="Ship the report", session_id="sess-race"),
+        service.create(objective="Ship the report", session_id="sess-race"),
+    )
+    assert sum(1 for _row, created in results if created) == 1
+    assert len({row.loop_id for row, _created in results}) == 1
+    open_goals = [
+        row
+        for row in await service.list_goals()
+        if row.session_id == "sess-race" and row.status in {"active", "paused"}
+    ]
+    assert len(open_goals) == 1
+
+
+@pytest.mark.asyncio
 async def test_goal_pause_resume_and_user_stop(store) -> None:
     service = DurableGoalService(store)
     row, _ = await service.create(objective="Ship it", session_id="sess-1")
@@ -74,16 +93,40 @@ async def test_goal_pause_resume_and_user_stop(store) -> None:
     assert paused.status == "paused"
     resumed = await service.resume(row.loop_id)
     assert resumed.status == "active"
-    via_tool = await service.update(session_id="sess-1", status="active")
+    via_tool = await service.update(
+        goal_id=row.loop_id,
+        session_id="sess-1",
+        status="active",
+    )
     assert via_tool.status == "active"
     await service.pause(row.loop_id)
-    via_resume = await service.update(session_id="sess-1", status="active")
+    via_resume = await service.update(
+        goal_id=row.loop_id,
+        session_id="sess-1",
+        status="active",
+    )
     assert via_resume.status == "active"
     stopped = await service.stop(row.loop_id)
     assert stopped.status == "completed"
     assert stopped.stop_reason == "manual"
     again = await service.stop(row.loop_id)
     assert again.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_update_goal_is_scoped_by_goal_id_and_session(store) -> None:
+    service = DurableGoalService(store)
+    first, _ = await service.create(objective="First", session_id="sess-1")
+    second, _ = await service.create(objective="Second", session_id="sess-2")
+    with pytest.raises(GoalNotFoundError):
+        await service.update(
+            goal_id=second.loop_id,
+            session_id="sess-1",
+            status="complete",
+        )
+    still_open = await service.get(first.loop_id)
+    assert still_open is not None
+    assert still_open.status == "active"
 
 
 @pytest.mark.asyncio
@@ -98,13 +141,75 @@ async def test_goal_tick_error_retries_instead_of_failing(store) -> None:
     assert completed.status == "active"
     assert completed.last_error == "timeout"
     assert completed.stop_reason is None
-    await service.update(session_id="sess-1", status="complete")
+    await service.update(
+        goal_id=row.loop_id,
+        session_id="sess-1",
+        status="complete",
+    )
     done = await store.get(row.loop_id)
     assert done is not None
     assert done.status == "completed"
     assert done.stop_reason == "complete"
     claimed_after = await store.claim_tick(row.loop_id, "worker-1")
     assert claimed_after is None
+
+
+@pytest.mark.asyncio
+async def test_goal_stops_after_three_consecutive_tick_errors(store) -> None:
+    service = DurableGoalService(store)
+    row, _ = await service.create(objective="Keep going", session_id="sess-fail")
+    for attempt in range(1, 4):
+        await _force_due(store, row.loop_id)
+        claimed = await store.claim_tick(row.loop_id, f"worker-{attempt}")
+        assert claimed is not None
+        completed = await store.complete_tick(
+            row.loop_id,
+            worker_id=f"worker-{attempt}",
+            error=f"timeout-{attempt}",
+        )
+        assert completed is not None
+        assert completed.consecutive_error_count == attempt
+    assert completed.status == "failed"
+    assert completed.stop_reason == "consecutive_tick_errors"
+    assert await store.claim_tick(row.loop_id, "worker-next") is None
+
+
+@pytest.mark.asyncio
+async def test_successful_goal_tick_resets_consecutive_errors(store) -> None:
+    service = DurableGoalService(store)
+    row, _ = await service.create(objective="Keep going", session_id="sess-recover")
+    await _force_due(store, row.loop_id)
+    assert await store.claim_tick(row.loop_id, "worker-1") is not None
+    failed = await store.complete_tick(row.loop_id, worker_id="worker-1", error="timeout")
+    assert failed is not None and failed.consecutive_error_count == 1
+    await _force_due(store, row.loop_id)
+    assert await store.claim_tick(row.loop_id, "worker-2") is not None
+    recovered = await store.complete_tick(row.loop_id, worker_id="worker-2")
+    assert recovered is not None
+    assert recovered.status == "active"
+    assert recovered.consecutive_error_count == 0
+    assert recovered.last_error is None
+
+
+@pytest.mark.asyncio
+async def test_goal_stops_after_three_stale_claim_releases(store) -> None:
+    service = DurableGoalService(store)
+    row, _ = await service.create(objective="Keep going", session_id="sess-crash")
+    for attempt in range(1, 4):
+        await _force_due(store, row.loop_id)
+        assert await store.claim_tick(row.loop_id, f"worker-{attempt}") is not None
+        await store._conn.execute(
+            "UPDATE scheduled_loops SET claimed_at_ms = 1 WHERE loop_id = ?",
+            (row.loop_id,),
+        )
+        await store._conn.commit()
+        assert await store.release_stale_claims(100) == 1
+        current = await store.get(row.loop_id)
+        assert current is not None
+        assert current.consecutive_error_count == attempt
+    assert current.status == "failed"
+    assert current.stop_reason == "consecutive_tick_errors"
+    assert current.last_error == "stale tick claim released"
 
 
 @pytest.mark.asyncio
@@ -217,12 +322,20 @@ async def test_create_goal_requires_slash_invocation(tmp_path) -> None:
     paused = await DurableGoalService(backend.scheduled_loops()).pause(payload["goal"]["id"])
     assert paused.status == "paused"
     resumed = await ex.execute(
-        call=ToolCall(name="update_goal", args={"status": "active"}, call_id="3"),
+        call=ToolCall(
+            name="update_goal",
+            args={"goal_id": payload["goal"]["id"], "status": "active"},
+            call_id="3",
+        ),
         ctx=replace(_ctx(), invoked_skill=SkillRef(name="goal", description="Goal")),
     )
     assert resumed.error is None
     done = await ex.execute(
-        call=ToolCall(name="update_goal", args={"status": "complete"}, call_id="4"),
+        call=ToolCall(
+            name="update_goal",
+            args={"goal_id": payload["goal"]["id"], "status": "complete"},
+            call_id="4",
+        ),
         ctx=_ctx(),
     )
     assert done.error is None
@@ -251,12 +364,17 @@ async def test_create_goal_skips_loop_confirmation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_build_context_advertises_goal_tools_when_storage_exists(
+async def test_goal_tools_are_advertised_only_for_goal_turns(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("ATTACHMENTS_ENABLED", "false")
     (tmp_path / "AGENT.md").write_text("You are a helpful assistant.\n", encoding="utf-8")
-    (tmp_path / "skills").mkdir()
+    skill_dir = tmp_path / "skills" / "goal"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: goal\ndescription: Durable goal\n---\n",
+        encoding="utf-8",
+    )
     ctx = await build_context(
         "t",
         "r",
@@ -268,8 +386,19 @@ async def test_build_context_advertises_goal_tools_when_storage_exists(
         loops_advertised=False,
     )
     names = {t.name for t in ctx.tools}
-    assert GOAL_TOOL_NAMES.issubset(names)
+    assert GOAL_TOOL_NAMES.isdisjoint(names)
     assert "start_loop" not in names
+    goal_ctx = apply_invoked_skill(ctx, "/goal Ship the report")
+    assert GOAL_TOOL_NAMES.issubset({tool.name for tool in goal_ctx.tools})
+    regular_ctx = apply_invoked_skill(ctx, "What is the status?")
+    assert GOAL_TOOL_NAMES.isdisjoint({tool.name for tool in regular_ctx.tools})
+    continuation_ctx = apply_invoked_skill(
+        ctx,
+        "[GOAL CONTINUATION · goal_id=goal-1 · session=t]\n\nContinue",
+    )
+    continuation_names = {tool.name for tool in continuation_ctx.tools}
+    assert "update_goal" in continuation_names
+    assert "create_goal" not in continuation_names
 
 
 def test_goal_tool_schemas_are_cursor_style() -> None:
@@ -278,9 +407,9 @@ def test_goal_tool_schemas_are_cursor_style() -> None:
     assert list(create.input_schema["properties"]) == ["objective"]
     assert create.input_schema["required"] == ["objective"]
     update = tools["update_goal"]
-    assert list(update.input_schema["properties"]) == ["status"]
+    assert list(update.input_schema["properties"]) == ["goal_id", "status"]
     assert update.input_schema["properties"]["status"]["enum"] == ["active", "complete"]
-    assert update.input_schema["required"] == ["status"]
+    assert update.input_schema["required"] == ["goal_id", "status"]
 
 
 @pytest.mark.asyncio
@@ -327,10 +456,9 @@ def test_goal_tick_prompt_restores_objective() -> None:
     assert "Ship the weekly report" in prompt
     assert "Do not call create_goal again" in prompt
     assert "SCHEDULED TICK" not in prompt
-    tick_index, status, stop_reason, _, last_error = resolve_complete_tick(
-        row, error="boom", now_ms=1000
-    )
-    assert tick_index == 3
-    assert status == "active"
-    assert stop_reason is None
-    assert last_error == "boom"
+    result = resolve_complete_tick(row, error="boom", now_ms=1000)
+    assert result.tick_index == 3
+    assert result.status == "active"
+    assert result.stop_reason is None
+    assert result.last_error == "boom"
+    assert result.consecutive_error_count == 1

@@ -42,6 +42,7 @@ from monkeybot.core.runtime.input_admission import (
 from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
 from monkeybot.core.types.content_blocks import ContentBlock
 
+from .goal_routes import build_goals_router
 from .loop_port import LoopPort, UsagePort
 from .models import (
     AdmissionAcceptedResponse,
@@ -66,7 +67,6 @@ from .models import (
 )
 from .reload import build_admin_router
 from .reply_body import ReplyBodyError, normalize_reply_to_user_content
-from .goal_routes import build_goals_router
 from .scheduler_routes import build_scheduler_router
 from .session_bus import SessionAlreadyExistsError, SessionBus, SessionRegistry
 from .sse import format_active_requests, format_ping

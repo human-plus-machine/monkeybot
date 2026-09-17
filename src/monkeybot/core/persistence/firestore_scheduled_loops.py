@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from collections.abc import Awaitable, Callable, Collection
@@ -13,7 +14,12 @@ from google.cloud.firestore import AsyncClient
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from monkeybot.core.persistence.scheduled_loops import (
+    GOAL_MAX_CONSECUTIVE_ERRORS,
+    KIND_GOAL,
     KIND_LOOP,
+    OPEN_GOAL_STATUSES,
+    OpenGoalExistsError,
+    PlannedScheduledLoop,
     ScheduledLoopCreate,
     ScheduledLoopRow,
     doc_to_scheduled_loop_row,
@@ -36,6 +42,36 @@ def _collection_name(prefix: str, base: str) -> str:
     return f"{prefix}_{base}"
 
 
+def _validated_kind(kind: str) -> str:
+    if kind not in {KIND_LOOP, KIND_GOAL}:
+        raise ValueError(f"invalid scheduled loop kind: {kind!r}")
+    return kind
+
+
+def _create_payload(values: PlannedScheduledLoop) -> dict[str, object]:
+    return {
+        "session_id": values.session_id,
+        "status": "active",
+        "prompt": values.prompt,
+        "interval_ms": values.interval_ms,
+        "max_ticks": values.max_ticks,
+        "max_runtime_ms": values.max_runtime_ms,
+        "skip_if_busy": 1 if values.skip_if_busy else 0,
+        "tick_index": 0,
+        "next_tick_at_ms": values.next_tick_at_ms,
+        "started_at_ms": values.started_at_ms,
+        "last_tick_at_ms": None,
+        "last_error": None,
+        "stop_reason": None,
+        "tick_in_flight": 0,
+        "worker_id": None,
+        "claimed_at_ms": None,
+        "kind": values.kind,
+        "objective": values.objective,
+        "consecutive_error_count": 0,
+    }
+
+
 class FirestoreScheduledLoopStore:
     """Firestore-backed scheduled-loop store."""
 
@@ -45,6 +81,10 @@ class FirestoreScheduledLoopStore:
 
     def _doc(self, loop_id: str) -> firestore.AsyncDocumentReference:
         return self._client.collection(self._collection).document(loop_id)
+
+    def _goal_lock_doc(self, session_id: str) -> firestore.AsyncDocumentReference:
+        digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+        return self._client.collection(f"{self._collection}_goal_sessions").document(digest)
 
     @staticmethod
     def _try_doc_to_row(doc_id: str, data: dict[str, object]) -> ScheduledLoopRow | None:
@@ -81,29 +121,17 @@ class FirestoreScheduledLoopStore:
     async def create(self, spec: ScheduledLoopCreate) -> ScheduledLoopRow:
         now_ms = int(time.time() * 1000)
         values = planned_create(spec, now_ms=now_ms)
-        loop_id = str(values["loop_id"])
-        payload = {
-            "session_id": values["session_id"],
-            "status": "active",
-            "prompt": values["prompt"],
-            "interval_ms": values["interval_ms"],
-            "max_ticks": values["max_ticks"],
-            "max_runtime_ms": values["max_runtime_ms"],
-            "skip_if_busy": 1 if values["skip_if_busy"] else 0,
-            "tick_index": 0,
-            "next_tick_at_ms": values["next_tick_at_ms"],
-            "started_at_ms": values["started_at_ms"],
-            "last_tick_at_ms": None,
-            "last_error": None,
-            "stop_reason": None,
-            "tick_in_flight": 0,
-            "worker_id": None,
-            "claimed_at_ms": None,
-            "kind": values["kind"] or KIND_LOOP,
-            "objective": values["objective"],
-        }
-        doc_ref = self._doc(loop_id)
+        payload = _create_payload(values)
+        if values.kind == KIND_GOAL:
+            await self._insert_goal(values, payload)
+        else:
+            await self._insert_loop(values.loop_id, payload)
+        row = await self.get(values.loop_id)
+        if row is None:
+            raise RuntimeError("failed to read scheduled loop after insert")
+        return row
 
+    async def _insert_loop(self, loop_id: str, payload: dict[str, object]) -> None:
         async def _create_body(
             txn: firestore.AsyncTransaction,
             ref: firestore.AsyncDocumentReference,
@@ -113,11 +141,51 @@ class FirestoreScheduledLoopStore:
                 raise ValueError(f"scheduled loop already exists: {loop_id}")
             txn.set(ref, payload)
 
-        await self._in_transaction(doc_ref, _create_body)
-        row = await self.get(loop_id)
-        if row is None:
-            raise RuntimeError("failed to read scheduled loop after insert")
-        return row
+        await self._in_transaction(self._doc(loop_id), _create_body)
+
+    async def _insert_goal(self, values: PlannedScheduledLoop, payload: dict[str, object]) -> None:
+        """Write the goal and claim its session lock in one transaction.
+
+        Firestore has no partial unique index, so a per-session lock document
+        serializes concurrent creates. A lock pointing at a goal that is gone or
+        already closed is stale and gets overwritten.
+        """
+        loop_id = values.loop_id
+        doc_ref = self._doc(loop_id)
+        lock_ref = self._goal_lock_doc(values.session_id)
+
+        async def _create_goal_body(txn: firestore.AsyncTransaction) -> None:
+            if (await doc_ref.get(transaction=txn)).exists:
+                raise ValueError(f"scheduled loop already exists: {loop_id}")
+            lock_data = (await lock_ref.get(transaction=txn)).to_dict() or {}
+            open_goal_id = str(lock_data.get("goal_id", "")).strip()
+            if open_goal_id and await self._is_open_goal(open_goal_id, txn=txn):
+                raise OpenGoalExistsError(
+                    f"an open goal already exists for session: {values.session_id}"
+                )
+            txn.set(doc_ref, payload)
+            txn.set(
+                lock_ref,
+                {
+                    "session_id": values.session_id,
+                    "goal_id": loop_id,
+                    "updated_at_ms": values.started_at_ms,
+                },
+            )
+
+        transaction = self._client.transaction()
+        create_goal = cast(
+            Callable[[firestore.AsyncTransaction], Awaitable[None]],
+            firestore.async_transactional(_create_goal_body),
+        )
+        await create_goal(transaction)
+
+    async def _is_open_goal(self, goal_id: str, *, txn: firestore.AsyncTransaction) -> bool:
+        snapshot = await self._doc(goal_id).get(transaction=txn)
+        if not snapshot.exists:
+            return False
+        data = snapshot.to_dict() or {}
+        return data.get("kind") == KIND_GOAL and data.get("status") in OPEN_GOAL_STATUSES
 
     async def get(self, loop_id: str) -> ScheduledLoopRow | None:
         snapshot = await self._doc(loop_id).get()
@@ -137,6 +205,10 @@ class FirestoreScheduledLoopStore:
         return rows
 
     async def list_kind(self, kind: str) -> list[ScheduledLoopRow]:
+        if _validated_kind(kind) == KIND_LOOP:
+            # Docs written before `kind` existed carry no field to filter on,
+            # so scan and let the row mapper default them to KIND_LOOP.
+            return [row for row in await self.list_all() if row.kind == KIND_LOOP]
         rows: list[ScheduledLoopRow] = []
         query = self._client.collection(self._collection).where(
             filter=FieldFilter("kind", "==", kind)
@@ -156,6 +228,12 @@ class FirestoreScheduledLoopStore:
         statuses: Collection[str],
     ) -> ScheduledLoopRow | None:
         wanted = {str(status) for status in statuses}
+        if _validated_kind(kind) == KIND_LOOP:
+            rows = await self.list_kind(KIND_LOOP)
+            return next(
+                (row for row in rows if row.session_id == session_id and row.status in wanted),
+                None,
+            )
         query = (
             self._client.collection(self._collection)
             .where(filter=FieldFilter("kind", "==", kind))
@@ -231,15 +309,21 @@ class FirestoreScheduledLoopStore:
             claimed_at = data.get("claimed_at_ms")
             if claimed_at is None or int(cast(int, claimed_at)) >= cutoff:
                 return False
-            txn.update(
-                ref,
-                {
-                    "tick_in_flight": 0,
-                    "worker_id": None,
-                    "claimed_at_ms": None,
-                    "last_error": data.get("last_error") or "stale tick claim released",
-                },
-            )
+            update: dict[str, object] = {
+                "tick_in_flight": 0,
+                "worker_id": None,
+                "claimed_at_ms": None,
+            }
+            if data.get("kind") == KIND_GOAL:
+                error_count = int(cast(int, data.get("consecutive_error_count", 0))) + 1
+                update["last_error"] = "stale tick claim released"
+                update["consecutive_error_count"] = error_count
+                if error_count >= GOAL_MAX_CONSECUTIVE_ERRORS:
+                    update["status"] = "failed"
+                    update["stop_reason"] = "consecutive_tick_errors"
+            else:
+                update["last_error"] = data.get("last_error") or "stale tick claim released"
+            txn.update(ref, update)
             return True
 
         return bool(await self._in_transaction(doc_ref, _release_body))
@@ -293,18 +377,17 @@ class FirestoreScheduledLoopStore:
             except ValueError as exc:
                 logger.error("complete_tick skipped loop_id=%s: %s", loop_id, exc)
                 return False
-            tick_index, status, stop_reason, next_tick_at, last_error = resolve_complete_tick(
-                row, error=error, now_ms=now_ms
-            )
+            result = resolve_complete_tick(row, error=error, now_ms=now_ms)
             txn.update(
                 ref,
                 {
-                    "tick_index": tick_index,
+                    "tick_index": result.tick_index,
                     "last_tick_at_ms": now_ms,
-                    "last_error": last_error,
-                    "status": status,
-                    "stop_reason": stop_reason,
-                    "next_tick_at_ms": next_tick_at,
+                    "last_error": result.last_error,
+                    "status": result.status,
+                    "stop_reason": result.stop_reason,
+                    "next_tick_at_ms": result.next_tick_at_ms,
+                    "consecutive_error_count": result.consecutive_error_count,
                     "tick_in_flight": 0,
                     "worker_id": None,
                     "claimed_at_ms": None,
@@ -332,7 +415,10 @@ class FirestoreScheduledLoopStore:
             if not snapshot.exists:
                 return False
             data = snapshot.to_dict() or {}
-            if data.get("worker_id") != worker_id or int(cast(int, data.get("tick_in_flight", 0))) != 1:
+            if (
+                data.get("worker_id") != worker_id
+                or int(cast(int, data.get("tick_in_flight", 0))) != 1
+            ):
                 logger.warning(
                     "defer_tick skipped loop_id=%s worker_id=%s (claim lost or not in flight)",
                     loop_id,
@@ -350,16 +436,15 @@ class FirestoreScheduledLoopStore:
                 )
                 return False
             now_ms = int(time.time() * 1000)
-            txn.update(
-                ref,
-                {
-                    "tick_in_flight": 0,
-                    "worker_id": None,
-                    "claimed_at_ms": None,
-                    "next_tick_at_ms": now_ms + row.interval_ms,
-                    "last_error": reason,
-                },
-            )
+            update: dict[str, object] = {
+                "tick_in_flight": 0,
+                "worker_id": None,
+                "claimed_at_ms": None,
+                "next_tick_at_ms": now_ms + row.interval_ms,
+            }
+            if row.kind != KIND_GOAL:
+                update["last_error"] = reason
+            txn.update(ref, update)
             return True
 
         return bool(await self._in_transaction(doc_ref, _defer_body))
@@ -383,7 +468,9 @@ class FirestoreScheduledLoopStore:
 
         return bool(await self._in_transaction(doc_ref, _renew_body))
 
-    async def set_status(self, loop_id: str, status: str, *, stop_reason: str | None = None) -> bool:
+    async def set_status(
+        self, loop_id: str, status: str, *, stop_reason: str | None = None
+    ) -> bool:
         if status not in _LOOP_STATUSES:
             raise ValueError(f"invalid loop status: {status}")
         snapshot = await self._doc(loop_id).get()

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
+from collections.abc import Awaitable
+from dataclasses import replace
 
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import ScheduledLoopStore
@@ -11,6 +14,7 @@ from monkeybot.core.persistence.scheduled_loops import (
     GOAL_DEFAULT_INTERVAL_MS,
     KIND_GOAL,
     OPEN_GOAL_STATUSES,
+    OpenGoalExistsError,
     ScheduledLoopCreate,
     ScheduledLoopRow,
     normalize_objective,
@@ -42,6 +46,7 @@ def goal_to_json(row: ScheduledLoopRow) -> dict[str, object]:
         "last_error": row.last_error,
         "stop_reason": row.stop_reason,
         "tick_in_flight": row.tick_in_flight,
+        "consecutive_error_count": row.consecutive_error_count,
     }
 
 
@@ -73,16 +78,7 @@ class DurableGoalService:
             raise ValueError("create_goal requires a non-empty objective")
         existing = await self.open_for_session(session_id)
         if existing is not None:
-            current = normalize_objective(existing.objective or existing.prompt)
-            if current == normalize_objective(objective):
-                logger.info(
-                    "goal create idempotent %s",
-                    kv(goal_id=existing.loop_id, session_id=session_id, status=existing.status),
-                )
-                return existing, False
-            raise GoalConflictError(
-                f"a goal is already {existing.status} in this session: {existing.loop_id}"
-            )
+            return self._resolve_existing(existing, objective=objective, session_id=session_id)
         spec = ScheduledLoopCreate(
             prompt=objective,
             interval_ms=GOAL_DEFAULT_INTERVAL_MS,
@@ -91,24 +87,30 @@ class DurableGoalService:
             kind=KIND_GOAL,
             objective=objective,
         )
-        row = await self._store.create(spec)
+        try:
+            row = await self._store.create(spec)
+        except OpenGoalExistsError:
+            # SQL backends enforce the invariant with a partial unique index;
+            # Firestore serializes creation through a per-session lock document.
+            # Re-read after a losing race to preserve idempotent create semantics.
+            raced = await self.open_for_session(session_id)
+            if raced is None:
+                raise
+            return self._resolve_existing(raced, objective=objective, session_id=session_id)
         logger.info(
             "goal created %s",
             kv(goal_id=row.loop_id, session_id=session_id, status=row.status),
         )
         return row, True
 
-    async def update(self, *, session_id: str, status: str) -> ScheduledLoopRow:
+    async def update(self, *, goal_id: str, session_id: str, status: str) -> ScheduledLoopRow:
         if status not in {"active", "complete"}:
             raise ValueError("update_goal status must be active or complete")
-        existing = await self.open_for_session(session_id)
-        if existing is None:
-            raise GoalNotFoundError("no open goal in this session")
+        existing = await self._require_for_session(goal_id, session_id=session_id)
+        if existing.status not in OPEN_GOAL_STATUSES:
+            raise GoalNotFoundError(f"no open goal {goal_id} in this session")
         if status == "complete":
-            await self._store.stop(existing.loop_id, stop_reason="complete")
-            row = await self.get(existing.loop_id)
-            if row is None:
-                raise GoalNotFoundError(existing.loop_id)
+            row = await self._stop(existing, stop_reason="complete")
             logger.info(
                 "goal completed %s",
                 kv(goal_id=row.loop_id, session_id=session_id, status=row.status),
@@ -118,12 +120,7 @@ class DurableGoalService:
             return existing
         if existing.status != "paused":
             raise ValueError("update_goal can set active only when the user paused the goal")
-        ok = await self._store.resume(existing.loop_id)
-        if not ok:
-            raise GoalNotFoundError(existing.loop_id)
-        row = await self.get(existing.loop_id)
-        if row is None:
-            raise GoalNotFoundError(existing.loop_id)
+        row = await self._resume(existing)
         logger.info(
             "goal resumed %s",
             kv(goal_id=row.loop_id, session_id=session_id, status=row.status),
@@ -136,11 +133,12 @@ class DurableGoalService:
             raise GoalNotFoundError(goal_id)
         if row.status == "paused":
             return row
-        if not await self._store.pause(goal_id):
-            raise GoalNotFoundError(goal_id)
-        updated = await self.get(goal_id)
-        if updated is None:
-            raise GoalNotFoundError(goal_id)
+        updated = await self._mutate(
+            row,
+            self._store.pause(goal_id),
+            status="paused",
+            stop_reason=row.stop_reason,
+        )
         logger.info("goal paused %s", kv(goal_id=goal_id, status=updated.status))
         return updated
 
@@ -148,11 +146,7 @@ class DurableGoalService:
         row = await self._require(goal_id)
         if row.status != "paused":
             raise GoalNotFoundError(f"paused goal not found: {goal_id}")
-        if not await self._store.resume(goal_id):
-            raise GoalNotFoundError(f"paused goal not found: {goal_id}")
-        updated = await self.get(goal_id)
-        if updated is None:
-            raise GoalNotFoundError(goal_id)
+        updated = await self._resume(row)
         logger.info("goal resumed %s", kv(goal_id=goal_id, status=updated.status))
         return updated
 
@@ -160,11 +154,7 @@ class DurableGoalService:
         row = await self._require(goal_id)
         if row.status in {"completed", "failed"}:
             return row
-        if not await self._store.stop(goal_id, stop_reason="manual"):
-            raise GoalNotFoundError(goal_id)
-        updated = await self.get(goal_id)
-        if updated is None:
-            raise GoalNotFoundError(goal_id)
+        updated = await self._stop(row, stop_reason="manual")
         logger.info(
             "goal stopped %s",
             kv(goal_id=goal_id, status=updated.status, stop_reason=updated.stop_reason),
@@ -176,3 +166,77 @@ class DurableGoalService:
         if row is None:
             raise GoalNotFoundError(f"unknown goal: {goal_id}")
         return row
+
+    async def _require_for_session(
+        self,
+        goal_id: str,
+        *,
+        session_id: str,
+    ) -> ScheduledLoopRow:
+        row = await self._require(goal_id)
+        if row.session_id != session_id:
+            raise GoalNotFoundError(f"no goal {goal_id} in this session")
+        return row
+
+    async def _stop(self, row: ScheduledLoopRow, *, stop_reason: str) -> ScheduledLoopRow:
+        return await self._mutate(
+            row,
+            self._store.stop(row.loop_id, stop_reason=stop_reason),
+            status="completed",
+            stop_reason=stop_reason,
+        )
+
+    async def _resume(self, row: ScheduledLoopRow) -> ScheduledLoopRow:
+        return await self._mutate(
+            row,
+            self._store.resume(row.loop_id),
+            status="active",
+            stop_reason=None,
+            next_tick_at_ms=int(time.time() * 1000),
+        )
+
+    async def _mutate(
+        self,
+        row: ScheduledLoopRow,
+        mutation: Awaitable[bool],
+        *,
+        status: str,
+        stop_reason: str | None,
+        next_tick_at_ms: int | None = None,
+    ) -> ScheduledLoopRow:
+        """Await a store transition and mirror it onto ``row``.
+
+        Mirroring avoids a second read; ``next_tick_at_ms=None`` keeps the
+        stored schedule. Every transition releases any tick claim.
+        """
+        if not await mutation:
+            raise GoalNotFoundError(row.loop_id)
+        return replace(
+            row,
+            status=status,
+            stop_reason=stop_reason,
+            next_tick_at_ms=(
+                next_tick_at_ms if next_tick_at_ms is not None else row.next_tick_at_ms
+            ),
+            tick_in_flight=False,
+            worker_id=None,
+            claimed_at_ms=None,
+        )
+
+    @staticmethod
+    def _resolve_existing(
+        existing: ScheduledLoopRow,
+        *,
+        objective: str,
+        session_id: str,
+    ) -> tuple[ScheduledLoopRow, bool]:
+        current = normalize_objective(existing.objective or existing.prompt)
+        if current == normalize_objective(objective):
+            logger.info(
+                "goal create idempotent %s",
+                kv(goal_id=existing.loop_id, session_id=session_id, status=existing.status),
+            )
+            return existing, False
+        raise GoalConflictError(
+            f"a goal is already {existing.status} in this session: {existing.loop_id}"
+        )

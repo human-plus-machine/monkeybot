@@ -8,7 +8,7 @@ from typing import Any, cast
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
-from monkeybot.core.persistence.backends import ScheduledLoopStore, StorageBackend
+from monkeybot.core.persistence.backends import ScheduledLoopStore
 from monkeybot.core.persistence.scheduled_loops import (
     KIND_GOAL,
     KIND_LOOP,
@@ -19,6 +19,7 @@ from monkeybot.core.persistence.thread_summary import reserved_thread_id_error
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.gateway.sse.loop_port import LoopPort
 from monkeybot.gateway.sse.models import APIError
+from monkeybot.gateway.sse.request_storage import require_storage_backend
 from monkeybot.gateway.sse.scheduler_wiring import GatewaySessionEnsurer
 from monkeybot.gateway.sse.session_bus import SessionRegistry
 from monkeybot.scheduler.interval import parse_interval_ms, parse_optional_duration_ms
@@ -28,17 +29,8 @@ def _get_registry(request: Request) -> SessionRegistry:
     return cast(SessionRegistry, request.app.state.registry)
 
 
-def _storage_backend(request: Request) -> StorageBackend:
-    backend: StorageBackend | None = getattr(request.app.state, "storage", None)
-    if backend is None:
-        raise APIError(
-            503, "STORAGE_NOT_READY", "Storage backend not initialized", uuid.uuid4().hex
-        )
-    return backend
-
-
 def _loop_store(request: Request) -> ScheduledLoopStore:
-    return _storage_backend(request).scheduled_loops()
+    return require_storage_backend(request).scheduled_loops()
 
 
 class CreateLoopRequest(BaseModel):
@@ -128,7 +120,7 @@ def build_scheduler_router(*, loop_port: LoopPort, registry: SessionRegistry) ->
 
     @router.get("/loops")
     async def list_loops(request: Request) -> dict[str, Any]:
-        rows = [r for r in await _loop_store(request).list_all() if r.kind != KIND_GOAL]
+        rows = await _loop_store(request).list_kind(KIND_LOOP)
         return {"loops": [_row_dict(r) for r in rows]}
 
     @router.get("/loops/{loop_id}")
@@ -137,7 +129,7 @@ def build_scheduler_router(*, loop_port: LoopPort, registry: SessionRegistry) ->
         if row is None or row.kind == KIND_GOAL:
             raise APIError(404, "LOOP_NOT_FOUND", f"Unknown loop {loop_id}", uuid.uuid4().hex)
         usage = (
-            await _storage_backend(request)
+            await require_storage_backend(request)
             .usage()
             .summary(
                 thread_id=row.session_id,
@@ -205,7 +197,7 @@ def build_scheduler_router(*, loop_port: LoopPort, registry: SessionRegistry) ->
             if error_message is not None:
                 raise APIError(400, "BAD_REQUEST", error_message, uuid.uuid4().hex)
             await ensurer.ensure_session(body.session_id)
-        turn_locks = _storage_backend(request).session_turns()
+        turn_locks = require_storage_backend(request).session_turns()
         acquired = await turn_locks.try_acquire(body.session_id, body.request_id)
         if not acquired:
             raise APIError(

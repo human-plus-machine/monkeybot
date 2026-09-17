@@ -176,6 +176,13 @@ def install_loop_skill(dest: Path, *, force: bool) -> str:
     return _install_file(target, resources.files(_DEFAULTS_PKG) / "loop" / "SKILL.md", force=force)
 
 
+def install_goal_skill(dest: Path, *, force: bool) -> str:
+    """Install the bundled native-goal procedure into ``skills/goal``."""
+    target = dest / "skills" / "goal" / "SKILL.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return _install_file(target, resources.files(_DEFAULTS_PKG) / "goal" / "SKILL.md", force=force)
+
+
 def install_env_example(dest: Path, *, force: bool) -> str:
     env_example = dest / ".env.example"
     if env_example.exists() and not force:
@@ -399,6 +406,7 @@ def run_refresh(*, dest: Path) -> list[str]:
     report.append(refresh_permissions_if_default(cfg_dir))
     report.append(refresh_monkeybot_yaml(cfg_dir))
     report.extend(ensure_memory(dest, force=False))
+    report.append(f"  skills/goal/SKILL.md: {install_goal_skill(dest, force=False)}")
     return report
 
 
@@ -412,11 +420,12 @@ def run_new(
 ) -> list[str]:
     """Full scaffold: config bundle, empty skills root, writable state, and image files.
 
-    Capability skills (``browser``, ``image-generator``, ``loop``) are packaged
+    Optional capability skills (``browser``, ``image-generator``, ``loop``) are packaged
     under ``scaffold_defaults`` but not installed into new agents for now —
     the Mac Main Agent loads them from ``~/.monkeybot/.internal/skills``
     instead. Re-enable via ``install_*_skill`` when custom agents should get
-    them again.
+    them again. The ``goal`` skill is installed because native goal tools are
+    intentionally exposed only for explicit ``/goal`` invocations.
     """
     cfg_dir = dest / "monkeybot_config"
     report = install_config_bundle(cfg_dir, force=force)
@@ -426,7 +435,7 @@ def run_new(
     )
     report.extend(ensure_memory(dest, force=force))
     report.extend(ensure_workspace(dest, force=force))
-    report.append("  skills/: ensured (empty — capability skills deferred)")
+    report.append(f"  skills/goal/SKILL.md: {install_goal_skill(dest, force=force)}")
     report.append(f"  .env.example: {install_env_example(dest, force=force)}")
     report.extend(install_container_files(dest, force=force))
     report.append(

@@ -155,6 +155,7 @@ def _sql_loop_tuple(*, loop_id: str = "demo", interval_ms: int = 1000) -> tuple[
         None,
         "loop",
         None,
+        0,
     )
 
 
@@ -167,6 +168,17 @@ def test_row_from_tuple_roundtrip_interval() -> None:
     row = _row_from_tuple(_sql_loop_tuple(interval_ms=5000))
     assert row.loop_id == "demo"
     assert row.interval_ms == 5000
+
+
+def test_doc_to_scheduled_loop_row_rejects_unknown_kind() -> None:
+    with pytest.raises(ValueError, match="invalid scheduled loop kind"):
+        doc_to_scheduled_loop_row(
+            "bad-kind",
+            {
+                "interval_ms": 1000,
+                "kind": "gaol",
+            },
+        )
 
 
 @pytest.mark.asyncio
@@ -352,10 +364,17 @@ async def test_sqlite_migrates_kind_and_objective_columns(tmp_path) -> None:
     assert legacy is not None
     assert legacy.kind == KIND_LOOP
     assert legacy.objective is None
-    goal, created = await DurableGoalService(store).create(
-        objective="Ship it", session_id="sess-1"
-    )
+    goal, created = await DurableGoalService(store).create(objective="Ship it", session_id="sess-1")
     assert created is True
     assert goal.kind == KIND_GOAL
     assert goal.objective == "Ship it"
+    assert goal.consecutive_error_count == 0
+    columns_cursor = await store._conn.execute("PRAGMA table_info(scheduled_loops)")
+    columns = {str(row[1]) for row in await columns_cursor.fetchall()}
+    await columns_cursor.close()
+    assert "consecutive_error_count" in columns
+    indexes_cursor = await store._conn.execute("PRAGMA index_list(scheduled_loops)")
+    indexes = {str(row[1]): bool(row[2]) for row in await indexes_cursor.fetchall()}
+    await indexes_cursor.close()
+    assert indexes["idx_scheduled_loops_one_open_goal"] is True
     await backend.close()

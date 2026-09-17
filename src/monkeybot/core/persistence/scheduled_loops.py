@@ -34,6 +34,7 @@ _SCHEDULED_LOOP_COLUMNS: tuple[str, ...] = (
     "claimed_at_ms",
     "kind",
     "objective",
+    "consecutive_error_count",
 )
 
 _LOOP_STATUSES = frozenset({"active", "paused", "completed", "failed"})
@@ -41,8 +42,16 @@ KIND_LOOP = "loop"
 KIND_GOAL = "goal"
 OPEN_GOAL_STATUSES = frozenset({"active", "paused"})
 GOAL_DEFAULT_INTERVAL_MS = 5 * 60 * 1000
+GOAL_MAX_CONSECUTIVE_ERRORS = 3
+# Prefix of every goal tick prompt; turn plumbing matches on it to re-advertise
+# ``update_goal``, so both producer and consumer must share this literal.
+GOAL_CONTINUATION_PREFIX = "[GOAL CONTINUATION · goal_id="
 
 logger = logging.getLogger(__name__)
+
+
+class OpenGoalExistsError(ValueError):
+    """A backend rejected creation because the session already has an open goal."""
 
 
 @dataclass(frozen=True)
@@ -68,6 +77,36 @@ class ScheduledLoopRow:
     claimed_at_ms: int | None = None
     kind: str = KIND_LOOP
     objective: str | None = None
+    consecutive_error_count: int = 0
+
+
+@dataclass(frozen=True)
+class PlannedScheduledLoop:
+    """Validated values shared by scheduled-loop persistence backends."""
+
+    loop_id: str
+    session_id: str
+    prompt: str
+    interval_ms: int
+    max_ticks: int | None
+    max_runtime_ms: int | None
+    skip_if_busy: bool
+    next_tick_at_ms: int
+    started_at_ms: int
+    kind: str
+    objective: str | None
+
+
+@dataclass(frozen=True)
+class TickResolution:
+    """State transition produced when a claimed tick finishes."""
+
+    tick_index: int
+    status: str
+    stop_reason: str | None
+    next_tick_at_ms: int
+    last_error: str | None
+    consecutive_error_count: int
 
 
 def _optional_int_field(raw: object) -> int | None:
@@ -98,8 +137,12 @@ def _bool_field(raw: object, *, default: bool = False) -> bool:
 
 
 def _kind_field(raw: object) -> str:
-    value = str(raw or "").strip().lower()
-    return KIND_GOAL if value == KIND_GOAL else KIND_LOOP
+    if raw is None or not str(raw).strip():
+        return KIND_LOOP
+    value = str(raw).strip().lower()
+    if value not in {KIND_LOOP, KIND_GOAL}:
+        raise ValueError(f"invalid scheduled loop kind: {raw!r}")
+    return value
 
 
 def _optional_str_field(raw: object) -> str | None:
@@ -113,9 +156,9 @@ def normalize_objective(text: str) -> str:
     return " ".join(text.split())
 
 
-def planned_create(spec: ScheduledLoopCreate, *, now_ms: int) -> dict[str, object]:
+def planned_create(spec: ScheduledLoopCreate, *, now_ms: int) -> PlannedScheduledLoop:
     """Validate a create spec and return insert values shared by every backend."""
-    kind = KIND_GOAL if spec.kind == KIND_GOAL else KIND_LOOP
+    kind = _kind_field(spec.kind)
     interval_ms = _require_positive_interval_ms("new", spec.interval_ms)
     if kind == KIND_GOAL:
         objective = (spec.objective or spec.prompt).strip()
@@ -136,27 +179,19 @@ def planned_create(spec: ScheduledLoopCreate, *, now_ms: int) -> dict[str, objec
         next_tick_at_ms = now_ms
         max_ticks = spec.max_ticks
         max_runtime_ms = spec.max_runtime_ms
-    return {
-        "loop_id": _loop_id_from_create(spec),
-        "session_id": spec.session_id.strip() or "loop-main",
-        "status": "active",
-        "prompt": prompt,
-        "interval_ms": interval_ms,
-        "max_ticks": max_ticks,
-        "max_runtime_ms": max_runtime_ms,
-        "skip_if_busy": spec.skip_if_busy,
-        "tick_index": 0,
-        "next_tick_at_ms": next_tick_at_ms,
-        "started_at_ms": now_ms,
-        "last_tick_at_ms": None,
-        "last_error": None,
-        "stop_reason": None,
-        "tick_in_flight": False,
-        "worker_id": None,
-        "claimed_at_ms": None,
-        "kind": kind,
-        "objective": objective,
-    }
+    return PlannedScheduledLoop(
+        loop_id=_loop_id_from_create(spec),
+        session_id=spec.session_id.strip() or "loop-main",
+        prompt=prompt,
+        interval_ms=interval_ms,
+        max_ticks=max_ticks,
+        max_runtime_ms=max_runtime_ms,
+        skip_if_busy=spec.skip_if_busy,
+        next_tick_at_ms=next_tick_at_ms,
+        started_at_ms=now_ms,
+        kind=kind,
+        objective=objective,
+    )
 
 
 def resolve_complete_tick(
@@ -164,13 +199,29 @@ def resolve_complete_tick(
     *,
     error: str | None,
     now_ms: int,
-) -> tuple[int, str, str | None, int, str | None]:
-    """Return ``(tick_index, status, stop_reason, next_tick_at_ms, last_error)``."""
+) -> TickResolution:
+    """Resolve a tick result, bounding retries for goals with persistent failures."""
     tick_index = row.tick_index + 1
     if error:
-        if row.kind == KIND_GOAL:
-            return tick_index, "active", None, now_ms + row.interval_ms, error
-        return tick_index, "failed", "tick_error", row.next_tick_at_ms, error
+        error_count = row.consecutive_error_count + 1
+        is_goal = row.kind == KIND_GOAL
+        if is_goal and error_count < GOAL_MAX_CONSECUTIVE_ERRORS:
+            return TickResolution(
+                tick_index=tick_index,
+                status="active",
+                stop_reason=None,
+                next_tick_at_ms=now_ms + row.interval_ms,
+                last_error=error,
+                consecutive_error_count=error_count,
+            )
+        return TickResolution(
+            tick_index=tick_index,
+            status="failed",
+            stop_reason="consecutive_tick_errors" if is_goal else "tick_error",
+            next_tick_at_ms=row.next_tick_at_ms,
+            last_error=error,
+            consecutive_error_count=error_count,
+        )
     status = row.status
     stop_reason: str | None = None
     if row.max_ticks is not None and tick_index >= row.max_ticks:
@@ -180,7 +231,14 @@ def resolve_complete_tick(
         status = "completed"
         stop_reason = "max_runtime"
     next_tick = now_ms + row.interval_ms if status == "active" else row.next_tick_at_ms
-    return tick_index, status, stop_reason, next_tick, None
+    return TickResolution(
+        tick_index=tick_index,
+        status=status,
+        stop_reason=stop_reason,
+        next_tick_at_ms=next_tick,
+        last_error=None,
+        consecutive_error_count=0,
+    )
 
 
 def _require_positive_interval_ms(loop_id: str, interval_ms: int) -> int:
@@ -191,9 +249,7 @@ def _require_positive_interval_ms(loop_id: str, interval_ms: int) -> int:
 
 def doc_to_scheduled_loop_row(loop_id: str, data: dict[str, object]) -> ScheduledLoopRow:
     """Map a Firestore document (or JSON blob) to :class:`ScheduledLoopRow`."""
-    interval_ms = _require_positive_interval_ms(
-        loop_id, int(cast(int, data.get("interval_ms", 0)))
-    )
+    interval_ms = _require_positive_interval_ms(loop_id, int(cast(int, data.get("interval_ms", 0))))
     return ScheduledLoopRow(
         loop_id=loop_id,
         session_id=str(data.get("session_id", "")),
@@ -214,6 +270,7 @@ def doc_to_scheduled_loop_row(loop_id: str, data: dict[str, object]) -> Schedule
         claimed_at_ms=_optional_int_field(data.get("claimed_at_ms")),
         kind=_kind_field(data.get("kind")),
         objective=_optional_str_field(data.get("objective")),
+        consecutive_error_count=int(cast(int, data.get("consecutive_error_count", 0))),
     )
 
 
@@ -275,6 +332,7 @@ def _row_from_tuple(row: tuple[object, ...]) -> ScheduledLoopRow:
         ),
         kind=_kind_field(d.get("kind")),
         objective=_optional_str_field(d.get("objective")),
+        consecutive_error_count=int(cast(int, d.get("consecutive_error_count", 0))),
     )
 
 
@@ -307,7 +365,7 @@ def format_tick_prompt(row: ScheduledLoopRow) -> str:
     if row.kind == KIND_GOAL:
         objective = (row.objective or row.prompt).strip()
         return (
-            f"[GOAL CONTINUATION · goal_id={row.loop_id} · session={row.session_id}]\n\n"
+            f"{GOAL_CONTINUATION_PREFIX}{row.loop_id} · session={row.session_id}]\n\n"
             f"Objective (keep this intact; do not shrink scope):\n{objective}\n\n"
             "This goal already exists. Do not call create_goal again.\n"
             "Do the next concrete increment of work now.\n"
@@ -339,34 +397,41 @@ class SQLiteScheduledLoopStore:
     async def create(self, spec: ScheduledLoopCreate) -> ScheduledLoopRow:
         now_ms = int(time.time() * 1000)
         values = planned_create(spec, now_ms=now_ms)
-        loop_id = str(values["loop_id"])
-        existing = await self.get(loop_id)
-        if existing is not None:
-            raise ValueError(f"scheduled loop already exists: {loop_id}")
-        await self._conn.execute(
-            """
-            INSERT INTO scheduled_loops(
-                loop_id, session_id, status, prompt, interval_ms,
-                max_ticks, max_runtime_ms, skip_if_busy, tick_index,
-                next_tick_at_ms, started_at_ms, last_tick_at_ms,
-                last_error, stop_reason, tick_in_flight, worker_id, claimed_at_ms,
-                kind, objective
-            ) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, 0, ?, ?, NULL, NULL, NULL, 0, NULL, NULL, ?, ?)
-            """,
-            (
-                loop_id,
-                values["session_id"],
-                values["prompt"],
-                values["interval_ms"],
-                values["max_ticks"],
-                values["max_runtime_ms"],
-                1 if values["skip_if_busy"] else 0,
-                values["next_tick_at_ms"],
-                values["started_at_ms"],
-                values["kind"],
-                values["objective"],
-            ),
-        )
+        loop_id = values.loop_id
+        try:
+            await self._conn.execute(
+                """
+                INSERT INTO scheduled_loops(
+                    loop_id, session_id, status, prompt, interval_ms,
+                    max_ticks, max_runtime_ms, skip_if_busy, tick_index,
+                    next_tick_at_ms, started_at_ms, last_tick_at_ms,
+                    last_error, stop_reason, tick_in_flight, worker_id, claimed_at_ms,
+                    kind, objective, consecutive_error_count
+                ) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, 0, ?, ?, NULL, NULL, NULL, 0,
+                          NULL, NULL, ?, ?, 0)
+                """,
+                (
+                    loop_id,
+                    values.session_id,
+                    values.prompt,
+                    values.interval_ms,
+                    values.max_ticks,
+                    values.max_runtime_ms,
+                    1 if values.skip_if_busy else 0,
+                    values.next_tick_at_ms,
+                    values.started_at_ms,
+                    values.kind,
+                    values.objective,
+                ),
+            )
+        except aiosqlite.IntegrityError as exc:
+            if await self.get(loop_id) is not None:
+                raise ValueError(f"scheduled loop already exists: {loop_id}") from exc
+            if values.kind == KIND_GOAL:
+                raise OpenGoalExistsError(
+                    f"an open goal already exists for session: {values.session_id}"
+                ) from exc
+            raise
         await self._conn.commit()
         row = await self.get(loop_id)
         if row is None:
@@ -484,12 +549,28 @@ class SQLiteScheduledLoopStore:
             """
             UPDATE scheduled_loops
             SET tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL,
-                last_error = COALESCE(last_error, 'stale tick claim released')
+                status = CASE
+                    WHEN kind = 'goal' AND consecutive_error_count + 1 >= ? THEN 'failed'
+                    ELSE status
+                END,
+                stop_reason = CASE
+                    WHEN kind = 'goal' AND consecutive_error_count + 1 >= ?
+                        THEN 'consecutive_tick_errors'
+                    ELSE stop_reason
+                END,
+                last_error = CASE
+                    WHEN kind = 'goal' THEN 'stale tick claim released'
+                    ELSE COALESCE(last_error, 'stale tick claim released')
+                END,
+                consecutive_error_count = CASE
+                    WHEN kind = 'goal' THEN consecutive_error_count + 1
+                    ELSE consecutive_error_count
+                END
             WHERE tick_in_flight = 1
               AND claimed_at_ms IS NOT NULL
               AND claimed_at_ms < ?
             """,
-            (cutoff,),
+            (GOAL_MAX_CONSECUTIVE_ERRORS, GOAL_MAX_CONSECUTIVE_ERRORS, cutoff),
         )
         await self._conn.commit()
         return int(cursor.rowcount)
@@ -523,24 +604,24 @@ class SQLiteScheduledLoopStore:
         if row is None or not row.tick_in_flight or row.worker_id != worker_id:
             return None
         now_ms = int(time.time() * 1000)
-        tick_index, status, stop_reason, next_tick, last_error = resolve_complete_tick(
-            row, error=error, now_ms=now_ms
-        )
+        result = resolve_complete_tick(row, error=error, now_ms=now_ms)
         await self._conn.execute(
             """
             UPDATE scheduled_loops
             SET tick_index = ?, last_tick_at_ms = ?, last_error = ?,
                 status = ?, stop_reason = ?, next_tick_at_ms = ?,
-                tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL
+                tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL,
+                consecutive_error_count = ?
             WHERE loop_id = ? AND worker_id = ? AND tick_in_flight = 1
             """,
             (
-                tick_index,
+                result.tick_index,
                 now_ms,
-                last_error,
-                status,
-                stop_reason,
-                next_tick,
+                result.last_error,
+                result.status,
+                result.stop_reason,
+                result.next_tick_at_ms,
+                result.consecutive_error_count,
                 loop_id,
                 worker_id,
             ),
@@ -563,7 +644,8 @@ class SQLiteScheduledLoopStore:
             """
             UPDATE scheduled_loops
             SET tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL,
-                next_tick_at_ms = ?, last_error = ?
+                next_tick_at_ms = ?,
+                last_error = CASE WHEN kind = 'goal' THEN last_error ELSE ? END
             WHERE loop_id = ? AND worker_id = ? AND tick_in_flight = 1
             """,
             (now_ms + row.interval_ms, reason, loop_id, worker_id),
@@ -632,4 +714,5 @@ class SQLiteScheduledLoopStore:
             "tick_in_flight": row.tick_in_flight,
             "kind": row.kind,
             "objective": row.objective,
+            "consecutive_error_count": row.consecutive_error_count,
         }

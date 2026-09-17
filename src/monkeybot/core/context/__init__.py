@@ -295,18 +295,23 @@ GOAL_TOOL_DEFS: tuple[ToolDef, ...] = (
     ),
     ToolDef(
         "update_goal",
-        "Update the open goal in this conversation. Set status to complete only "
+        "Update a specific open goal in this conversation. Set status to complete only "
         "when evidence proves the objective is done. Set active only when the user "
         "paused the goal and asked to resume. You cannot pause with this tool.",
         {
             "type": "object",
             "properties": {
+                "goal_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The durable goal id returned by create_goal.",
+                },
                 "status": {
                     "type": "string",
                     "enum": ["active", "complete"],
-                }
+                },
             },
-            "required": ["status"],
+            "required": ["goal_id", "status"],
         },
     ),
 )
@@ -1007,8 +1012,6 @@ async def build_context(
     tools.extend(mcp_client.all_tools())
     if _any_mcp_connected(mcp_client):
         tools.extend(MCP_PROGRESSIVE_META_TOOL_DEFS)
-    if scheduled_loops_available:
-        tools.extend(GOAL_TOOL_DEFS)
     if loops_advertised and scheduled_loops_available:
         tools.extend(SCHEDULED_LOOP_TOOL_DEFS)
     for ct in extra_tools or []:

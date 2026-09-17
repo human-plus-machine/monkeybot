@@ -507,7 +507,7 @@ async def test_build_context_advertises_loop_tools_when_enabled(
     )
     names = {t.name for t in ctx.tools}
     assert SCHEDULED_LOOP_TOOL_NAMES.issubset(names)
-    assert GOAL_TOOL_NAMES.issubset(names)
+    assert GOAL_TOOL_NAMES.isdisjoint(names)
     assert ctx.scheduled_loops_available is True
 
 

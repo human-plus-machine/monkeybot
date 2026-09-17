@@ -14,23 +14,15 @@ from monkeybot.core.goals.service import (
     goal_to_json,
 )
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.persistence.backends import ScheduledLoopStore, StorageBackend
+from monkeybot.core.persistence.backends import ScheduledLoopStore
 from monkeybot.gateway.sse.models import APIError
+from monkeybot.gateway.sse.request_storage import require_storage_backend
 
 logger = logging.getLogger(__name__)
 
 
-def _storage_backend(request: Request) -> StorageBackend:
-    backend: StorageBackend | None = getattr(request.app.state, "storage", None)
-    if backend is None:
-        raise APIError(
-            503, "STORAGE_NOT_READY", "Storage backend not initialized", uuid.uuid4().hex
-        )
-    return backend
-
-
 def _goal_service(request: Request) -> DurableGoalService:
-    store: ScheduledLoopStore = _storage_backend(request).scheduled_loops()
+    store: ScheduledLoopStore = require_storage_backend(request).scheduled_loops()
     return DurableGoalService(store)
 
 

@@ -2325,7 +2325,7 @@ class CoreToolExecutor(ToolExecutorPort):
             if row is None or row.kind == KIND_GOAL:
                 return (None, f"unknown loop: {loop_id}")
             return (_j({"ok": True, "loop": self._loop_row_json(row)}), None)
-        rows = [r for r in await store.list_all() if r.kind != KIND_GOAL]
+        rows = await store.list_kind(KIND_LOOP)
         return (_j({"ok": True, "loops": [self._loop_row_json(r) for r in rows]}), None)
 
     @staticmethod
@@ -2460,8 +2460,15 @@ class CoreToolExecutor(ToolExecutorPort):
         status = _str_arg(args, "status")
         if not status:
             return (None, "update_goal requires status")
+        goal_id = _str_arg(args, "goal_id", "id")
+        if not goal_id:
+            return (None, "update_goal requires goal_id")
         try:
-            row = await service_or_err.update(session_id=ctx.thread_id, status=status)
+            row = await service_or_err.update(
+                goal_id=goal_id,
+                session_id=ctx.thread_id,
+                status=status,
+            )
         except GoalNotFoundError as exc:
             logger.warning(
                 "update_goal missed %s",

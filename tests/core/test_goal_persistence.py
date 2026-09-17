@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +24,7 @@ from monkeybot.core.persistence.scheduled_loops import (
     KIND_GOAL,
     KIND_LOOP,
     OPEN_GOAL_STATUSES,
+    OpenGoalExistsError,
     ScheduledLoopCreate,
     ScheduledLoopRow,
     planned_create,
@@ -47,11 +48,11 @@ def test_planned_create_goal_is_unbounded_and_deferred() -> None:
         ),
         now_ms=1_000,
     )
-    assert values["kind"] == KIND_GOAL
-    assert values["objective"] == "Ship it"
-    assert values["max_ticks"] is None
-    assert values["max_runtime_ms"] is None
-    assert values["next_tick_at_ms"] == 1_000 + 300_000
+    assert values.kind == KIND_GOAL
+    assert values.objective == "Ship it"
+    assert values.max_ticks is None
+    assert values.max_runtime_ms is None
+    assert values.next_tick_at_ms == 1_000 + 300_000
     loop_values = planned_create(
         ScheduledLoopCreate(
             prompt="poll",
@@ -61,9 +62,22 @@ def test_planned_create_goal_is_unbounded_and_deferred() -> None:
         ),
         now_ms=1_000,
     )
-    assert loop_values["kind"] == KIND_LOOP
-    assert loop_values["objective"] is None
-    assert loop_values["next_tick_at_ms"] == 1_000
+    assert loop_values.kind == KIND_LOOP
+    assert loop_values.objective is None
+    assert loop_values.next_tick_at_ms == 1_000
+
+
+def test_planned_create_rejects_unknown_kind() -> None:
+    with pytest.raises(ValueError, match="invalid scheduled loop kind"):
+        planned_create(
+            ScheduledLoopCreate(
+                prompt="poll",
+                interval_ms=5_000,
+                max_ticks=3,
+                kind="gaol",
+            ),
+            now_ms=1_000,
+        )
 
 
 def test_resolve_complete_tick_loop_error_still_fails() -> None:
@@ -85,13 +99,11 @@ def test_resolve_complete_tick_loop_error_still_fails() -> None:
         tick_in_flight=True,
         kind=KIND_LOOP,
     )
-    tick_index, status, stop_reason, _, last_error = resolve_complete_tick(
-        row, error="boom", now_ms=1_000
-    )
-    assert tick_index == 1
-    assert status == "failed"
-    assert stop_reason == "tick_error"
-    assert last_error == "boom"
+    result = resolve_complete_tick(row, error="boom", now_ms=1_000)
+    assert result.tick_index == 1
+    assert result.status == "failed"
+    assert result.stop_reason == "tick_error"
+    assert result.last_error == "boom"
 
 
 @pytest.mark.asyncio
@@ -284,7 +296,9 @@ def _start_ephemeral_postgres() -> _PgServer:
 
 
 @asynccontextmanager
-async def _postgres_backend() -> AsyncIterator[Any]:
+async def _postgres_backend(
+    prepare: Callable[[Any], Awaitable[None]] | None = None,
+) -> AsyncIterator[Any]:
     asyncpg = pytest.importorskip("asyncpg")
     from monkeybot.core.persistence.postgres import PostgresStorageBackend
 
@@ -300,7 +314,14 @@ async def _postgres_backend() -> AsyncIterator[Any]:
         await admin.execute(f'CREATE DATABASE "{db_name}"')
         await admin.close()
         admin = None
-        backend = PostgresStorageBackend(_with_database(admin_url, db_name))
+        database_url = _with_database(admin_url, db_name)
+        if prepare is not None:
+            preparation_conn = await asyncpg.connect(database_url)
+            try:
+                await prepare(preparation_conn)
+            finally:
+                await preparation_conn.close()
+        backend = PostgresStorageBackend(database_url)
         await backend.open()
         yield backend
     finally:
@@ -329,8 +350,53 @@ async def _postgres_backend() -> AsyncIterator[Any]:
 
 @pytest.mark.asyncio
 async def test_postgres_goal_queries_run() -> None:
-    async with _postgres_backend() as backend:
+    async def prepare_legacy_schema(conn: Any) -> None:
+        await conn.execute(
+            """
+            CREATE TABLE scheduled_loops (
+                loop_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                interval_ms BIGINT NOT NULL,
+                max_ticks INTEGER,
+                max_runtime_ms BIGINT,
+                skip_if_busy INTEGER NOT NULL DEFAULT 1,
+                tick_index INTEGER NOT NULL DEFAULT 0,
+                next_tick_at_ms BIGINT NOT NULL,
+                started_at_ms BIGINT NOT NULL,
+                last_tick_at_ms BIGINT,
+                last_error TEXT,
+                stop_reason TEXT,
+                tick_in_flight INTEGER NOT NULL DEFAULT 0,
+                worker_id TEXT,
+                claimed_at_ms BIGINT
+            )
+            """
+        )
+        await conn.execute(
+            """
+            INSERT INTO scheduled_loops(
+                loop_id, session_id, status, prompt, interval_ms,
+                max_ticks, skip_if_busy, tick_index, next_tick_at_ms,
+                started_at_ms, tick_in_flight
+            ) VALUES ('legacy-loop', 'loop-main', 'active', 'poll', 5000, 3, 1, 0, 1, 0, 0)
+            """
+        )
+
+    async with _postgres_backend(prepare_legacy_schema) as backend:
         store = backend.scheduled_loops()
+        legacy = await store.get("legacy-loop")
+        assert legacy is not None
+        assert legacy.kind == KIND_LOOP
+        assert legacy.objective is None
+        assert legacy.consecutive_error_count == 0
+        unique_index = await store._pool.fetchval(
+            "SELECT indexdef FROM pg_indexes "
+            "WHERE tablename = 'scheduled_loops' "
+            "AND indexname = 'idx_scheduled_loops_one_open_goal'"
+        )
+        assert unique_index is not None
         await store.create(
             ScheduledLoopCreate(
                 prompt="poll inbox",
@@ -379,3 +445,50 @@ async def test_postgres_goal_queries_run() -> None:
         stopped = await service.stop("goal-pg-1")
         assert stopped.status == "completed"
         assert await service.open_for_session("sess-1") is None
+
+        create_results = await asyncio.gather(
+            store.create(
+                ScheduledLoopCreate(
+                    prompt="Race one",
+                    interval_ms=300_000,
+                    session_id="sess-race",
+                    loop_id="goal-pg-race-1",
+                    kind=KIND_GOAL,
+                    objective="Race one",
+                )
+            ),
+            store.create(
+                ScheduledLoopCreate(
+                    prompt="Race two",
+                    interval_ms=300_000,
+                    session_id="sess-race",
+                    loop_id="goal-pg-race-2",
+                    kind=KIND_GOAL,
+                    objective="Race two",
+                )
+            ),
+            return_exceptions=True,
+        )
+        assert sum(isinstance(result, ScheduledLoopRow) for result in create_results) == 1
+        assert sum(isinstance(result, OpenGoalExistsError) for result in create_results) == 1
+
+        crash_goal, _ = await service.create(
+            objective="Survive worker crashes",
+            session_id="sess-crash",
+        )
+        for attempt in range(1, 4):
+            await store._pool.execute(
+                "UPDATE scheduled_loops SET next_tick_at_ms = 1 WHERE loop_id = $1",
+                crash_goal.loop_id,
+            )
+            assert await store.claim_tick(crash_goal.loop_id, f"crash-worker-{attempt}")
+            await store._pool.execute(
+                "UPDATE scheduled_loops SET claimed_at_ms = 1 WHERE loop_id = $1",
+                crash_goal.loop_id,
+            )
+            assert await store.release_stale_claims(100) == 1
+        failed = await store.get(crash_goal.loop_id)
+        assert failed is not None
+        assert failed.status == "failed"
+        assert failed.stop_reason == "consecutive_tick_errors"
+        assert failed.consecutive_error_count == 3

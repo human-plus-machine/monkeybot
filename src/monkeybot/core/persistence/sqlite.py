@@ -180,7 +180,8 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     worker_id TEXT,
     claimed_at_ms INTEGER,
     kind TEXT NOT NULL DEFAULT 'loop',
-    objective TEXT
+    objective TEXT,
+    consecutive_error_count INTEGER NOT NULL DEFAULT 0
 )""",
     """CREATE INDEX IF NOT EXISTS idx_scheduled_loops_due
     ON scheduled_loops(status, tick_in_flight, next_tick_at_ms)
@@ -477,7 +478,7 @@ async def _ensure_outbox_palace_id_column(conn: aiosqlite.Connection) -> None:
 
 
 async def _ensure_scheduled_loop_kind_columns(conn: aiosqlite.Connection) -> None:
-    """Add kind/objective on scheduled_loops when upgrading an existing DB."""
+    """Migrate scheduled-loop kind fields and enforce one open goal per session."""
     cur = await conn.execute("PRAGMA table_info(scheduled_loops)")
     rows = await cur.fetchall()
     await cur.close()
@@ -485,12 +486,47 @@ async def _ensure_scheduled_loop_kind_columns(conn: aiosqlite.Connection) -> Non
     if not names:
         return
     if "kind" not in names:
-        await conn.execute("ALTER TABLE scheduled_loops ADD COLUMN kind TEXT NOT NULL DEFAULT 'loop'")
+        await conn.execute(
+            "ALTER TABLE scheduled_loops ADD COLUMN kind TEXT NOT NULL DEFAULT 'loop'"
+        )
     if "objective" not in names:
         await conn.execute("ALTER TABLE scheduled_loops ADD COLUMN objective TEXT")
+    if "consecutive_error_count" not in names:
+        await conn.execute(
+            "ALTER TABLE scheduled_loops "
+            "ADD COLUMN consecutive_error_count INTEGER NOT NULL DEFAULT 0"
+        )
+    await conn.execute(
+        """
+        UPDATE scheduled_loops
+        SET status = 'completed',
+            stop_reason = COALESCE(stop_reason, 'superseded_migration'),
+            tick_in_flight = 0,
+            worker_id = NULL,
+            claimed_at_ms = NULL
+        WHERE loop_id IN (
+            SELECT loop_id
+            FROM (
+                SELECT loop_id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY session_id
+                           ORDER BY started_at_ms DESC, loop_id DESC
+                       ) AS open_rank
+                FROM scheduled_loops
+                WHERE kind = 'goal' AND status IN ('active', 'paused')
+            )
+            WHERE open_rank > 1
+        )
+        """
+    )
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_scheduled_loops_kind_session "
         "ON scheduled_loops(kind, session_id, status)"
+    )
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_loops_one_open_goal "
+        "ON scheduled_loops(session_id) "
+        "WHERE kind = 'goal' AND status IN ('active', 'paused')"
     )
     await conn.commit()
 

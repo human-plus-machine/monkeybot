@@ -196,6 +196,7 @@ def _seed_in_flight(
         "claimed_at_ms": claimed_at_ms,
         "kind": kind,
         "objective": objective,
+        "consecutive_error_count": 0,
     }
 
 
@@ -235,6 +236,27 @@ async def test_firestore_defer_tick_releases_own_claim(
     assert row["claimed_at_ms"] is None
     assert row["last_error"] == "session busy"
     assert row["next_tick_at_ms"] >= 5_000
+
+
+@pytest.mark.asyncio
+async def test_firestore_goal_defer_does_not_replace_execution_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_transactional(monkeypatch)
+    client = _FakeClient()
+    _seed_in_flight(
+        client,
+        loop_id="goal-1",
+        worker_id="worker-a",
+        kind="goal",
+        objective="Ship it",
+        max_ticks=None,
+    )
+    client.docs["goal-1"]["last_error"] = "provider timeout"
+    store = FirestoreScheduledLoopStore(client, prefix="t")  # type: ignore[arg-type]
+
+    assert await store.defer_tick("goal-1", worker_id="worker-a", reason="session busy")
+    assert client.docs["goal-1"]["last_error"] == "provider timeout"
 
 
 @pytest.mark.asyncio
@@ -366,6 +388,40 @@ async def test_firestore_release_stale_clears_truly_stale_claim(
 
 
 @pytest.mark.asyncio
+async def test_firestore_stale_goal_claims_stop_after_retry_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_transactional(monkeypatch)
+    client = _FakeClient()
+    _seed_in_flight(
+        client,
+        loop_id="goal-1",
+        worker_id="worker-1",
+        claimed_at_ms=1,
+        kind="goal",
+        objective="Ship it",
+        max_ticks=None,
+    )
+    store = FirestoreScheduledLoopStore(client, prefix="t")  # type: ignore[arg-type]
+
+    import monkeybot.core.persistence.firestore_scheduled_loops as mod
+
+    monkeypatch.setattr(mod.time, "time", lambda: 100.0)
+    for attempt in range(1, 4):
+        client.docs["goal-1"].update(
+            {
+                "tick_in_flight": 1,
+                "worker_id": f"worker-{attempt}",
+                "claimed_at_ms": 1,
+            }
+        )
+        assert await store.release_stale_claims(stale_after_ms=1_000) == 1
+        assert client.docs["goal-1"]["consecutive_error_count"] == attempt
+    assert client.docs["goal-1"]["status"] == "failed"
+    assert client.docs["goal-1"]["stop_reason"] == "consecutive_tick_errors"
+
+
+@pytest.mark.asyncio
 async def test_firestore_goal_tick_error_stays_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -385,6 +441,7 @@ async def test_firestore_goal_tick_error_stays_active(
     assert completed.status == "active"
     assert completed.last_error == "timeout"
     assert completed.stop_reason is None
+    assert completed.consecutive_error_count == 1
 
 
 @pytest.mark.asyncio
@@ -434,3 +491,31 @@ async def test_firestore_list_kind_returns_only_goals(
     )
     assert opened is not None
     assert opened.loop_id == row.loop_id
+
+
+@pytest.mark.asyncio
+async def test_firestore_list_kind_loop_includes_legacy_docs_without_kind() -> None:
+    client = _FakeClient()
+    _seed_due(client, "legacy-loop")
+    store = FirestoreScheduledLoopStore(client, prefix="t")  # type: ignore[arg-type]
+    loops = await store.list_kind("loop")
+    assert [row.loop_id for row in loops] == ["legacy-loop"]
+
+
+@pytest.mark.asyncio
+async def test_firestore_goal_session_lock_rejects_second_open_goal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_transactional(monkeypatch)
+    client = _FakeClient()
+    store = FirestoreScheduledLoopStore(client, prefix="t")  # type: ignore[arg-type]
+    from monkeybot.core.goals.service import DurableGoalService, GoalConflictError
+
+    service = DurableGoalService(store)
+    first, created = await service.create(objective="Ship it", session_id="sess-1")
+    assert created is True
+    with pytest.raises(GoalConflictError):
+        await service.create(objective="Do something else", session_id="sess-1")
+    opened = await service.open_for_session("sess-1")
+    assert opened is not None
+    assert opened.loop_id == first.loop_id
