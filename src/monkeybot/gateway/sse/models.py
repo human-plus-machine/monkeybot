@@ -118,7 +118,11 @@ class ReplyResponse(BaseModel):
 
 
 class AdmissionAcceptedResponse(BaseModel):
-    """POST /steer or /queue acceptance."""
+    """POST /steer, /queue, or /queue/{id}/steer acceptance.
+
+    For ``queue="steer"``, ``request_id`` is the in-flight turn (promote
+    included). For ``queue="follow_up"``, it is the follow-up's own id.
+    """
 
     request_id: str
     queue: Literal["steer", "follow_up"]

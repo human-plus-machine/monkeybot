@@ -243,16 +243,28 @@ class AttachmentDescriptorEvent:
 
 @dataclass(frozen=True)
 class UserSteered:
-    """User text injected mid-turn at a safe loop boundary (steer queue)."""
+    """User text injected mid-turn at a safe loop boundary (steer queue).
+
+    ``request_id`` is the in-flight turn that received the injection.
+    ``queued_request_id`` is the original follow-up id when this steer was
+    promoted from the FIFO; empty for ``POST /steer``.
+    """
 
     kind: Literal["UserSteered"] = "UserSteered"
     request_id: str = ""
     text: str = ""
+    queued_request_id: str = ""
 
 
 @dataclass(frozen=True)
 class QueuedInputAccepted:
-    """Steer or follow-up prompt accepted into a session admission queue."""
+    """Steer or follow-up prompt accepted into a session admission queue.
+
+    For ``queue="steer"``, ``request_id`` is the in-flight turn — the same id
+    ``POST /steer`` publishes, not the follow-up id. Promoted follow-ups
+    correlate via ``UserSteered.queued_request_id``. For ``queue="follow_up"``,
+    ``request_id`` is the follow-up's own id.
+    """
 
     kind: Literal["QueuedInputAccepted"] = "QueuedInputAccepted"
     request_id: str = ""
@@ -694,7 +706,10 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             "search_queries": list(event.search_queries),
         }
     if isinstance(event, UserSteered):
-        return {**base, "text": event.text}
+        steered: dict[str, object] = {**base, "text": event.text}
+        if event.queued_request_id:
+            steered["queued_request_id"] = event.queued_request_id
+        return steered
     if isinstance(event, VerifierVerdict):
         payload: dict[str, object] = {
             **base,
@@ -1138,7 +1153,9 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
     if t == "UserSteered":
         text_raw = payload.get("text", "")
         text = text_raw if isinstance(text_raw, str) else ""
-        return UserSteered(request_id=rid, text=text)
+        qid_raw = payload.get("queued_request_id", "")
+        queued_request_id = qid_raw if isinstance(qid_raw, str) else ""
+        return UserSteered(request_id=rid, text=text, queued_request_id=queued_request_id)
     if t == "VerifierVerdict":
         signals_raw = payload.get("triggering_signals") or []
         signals = tuple(str(s) for s in signals_raw) if isinstance(signals_raw, list) else ()
@@ -1204,7 +1221,9 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         )
     if t == "CredentialEgressBlocked":
         sk_raw = payload.get("scan_kind", "secret")
-        scan_kind = cast(Literal["secret", "canary"], sk_raw if sk_raw in ("secret", "canary") else "secret")
+        scan_kind = cast(
+            Literal["secret", "canary"], sk_raw if sk_raw in ("secret", "canary") else "secret"
+        )
         origin_raw = payload.get("origin")
         origin = origin_raw if isinstance(origin_raw, str) and origin_raw else None
         return CredentialEgressBlockedEvent(request_id=rid, scan_kind=scan_kind, origin=origin)
