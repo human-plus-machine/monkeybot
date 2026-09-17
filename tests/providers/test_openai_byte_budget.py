@@ -9,14 +9,17 @@ from typing import Any
 import pytest
 
 from monkeybot.core.llm.provider import Message, TextDelta, UsageEvent
-from monkeybot.core.types.content_blocks import Image, Text, ToolResponse
+from monkeybot.core.types.content_blocks import File, Image, Text, ToolResponse
 from monkeybot.providers._openai_compat import (
     _OMITTED_IMAGE_TEXT,
+    _trim_openai_messages_for_byte_budget,
+    enforce_openai_request_byte_budget,
     is_ollama_request_body_read_error,
     openai_chat_request_body_bytes,
     stream_chat_completions_with_tool_fallback,
-    trim_openai_messages_for_byte_budget,
 )
+from monkeybot.providers.openai import OpenAIProvider
+from monkeybot.providers.request_budget import RequestByteBudgetError
 
 
 def _data_url(n: int) -> str:
@@ -67,9 +70,13 @@ def test_trim_drops_oldest_images_first() -> None:
         ],
     }
     before = openai_chat_request_body_bytes(kwargs)
-    out, stubbed = trim_openai_messages_for_byte_budget(kwargs, 4_000)
+    out = enforce_openai_request_byte_budget(
+        kwargs,
+        4_000,
+        provider="openrouter",
+        model="m",
+    )
     after = openai_chat_request_body_bytes(out)
-    assert stubbed >= 1
     assert after < before
     assert after <= 4_000
     last = out["messages"][-1]["content"]
@@ -90,7 +97,11 @@ def test_trim_drop_all_media_stubs_every_data_url() -> None:
         "model": "m",
         "messages": [_image_message(_data_url(4_000)), _image_message(_data_url(4_000))],
     }
-    out, stubbed = trim_openai_messages_for_byte_budget(kwargs, 1, drop_all_media=True)
+    out, stubbed, _after = _trim_openai_messages_for_byte_budget(
+        kwargs,
+        1,
+        drop_all_media=True,
+    )
     assert stubbed == 2
     for msg in out["messages"]:
         for part in msg["content"]:
@@ -107,8 +118,12 @@ def test_trim_stops_destroying_tool_text_once_under_budget() -> None:
         ],
     }
     before = openai_chat_request_body_bytes(kwargs)
-    out, stubbed = trim_openai_messages_for_byte_budget(kwargs, before - 3_000)
-    assert stubbed == 0
+    out = enforce_openai_request_byte_budget(
+        kwargs,
+        before - 3_000,
+        provider="openrouter",
+        model="m",
+    )
     assert len(out["messages"][0]["content"]) < 5_000
     assert out["messages"][1]["content"] == "B" * 5_000
 
@@ -122,7 +137,7 @@ def test_drop_all_media_without_lower_cap_preserves_tool_text() -> None:
         ],
     }
     before = openai_chat_request_body_bytes(kwargs)
-    out, stubbed = trim_openai_messages_for_byte_budget(
+    out, stubbed, _after = _trim_openai_messages_for_byte_budget(
         kwargs,
         before,
         drop_all_media=True,
@@ -249,3 +264,91 @@ async def test_body_read_400_retries_once_without_media(
     second_tool = next(msg for msg in second_msgs if msg.get("role") == "tool")
     assert second_tool["content"] == first_tool["content"]
     assert any(isinstance(ev, (UsageEvent, TextDelta)) for ev in events)
+
+
+@pytest.mark.asyncio
+async def test_non_ollama_body_read_400_is_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    fail = _FakeAPIStatusError(400, "failed to read request body")
+
+    async def _create(**_kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        raise fail
+
+    fake_openai = ModuleType("openai")
+    fake_openai.AsyncOpenAI = lambda *_a, **_kw: SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=_create))
+    )
+    fake_openai.APIStatusError = _FakeAPIStatusError
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    with pytest.raises(_FakeAPIStatusError):
+        _ = [
+            event
+            async for event in stream_chat_completions_with_tool_fallback(
+                base_url="https://openrouter.ai/api/v1",
+                api_key="key",
+                provider="openrouter",
+                messages=[Message(role="user", content=[Text(text="hello")])],
+                tools=[],
+                model="m",
+                temperature=0.2,
+                max_tokens=64,
+                max_request_bytes=50_000,
+            )
+        ]
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_openai_checks_budget_after_file_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setenv("MODEL_MAX_REQUEST_BYTES", "10000")
+
+    async def _messages_to_openai(
+        _messages: list[Message],
+    ) -> tuple[None, list[dict[str, Any]]]:
+        return None, [{"role": "user", "content": "X" * 20_000}]
+
+    fake_openai = ModuleType("openai")
+    fake_openai.AsyncOpenAI = lambda **_kwargs: SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    monkeypatch.setattr("monkeybot.providers.openai.messages_to_openai", _messages_to_openai)
+
+    provider = OpenAIProvider()
+    with pytest.raises(RequestByteBudgetError, match="after trimming"):
+        _ = [
+            event
+            async for event in provider.stream(
+                [
+                    Message(
+                        role="user",
+                        content=[File(mime_type="application/pdf", data="A")],
+                    )
+                ],
+                [],
+                model="gpt-4.1",
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_direct_openai_token_count_can_trigger_compaction_over_byte_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+    monkeypatch.setenv("MODEL_MAX_REQUEST_BYTES", "1000")
+    provider = OpenAIProvider()
+
+    count = await provider.count_input_tokens(
+        [Message(role="user", content=[Text(text="history " * 2_000)])],
+        [],
+        model="gpt-4.1",
+    )
+
+    assert count > 1_000

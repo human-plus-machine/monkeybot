@@ -56,7 +56,12 @@ class ClaudeProvider:
         del thinking_budget, hints
         import anthropic  # noqa: PLC0415
 
-        messages = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
+        messages = trim_message_media_for_byte_budget(
+            messages,
+            tools,
+            provider=self.name,
+            raise_if_oversized=False,
+        )
         system, msgs = split_leading_system(messages)
         converted_messages = build_anthropic_messages(msgs)
         return await count_anthropic_input_tokens(

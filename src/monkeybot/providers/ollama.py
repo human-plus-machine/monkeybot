@@ -282,7 +282,12 @@ class OllamaProvider:
         thinking_budget: int | None = None,
     ) -> int:
         return await count_input_tokens_tiktoken(
-            messages, tools, model=model, thinking_budget=thinking_budget
+            messages,
+            tools,
+            model=model,
+            provider=self.name,
+            max_request_bytes=_ollama_max_request_bytes(self._mode, self._base_url),
+            thinking_budget=thinking_budget,
         )
 
     async def stream(

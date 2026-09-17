@@ -23,15 +23,30 @@ from .image_preview import ImagePreviewError, make_provider_preview, provider_pr
 from .store import AttachmentStore
 
 _PREVIEW_CACHE_MAX = 128
-_preview_cache: weakref.WeakKeyDictionary[
-    object,
-    OrderedDict[tuple[str, str, str, int, int], tuple[bytes, str]],
-] = weakref.WeakKeyDictionary()
+_PREVIEW_CACHE_MAX_BYTES = 16 * 1024 * 1024
+_PreviewKey = tuple[str, str, str, int, int]
+_PreviewBucket = OrderedDict[_PreviewKey, tuple[bytes, str]]
+_preview_cache: weakref.WeakKeyDictionary[object, _PreviewBucket] = weakref.WeakKeyDictionary()
 _preview_cache_lock = threading.Lock()
 
 
 class AttachmentResolveError(MonkeybotError):
     """Failed to load attachment bytes for provider resolution."""
+
+
+def _preview_bucket(store: AttachmentStore) -> _PreviewBucket | None:
+    """Bucket for *store*, or None for stores that cannot be weak-referenced or hashed."""
+    try:
+        return _preview_cache.setdefault(store, OrderedDict())
+    except TypeError:
+        return None
+
+
+def _evict_preview_overflow(bucket: _PreviewBucket) -> None:
+    total = sum(len(data) for data, _mime in bucket.values())
+    while bucket and (len(bucket) > _PREVIEW_CACHE_MAX or total > _PREVIEW_CACHE_MAX_BYTES):
+        _key, (data, _mime) = bucket.popitem(last=False)
+        total -= len(data)
 
 
 def _cached_preview(
@@ -44,26 +59,19 @@ def _cached_preview(
     max_dim = preview_max_dim()
     max_bytes = preview_max_bytes()
     key = (session_id, attachment_id, mime, max_dim, max_bytes)
-    try:
-        with _preview_cache_lock:
-            bucket = _preview_cache.get(store)
-            if bucket is not None and key in bucket:
-                bucket.move_to_end(key)
-                return bucket[key]
-    except TypeError:
-        # Stores that cannot be weak-referenced or hashed simply go uncached.
-        return make_provider_preview(raw, mime, max_dim=max_dim, max_bytes=max_bytes)
+    with _preview_cache_lock:
+        bucket = _preview_bucket(store)
+        if bucket is not None and key in bucket:
+            bucket.move_to_end(key)
+            return bucket[key]
 
+    # Encoding stays outside the lock; *store* is live here, so *bucket* is too.
     value = make_provider_preview(raw, mime, max_dim=max_dim, max_bytes=max_bytes)
-    try:
+    if bucket is not None:
         with _preview_cache_lock:
-            bucket = _preview_cache.setdefault(store, OrderedDict())
             bucket[key] = value
             bucket.move_to_end(key)
-            while len(bucket) > _PREVIEW_CACHE_MAX:
-                bucket.popitem(last=False)
-    except TypeError:
-        pass
+            _evict_preview_overflow(bucket)
     return value
 
 
@@ -77,7 +85,8 @@ def _ref_to_media(
     except FileNotFoundError as exc:
         raise AttachmentResolveError(str(exc)) from exc
     mime_use = ref.mime_type or mime
-    meta = dict(ref.metadata) if ref.metadata else None
+    meta = dict(ref.metadata) if ref.metadata else {}
+    meta.setdefault("attachment_id", ref.attachment_id)
     if mime_use in IMAGE_MIME_TYPES:
         try:
             preview_bytes, preview_mime = _cached_preview(
@@ -87,13 +96,13 @@ def _ref_to_media(
             raise AttachmentResolveError(
                 f"Failed to prepare attachment {ref.attachment_id} for the provider: {exc}"
             ) from exc
-        meta = provider_preview_metadata(
+        preview_meta = provider_preview_metadata(
             meta,
             original_mime=mime_use,
             preview_mime=preview_mime,
         )
         data_b64 = base64.b64encode(preview_bytes).decode("ascii")
-        return Image(mime_type=preview_mime, data=data_b64, metadata=meta)
+        return Image(mime_type=preview_mime, data=data_b64, metadata=preview_meta)
     data_b64 = base64.b64encode(raw).decode("ascii")
     return File(mime_type=mime_use, data=data_b64, metadata=meta)
 

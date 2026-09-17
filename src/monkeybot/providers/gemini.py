@@ -582,7 +582,12 @@ class GeminiProvider:
                 "google-genai is required for GeminiProvider. Install with: uv sync (monkeybot dependencies)."
             ) from exc
 
-        messages = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
+        messages = trim_message_media_for_byte_budget(
+            messages,
+            tools,
+            provider=self.name,
+            raise_if_oversized=False,
+        )
         system_instruction, rest = _split_system_and_rest(messages)
         contents = _messages_to_contents(rest)
         # Developer API CountTokensConfig rejects system_instruction/tools/gen_cfg; fold system into contents.

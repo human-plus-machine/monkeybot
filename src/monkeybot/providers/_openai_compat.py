@@ -45,7 +45,10 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import safe_parse_tool_args
-from monkeybot.providers.request_budget import RequestByteBudgetError
+from monkeybot.providers.request_budget import (
+    RequestByteBudgetError,
+    trim_message_media_for_byte_budget,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -904,19 +907,32 @@ async def count_input_tokens_tiktoken(
     tools: Sequence[ToolDef],
     *,
     model: str,
+    provider: str,
+    max_request_bytes: int,
     thinking_budget: int | None = None,
 ) -> int:
     """Shared ``count_input_tokens`` body for tiktoken-based providers.
 
     Falls back to ``cl100k_base`` when ``model`` isn't a tiktoken-known model id
     (true for most non-OpenAI models served through an OpenAI-compat endpoint).
+
+    Media is stubbed against ``max_request_bytes`` so the count reflects what
+    ``stream`` will actually send, but never raises when text alone stays over
+    the cap — the caller counts tokens precisely to decide whether to compact.
+
     ``thinking_budget`` is accepted for ``Provider`` protocol symmetry but unused:
     none of these providers' token counts vary with reasoning configuration.
     """
     del thinking_budget
     import tiktoken  # noqa: PLC0415
 
-    msgs = list(messages)
+    msgs = trim_message_media_for_byte_budget(
+        messages,
+        tools,
+        max_bytes=max_request_bytes,
+        provider=provider,
+        raise_if_oversized=False,
+    )
     try:
         enc = tiktoken.encoding_for_model(model)
     except KeyError:
@@ -926,7 +942,7 @@ async def count_input_tokens_tiktoken(
 
 _OMITTED_IMAGE_TEXT = (
     "[image omitted to fit the provider request size; previously shown. "
-    "Call load_file with the original path or attachment_id to reload.]"
+    "Ask the user to reattach it if it is needed again.]"
 )
 _STUB_IMAGE_PART = {"type": "text", "text": _OMITTED_IMAGE_TEXT}
 _STUB_IMAGE_JSON_LEN = len(json.dumps(_STUB_IMAGE_PART, ensure_ascii=False).encode("utf-8"))
@@ -1041,23 +1057,49 @@ def _trim_openai_messages_for_byte_budget(
     return out, stubbed, current
 
 
-def trim_openai_messages_for_byte_budget(
+def enforce_openai_request_byte_budget(
     kwargs: dict[str, Any],
     max_bytes: int,
     *,
-    drop_all_media: bool = False,
-) -> tuple[dict[str, Any], int]:
-    """Replace oldest ``image_url`` data URLs with stubs until *kwargs* fits *max_bytes*.
-
-    Never reorders messages, so tool-call / tool-result pairing stays valid.
-    Returns ``(new_kwargs, images_stubbed)``.
-    """
-    out, stubbed, _current = _trim_openai_messages_for_byte_budget(
+    provider: str,
+    model: str,
+) -> dict[str, Any]:
+    """Trim a converted Chat Completions request and reject it if it still exceeds the cap."""
+    before = openai_chat_request_body_bytes(kwargs)
+    if before <= max_bytes:
+        # Nothing to trim — skip the deep copy of every data URL in the body.
+        return kwargs
+    out, stubbed, after = _trim_openai_messages_for_byte_budget(
         kwargs,
         max_bytes,
-        drop_all_media=drop_all_media,
+        current_bytes=before,
     )
-    return out, stubbed
+    if stubbed:
+        _log.warning(
+            "openai-compat trimmed request media %s",
+            kv(
+                provider=provider,
+                model=model,
+                body_bytes_before=before,
+                body_bytes_after=after,
+                trimmed_images=stubbed,
+                max_request_bytes=max_bytes,
+            ),
+        )
+    if after > max_bytes:
+        _log.error(
+            "openai-compat request remains over byte cap %s",
+            kv(
+                provider=provider,
+                model=model,
+                body_bytes=after,
+                max_request_bytes=max_bytes,
+            ),
+        )
+        raise RequestByteBudgetError(
+            f"{provider} request exceeds configured byte cap after trimming ({after} > {max_bytes})"
+        )
+    return out
 
 
 def is_ollama_request_body_read_error(exc: BaseException) -> bool:
@@ -1112,6 +1154,13 @@ async def stream_chat_completions_with_tool_fallback(
     from openai import AsyncOpenAI  # noqa: PLC0415
 
     msgs = list(messages)
+    if max_request_bytes is not None and max_request_bytes > 0:
+        msgs = trim_message_media_for_byte_budget(
+            msgs,
+            tools,
+            max_bytes=max_request_bytes,
+            provider=provider,
+        )
     system, oai_messages = await messages_to_openai(msgs)
     if system:
         oai_messages = [{"role": "system", "content": system}, *oai_messages]
@@ -1131,38 +1180,12 @@ async def stream_chat_completions_with_tool_fallback(
     if extra_body:
         kwargs["extra_body"] = extra_body
     if max_request_bytes is not None and max_request_bytes > 0:
-        before = openai_chat_request_body_bytes(kwargs)
-        kwargs, stubbed, after = _trim_openai_messages_for_byte_budget(
+        kwargs = enforce_openai_request_byte_budget(
             kwargs,
             max_request_bytes,
-            current_bytes=before,
+            provider=provider,
+            model=model,
         )
-        if stubbed:
-            _log.warning(
-                "openai-compat trimmed request media %s",
-                kv(
-                    provider=provider,
-                    model=model,
-                    body_bytes_before=before,
-                    body_bytes_after=after,
-                    trimmed_images=stubbed,
-                    max_request_bytes=max_request_bytes,
-                ),
-            )
-        if after > max_request_bytes:
-            _log.error(
-                "openai-compat request remains over byte cap %s",
-                kv(
-                    provider=provider,
-                    model=model,
-                    body_bytes=after,
-                    max_request_bytes=max_request_bytes,
-                ),
-            )
-            raise RequestByteBudgetError(
-                f"{provider} request exceeds configured byte cap after trimming "
-                f"({after} > {max_request_bytes})"
-            )
 
     n_tools = len(tools)
     sem = _provider_semaphore(provider)

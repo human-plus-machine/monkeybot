@@ -14,13 +14,17 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._openai_compat import (
     count_openai_compat_input_tokens,
+    enforce_openai_request_byte_budget,
     iter_openai_compat_stream,
     messages_to_openai,
     openai_messages_token_count,
     openai_tools,
     openai_tools_token_count,
 )
-from monkeybot.providers.request_budget import trim_message_media_for_byte_budget
+from monkeybot.providers.request_budget import (
+    configured_request_byte_budget,
+    trim_message_media_for_byte_budget,
+)
 from monkeybot.providers.sampling import resolve_model_sampling
 
 # Re-export private names that existing tests import directly from this module.
@@ -74,7 +78,12 @@ class OpenAIProvider:
         del thinking_budget, hints
         import tiktoken  # noqa: PLC0415
 
-        msgs = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
+        msgs = trim_message_media_for_byte_budget(
+            messages,
+            tools,
+            provider=self.name,
+            raise_if_oversized=False,
+        )
         try:
             enc = tiktoken.encoding_for_model(model)
         except KeyError:
@@ -93,7 +102,13 @@ class OpenAIProvider:
         del thinking_budget
         from openai import AsyncOpenAI  # noqa: PLC0415
 
-        msgs = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
+        max_request_bytes = configured_request_byte_budget(provider=self.name)
+        msgs = trim_message_media_for_byte_budget(
+            messages,
+            tools,
+            max_bytes=max_request_bytes,
+            provider=self.name,
+        )
 
         system, oai_messages = await messages_to_openai(msgs)
         if system:
@@ -117,6 +132,12 @@ class OpenAIProvider:
             kwargs["parallel_" + "tool" + "_calls"] = True
         if retention == "long":
             kwargs["prompt_cache_retention"] = "24h"
+        kwargs = enforce_openai_request_byte_budget(
+            kwargs,
+            max_request_bytes,
+            provider=self.name,
+            model=model,
+        )
 
         async for event in iter_openai_compat_stream(
             client,

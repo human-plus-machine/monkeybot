@@ -96,7 +96,11 @@ def test_resolve_uses_preview_not_original(tmp_path: Path, monkeypatch: pytest.M
     preview = base64.b64decode(img.data)
     assert len(preview) < len(raw)
     assert img.mime_type == "image/jpeg"
-    assert img.metadata == {"filename": "n.jpg", "original_filename": "n.png"}
+    assert img.metadata == {
+        "filename": "n.jpg",
+        "original_filename": "n.png",
+        "attachment_id": stored.attachment_id,
+    }
     still, _m, _n = store.read("s1", stored.attachment_id)
     assert still == raw
 

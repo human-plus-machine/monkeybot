@@ -80,7 +80,12 @@ class NvidiaProvider:
         thinking_budget: int | None = None,
     ) -> int:
         return await count_input_tokens_tiktoken(
-            messages, tools, model=model, thinking_budget=thinking_budget
+            messages,
+            tools,
+            model=model,
+            provider=self.name,
+            max_request_bytes=configured_request_byte_budget(provider=self.name),
+            thinking_budget=thinking_budget,
         )
 
     async def stream(
@@ -101,6 +106,6 @@ class NvidiaProvider:
             model=model,
             temperature=self._temperature,
             max_tokens=self._max_tokens,
-            max_request_bytes=configured_request_byte_budget(),
+            max_request_bytes=configured_request_byte_budget(provider=self.name),
         ):
             yield event

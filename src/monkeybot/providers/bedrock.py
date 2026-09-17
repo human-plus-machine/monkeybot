@@ -96,7 +96,12 @@ class BedrockProvider:
         hints: ProviderCallHints | None = None,
     ) -> int:
         del thinking_budget, hints
-        messages = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
+        messages = trim_message_media_for_byte_budget(
+            messages,
+            tools,
+            provider=self.name,
+            raise_if_oversized=False,
+        )
         if not uses_anthropic_bedrock(model):
             return estimate_converse_input_tokens(messages, tools)
         import anthropic  # noqa: PLC0415
