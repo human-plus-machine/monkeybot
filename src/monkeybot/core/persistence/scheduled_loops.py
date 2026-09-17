@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from typing import cast
 
@@ -32,9 +32,15 @@ _SCHEDULED_LOOP_COLUMNS: tuple[str, ...] = (
     "tick_in_flight",
     "worker_id",
     "claimed_at_ms",
+    "kind",
+    "objective",
 )
 
 _LOOP_STATUSES = frozenset({"active", "paused", "completed", "failed"})
+KIND_LOOP = "loop"
+KIND_GOAL = "goal"
+OPEN_GOAL_STATUSES = frozenset({"active", "paused"})
+GOAL_DEFAULT_INTERVAL_MS = 5 * 60 * 1000
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +66,8 @@ class ScheduledLoopRow:
     tick_in_flight: bool
     worker_id: str | None = None
     claimed_at_ms: int | None = None
+    kind: str = KIND_LOOP
+    objective: str | None = None
 
 
 def _optional_int_field(raw: object) -> int | None:
@@ -87,6 +95,92 @@ def _bool_field(raw: object, *, default: bool = False) -> bool:
     if isinstance(raw, str):
         return raw.strip().lower() in {"1", "true", "yes", "on"}
     return default
+
+
+def _kind_field(raw: object) -> str:
+    value = str(raw or "").strip().lower()
+    return KIND_GOAL if value == KIND_GOAL else KIND_LOOP
+
+
+def _optional_str_field(raw: object) -> str | None:
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
+def normalize_objective(text: str) -> str:
+    return " ".join(text.split())
+
+
+def planned_create(spec: ScheduledLoopCreate, *, now_ms: int) -> dict[str, object]:
+    """Validate a create spec and return insert values shared by every backend."""
+    kind = KIND_GOAL if spec.kind == KIND_GOAL else KIND_LOOP
+    interval_ms = _require_positive_interval_ms("new", spec.interval_ms)
+    if kind == KIND_GOAL:
+        objective = (spec.objective or spec.prompt).strip()
+        if not objective:
+            raise ValueError("goals require a non-empty objective")
+        prompt = spec.prompt.strip() or objective
+        next_tick_at_ms = now_ms + interval_ms
+        max_ticks = None
+        max_runtime_ms = None
+    else:
+        validate_loop_guards(
+            max_ticks=spec.max_ticks,
+            max_runtime_ms=spec.max_runtime_ms,
+            unbounded=spec.unbounded,
+        )
+        objective = None
+        prompt = spec.prompt.strip()
+        next_tick_at_ms = now_ms
+        max_ticks = spec.max_ticks
+        max_runtime_ms = spec.max_runtime_ms
+    return {
+        "loop_id": _loop_id_from_create(spec),
+        "session_id": spec.session_id.strip() or "loop-main",
+        "status": "active",
+        "prompt": prompt,
+        "interval_ms": interval_ms,
+        "max_ticks": max_ticks,
+        "max_runtime_ms": max_runtime_ms,
+        "skip_if_busy": spec.skip_if_busy,
+        "tick_index": 0,
+        "next_tick_at_ms": next_tick_at_ms,
+        "started_at_ms": now_ms,
+        "last_tick_at_ms": None,
+        "last_error": None,
+        "stop_reason": None,
+        "tick_in_flight": False,
+        "worker_id": None,
+        "claimed_at_ms": None,
+        "kind": kind,
+        "objective": objective,
+    }
+
+
+def resolve_complete_tick(
+    row: ScheduledLoopRow,
+    *,
+    error: str | None,
+    now_ms: int,
+) -> tuple[int, str, str | None, int, str | None]:
+    """Return ``(tick_index, status, stop_reason, next_tick_at_ms, last_error)``."""
+    tick_index = row.tick_index + 1
+    if error:
+        if row.kind == KIND_GOAL:
+            return tick_index, "active", None, now_ms + row.interval_ms, error
+        return tick_index, "failed", "tick_error", row.next_tick_at_ms, error
+    status = row.status
+    stop_reason: str | None = None
+    if row.max_ticks is not None and tick_index >= row.max_ticks:
+        status = "completed"
+        stop_reason = "max_ticks"
+    elif row.max_runtime_ms is not None and (now_ms - row.started_at_ms) >= row.max_runtime_ms:
+        status = "completed"
+        stop_reason = "max_runtime"
+    next_tick = now_ms + row.interval_ms if status == "active" else row.next_tick_at_ms
+    return tick_index, status, stop_reason, next_tick, None
 
 
 def _require_positive_interval_ms(loop_id: str, interval_ms: int) -> int:
@@ -118,6 +212,8 @@ def doc_to_scheduled_loop_row(loop_id: str, data: dict[str, object]) -> Schedule
         tick_in_flight=_bool_field(data.get("tick_in_flight")),
         worker_id=str(data["worker_id"]) if data.get("worker_id") is not None else None,
         claimed_at_ms=_optional_int_field(data.get("claimed_at_ms")),
+        kind=_kind_field(data.get("kind")),
+        objective=_optional_str_field(data.get("objective")),
     )
 
 
@@ -133,6 +229,8 @@ class ScheduledLoopCreate:
     max_runtime_ms: int | None = None
     skip_if_busy: bool = True
     unbounded: bool = False
+    kind: str = KIND_LOOP
+    objective: str | None = None
 
 
 def validate_loop_guards(
@@ -175,6 +273,8 @@ def _row_from_tuple(row: tuple[object, ...]) -> ScheduledLoopRow:
         claimed_at_ms=(
             int(cast(int, d["claimed_at_ms"])) if d["claimed_at_ms"] is not None else None
         ),
+        kind=_kind_field(d.get("kind")),
+        objective=_optional_str_field(d.get("objective")),
     )
 
 
@@ -204,6 +304,16 @@ def _loop_id_from_create(spec: ScheduledLoopCreate) -> str:
 
 def format_tick_prompt(row: ScheduledLoopRow) -> str:
     """Wrap the stored user prompt with tick metadata for each scheduled invocation."""
+    if row.kind == KIND_GOAL:
+        objective = (row.objective or row.prompt).strip()
+        return (
+            f"[GOAL CONTINUATION · goal_id={row.loop_id} · session={row.session_id}]\n\n"
+            f"Objective (keep this intact; do not shrink scope):\n{objective}\n\n"
+            "This goal already exists. Do not call create_goal again.\n"
+            "Do the next concrete increment of work now.\n"
+            "Call update_goal with status complete only after evidence proves every "
+            "requirement. If work remains, leave the goal active.\n"
+        )
     max_label = str(row.max_ticks) if row.max_ticks is not None else "∞"
     tick_num = row.tick_index + 1
     header = (
@@ -227,35 +337,34 @@ class SQLiteScheduledLoopStore:
 
     @with_conn_lock
     async def create(self, spec: ScheduledLoopCreate) -> ScheduledLoopRow:
-        loop_id = _loop_id_from_create(spec)
+        now_ms = int(time.time() * 1000)
+        values = planned_create(spec, now_ms=now_ms)
+        loop_id = str(values["loop_id"])
         existing = await self.get(loop_id)
         if existing is not None:
             raise ValueError(f"scheduled loop already exists: {loop_id}")
-        validate_loop_guards(
-            max_ticks=spec.max_ticks,
-            max_runtime_ms=spec.max_runtime_ms,
-            unbounded=spec.unbounded,
-        )
-        now_ms = int(time.time() * 1000)
         await self._conn.execute(
             """
             INSERT INTO scheduled_loops(
                 loop_id, session_id, status, prompt, interval_ms,
                 max_ticks, max_runtime_ms, skip_if_busy, tick_index,
                 next_tick_at_ms, started_at_ms, last_tick_at_ms,
-                last_error, stop_reason, tick_in_flight, worker_id, claimed_at_ms
-            ) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, 0, ?, ?, NULL, NULL, NULL, 0, NULL, NULL)
+                last_error, stop_reason, tick_in_flight, worker_id, claimed_at_ms,
+                kind, objective
+            ) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, 0, ?, ?, NULL, NULL, NULL, 0, NULL, NULL, ?, ?)
             """,
             (
                 loop_id,
-                spec.session_id.strip() or "loop-main",
-                spec.prompt.strip(),
-                spec.interval_ms,
-                spec.max_ticks,
-                spec.max_runtime_ms,
-                1 if spec.skip_if_busy else 0,
-                now_ms,
-                now_ms,
+                values["session_id"],
+                values["prompt"],
+                values["interval_ms"],
+                values["max_ticks"],
+                values["max_runtime_ms"],
+                1 if values["skip_if_busy"] else 0,
+                values["next_tick_at_ms"],
+                values["started_at_ms"],
+                values["kind"],
+                values["objective"],
             ),
         )
         await self._conn.commit()
@@ -286,6 +395,49 @@ class SQLiteScheduledLoopStore:
         rows = await cursor.fetchall()
         await cursor.close()
         return _map_loop_tuples(rows)
+
+    @with_conn_lock
+    async def list_kind(self, kind: str) -> list[ScheduledLoopRow]:
+        columns = ", ".join(_SCHEDULED_LOOP_COLUMNS)
+        cursor = await self._conn.execute(
+            f"""
+            SELECT {columns} FROM scheduled_loops
+            WHERE kind = ?
+            ORDER BY started_at_ms DESC
+            """,
+            (kind,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return _map_loop_tuples(rows)
+
+    @with_conn_lock
+    async def find_open(
+        self,
+        *,
+        session_id: str,
+        kind: str,
+        statuses: Collection[str],
+    ) -> ScheduledLoopRow | None:
+        wanted = tuple(statuses)
+        if not wanted:
+            return None
+        columns = ", ".join(_SCHEDULED_LOOP_COLUMNS)
+        placeholders = ", ".join("?" for _ in wanted)
+        cursor = await self._conn.execute(
+            f"""
+            SELECT {columns} FROM scheduled_loops
+            WHERE kind = ? AND session_id = ? AND status IN ({placeholders})
+            ORDER BY started_at_ms DESC
+            LIMIT 1
+            """,
+            (kind, session_id, *wanted),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        return _try_row_from_tuple(tuple(row))
 
     @with_conn_lock
     async def list_due(self, now_ms: int) -> list[ScheduledLoopRow]:
@@ -371,19 +523,9 @@ class SQLiteScheduledLoopStore:
         if row is None or not row.tick_in_flight or row.worker_id != worker_id:
             return None
         now_ms = int(time.time() * 1000)
-        tick_index = row.tick_index + 1
-        stop_reason: str | None = None
-        status = row.status
-        if error:
-            status = "failed"
-            stop_reason = "tick_error"
-        elif row.max_ticks is not None and tick_index >= row.max_ticks:
-            status = "completed"
-            stop_reason = "max_ticks"
-        elif row.max_runtime_ms is not None and (now_ms - row.started_at_ms) >= row.max_runtime_ms:
-            status = "completed"
-            stop_reason = "max_runtime"
-        next_tick = now_ms + row.interval_ms if status == "active" else row.next_tick_at_ms
+        tick_index, status, stop_reason, next_tick, last_error = resolve_complete_tick(
+            row, error=error, now_ms=now_ms
+        )
         await self._conn.execute(
             """
             UPDATE scheduled_loops
@@ -395,7 +537,7 @@ class SQLiteScheduledLoopStore:
             (
                 tick_index,
                 now_ms,
-                error,
+                last_error,
                 status,
                 stop_reason,
                 next_tick,
@@ -488,4 +630,6 @@ class SQLiteScheduledLoopStore:
             "last_error": row.last_error,
             "stop_reason": row.stop_reason,
             "tick_in_flight": row.tick_in_flight,
+            "kind": row.kind,
+            "objective": row.objective,
         }

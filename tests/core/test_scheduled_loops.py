@@ -34,6 +34,8 @@ async def test_scheduled_loop_create_and_tick_lifecycle(tmp_path) -> None:
     )
     assert row.status == "active"
     assert row.tick_index == 0
+    assert row.kind == "loop"
+    assert row.objective is None
     prompt = format_tick_prompt(row)
     assert "SCHEDULED TICK 1/2" in prompt
     assert "BUSINESS: append status" in prompt
@@ -123,6 +125,8 @@ def test_doc_to_scheduled_loop_row_roundtrip_fields() -> None:
     assert row.max_ticks == 3
     assert row.skip_if_busy is True
     assert row.tick_index == 2
+    assert row.kind == "loop"
+    assert row.objective is None
 
 
 def test_doc_to_scheduled_loop_row_rejects_invalid_interval() -> None:
@@ -148,6 +152,8 @@ def _sql_loop_tuple(*, loop_id: str = "demo", interval_ms: int = 1000) -> tuple[
         None,
         0,
         None,
+        None,
+        "loop",
         None,
     )
 
@@ -290,4 +296,66 @@ async def test_sql_list_due_skips_malformed_interval(tmp_path) -> None:
     assert await store.get("bad") is None
     all_rows = await store.list_all()
     assert [row.loop_id for row in all_rows] == ["good"]
+    await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_migrates_kind_and_objective_columns(tmp_path) -> None:
+    import aiosqlite
+
+    from monkeybot.core.goals.service import DurableGoalService
+    from monkeybot.core.persistence.scheduled_loops import KIND_GOAL, KIND_LOOP
+
+    path = tmp_path / "legacy.db"
+    conn = await aiosqlite.connect(path)
+    await conn.execute(
+        """
+        CREATE TABLE scheduled_loops (
+            loop_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            interval_ms INTEGER NOT NULL,
+            max_ticks INTEGER,
+            max_runtime_ms INTEGER,
+            skip_if_busy INTEGER NOT NULL DEFAULT 1,
+            tick_index INTEGER NOT NULL DEFAULT 0,
+            next_tick_at_ms INTEGER NOT NULL,
+            started_at_ms INTEGER NOT NULL,
+            last_tick_at_ms INTEGER,
+            last_error TEXT,
+            stop_reason TEXT,
+            tick_in_flight INTEGER NOT NULL DEFAULT 0,
+            worker_id TEXT,
+            claimed_at_ms INTEGER
+        )
+        """
+    )
+    await conn.execute(
+        """
+        INSERT INTO scheduled_loops(
+            loop_id, session_id, status, prompt, interval_ms,
+            max_ticks, max_runtime_ms, skip_if_busy, tick_index,
+            next_tick_at_ms, started_at_ms, last_tick_at_ms,
+            last_error, stop_reason, tick_in_flight, worker_id, claimed_at_ms
+        ) VALUES ('legacy-loop', 'loop-main', 'active', 'tick', 5000, 3, NULL, 1, 0,
+                  1, 0, NULL, NULL, NULL, 0, NULL, NULL)
+        """
+    )
+    await conn.commit()
+    await conn.close()
+
+    backend = SQLiteStorageBackend(f"sqlite:///{path}")
+    await backend.open()
+    store = backend.scheduled_loops()
+    legacy = await store.get("legacy-loop")
+    assert legacy is not None
+    assert legacy.kind == KIND_LOOP
+    assert legacy.objective is None
+    goal, created = await DurableGoalService(store).create(
+        objective="Ship it", session_id="sess-1"
+    )
+    assert created is True
+    assert goal.kind == KIND_GOAL
+    assert goal.objective == "Ship it"
     await backend.close()

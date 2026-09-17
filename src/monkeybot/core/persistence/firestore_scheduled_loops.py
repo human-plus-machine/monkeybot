@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from typing import TypeVar, cast
 
 from google.cloud import firestore
@@ -13,11 +13,12 @@ from google.cloud.firestore import AsyncClient
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from monkeybot.core.persistence.scheduled_loops import (
+    KIND_LOOP,
     ScheduledLoopCreate,
     ScheduledLoopRow,
-    _loop_id_from_create,
     doc_to_scheduled_loop_row,
-    validate_loop_guards,
+    planned_create,
+    resolve_complete_tick,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,30 +79,28 @@ class FirestoreScheduledLoopStore:
         return await txn(transaction, doc_ref)
 
     async def create(self, spec: ScheduledLoopCreate) -> ScheduledLoopRow:
-        loop_id = _loop_id_from_create(spec)
-        validate_loop_guards(
-            max_ticks=spec.max_ticks,
-            max_runtime_ms=spec.max_runtime_ms,
-            unbounded=spec.unbounded,
-        )
         now_ms = int(time.time() * 1000)
+        values = planned_create(spec, now_ms=now_ms)
+        loop_id = str(values["loop_id"])
         payload = {
-            "session_id": spec.session_id.strip() or "loop-main",
+            "session_id": values["session_id"],
             "status": "active",
-            "prompt": spec.prompt.strip(),
-            "interval_ms": spec.interval_ms,
-            "max_ticks": spec.max_ticks,
-            "max_runtime_ms": spec.max_runtime_ms,
-            "skip_if_busy": 1 if spec.skip_if_busy else 0,
+            "prompt": values["prompt"],
+            "interval_ms": values["interval_ms"],
+            "max_ticks": values["max_ticks"],
+            "max_runtime_ms": values["max_runtime_ms"],
+            "skip_if_busy": 1 if values["skip_if_busy"] else 0,
             "tick_index": 0,
-            "next_tick_at_ms": now_ms,
-            "started_at_ms": now_ms,
+            "next_tick_at_ms": values["next_tick_at_ms"],
+            "started_at_ms": values["started_at_ms"],
             "last_tick_at_ms": None,
             "last_error": None,
             "stop_reason": None,
             "tick_in_flight": 0,
             "worker_id": None,
             "claimed_at_ms": None,
+            "kind": values["kind"] or KIND_LOOP,
+            "objective": values["objective"],
         }
         doc_ref = self._doc(loop_id)
 
@@ -136,6 +135,37 @@ class FirestoreScheduledLoopStore:
             if row is not None:
                 rows.append(row)
         return rows
+
+    async def list_kind(self, kind: str) -> list[ScheduledLoopRow]:
+        rows: list[ScheduledLoopRow] = []
+        query = self._client.collection(self._collection).where(
+            filter=FieldFilter("kind", "==", kind)
+        )
+        async for doc in query.stream():
+            row = self._try_doc_to_row(doc.id, doc.to_dict() or {})
+            if row is not None:
+                rows.append(row)
+        rows.sort(key=lambda item: item.started_at_ms, reverse=True)
+        return rows
+
+    async def find_open(
+        self,
+        *,
+        session_id: str,
+        kind: str,
+        statuses: Collection[str],
+    ) -> ScheduledLoopRow | None:
+        wanted = {str(status) for status in statuses}
+        query = (
+            self._client.collection(self._collection)
+            .where(filter=FieldFilter("kind", "==", kind))
+            .where(filter=FieldFilter("session_id", "==", session_id))
+        )
+        async for doc in query.stream():
+            row = self._try_doc_to_row(doc.id, doc.to_dict() or {})
+            if row is not None and row.status in wanted:
+                return row
+        return None
 
     async def list_due(self, now_ms: int) -> list[ScheduledLoopRow]:
         rows: list[ScheduledLoopRow] = []
@@ -263,33 +293,15 @@ class FirestoreScheduledLoopStore:
             except ValueError as exc:
                 logger.error("complete_tick skipped loop_id=%s: %s", loop_id, exc)
                 return False
-            tick_index = row.tick_index + 1
-            status = row.status
-            stop_reason: str | None = None
-            started_at_ms = row.started_at_ms
-            if error:
-                status = "failed"
-                stop_reason = "tick_error"
-            elif row.max_ticks is not None and tick_index >= row.max_ticks:
-                status = "completed"
-                stop_reason = "max_ticks"
-            elif (
-                row.max_runtime_ms is not None
-                and (now_ms - started_at_ms) >= row.max_runtime_ms
-            ):
-                status = "completed"
-                stop_reason = "max_runtime"
-            next_tick_at = (
-                now_ms + row.interval_ms
-                if status == "active"
-                else row.next_tick_at_ms
+            tick_index, status, stop_reason, next_tick_at, last_error = resolve_complete_tick(
+                row, error=error, now_ms=now_ms
             )
             txn.update(
                 ref,
                 {
                     "tick_index": tick_index,
                     "last_tick_at_ms": now_ms,
-                    "last_error": error,
+                    "last_error": last_error,
                     "status": status,
                     "stop_reason": stop_reason,
                     "next_tick_at_ms": next_tick_at,

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 
 pytest.importorskip("google.cloud.firestore")
 
-from monkeybot.core.persistence.firestore_scheduled_loops import FirestoreScheduledLoopStore  # noqa: E402
+from monkeybot.core.persistence.firestore_scheduled_loops import (
+    FirestoreScheduledLoopStore,  # noqa: E402
+)
 
 
 class _FakeSnapshot:
@@ -29,11 +32,18 @@ class _FakeTransaction:
     def __init__(self, store: dict[str, dict[str, Any]]) -> None:
         self._store = store
         self._pending: list[tuple[str, dict[str, Any]]] = []
+        self._sets: list[tuple[str, dict[str, Any]]] = []
 
-    def update(self, ref: "_FakeDocRef", fields: dict[str, Any]) -> None:
+    def set(self, ref: _FakeDocRef, payload: dict[str, Any]) -> None:
+        self._sets.append((ref.id, dict(payload)))
+
+    def update(self, ref: _FakeDocRef, fields: dict[str, Any]) -> None:
         self._pending.append((ref.id, fields))
 
     def commit(self) -> None:
+        for doc_id, payload in self._sets:
+            self._store[doc_id] = dict(payload)
+        self._sets.clear()
         for doc_id, fields in self._pending:
             cur = dict(self._store.get(doc_id, {}))
             cur.update(fields)
@@ -71,14 +81,14 @@ class _FakeQuery:
         self._filters = filters
         self._order_field = order_field
 
-    def where(self, *, filter: Any) -> "_FakeQuery":  # noqa: A002
+    def where(self, *, filter: Any) -> _FakeQuery:  # noqa: A002
         return _FakeQuery(
             self._store,
             [*self._filters, (filter.field_path, filter.op_string, filter.value)],
             self._order_field,
         )
 
-    def order_by(self, field: str, direction: Any = None) -> "_FakeQuery":
+    def order_by(self, field: str, direction: Any = None) -> _FakeQuery:
         return _FakeQuery(self._store, self._filters, field)
 
     async def stream(self):
@@ -163,13 +173,16 @@ def _seed_in_flight(
     worker_id: str = "worker-a",
     claimed_at_ms: int = 1_000,
     interval_ms: int = 5_000,
+    kind: str = "loop",
+    objective: str | None = None,
+    max_ticks: int | None = 10,
 ) -> None:
     client.docs[loop_id] = {
         "session_id": "loop-main",
         "status": "active",
         "prompt": "tick",
         "interval_ms": interval_ms,
-        "max_ticks": 10,
+        "max_ticks": max_ticks,
         "max_runtime_ms": None,
         "skip_if_busy": 1,
         "tick_index": 0,
@@ -181,6 +194,8 @@ def _seed_in_flight(
         "tick_in_flight": 1,
         "worker_id": worker_id,
         "claimed_at_ms": claimed_at_ms,
+        "kind": kind,
+        "objective": objective,
     }
 
 
@@ -348,3 +363,74 @@ async def test_firestore_release_stale_clears_truly_stale_claim(
     assert row["tick_in_flight"] == 0
     assert row["worker_id"] is None
     assert row["claimed_at_ms"] is None
+
+
+@pytest.mark.asyncio
+async def test_firestore_goal_tick_error_stays_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_transactional(monkeypatch)
+    client = _FakeClient()
+    _seed_in_flight(
+        client,
+        loop_id="goal-1",
+        kind="goal",
+        objective="Ship it",
+        max_ticks=None,
+    )
+    store = FirestoreScheduledLoopStore(client, prefix="t")  # type: ignore[arg-type]
+    completed = await store.complete_tick("goal-1", worker_id="worker-a", error="timeout")
+    assert completed is not None
+    assert completed.kind == "goal"
+    assert completed.status == "active"
+    assert completed.last_error == "timeout"
+    assert completed.stop_reason is None
+
+
+@pytest.mark.asyncio
+async def test_firestore_docs_without_kind_default_to_loop() -> None:
+    client = _FakeClient()
+    _seed_due(client, "legacy-loop")
+    store = FirestoreScheduledLoopStore(client, prefix="t")  # type: ignore[arg-type]
+    row = await store.get("legacy-loop")
+    assert row is not None
+    assert row.kind == "loop"
+    assert row.objective is None
+
+
+@pytest.mark.asyncio
+async def test_firestore_create_goal_persists_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_transactional(monkeypatch)
+    client = _FakeClient()
+    store = FirestoreScheduledLoopStore(client, prefix="t")  # type: ignore[arg-type]
+    from monkeybot.core.goals.service import DurableGoalService
+
+    row, created = await DurableGoalService(store).create(objective="Ship it", session_id="sess-1")
+    assert created is True
+    assert row.kind == "goal"
+    assert client.docs[row.loop_id]["kind"] == "goal"
+    assert client.docs[row.loop_id]["objective"] == "Ship it"
+
+
+@pytest.mark.asyncio
+async def test_firestore_list_kind_returns_only_goals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_transactional(monkeypatch)
+    client = _FakeClient()
+    _seed_due(client, "loop-1")
+    store = FirestoreScheduledLoopStore(client, prefix="t")  # type: ignore[arg-type]
+    from monkeybot.core.goals.service import DurableGoalService
+
+    row, _created = await DurableGoalService(store).create(objective="Ship it", session_id="sess-1")
+    goals = await store.list_kind("goal")
+    assert [item.loop_id for item in goals] == [row.loop_id]
+    opened = await store.find_open(
+        session_id="sess-1",
+        kind="goal",
+        statuses={"active", "paused"},
+    )
+    assert opened is not None
+    assert opened.loop_id == row.loop_id

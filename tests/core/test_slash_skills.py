@@ -27,7 +27,8 @@ def _ctx(*, skills: list[SkillRef] | None = None, invoked: SkillRef | None = Non
 
 BROWSER = SkillRef(name="browser", description="Control a browser")
 IMAGE = SkillRef(name="image-generator", description="Generate images")
-SKILLS = [BROWSER, IMAGE]
+GOAL = SkillRef(name="goal", description="Create a durable goal")
+SKILLS = [BROWSER, IMAGE, GOAL]
 
 
 def test_resolve_matches_installed_skill_only() -> None:
@@ -35,6 +36,7 @@ def test_resolve_matches_installed_skill_only() -> None:
     assert resolve_invoked_skill("/Browser now", SKILLS) is BROWSER
     assert resolve_invoked_skill("please /browser now", SKILLS) is BROWSER
     assert resolve_invoked_skill("/loop now", SKILLS) is None
+    assert resolve_invoked_skill("/goal ship the report", SKILLS) is GOAL
     assert resolve_invoked_skill("/not-a-skill", SKILLS) is None
     assert resolve_invoked_skill("browser please", SKILLS) is None
 

@@ -62,6 +62,7 @@ from .models import (
 )
 from .reload import build_admin_router
 from .reply_body import ReplyBodyError, normalize_reply_to_user_content
+from .goal_routes import build_goals_router
 from .scheduler_routes import build_scheduler_router
 from .session_bus import SessionAlreadyExistsError, SessionBus, SessionRegistry
 from .sse import format_active_requests, format_ping
@@ -1194,6 +1195,7 @@ def create_app(
 
     app.include_router(api)
     app.include_router(build_scheduler_router(loop_port=loop, registry=reg))
+    app.include_router(build_goals_router())
     app.include_router(build_admin_router())
 
     @app.get("/health", response_model=HealthResponse)

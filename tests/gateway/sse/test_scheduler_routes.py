@@ -48,6 +48,7 @@ async def test_scheduler_create_and_list_loop(scheduler_app) -> None:
         assert create.status_code == 201
         body = create.json()
         assert body["loop"]["loop_id"] == "demo-loop"
+        assert body["loop"]["kind"] == "loop"
         listed = await client.get("/scheduler/loops")
         assert listed.status_code == 200
         loops = listed.json()["loops"]
