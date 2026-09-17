@@ -249,7 +249,11 @@ async def _drain_steers(
                     provenance=item.provenance,
                 ),
             )
-            yield UserSteered(request_id=ctx.request_id, text=preview)
+            yield UserSteered(
+                request_id=ctx.request_id,
+                text=preview,
+                queued_request_id=item.queued_request_id or "",
+            )
     async for verdict_evt in _drain_verdicts(ctx, history):
         yield verdict_evt
 
