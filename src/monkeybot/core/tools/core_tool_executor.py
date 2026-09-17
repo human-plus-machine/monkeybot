@@ -47,6 +47,12 @@ from monkeybot.core.context.tool_result_ingress import (
     sanitize_tool_result_text,
     skip_tool_result_sanitize,
 )
+from monkeybot.core.goals.service import (
+    DurableGoalService,
+    GoalConflictError,
+    GoalNotFoundError,
+    goal_to_json,
+)
 from monkeybot.core.knowledge.subsystem import KnowledgeSubsystem
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.logging_utils import kv
@@ -59,7 +65,7 @@ from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import RunStore, ScheduledLoopStore
 from monkeybot.core.persistence.runs import make_run_id
-from monkeybot.core.persistence.scheduled_loops import ScheduledLoopCreate
+from monkeybot.core.persistence.scheduled_loops import KIND_GOAL, KIND_LOOP, ScheduledLoopCreate
 from monkeybot.core.runtime.events import (
     AgentEvent,
     AssistantDelta,
@@ -151,6 +157,8 @@ _CORE_TOOL_NAMES = frozenset(
         "pause_loop",
         "resume_loop",
         "stop_loop",
+        "create_goal",
+        "update_goal",
     }
 )
 
@@ -1161,6 +1169,10 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = await self._tool_resume_loop(args)
             elif name == "stop_loop":
                 result_text, err_text = await self._tool_stop_loop(args)
+            elif name == "create_goal":
+                result_text, err_text = await self._tool_create_goal(args, ctx)
+            elif name == "update_goal":
+                result_text, err_text = await self._tool_update_goal(args, ctx)
             elif name in self._extra_tools:
                 try:
                     raw = await self._extra_tools[name].execute(args)
@@ -2289,6 +2301,7 @@ class CoreToolExecutor(ToolExecutorPort):
             max_runtime_ms=max_runtime_ms,
             skip_if_busy=skip_if_busy,
             unbounded=unbounded,
+            kind=KIND_LOOP,
         )
         try:
             row = await store.create(spec)
@@ -2322,10 +2335,10 @@ class CoreToolExecutor(ToolExecutorPort):
         loop_id = _str_arg(args, "loop_id", "id")
         if loop_id:
             row = await store.get(loop_id)
-            if row is None:
+            if row is None or row.kind == KIND_GOAL:
                 return (None, f"unknown loop: {loop_id}")
             return (_j({"ok": True, "loop": self._loop_row_json(row)}), None)
-        rows = await store.list_all()
+        rows = await store.list_kind(KIND_LOOP)
         return (_j({"ok": True, "loops": [self._loop_row_json(r) for r in rows]}), None)
 
     @staticmethod
@@ -2347,6 +2360,7 @@ class CoreToolExecutor(ToolExecutorPort):
             "last_error": row.last_error,
             "stop_reason": row.stop_reason,
             "tick_in_flight": row.tick_in_flight,
+            "kind": row.kind,
         }
 
     async def _tool_pause_loop(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -2356,6 +2370,9 @@ class CoreToolExecutor(ToolExecutorPort):
         loop_id = _str_arg(args, "loop_id", "id")
         if not loop_id:
             return (None, "pause_loop requires loop_id")
+        row = await store_or_err.get(loop_id)
+        if row is None or row.kind == KIND_GOAL:
+            return (None, f"unknown loop: {loop_id}")
         ok = await store_or_err.pause(loop_id)
         if not ok:
             return (None, f"unknown loop: {loop_id}")
@@ -2368,6 +2385,9 @@ class CoreToolExecutor(ToolExecutorPort):
         loop_id = _str_arg(args, "loop_id", "id")
         if not loop_id:
             return (None, "resume_loop requires loop_id")
+        row = await store_or_err.get(loop_id)
+        if row is None or row.kind == KIND_GOAL:
+            return (None, f"paused loop not found: {loop_id}")
         ok = await store_or_err.resume(loop_id)
         if not ok:
             return (None, f"paused loop not found: {loop_id}")
@@ -2380,7 +2400,111 @@ class CoreToolExecutor(ToolExecutorPort):
         loop_id = _str_arg(args, "loop_id", "id")
         if not loop_id:
             return (None, "stop_loop requires loop_id")
+        row = await store_or_err.get(loop_id)
+        if row is None or row.kind == KIND_GOAL:
+            return (None, f"unknown loop: {loop_id}")
         ok = await store_or_err.stop(loop_id)
         if not ok:
             return (None, f"unknown loop: {loop_id}")
         return (_j({"ok": True, "loop_id": loop_id, "status": "completed"}), None)
+
+    def _goal_service(self) -> DurableGoalService | tuple[None, str]:
+        store_or_err = self._require_loop_store()
+        if isinstance(store_or_err, tuple):
+            return store_or_err
+        return DurableGoalService(store_or_err)
+
+    async def _tool_create_goal(
+        self, args: dict[str, Any], ctx: TurnContext
+    ) -> tuple[str | None, str | None]:
+        service_or_err = self._goal_service()
+        if isinstance(service_or_err, tuple):
+            return None, service_or_err[1]
+        invoked = ctx.invoked_skill
+        if invoked is None or invoked.name.lower() != "goal":
+            return (None, "create_goal is only available when the user invoked /goal")
+        objective = _str_arg(args, "objective")
+        if not objective:
+            return (None, "create_goal requires a non-empty objective")
+        try:
+            row, created = await service_or_err.create(
+                objective=objective,
+                session_id=ctx.thread_id,
+            )
+        except GoalConflictError as exc:
+            logger.warning(
+                "create_goal conflict %s",
+                kv(session_id=ctx.thread_id, error=str(exc)),
+            )
+            return (None, str(exc))
+        except ValueError as exc:
+            logger.warning(
+                "create_goal rejected %s",
+                kv(session_id=ctx.thread_id, error=str(exc)),
+            )
+            return (None, str(exc))
+        logger.info(
+            "create_goal %s",
+            kv(session_id=ctx.thread_id, goal_id=row.loop_id, created=created, status=row.status),
+        )
+        return (
+            _j(
+                {
+                    "ok": True,
+                    "created": created,
+                    "goal": goal_to_json(row),
+                    "message": (
+                        "Goal armed. Do the first concrete unit of work now. "
+                        "Call update_goal complete only when evidence proves the objective."
+                        if created
+                        else "This goal is already armed; continue the existing work."
+                    ),
+                }
+            ),
+            None,
+        )
+
+    async def _tool_update_goal(
+        self, args: dict[str, Any], ctx: TurnContext
+    ) -> tuple[str | None, str | None]:
+        service_or_err = self._goal_service()
+        if isinstance(service_or_err, tuple):
+            return None, service_or_err[1]
+        status = _str_arg(args, "status")
+        if not status:
+            return (None, "update_goal requires status")
+        goal_id = _str_arg(args, "goal_id", "id")
+        if not goal_id:
+            return (None, "update_goal requires goal_id")
+        try:
+            row = await service_or_err.update(
+                goal_id=goal_id,
+                session_id=ctx.thread_id,
+                status=status,
+            )
+        except GoalNotFoundError as exc:
+            logger.warning(
+                "update_goal missed %s",
+                kv(session_id=ctx.thread_id, status=status, error=str(exc)),
+            )
+            return (None, str(exc))
+        except ValueError as exc:
+            logger.warning(
+                "update_goal rejected %s",
+                kv(session_id=ctx.thread_id, status=status, error=str(exc)),
+            )
+            return (None, str(exc))
+        logger.info(
+            "update_goal %s",
+            kv(session_id=ctx.thread_id, goal_id=row.loop_id, status=row.status),
+        )
+        return (
+            _j(
+                {
+                    "ok": True,
+                    "goal": goal_to_json(row),
+                    "status": row.status,
+                }
+            ),
+            None,
+        )

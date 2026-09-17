@@ -99,6 +99,8 @@ dev = [
     "monkeybot[knowledge-media]",
     # MemPalace is an optional extra; tests still exercise the adapter.
     "monkeybot[memory]",
+    # Native goal persistence tests hit a real Postgres via asyncpg.
+    "monkeybot[postgres]",
 ]
 
 [tool.uv]
