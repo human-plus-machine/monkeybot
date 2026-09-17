@@ -124,6 +124,13 @@ logger = logging.getLogger("monkeybot.core.runtime.loop.turn_loop")
 # a contract between the loop and the subagent completion payload, not a message.
 MAX_TURNS_ERROR = "Max turns exceeded"
 
+_MAX_TURNS_FINISH_NOTE = (
+    "[Harness] You are on the last inner turns of this user message. Stop "
+    "exploring. Do not load more files or images. Finish with the best answer "
+    "you can from what you already have, or write remaining work to a plan "
+    "file and stop."
+)
+
 TurnAction = Literal["continue", "break", "return"]
 
 _EMPTY_COMPLETION_RETRIES = 2
@@ -522,7 +529,10 @@ async def _prepare_turn_context(
     combined_extra = _combine_extras(state.pre_turn_extra, state.pre_tool_extra_next)
     _arm_replan_from_mailbox(state)
     force_no_tools, doom_loop_note = state.doom_tracker.consume_recovery()
-    combined_extra = _combine_extras(combined_extra, doom_loop_note)
+    finish_note = None
+    if state.effective_max > 1 and state.turn_index >= state.effective_max:
+        finish_note = _MAX_TURNS_FINISH_NOTE
+    combined_extra = _combine_extras(combined_extra, doom_loop_note, finish_note)
     state.system = _append_extra_system_text(system, combined_extra)
     state.pre_tool_extra_next = None
     state.turn_tools = () if force_no_tools else state.ctx.tools
@@ -1648,10 +1658,11 @@ async def _run_inner_core(
             if state.action == "return":
                 # Cancel/error mid-stream skips _handle_empty_or_final_text —
                 # persist any text already shown to the user before exiting.
+                # Break (do not return) so freeze_attachments_in_history still runs.
                 await _persist_partial_assistant_on_abort(
                     state, history=history, last_assistant=last_assistant
                 )
-                return
+                break
             state.action = None
 
             if cancelled is not None and cancelled.is_set():
@@ -1691,7 +1702,7 @@ async def _run_inner_core(
                 ):
                     yield evt
                 if state.action == "return":
-                    return
+                    break
 
         finally:
             set_turn_prompt_tokens(usage.estimated_prompt_tokens)

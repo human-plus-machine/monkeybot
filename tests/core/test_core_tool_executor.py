@@ -250,6 +250,43 @@ async def test_read_file_and_write_file(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_file_rejects_png_with_binary_file_code(tmp_path: Path) -> None:
+    png = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+        b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc"
+        b"\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    (tmp_path / "shot.png").write_bytes(png)
+    ex = _make_executor(tmp_path)
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="rf-bin", name="read_file", args={"path": "./shot.png"}),
+            ctx=_ctx(),
+        )
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["ok"] is False
+    assert payload["details"]["code"] == "binary_file"
+    assert "load_file" in payload["hint"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_rejects_nul_bytes(tmp_path: Path) -> None:
+    (tmp_path / "blob.bin").write_bytes(b"abc\x00def")
+    ex = _make_executor(tmp_path)
+    _out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="rf-nul", name="read_file", args={"path": "./blob.bin"}),
+            ctx=_ctx(),
+        )
+    )
+    assert err is not None
+    payload = json.loads(err)
+    assert payload["details"]["code"] == "binary_file"
+
+
+@pytest.mark.asyncio
 async def test_read_file_with_turn_path_grant_reads_in_place(tmp_path: Path) -> None:
     """End-to-end regression test for the reported bug: given a folder grant
     for this turn, read_file on an absolute out-of-workspace path succeeds
@@ -3197,6 +3234,53 @@ async def test_load_file_from_path_returns_image_block(tmp_path: Path) -> None:
     assert img.mime_type == "image/png"
     assert img.metadata is not None
     assert "attachment_id" in img.metadata
+
+
+@pytest.mark.asyncio
+async def test_load_file_sends_preview_but_keeps_original_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import base64
+    import os
+
+    from PIL import Image as PILImage
+
+    from monkeybot.core.attachments.store import FilesystemAttachmentStore
+    from monkeybot.core.types.content_blocks import Image
+
+    monkeypatch.setenv("ATTACHMENT_PREVIEW_MAX_DIM", "64")
+    monkeypatch.setenv("ATTACHMENT_PREVIEW_MAX_BYTES", "20000")
+    img_dir = tmp_path / "generated-media" / "images"
+    img_dir.mkdir(parents=True)
+    noisy = PILImage.frombytes("RGB", (400, 400), os.urandom(400 * 400 * 3))
+    raw_path = img_dir / "noisy.png"
+    noisy.save(raw_path, format="PNG")
+    original = raw_path.read_bytes()
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    store = FilesystemAttachmentStore(tmp_path)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        attachment_store=store,
+    )
+    result = await ex.execute(
+        call=ToolCall(
+            call_id="lf-prev",
+            name="load_file",
+            args={"path": "./generated-media/images/noisy.png"},
+        ),
+        ctx=_ctx(),
+    )
+    assert result.error is None
+    img = next(b for b in result.blocks if isinstance(b, Image))
+    preview = base64.b64decode(img.data)
+    assert len(preview) < len(original)
+    att_id = str(img.metadata["attachment_id"])  # type: ignore[index]
+    stored, _mime, _name = store.read("t", att_id)
+    assert stored == original
 
 
 @pytest.mark.asyncio

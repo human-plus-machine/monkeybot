@@ -71,6 +71,8 @@ _DEFAULT_CLOUD_URL = "https://ollama.com"
 _DUMMY_API_KEY = "ollama"
 _DEFAULT_LOCAL_KEEP_ALIVE = "24h"
 _DISABLE_KEEP_ALIVE = frozenset({"", "0"})
+_OLLAMA_CLOUD_MAX_REQUEST_BYTES = 8 * 1024 * 1024
+_OLLAMA_LOCAL_MAX_REQUEST_BYTES = 32 * 1024 * 1024
 _log = logging.getLogger(__name__)
 
 
@@ -154,6 +156,21 @@ def _is_local_runtime(mode: OllamaMode, host: str) -> bool:
     if mode == "local":
         return True
     return not _is_cloud_host(host)
+
+
+def _ollama_max_request_bytes(mode: OllamaMode, host: str) -> int:
+    """JSON body cap for Ollama Chat Completions requests."""
+    from monkeybot.core.config.snapshot import current_env
+
+    raw = current_env("MODEL_MAX_REQUEST_BYTES", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            _log.warning("invalid MODEL_MAX_REQUEST_BYTES %s", kv(value=raw))
+    if _is_local_runtime(mode, host):
+        return _OLLAMA_LOCAL_MAX_REQUEST_BYTES
+    return _OLLAMA_CLOUD_MAX_REQUEST_BYTES
 
 
 def reasoning_effort_for_thinking_budget(budget: int) -> str | None:
@@ -299,5 +316,6 @@ class OllamaProvider:
             max_tokens=self._max_tokens,
             reasoning_effort=reasoning_effort_for_thinking_budget(budget),
             extra_body=extra_body,
+            max_request_bytes=_ollama_max_request_bytes(self._mode, self._base_url),
         ):
             yield event

@@ -20,6 +20,8 @@ from monkeybot.core.tools.text_normalize import normalize_unicode_punctuation
 
 logger = logging.getLogger(__name__)
 
+_BINARY_SAMPLE_BYTES = 8192
+
 # Directories skipped when walking for grep: noisy, large, or not source content.
 _GREP_IGNORE_DIRS = frozenset(
     {
@@ -355,6 +357,56 @@ def _raise_grep_max_files(
         code="incomplete_scan",
         details=details,
     )
+
+
+def _reject_binary_read(fp: Path) -> None:
+    """Raise ``binary_file`` when ``read_file`` is pointed at media or non-UTF-8 bytes."""
+    from monkeybot.core.attachments.store import sniff_mime
+
+    try:
+        with fp.open("rb") as handle:
+            sample = handle.read(_BINARY_SAMPLE_BYTES)
+    except OSError as exc:
+        raise WorkspaceError(f"Failed to read file: {fp}", code="read_failed") from exc
+
+    sniffed = sniff_mime(sample) if sample else None
+    if sniffed is not None:
+        raise WorkspaceError(
+            f"Cannot read_file binary media ({sniffed}). Use load_file for images/PDFs, "
+            "or glob to confirm the path exists.",
+            code="binary_file",
+            details={"path": str(fp), "mime": sniffed},
+        )
+    if b"\x00" in sample:
+        raise WorkspaceError(
+            "Cannot read_file a binary file (NUL byte in the first 8 KiB). "
+            "Use load_file for images/PDFs, or glob to confirm the path exists.",
+            code="binary_file",
+            details={"path": str(fp), "mime": "application/octet-stream"},
+        )
+    if not _utf8_prefix_ok(sample):
+        raise WorkspaceError(
+            "Cannot read_file a non-UTF-8 file. Use load_file for images/PDFs.",
+            code="binary_file",
+            details={"path": str(fp), "mime": "application/octet-stream"},
+        )
+
+
+def _utf8_prefix_ok(sample: bytes) -> bool:
+    """True when *sample* is UTF-8, ignoring a truncated trailing multi-byte char."""
+    if not sample:
+        return True
+    try:
+        sample.decode("utf-8")
+        return True
+    except UnicodeDecodeError as exc:
+        if exc.start >= max(0, len(sample) - 3):
+            try:
+                sample[: exc.start].decode("utf-8")
+                return True
+            except UnicodeDecodeError:
+                return False
+        return False
 
 
 def _grep_classify(fp: Path, max_file_bytes: int) -> tuple[str, bytes | None]:
@@ -998,7 +1050,8 @@ class WorkspaceFileService:
         fp = self._resolve_read_path(path)
         if not fp.is_file():
             raise WorkspaceError(f"Not a file: {path}", code="not_found")
-        text = fp.read_text(encoding="utf-8", errors="replace")
+        _reject_binary_read(fp)
+        text = fp.read_text(encoding="utf-8")
         lines = text.splitlines()
         total = len(lines)
         start_idx = offset - 1

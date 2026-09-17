@@ -485,6 +485,19 @@ def test_effective_max_turns_uses_pinned_snapshot(
     assert _effective_max_turns(None, get_config_store().current()) == 99
 
 
+def test_effective_max_turns_defaults_to_1000(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.runtime.loop_usage import _effective_max_turns
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MAX_TURNS", raising=False)
+    apply_monkeybot_runtime_env(
+        config_path=_write_yaml(tmp_path, "runtime:\n  port: 8080\n"), agent_root=tmp_path
+    )
+    assert _effective_max_turns(None, get_config_store().current()) == 1000
+
+
 def test_env_value_or_current_uses_store_when_unpinned(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

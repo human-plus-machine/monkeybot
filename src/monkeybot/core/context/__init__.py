@@ -672,9 +672,11 @@ def _core_tool_defs(
                 f"Without limit, returns up to {default_lines} lines from offset. "
                 f"Prefer that default (or a larger limit) over many small reads; "
                 f"use offset+limit only to continue from next_offset when truncated. "
-                f"An absolute path outside the workspace is read in place once the "
-                f"user grants that folder — pass it directly rather than copying "
-                f"or moving the file into the workspace first."
+                f"Images and PDFs cannot be read this way — use load_file (pixels) "
+                f"or glob (existence). An absolute path outside the workspace is "
+                f"read in place once the user grants that folder — pass it "
+                f"directly rather than copying or moving the file into the "
+                f"workspace first."
             ),
             read_schema,
             parallel_safe=True,

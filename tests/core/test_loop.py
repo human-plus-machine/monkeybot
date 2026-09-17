@@ -1342,6 +1342,124 @@ async def test_run_max_turns_emits_error_and_turn_complete() -> None:
     assert prov.stream_calls == 2
     assert any(isinstance(e, Error) and "Max turns exceeded" in e.error for e in events)
     assert isinstance(events[-1], TurnComplete)
+    from monkeybot.core.runtime.turn_loop import _MAX_TURNS_FINISH_NOTE
+
+    last_system = "".join(
+        b.text
+        for m in prov.stream_messages[-1]
+        if m.role == "system"
+        for b in m.content
+        if hasattr(b, "text")
+    )
+    assert _MAX_TURNS_FINISH_NOTE in last_system
+
+
+@pytest.mark.asyncio
+async def test_run_freezes_images_when_provider_followup_fails() -> None:
+    """A 400 on the post-tool provider call must still freeze attachment media."""
+
+    class FailOnFollowup(FakeProvider):
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[ToolDef],
+            *,
+            model: str,
+            thinking_budget: int | None = None,
+            vertex_google_search: bool = False,
+        ) -> AsyncIterator[ProviderEvent]:
+            del tools, thinking_budget
+            self.stream_messages.append(list(messages))
+            self.stream_models.append(model)
+            self.vertex_google_search_calls.append(vertex_google_search)
+            idx = self.stream_calls
+            self.stream_calls += 1
+            if idx >= 1:
+                raise RuntimeError(
+                    "Error code: 400 - {'error': {'message': 'failed to read request body'}}"
+                )
+            for ev in self._scripted[idx]:
+                yield ev  # type: ignore[misc]
+
+    b64 = "A" * 8000
+    prov = FailOnFollowup(
+        [
+            [
+                ToolCall(call_id="c1", name="load_file", args={"path": "./x.png"}),
+                Done(),
+            ],
+        ]
+    )
+    hist = FakeHistory()
+    exe = RecordingExecutor(
+        ToolExecutionResult.ok_blocks(
+            [
+                Image(
+                    mime_type="image/png",
+                    data=b64,
+                    metadata={
+                        "attachment_id": "att_big",
+                        "filename": "x.png",
+                        "path": "./x.png",
+                    },
+                )
+            ]
+        )
+    )
+    events = []
+    async for e in run(
+        "u",
+        _ctx(),
+        provider=prov,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=exe,
+        max_turns=4,
+    ):
+        events.append(e)
+    assert any(isinstance(e, Error) for e in events)
+    frozen = [
+        b
+        for m in hist.rows
+        if m.role == "user"
+        for b in m.content
+        if isinstance(b, ToolResponse)
+        for b in b.result
+    ]
+    assert frozen
+    assert all(isinstance(b, Text) for b in frozen)
+    assert any("shown earlier" in b.text for b in frozen if isinstance(b, Text))
+    assert not any(
+        isinstance(b, Image)
+        for m in hist.rows
+        for b in m.content
+        if not isinstance(b, ToolResponse)
+    )
+
+    follow = FakeProvider([[TextDelta(text="ok"), Done()]])
+    async for _ in run(
+        "continue",
+        _ctx(),
+        provider=follow,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=2,
+    ):
+        pass
+
+    def _has_image(messages: list[Message]) -> bool:
+        for msg in messages:
+            for block in msg.content:
+                if isinstance(block, Image):
+                    return True
+                if isinstance(block, ToolResponse) and any(
+                    isinstance(inner, Image) for inner in block.result
+                ):
+                    return True
+        return False
+
+    assert not any(_has_image(msgs) for msgs in follow.stream_messages)
 
 
 def test_chunk_tool_calls_groups_consecutive_tasks() -> None:

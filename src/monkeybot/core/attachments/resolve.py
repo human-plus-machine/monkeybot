@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import copy
 from collections.abc import Sequence
 
@@ -11,12 +12,11 @@ from monkeybot.core.types.content_blocks import (
     ContentBlock,
     File,
     Image,
-    Text,
-    ToolResponse,
 )
 from monkeybot.core.types.interfaces import MonkeybotError
 
 from .config import IMAGE_MIME_TYPES
+from .image_preview import make_provider_preview
 from .store import AttachmentStore
 
 
@@ -30,17 +30,22 @@ def _ref_to_media(
     ref: AttachmentRef,
 ) -> Image | File:
     try:
-        data_b64, mime, _filename = store.read_base64(session_id, ref.attachment_id)
+        raw, mime, _filename = store.read(session_id, ref.attachment_id)
     except FileNotFoundError as exc:
         raise AttachmentResolveError(str(exc)) from exc
     mime_use = ref.mime_type or mime
     meta = dict(ref.metadata) if ref.metadata else None
     if mime_use in IMAGE_MIME_TYPES:
-        return Image(mime_type=mime_use, data=data_b64, metadata=meta)
+        preview_bytes, preview_mime = make_provider_preview(raw, mime_use)
+        data_b64 = base64.b64encode(preview_bytes).decode("ascii")
+        return Image(mime_type=preview_mime, data=data_b64, metadata=meta)
+    data_b64 = base64.b64encode(raw).decode("ascii")
     return File(mime_type=mime_use, data=data_b64, metadata=meta)
 
 
-def _resolve_user_content(blocks: list[ContentBlock], store: AttachmentStore, session_id: str) -> list[ContentBlock]:
+def _resolve_user_content(
+    blocks: list[ContentBlock], store: AttachmentStore, session_id: str
+) -> list[ContentBlock]:
     out: list[ContentBlock] = []
     for block in blocks:
         if isinstance(block, AttachmentRef):

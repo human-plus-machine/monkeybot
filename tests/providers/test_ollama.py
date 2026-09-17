@@ -334,3 +334,22 @@ async def test_local_stream_ignores_env_knobs(monkeypatch: pytest.MonkeyPatch) -
     extra = captured[0]["extra_body"]
     assert extra["keep_alive"] == "24h"
     assert "options" not in extra
+
+
+@pytest.mark.asyncio
+async def test_cloud_stream_uses_8mb_request_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _capture_stream(monkeypatch)
+    monkeypatch.delenv("MODEL_MAX_REQUEST_BYTES", raising=False)
+    monkeypatch.setenv("OLLAMA_API_KEY", "k")
+    provider = OllamaProvider(mode="cloud")
+    _ = [ev async for ev in provider.stream([], [], model="gpt-oss:20b")]
+    assert captured[0]["max_request_bytes"] == 8 * 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_local_stream_uses_32mb_request_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _capture_stream(monkeypatch)
+    monkeypatch.delenv("MODEL_MAX_REQUEST_BYTES", raising=False)
+    provider = OllamaProvider(mode="local")
+    _ = [ev async for ev in provider.stream([], [], model="llama3.1")]
+    assert captured[0]["max_request_bytes"] == 32 * 1024 * 1024
