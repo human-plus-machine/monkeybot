@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -38,12 +39,14 @@ from monkeybot.core.persistence.durable_runs import (
 from monkeybot.core.persistence.errors import AmbiguousCommitError
 from monkeybot.core.persistence.scheduled_loops import (
     _SCHEDULED_LOOP_COLUMNS,
+    GOAL_MAX_CONSECUTIVE_ERRORS,
+    OpenGoalExistsError,
     ScheduledLoopCreate,
     ScheduledLoopRow,
-    _loop_id_from_create,
     _map_loop_tuples,
     _try_row_from_tuple,
-    validate_loop_guards,
+    planned_create,
+    resolve_complete_tick,
 )
 from monkeybot.core.persistence.thread_summary import (
     SUBAGENT_THREAD_ID_PREFIX,
@@ -128,7 +131,10 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     stop_reason TEXT,
     tick_in_flight INTEGER NOT NULL DEFAULT 0,
     worker_id TEXT,
-    claimed_at_ms BIGINT
+    claimed_at_ms BIGINT,
+    kind TEXT NOT NULL DEFAULT 'loop',
+    objective TEXT,
+    consecutive_error_count INTEGER NOT NULL DEFAULT 0
 )""",
     """CREATE INDEX IF NOT EXISTS idx_scheduled_loops_due
     ON scheduled_loops(status, tick_in_flight, next_tick_at_ms)
@@ -181,6 +187,44 @@ async def _apply_schema(pool: asyncpg.Pool) -> None:
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_history_message_id "
             "ON conversation_history(message_id) "
             "WHERE message_id IS NOT NULL AND message_id != ''"
+        )
+        await conn.execute(
+            "ALTER TABLE scheduled_loops ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'loop'"
+        )
+        await conn.execute("ALTER TABLE scheduled_loops ADD COLUMN IF NOT EXISTS objective TEXT")
+        await conn.execute(
+            "ALTER TABLE scheduled_loops ADD COLUMN IF NOT EXISTS "
+            "consecutive_error_count INTEGER NOT NULL DEFAULT 0"
+        )
+        await conn.execute(
+            """
+            WITH ranked AS (
+                SELECT loop_id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY session_id
+                           ORDER BY started_at_ms DESC, loop_id DESC
+                       ) AS open_rank
+                FROM scheduled_loops
+                WHERE kind = 'goal' AND status IN ('active', 'paused')
+            )
+            UPDATE scheduled_loops AS loops
+            SET status = 'completed',
+                stop_reason = COALESCE(loops.stop_reason, 'superseded_migration'),
+                tick_in_flight = 0,
+                worker_id = NULL,
+                claimed_at_ms = NULL
+            FROM ranked
+            WHERE loops.loop_id = ranked.loop_id AND ranked.open_rank > 1
+            """
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_scheduled_loops_kind_session "
+            "ON scheduled_loops(kind, session_id, status)"
+        )
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_loops_one_open_goal "
+            "ON scheduled_loops(session_id) "
+            "WHERE kind = 'goal' AND status IN ('active', 'paused')"
         )
 
 
@@ -943,34 +987,44 @@ class PostgresScheduledLoopStore:
         self._pool = pool
 
     async def create(self, spec: ScheduledLoopCreate) -> ScheduledLoopRow:
-        loop_id = _loop_id_from_create(spec)
-        if await self.get(loop_id) is not None:
-            raise ValueError(f"scheduled loop already exists: {loop_id}")
-        validate_loop_guards(
-            max_ticks=spec.max_ticks,
-            max_runtime_ms=spec.max_runtime_ms,
-            unbounded=spec.unbounded,
-        )
         now_ms = int(time.time() * 1000)
-        async with self._pool.acquire() as conn:
-            await conn.execute(
-                """
-                INSERT INTO scheduled_loops(
-                    loop_id, session_id, status, prompt, interval_ms,
-                    max_ticks, max_runtime_ms, skip_if_busy, tick_index,
-                    next_tick_at_ms, started_at_ms, last_tick_at_ms,
-                    last_error, stop_reason, tick_in_flight, worker_id, claimed_at_ms
-                ) VALUES ($1, $2, 'active', $3, $4, $5, $6, $7, 0, $8, $8, NULL, NULL, NULL, 0, NULL, NULL)
-                """,
-                loop_id,
-                spec.session_id.strip() or "loop-main",
-                spec.prompt.strip(),
-                spec.interval_ms,
-                spec.max_ticks,
-                spec.max_runtime_ms,
-                1 if spec.skip_if_busy else 0,
-                now_ms,
-            )
+        values = planned_create(spec, now_ms=now_ms)
+        loop_id = values.loop_id
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO scheduled_loops(
+                        loop_id, session_id, status, prompt, interval_ms,
+                        max_ticks, max_runtime_ms, skip_if_busy, tick_index,
+                        next_tick_at_ms, started_at_ms, last_tick_at_ms,
+                        last_error, stop_reason, tick_in_flight, worker_id, claimed_at_ms,
+                        kind, objective, consecutive_error_count
+                    ) VALUES (
+                        $1, $2, 'active', $3, $4, $5, $6, $7, 0, $8, $9,
+                        NULL, NULL, NULL, 0, NULL, NULL, $10, $11, 0
+                    )
+                    """,
+                    loop_id,
+                    values.session_id,
+                    values.prompt,
+                    values.interval_ms,
+                    values.max_ticks,
+                    values.max_runtime_ms,
+                    1 if values.skip_if_busy else 0,
+                    values.next_tick_at_ms,
+                    values.started_at_ms,
+                    values.kind,
+                    values.objective,
+                )
+        except asyncpg.UniqueViolationError as exc:
+            if await self.get(loop_id) is not None:
+                raise ValueError(f"scheduled loop already exists: {loop_id}") from exc
+            if values.kind == "goal":
+                raise OpenGoalExistsError(
+                    f"an open goal already exists for session: {values.session_id}"
+                ) from exc
+            raise
         row = await self.get(loop_id)
         if row is None:
             raise RuntimeError("failed to read scheduled loop after insert")
@@ -994,6 +1048,46 @@ class PostgresScheduledLoopStore:
                 f"SELECT {columns} FROM scheduled_loops ORDER BY started_at_ms DESC"
             )
         return _map_loop_tuples(rows)
+
+    async def list_kind(self, kind: str) -> list[ScheduledLoopRow]:
+        columns = ", ".join(_SCHEDULED_LOOP_COLUMNS)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT {columns} FROM scheduled_loops
+                WHERE kind = $1
+                ORDER BY started_at_ms DESC
+                """,
+                kind,
+            )
+        return _map_loop_tuples(rows)
+
+    async def find_open(
+        self,
+        *,
+        session_id: str,
+        kind: str,
+        statuses: Collection[str],
+    ) -> ScheduledLoopRow | None:
+        wanted = list(statuses)
+        if not wanted:
+            return None
+        columns = ", ".join(_SCHEDULED_LOOP_COLUMNS)
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"""
+                SELECT {columns} FROM scheduled_loops
+                WHERE kind = $1 AND session_id = $2 AND status = ANY($3::text[])
+                ORDER BY started_at_ms DESC
+                LIMIT 1
+                """,
+                kind,
+                session_id,
+                wanted,
+            )
+        if row is None:
+            return None
+        return _try_row_from_tuple(tuple(row))
 
     async def list_due(self, now_ms: int) -> list[ScheduledLoopRow]:
         columns = ", ".join(_SCHEDULED_LOOP_COLUMNS)
@@ -1037,12 +1131,29 @@ class PostgresScheduledLoopStore:
                 """
                 UPDATE scheduled_loops
                 SET tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL,
-                    last_error = COALESCE(last_error, 'stale tick claim released')
+                    status = CASE
+                        WHEN kind = 'goal' AND consecutive_error_count + 1 >= $2 THEN 'failed'
+                        ELSE status
+                    END,
+                    stop_reason = CASE
+                        WHEN kind = 'goal' AND consecutive_error_count + 1 >= $2
+                            THEN 'consecutive_tick_errors'
+                        ELSE stop_reason
+                    END,
+                    last_error = CASE
+                        WHEN kind = 'goal' THEN 'stale tick claim released'
+                        ELSE COALESCE(last_error, 'stale tick claim released')
+                    END,
+                    consecutive_error_count = CASE
+                        WHEN kind = 'goal' THEN consecutive_error_count + 1
+                        ELSE consecutive_error_count
+                    END
                 WHERE tick_in_flight = 1
                   AND claimed_at_ms IS NOT NULL
                   AND claimed_at_ms < $1
                 """,
                 cutoff,
+                GOAL_MAX_CONSECUTIVE_ERRORS,
             )
         return _asyncpg_affected_rows(status)
 
@@ -1057,34 +1168,24 @@ class PostgresScheduledLoopStore:
         if row is None or not row.tick_in_flight or row.worker_id != worker_id:
             return None
         now_ms = int(time.time() * 1000)
-        tick_index = row.tick_index + 1
-        stop_reason: str | None = None
-        status = row.status
-        if error:
-            status = "failed"
-            stop_reason = "tick_error"
-        elif row.max_ticks is not None and tick_index >= row.max_ticks:
-            status = "completed"
-            stop_reason = "max_ticks"
-        elif row.max_runtime_ms is not None and (now_ms - row.started_at_ms) >= row.max_runtime_ms:
-            status = "completed"
-            stop_reason = "max_runtime"
-        next_tick = now_ms + row.interval_ms if status == "active" else row.next_tick_at_ms
+        result = resolve_complete_tick(row, error=error, now_ms=now_ms)
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
                 UPDATE scheduled_loops
                 SET tick_index = $1, last_tick_at_ms = $2, last_error = $3,
                     status = $4, stop_reason = $5, next_tick_at_ms = $6,
-                    tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL
-                WHERE loop_id = $7 AND worker_id = $8 AND tick_in_flight = 1
+                    tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL,
+                    consecutive_error_count = $7
+                WHERE loop_id = $8 AND worker_id = $9 AND tick_in_flight = 1
                 """,
-                tick_index,
+                result.tick_index,
                 now_ms,
-                error,
-                status,
-                stop_reason,
-                next_tick,
+                result.last_error,
+                result.status,
+                result.stop_reason,
+                result.next_tick_at_ms,
+                result.consecutive_error_count,
                 loop_id,
                 worker_id,
             )
@@ -1100,7 +1201,8 @@ class PostgresScheduledLoopStore:
                 """
                 UPDATE scheduled_loops
                 SET tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL,
-                    next_tick_at_ms = $1, last_error = $2
+                    next_tick_at_ms = $1,
+                    last_error = CASE WHEN kind = 'goal' THEN last_error ELSE $2 END
                 WHERE loop_id = $3 AND worker_id = $4 AND tick_in_flight = 1
                 """,
                 now_ms + row.interval_ms,

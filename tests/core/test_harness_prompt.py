@@ -24,6 +24,8 @@ def test_harness_is_protocol_not_tool_catalog() -> None:
     assert "`enable_mcp`" not in out
     assert "`enable_loops`" in out
     assert "before scheduled-loop tools appear" in out
+    assert "`create_goal`" in out
+    assert "`update_goal`" in out
     assert "`mcp_status`" not in out
     assert "`run_command`" in out
     assert "`task` —" not in out

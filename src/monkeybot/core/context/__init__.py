@@ -275,6 +275,48 @@ MCP_PROGRESSIVE_META_TOOL_DEFS: tuple[ToolDef, ...] = (
 )
 MCP_PROGRESSIVE_META_TOOLS = frozenset(t.name for t in MCP_PROGRESSIVE_META_TOOL_DEFS)
 
+GOAL_TOOL_DEFS: tuple[ToolDef, ...] = (
+    ToolDef(
+        "create_goal",
+        "Create a durable goal for an explicit `/goal` invocation. Pass the full "
+        "objective. Call exactly once; do not retry. The first unit of work must "
+        "happen in this turn after creation. Requires durable storage (DB_URL).",
+        {
+            "type": "object",
+            "properties": {
+                "objective": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The full user objective. Keep it intact.",
+                }
+            },
+            "required": ["objective"],
+        },
+    ),
+    ToolDef(
+        "update_goal",
+        "Update a specific open goal in this conversation. Set status to complete only "
+        "when evidence proves the objective is done. Set active only when the user "
+        "paused the goal and asked to resume. You cannot pause with this tool.",
+        {
+            "type": "object",
+            "properties": {
+                "goal_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The durable goal id returned by create_goal.",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["active", "complete"],
+                },
+            },
+            "required": ["goal_id", "status"],
+        },
+    ),
+)
+GOAL_TOOL_NAMES = frozenset(t.name for t in GOAL_TOOL_DEFS)
+
 # Lifecycle tools — advertised only after ``enable_loops`` (or auto-advertise).
 SCHEDULED_LOOP_TOOL_DEFS: tuple[ToolDef, ...] = (
     ToolDef(

@@ -2473,7 +2473,7 @@ web-search = [
 dev = [
     { name = "anthropic", extra = ["bedrock", "vertex"] },
     { name = "asgi-lifespan" },
-    { name = "monkeybot", extra = ["knowledge-ast", "knowledge-media", "memory"] },
+    { name = "monkeybot", extra = ["knowledge-ast", "knowledge-media", "memory", "postgres"] },
     { name = "monkeybot-cli" },
     { name = "mypy" },
     { name = "opentelemetry-api" },
@@ -2563,6 +2563,7 @@ dev = [
     { name = "monkeybot", extras = ["knowledge-ast"] },
     { name = "monkeybot", extras = ["knowledge-media"] },
     { name = "monkeybot", extras = ["memory"] },
+    { name = "monkeybot", extras = ["postgres"] },
     { name = "monkeybot-cli", editable = "cli" },
     { name = "mypy", specifier = ">=1.13.0" },
     { name = "opentelemetry-api", specifier = ">=1.28" },

@@ -42,6 +42,7 @@ from monkeybot.core.runtime.input_admission import (
 from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
 from monkeybot.core.types.content_blocks import ContentBlock
 
+from .goal_routes import build_goals_router
 from .loop_port import LoopPort, UsagePort
 from .models import (
     AdmissionAcceptedResponse,
@@ -1325,6 +1326,7 @@ def create_app(
 
     app.include_router(api)
     app.include_router(build_scheduler_router(loop_port=loop, registry=reg))
+    app.include_router(build_goals_router())
     app.include_router(build_admin_router())
 
     @app.get("/health", response_model=HealthResponse)
