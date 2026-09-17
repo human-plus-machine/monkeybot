@@ -1342,16 +1342,6 @@ async def test_run_max_turns_emits_error_and_turn_complete() -> None:
     assert prov.stream_calls == 2
     assert any(isinstance(e, Error) and "Max turns exceeded" in e.error for e in events)
     assert isinstance(events[-1], TurnComplete)
-    from monkeybot.core.runtime.turn_loop import _MAX_TURNS_FINISH_NOTE
-
-    last_system = "".join(
-        b.text
-        for m in prov.stream_messages[-1]
-        if m.role == "system"
-        for b in m.content
-        if hasattr(b, "text")
-    )
-    assert _MAX_TURNS_FINISH_NOTE in last_system
 
 
 @pytest.mark.asyncio

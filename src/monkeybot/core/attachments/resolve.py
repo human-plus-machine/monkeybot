@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import base64
 import copy
+import threading
+import weakref
+from collections import OrderedDict
 from collections.abc import Sequence
 
 from monkeybot.core.llm.provider import Message
@@ -15,13 +18,53 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.interfaces import MonkeybotError
 
-from .config import IMAGE_MIME_TYPES
-from .image_preview import make_provider_preview
+from .config import IMAGE_MIME_TYPES, preview_max_bytes, preview_max_dim
+from .image_preview import ImagePreviewError, make_provider_preview, provider_preview_metadata
 from .store import AttachmentStore
+
+_PREVIEW_CACHE_MAX = 128
+_preview_cache: weakref.WeakKeyDictionary[
+    object,
+    OrderedDict[tuple[str, str, str, int, int], tuple[bytes, str]],
+] = weakref.WeakKeyDictionary()
+_preview_cache_lock = threading.Lock()
 
 
 class AttachmentResolveError(MonkeybotError):
     """Failed to load attachment bytes for provider resolution."""
+
+
+def _cached_preview(
+    store: AttachmentStore,
+    session_id: str,
+    attachment_id: str,
+    raw: bytes,
+    mime: str,
+) -> tuple[bytes, str]:
+    max_dim = preview_max_dim()
+    max_bytes = preview_max_bytes()
+    key = (session_id, attachment_id, mime, max_dim, max_bytes)
+    try:
+        with _preview_cache_lock:
+            bucket = _preview_cache.get(store)
+            if bucket is not None and key in bucket:
+                bucket.move_to_end(key)
+                return bucket[key]
+    except TypeError:
+        # Stores that cannot be weak-referenced or hashed simply go uncached.
+        return make_provider_preview(raw, mime, max_dim=max_dim, max_bytes=max_bytes)
+
+    value = make_provider_preview(raw, mime, max_dim=max_dim, max_bytes=max_bytes)
+    try:
+        with _preview_cache_lock:
+            bucket = _preview_cache.setdefault(store, OrderedDict())
+            bucket[key] = value
+            bucket.move_to_end(key)
+            while len(bucket) > _PREVIEW_CACHE_MAX:
+                bucket.popitem(last=False)
+    except TypeError:
+        pass
+    return value
 
 
 def _ref_to_media(
@@ -36,7 +79,19 @@ def _ref_to_media(
     mime_use = ref.mime_type or mime
     meta = dict(ref.metadata) if ref.metadata else None
     if mime_use in IMAGE_MIME_TYPES:
-        preview_bytes, preview_mime = make_provider_preview(raw, mime_use)
+        try:
+            preview_bytes, preview_mime = _cached_preview(
+                store, session_id, ref.attachment_id, raw, mime_use
+            )
+        except ImagePreviewError as exc:
+            raise AttachmentResolveError(
+                f"Failed to prepare attachment {ref.attachment_id} for the provider: {exc}"
+            ) from exc
+        meta = provider_preview_metadata(
+            meta,
+            original_mime=mime_use,
+            preview_mime=preview_mime,
+        )
         data_b64 = base64.b64encode(preview_bytes).decode("ascii")
         return Image(mime_type=preview_mime, data=data_b64, metadata=meta)
     data_b64 = base64.b64encode(raw).decode("ascii")

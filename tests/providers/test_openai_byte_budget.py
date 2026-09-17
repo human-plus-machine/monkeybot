@@ -9,10 +9,10 @@ from typing import Any
 import pytest
 
 from monkeybot.core.llm.provider import Message, TextDelta, UsageEvent
-from monkeybot.core.types.content_blocks import Image, Text
+from monkeybot.core.types.content_blocks import Image, Text, ToolResponse
 from monkeybot.providers._openai_compat import (
     _OMITTED_IMAGE_TEXT,
-    is_request_body_read_error,
+    is_ollama_request_body_read_error,
     openai_chat_request_body_bytes,
     stream_chat_completions_with_tool_fallback,
     trim_openai_messages_for_byte_budget,
@@ -43,7 +43,10 @@ def test_openai_chat_request_body_bytes_counts_json() -> None:
     assert n > 100
     assert n == len(
         __import__("json")
-        .dumps({"model": "m", "messages": kwargs["messages"]}, ensure_ascii=False)
+        .dumps(
+            {"model": "m", "messages": kwargs["messages"], "stream": True},
+            ensure_ascii=False,
+        )
         .encode("utf-8")
     )
 
@@ -95,6 +98,39 @@ def test_trim_drop_all_media_stubs_every_data_url() -> None:
                 assert part.get("type") != "image_url"
 
 
+def test_trim_stops_destroying_tool_text_once_under_budget() -> None:
+    kwargs = {
+        "model": "m",
+        "messages": [
+            {"role": "tool", "content": "A" * 5_000},
+            {"role": "tool", "content": "B" * 5_000},
+        ],
+    }
+    before = openai_chat_request_body_bytes(kwargs)
+    out, stubbed = trim_openai_messages_for_byte_budget(kwargs, before - 3_000)
+    assert stubbed == 0
+    assert len(out["messages"][0]["content"]) < 5_000
+    assert out["messages"][1]["content"] == "B" * 5_000
+
+
+def test_drop_all_media_without_lower_cap_preserves_tool_text() -> None:
+    kwargs = {
+        "model": "m",
+        "messages": [
+            {"role": "tool", "content": "A" * 5_000},
+            _image_message(_data_url(4_000)),
+        ],
+    }
+    before = openai_chat_request_body_bytes(kwargs)
+    out, stubbed = trim_openai_messages_for_byte_budget(
+        kwargs,
+        before,
+        drop_all_media=True,
+    )
+    assert stubbed == 1
+    assert out["messages"][0]["content"] == "A" * 5_000
+
+
 class _FakeAPIError(Exception):
     def __init__(self, message: str) -> None:
         super().__init__(message)
@@ -108,16 +144,16 @@ class _FakeAPIStatusError(_FakeAPIError):
         self.body = {"error": {"message": message, "type": "invalid_request_error"}}
 
 
-def test_is_request_body_read_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_is_ollama_request_body_read_error(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_openai = ModuleType("openai")
     fake_openai.APIStatusError = _FakeAPIStatusError
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
     hit = _FakeAPIStatusError(400, "failed to read request body")
     miss = _FakeAPIStatusError(400, "invalid json schema")
     other = _FakeAPIStatusError(500, "failed to read request body")
-    assert is_request_body_read_error(hit)
-    assert not is_request_body_read_error(miss)
-    assert not is_request_body_read_error(other)
+    assert is_ollama_request_body_read_error(hit)
+    assert not is_ollama_request_body_read_error(miss)
+    assert not is_ollama_request_body_read_error(other)
 
 
 def _text_chunk(content: str = "hi") -> SimpleNamespace:
@@ -170,7 +206,17 @@ async def test_body_read_400_retries_once_without_media(
                             mime_type="image/png", data="A" * 8_000, metadata={"filename": "x.png"}
                         ),
                     ],
-                )
+                ),
+                Message(
+                    role="user",
+                    content=[
+                        ToolResponse(
+                            id="tool-1",
+                            tool_name="read_file",
+                            result=[Text(text="T" * 5_000)],
+                        )
+                    ],
+                ),
             ],
             tools=[],
             model="gpt-oss:20b",
@@ -199,4 +245,7 @@ async def test_body_read_400_retries_once_without_media(
 
     assert _has_data_url(first_msgs)
     assert not _has_data_url(second_msgs)
+    first_tool = next(msg for msg in first_msgs if msg.get("role") == "tool")
+    second_tool = next(msg for msg in second_msgs if msg.get("role") == "tool")
+    assert second_tool["content"] == first_tool["content"]
     assert any(isinstance(ev, (UsageEvent, TextDelta)) for ev in events)

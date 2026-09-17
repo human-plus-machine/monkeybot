@@ -249,41 +249,31 @@ async def test_read_file_and_write_file(tmp_path: Path) -> None:
     assert e2 is None and r2 is not None and "abc" in r2
 
 
+@pytest.mark.parametrize(
+    ("filename", "payload", "expected"),
+    [
+        ("late-invalid.txt", (b"x" * 9_000) + b"\xff\xfe", "\ufffd"),
+        ("latin-1.txt", "café résumé".encode("latin-1"), "caf\ufffd"),
+        ("pdf-fixture.txt", b"%PDF- this is plain text\n", "%PDF-"),
+    ],
+)
 @pytest.mark.asyncio
-async def test_read_file_rejects_png_with_binary_file_code(tmp_path: Path) -> None:
-    png = (
-        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
-        b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc"
-        b"\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
-    )
-    (tmp_path / "shot.png").write_bytes(png)
-    ex = _make_executor(tmp_path)
-    _out, err = unwrap_tool_execution_result(
-        await ex.execute(
-            call=ToolCall(call_id="rf-bin", name="read_file", args={"path": "./shot.png"}),
+async def test_read_file_keeps_legacy_replacement_decoding(
+    tmp_path: Path,
+    filename: str,
+    payload: bytes,
+    expected: str,
+) -> None:
+    (tmp_path / filename).write_bytes(payload)
+    result, error = unwrap_tool_execution_result(
+        await _make_executor(tmp_path).execute(
+            call=ToolCall(call_id="rf-text", name="read_file", args={"path": filename}),
             ctx=_ctx(),
         )
     )
-    assert err is not None
-    payload = json.loads(err)
-    assert payload["ok"] is False
-    assert payload["details"]["code"] == "binary_file"
-    assert "load_file" in payload["hint"]
-
-
-@pytest.mark.asyncio
-async def test_read_file_rejects_nul_bytes(tmp_path: Path) -> None:
-    (tmp_path / "blob.bin").write_bytes(b"abc\x00def")
-    ex = _make_executor(tmp_path)
-    _out, err = unwrap_tool_execution_result(
-        await ex.execute(
-            call=ToolCall(call_id="rf-nul", name="read_file", args={"path": "./blob.bin"}),
-            ctx=_ctx(),
-        )
-    )
-    assert err is not None
-    payload = json.loads(err)
-    assert payload["details"]["code"] == "binary_file"
+    assert error is None
+    assert result is not None
+    assert expected in result
 
 
 @pytest.mark.asyncio

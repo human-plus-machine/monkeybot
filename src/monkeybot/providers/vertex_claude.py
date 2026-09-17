@@ -19,6 +19,7 @@ from monkeybot.providers._utils import (
     split_leading_system,
 )
 from monkeybot.providers.model_capabilities import supports_param
+from monkeybot.providers.request_budget import trim_message_media_for_byte_budget
 from monkeybot.providers.sampling import resolve_model_sampling
 
 _log = logging.getLogger(__name__)
@@ -49,9 +50,7 @@ class VertexClaudeProvider:
             "ANTHROPIC_VERTEX_PROJECT_ID", ""
         ).strip()
         self._region = (
-            (region or "").strip()
-            or current_env("ANTHROPIC_VERTEX_REGION", "").strip()
-            or "global"
+            (region or "").strip() or current_env("ANTHROPIC_VERTEX_REGION", "").strip() or "global"
         )
         if not self._project_id:
             raise ValueError("ANTHROPIC_VERTEX_PROJECT_ID is not set (or pass project_id=)")
@@ -72,6 +71,7 @@ class VertexClaudeProvider:
         import anthropic  # noqa: PLC0415
         from anthropic import AsyncAnthropicVertex  # noqa: PLC0415
 
+        messages = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
         system, msgs = split_leading_system(messages)
         converted_messages = build_anthropic_messages(msgs)
         client = AsyncAnthropicVertex(project_id=self._project_id, region=self._region)
@@ -115,6 +115,7 @@ class VertexClaudeProvider:
         from anthropic import AsyncAnthropicVertex  # noqa: PLC0415
 
         retention = hints.cache_retention if hints is not None else "short"
+        messages = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
         system, msgs = split_leading_system(messages)
         client = AsyncAnthropicVertex(project_id=self._project_id, region=self._region)
         system_param, converted_messages, tools_param = prepare_anthropic_cached_payload(

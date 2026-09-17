@@ -23,7 +23,11 @@ from monkeybot.core.attachments.config import (
     max_image_bytes,
     max_pdf_bytes,
 )
-from monkeybot.core.attachments.image_preview import make_provider_preview
+from monkeybot.core.attachments.image_preview import (
+    ImagePreviewError,
+    make_provider_preview,
+    provider_preview_metadata,
+)
 from monkeybot.core.attachments.store import (
     AttachmentStore,
     attachment_workspace_path,
@@ -843,11 +847,6 @@ def _workspace_error_envelope(exc: WorkspaceError) -> str:
         hint = "Write only under the configured write scope, or ask the operator to adjust policy."
     elif code == "not_found":
         hint = "Create the file with write_file first, or fix the path spelling."
-    elif code == "binary_file":
-        hint = (
-            "This file is binary. Use load_file for images and PDFs, or glob to "
-            "confirm the path exists. Do not read_file media files."
-        )
     elif code == "not_found_replace":
         hint = "Re-read the file and provide an exact unique old_string (or rely on fuzzy match with more context)."
     elif code == "ambiguous_replace":
@@ -863,12 +862,7 @@ def _workspace_error_envelope(exc: WorkspaceError) -> str:
         hint = "Check disk permissions and path; retry after fixing the underlying issue."
     else:
         hint = "Fix the path or arguments per read_file/write_file rules, then retry once."
-    details: dict[str, object] = {"code": code}
-    extra = getattr(exc, "details", None)
-    if isinstance(extra, dict):
-        details.update(extra)
-        details["code"] = code
-    return _built_in_tool_error(error_kind, msg, hint, details)
+    return _built_in_tool_error(error_kind, msg, hint, {"code": code})
 
 
 def _run_command_parse_envelope(exc: ValueError) -> str:
@@ -1302,10 +1296,18 @@ class CoreToolExecutor(ToolExecutorPort):
     @staticmethod
     def _media_result(raw: bytes, mime: str, meta: dict[str, object]) -> ToolExecutionResult:
         if mime in IMAGE_MIME_TYPES:
-            preview_bytes, preview_mime = make_provider_preview(raw, mime)
+            try:
+                preview_bytes, preview_mime = make_provider_preview(raw, mime)
+            except ImagePreviewError as exc:
+                return ToolExecutionResult.err(f"Could not prepare image for the provider: {exc}")
             data_b64 = base64.b64encode(preview_bytes).decode("ascii")
+            preview_meta = provider_preview_metadata(
+                meta,
+                original_mime=mime,
+                preview_mime=preview_mime,
+            )
             return ToolExecutionResult.ok_blocks(
-                [Image(mime_type=preview_mime, data=data_b64, metadata=meta)]
+                [Image(mime_type=preview_mime, data=data_b64, metadata=preview_meta)]
             )
         data_b64 = base64.b64encode(raw).decode("ascii")
         return ToolExecutionResult.ok_blocks([File(mime_type=mime, data=data_b64, metadata=meta)])

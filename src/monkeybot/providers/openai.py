@@ -20,6 +20,7 @@ from monkeybot.providers._openai_compat import (
     openai_tools,
     openai_tools_token_count,
 )
+from monkeybot.providers.request_budget import trim_message_media_for_byte_budget
 from monkeybot.providers.sampling import resolve_model_sampling
 
 # Re-export private names that existing tests import directly from this module.
@@ -73,7 +74,7 @@ class OpenAIProvider:
         del thinking_budget, hints
         import tiktoken  # noqa: PLC0415
 
-        msgs = list(messages)
+        msgs = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
         try:
             enc = tiktoken.encoding_for_model(model)
         except KeyError:
@@ -92,7 +93,7 @@ class OpenAIProvider:
         del thinking_budget
         from openai import AsyncOpenAI  # noqa: PLC0415
 
-        msgs = list(messages)
+        msgs = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
 
         system, oai_messages = await messages_to_openai(msgs)
         if system:

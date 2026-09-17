@@ -10,6 +10,7 @@ import pytest
 from monkeybot.providers.ollama import (
     _DUMMY_API_KEY,
     OllamaProvider,
+    _ollama_max_request_bytes,
     reasoning_effort_for_thinking_budget,
 )
 
@@ -166,6 +167,12 @@ def test_ollama_thinking_budget_from_env(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("MODEL_THINKING_BUDGET", "0")
     provider = OllamaProvider()
     assert provider._thinking_budget == 0
+
+
+def test_ollama_request_budget_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODEL_MAX_REQUEST_BYTES", "123456")
+    assert _ollama_max_request_bytes("cloud", "https://ollama.com") == 123456
+    assert _ollama_max_request_bytes("local", "http://localhost:11434") == 123456
 
 
 @pytest.mark.asyncio

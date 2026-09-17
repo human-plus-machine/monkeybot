@@ -33,6 +33,7 @@ from monkeybot.providers._openai_compat import (
     count_input_tokens_tiktoken,
     stream_chat_completions_with_tool_fallback,
 )
+from monkeybot.providers.request_budget import configured_request_byte_budget
 from monkeybot.providers.sampling import resolve_model_sampling
 
 _DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
@@ -100,5 +101,6 @@ class NvidiaProvider:
             model=model,
             temperature=self._temperature,
             max_tokens=self._max_tokens,
+            max_request_bytes=configured_request_byte_budget(),
         ):
             yield event

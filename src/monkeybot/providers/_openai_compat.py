@@ -45,6 +45,7 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import safe_parse_tool_args
+from monkeybot.providers.request_budget import RequestByteBudgetError
 
 _log = logging.getLogger(__name__)
 
@@ -934,13 +935,17 @@ _REQUEST_BODY_RETRY_MAX = 1
 
 
 def openai_chat_request_body_bytes(kwargs: dict[str, Any]) -> int:
-    """UTF-8 size of the JSON body the Chat Completions SDK would send."""
+    """Conservative UTF-8 size estimate for the Chat Completions JSON body.
+
+    The OpenAI SDK currently delegates JSON encoding to httpx with compact
+    separators. Keep this estimator conservative by retaining default separators.
+    """
     payload: dict[str, Any] = {}
     extra = kwargs.get("extra_body")
     if isinstance(extra, dict):
         payload.update(extra)
     for key, val in kwargs.items():
-        if key in {"extra_body", "stream", "stream_options"} or val is None:
+        if key == "extra_body" or val is None:
             continue
         payload[key] = val
     return len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"))
@@ -982,8 +987,14 @@ def _part_json_len(part: dict[str, Any]) -> int:
     return len(json.dumps(part, ensure_ascii=False).encode("utf-8"))
 
 
-def _trim_old_tool_text(messages: list[dict[str, Any]], current: int) -> int:
+def _trim_old_tool_text(
+    messages: list[dict[str, Any]],
+    current: int,
+    max_bytes: int,
+) -> int:
     for msg in messages:
+        if current <= max_bytes:
+            break
         if msg.get("role") != "tool":
             continue
         content = msg.get("content")
@@ -999,21 +1010,17 @@ def _trim_old_tool_text(messages: list[dict[str, Any]], current: int) -> int:
     return current
 
 
-def trim_openai_messages_for_byte_budget(
+def _trim_openai_messages_for_byte_budget(
     kwargs: dict[str, Any],
     max_bytes: int,
     *,
     drop_all_media: bool = False,
-) -> tuple[dict[str, Any], int]:
-    """Replace oldest ``image_url`` data URLs with stubs until *kwargs* fits *max_bytes*.
-
-    Never reorders messages, so tool-call / tool-result pairing stays valid.
-    Returns ``(new_kwargs, images_stubbed)``.
-    """
+    current_bytes: int | None = None,
+) -> tuple[dict[str, Any], int, int]:
     out = dict(kwargs)
     messages = copy.deepcopy(list(kwargs.get("messages") or []))
     out["messages"] = messages
-    current = openai_chat_request_body_bytes(out)
+    current = openai_chat_request_body_bytes(out) if current_bytes is None else current_bytes
     locs = _image_url_locations(messages)
     order = locs if drop_all_media else _drop_image_order(messages, locs)
     stubbed = 0
@@ -1030,12 +1037,31 @@ def trim_openai_messages_for_byte_budget(
         content[pi] = dict(_STUB_IMAGE_PART)
         stubbed += 1
     if current > max_bytes:
-        _trim_old_tool_text(messages, current)
+        current = _trim_old_tool_text(messages, current, max_bytes)
+    return out, stubbed, current
+
+
+def trim_openai_messages_for_byte_budget(
+    kwargs: dict[str, Any],
+    max_bytes: int,
+    *,
+    drop_all_media: bool = False,
+) -> tuple[dict[str, Any], int]:
+    """Replace oldest ``image_url`` data URLs with stubs until *kwargs* fits *max_bytes*.
+
+    Never reorders messages, so tool-call / tool-result pairing stays valid.
+    Returns ``(new_kwargs, images_stubbed)``.
+    """
+    out, stubbed, _current = _trim_openai_messages_for_byte_budget(
+        kwargs,
+        max_bytes,
+        drop_all_media=drop_all_media,
+    )
     return out, stubbed
 
 
-def is_request_body_read_error(exc: BaseException) -> bool:
-    """True for a 400 whose body could not be read (typically oversized JSON)."""
+def is_ollama_request_body_read_error(exc: BaseException) -> bool:
+    """True for Ollama Cloud's request-body parsing 400."""
     blob = str(exc).lower()
     body = getattr(exc, "body", None)
     if body is not None:
@@ -1106,7 +1132,11 @@ async def stream_chat_completions_with_tool_fallback(
         kwargs["extra_body"] = extra_body
     if max_request_bytes is not None and max_request_bytes > 0:
         before = openai_chat_request_body_bytes(kwargs)
-        kwargs, stubbed = trim_openai_messages_for_byte_budget(kwargs, max_request_bytes)
+        kwargs, stubbed, after = _trim_openai_messages_for_byte_budget(
+            kwargs,
+            max_request_bytes,
+            current_bytes=before,
+        )
         if stubbed:
             _log.warning(
                 "openai-compat trimmed request media %s",
@@ -1114,10 +1144,24 @@ async def stream_chat_completions_with_tool_fallback(
                     provider=provider,
                     model=model,
                     body_bytes_before=before,
-                    body_bytes_after=openai_chat_request_body_bytes(kwargs),
+                    body_bytes_after=after,
                     trimmed_images=stubbed,
                     max_request_bytes=max_request_bytes,
                 ),
+            )
+        if after > max_request_bytes:
+            _log.error(
+                "openai-compat request remains over byte cap %s",
+                kv(
+                    provider=provider,
+                    model=model,
+                    body_bytes=after,
+                    max_request_bytes=max_request_bytes,
+                ),
+            )
+            raise RequestByteBudgetError(
+                f"{provider} request exceeds configured byte cap after trimming "
+                f"({after} > {max_request_bytes})"
             )
 
     n_tools = len(tools)
@@ -1156,15 +1200,23 @@ async def stream_chat_completions_with_tool_fallback(
                     n_tools = 0
                     continue
                 if (
-                    is_request_body_read_error(exc)
+                    provider.startswith("ollama")
+                    and is_ollama_request_body_read_error(exc)
                     and not yielded_any
                     and body_read_retries < _REQUEST_BODY_RETRY_MAX
                 ):
                     body_read_retries += 1
                     before = openai_chat_request_body_bytes(kwargs)
-                    cap = max_request_bytes if max_request_bytes is not None else 1
-                    kwargs, stubbed = trim_openai_messages_for_byte_budget(
-                        kwargs, cap, drop_all_media=True
+                    cap = (
+                        max_request_bytes
+                        if max_request_bytes is not None and max_request_bytes > 0
+                        else before
+                    )
+                    kwargs, stubbed, after = _trim_openai_messages_for_byte_budget(
+                        kwargs,
+                        cap,
+                        drop_all_media=True,
+                        current_bytes=before,
                     )
                     _log.warning(
                         "retrying after request-body 400 %s",
@@ -1172,7 +1224,7 @@ async def stream_chat_completions_with_tool_fallback(
                             provider=provider,
                             model=model,
                             body_bytes_before=before,
-                            body_bytes_after=openai_chat_request_body_bytes(kwargs),
+                            body_bytes_after=after,
                             trimmed_images=stubbed,
                         ),
                     )

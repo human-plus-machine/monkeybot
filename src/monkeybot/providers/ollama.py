@@ -62,6 +62,7 @@ from monkeybot.providers._openai_compat import (
     count_input_tokens_tiktoken,
     stream_chat_completions_with_tool_fallback,
 )
+from monkeybot.providers.request_budget import configured_request_byte_budget
 from monkeybot.providers.sampling import resolve_model_sampling
 
 OllamaMode = Literal["auto", "cloud", "local"]
@@ -160,17 +161,12 @@ def _is_local_runtime(mode: OllamaMode, host: str) -> bool:
 
 def _ollama_max_request_bytes(mode: OllamaMode, host: str) -> int:
     """JSON body cap for Ollama Chat Completions requests."""
-    from monkeybot.core.config.snapshot import current_env
-
-    raw = current_env("MODEL_MAX_REQUEST_BYTES", "").strip()
-    if raw:
-        try:
-            return max(1, int(raw))
-        except ValueError:
-            _log.warning("invalid MODEL_MAX_REQUEST_BYTES %s", kv(value=raw))
-    if _is_local_runtime(mode, host):
-        return _OLLAMA_LOCAL_MAX_REQUEST_BYTES
-    return _OLLAMA_CLOUD_MAX_REQUEST_BYTES
+    default = (
+        _OLLAMA_LOCAL_MAX_REQUEST_BYTES
+        if _is_local_runtime(mode, host)
+        else _OLLAMA_CLOUD_MAX_REQUEST_BYTES
+    )
+    return configured_request_byte_budget(default)
 
 
 def reasoning_effort_for_thinking_budget(budget: int) -> str | None:

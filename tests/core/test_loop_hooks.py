@@ -760,5 +760,10 @@ async def test_credential_egress_blocked_ends_routine_without_second_provider_ca
         getattr(e, "kind", None) == "Error" and "Blocked" in (getattr(e, "error", None) or "")
         for e in events
     )
+    assert not any(
+        getattr(e, "kind", None) == "Error"
+        and "Max turns exceeded" in (getattr(e, "error", None) or "")
+        for e in events
+    )
     # The second provider call (which would have sent the secret) never happens.
     assert len(prov.message_snapshots) == 1

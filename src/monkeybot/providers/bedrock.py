@@ -27,6 +27,7 @@ from monkeybot.providers._utils import (
     split_leading_system,
 )
 from monkeybot.providers.model_capabilities import supports_param
+from monkeybot.providers.request_budget import trim_message_media_for_byte_budget
 from monkeybot.providers.sampling import resolve_model_sampling
 
 _log = logging.getLogger(__name__)
@@ -95,6 +96,7 @@ class BedrockProvider:
         hints: ProviderCallHints | None = None,
     ) -> int:
         del thinking_budget, hints
+        messages = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
         if not uses_anthropic_bedrock(model):
             return estimate_converse_input_tokens(messages, tools)
         import anthropic  # noqa: PLC0415
@@ -137,7 +139,9 @@ class BedrockProvider:
         thinking_budget: int | None = None,
         hints: ProviderCallHints | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        del thinking_budget  # Converse path does not request reasoning yet; see converse_request_kwargs.
+        # Converse path does not request reasoning yet; see converse_request_kwargs.
+        del thinking_budget
+        messages = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
         if not uses_anthropic_bedrock(model):
             _log.info(
                 "Bedrock dispatch %s",

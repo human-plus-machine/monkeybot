@@ -17,6 +17,7 @@ from monkeybot.providers._utils import (
     split_leading_system,
 )
 from monkeybot.providers.model_capabilities import supports_param
+from monkeybot.providers.request_budget import trim_message_media_for_byte_budget
 from monkeybot.providers.sampling import resolve_model_sampling
 
 
@@ -55,6 +56,7 @@ class ClaudeProvider:
         del thinking_budget, hints
         import anthropic  # noqa: PLC0415
 
+        messages = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
         system, msgs = split_leading_system(messages)
         converted_messages = build_anthropic_messages(msgs)
         return await count_anthropic_input_tokens(
@@ -80,6 +82,7 @@ class ClaudeProvider:
         retention = hints.cache_retention if hints is not None else "short"
         session_id = hints.session_id if hints is not None else None
 
+        messages = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
         system, msgs = split_leading_system(messages)
         system_param, converted_messages, tools_param = prepare_anthropic_cached_payload(
             system=system,
