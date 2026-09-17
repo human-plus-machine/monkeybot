@@ -243,7 +243,12 @@ class AttachmentDescriptorEvent:
 
 @dataclass(frozen=True)
 class UserSteered:
-    """User text injected mid-turn at a safe loop boundary (steer queue)."""
+    """User text injected mid-turn at a safe loop boundary (steer queue).
+
+    ``request_id`` is the in-flight turn that received the injection.
+    ``queued_request_id`` is the original follow-up id when this steer was
+    promoted from the FIFO; empty for ``POST /steer``.
+    """
 
     kind: Literal["UserSteered"] = "UserSteered"
     request_id: str = ""
@@ -253,7 +258,13 @@ class UserSteered:
 
 @dataclass(frozen=True)
 class QueuedInputAccepted:
-    """Steer or follow-up prompt accepted into a session admission queue."""
+    """Steer or follow-up prompt accepted into a session admission queue.
+
+    For ``queue="steer"``, ``request_id`` is the in-flight turn — the same id
+    ``POST /steer`` publishes, not the follow-up id. Promoted follow-ups
+    correlate via ``UserSteered.queued_request_id``. For ``queue="follow_up"``,
+    ``request_id`` is the follow-up's own id.
+    """
 
     kind: Literal["QueuedInputAccepted"] = "QueuedInputAccepted"
     request_id: str = ""
@@ -1210,7 +1221,9 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         )
     if t == "CredentialEgressBlocked":
         sk_raw = payload.get("scan_kind", "secret")
-        scan_kind = cast(Literal["secret", "canary"], sk_raw if sk_raw in ("secret", "canary") else "secret")
+        scan_kind = cast(
+            Literal["secret", "canary"], sk_raw if sk_raw in ("secret", "canary") else "secret"
+        )
         origin_raw = payload.get("origin")
         origin = origin_raw if isinstance(origin_raw, str) and origin_raw else None
         return CredentialEgressBlockedEvent(request_id=rid, scan_kind=scan_kind, origin=origin)
