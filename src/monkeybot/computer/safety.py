@@ -215,7 +215,7 @@ def _app_home() -> Path | None:
         return None
 
 
-def _denied_dirs() -> tuple[Path, ...]:
+def _denied_dirs(*, include_workspace: bool = True) -> tuple[Path, ...]:
     home = Path.home().resolve()
     dirs = [(home / rel).resolve() for rel in _DENIED_HOME_SUBDIRS]
     app_home = _app_home()
@@ -237,9 +237,10 @@ def _denied_dirs() -> tuple[Path, ...]:
     # (or out of) that workspace, one click away from smuggling the exact
     # thing the read-only file tools' workspace boundary exists to prevent.
     # Open/export callers pass allow_workspace=True to skip this root only.
-    workspace_root = _configured_workspace_root()
-    if workspace_root is not None:
-        dirs.append(workspace_root)
+    if include_workspace:
+        workspace_root = _configured_workspace_root()
+        if workspace_root is not None:
+            dirs.append(workspace_root)
     return tuple(dirs)
 
 
@@ -285,16 +286,27 @@ def _check_filename_denied(path: Path) -> None:
 
 
 def _check_denied_dirs(path: Path, *, allow_workspace: bool = False) -> None:
-    if allow_workspace and _is_under_workspace(path):
-        return
-    for denied_root in _denied_dirs():
+    under_workspace = allow_workspace and _is_under_workspace(path)
+    workspace_root = _configured_workspace_root() if under_workspace else None
+    # Skip the dedicated workspace denylist entry so open/export can read
+    # generated files. Nested credential stores (.ssh, .aws, …) stay denied;
+    # wrapping ancestors (e.g. ~/.monkeybot) are skipped only so the workspace
+    # itself is reachable.
+    for denied_root in _denied_dirs(include_workspace=not under_workspace):
+        if (
+            workspace_root is not None
+            and workspace_root != denied_root
+            and is_within(workspace_root, denied_root)
+        ):
+            continue
         if path == denied_root or is_within(path, denied_root):
             raise ComputerToolError(
                 "policy",
                 f"Path is inside a protected directory: {path}",
                 "This directory holds credentials, browser data, or app-internal state and is always denied.",
             )
-    for part in path.parts:
+    parts = path.relative_to(workspace_root).parts if workspace_root is not None else path.parts
+    for part in parts:
         if part in _DENIED_BASENAMES_ANYWHERE:
             raise ComputerToolError(
                 "policy",
@@ -317,9 +329,10 @@ def resolve_user_path(
 
     ``allow_workspace`` lets *read/export* callers (``computer_open``,
     ``computer_move`` source) touch files inside ``MONKEYBOT_WORKSPACE_ROOT``
-    even when that root sits under ``~/.monkeybot``. Destinations, trash, and
-    find still use the default so the agent cannot smuggle files *into* the
-    workspace around ``write_file``.
+    even when that root sits under ``~/.monkeybot``. Nested credential stores
+    (``.ssh``, ``.aws``, …) inside the workspace stay denied. Destinations,
+    trash, and find still use the default so the agent cannot smuggle files
+    *into* the workspace around ``write_file``.
     """
     if not raw or not raw.strip():
         raise ComputerToolError("validation", "path is required", "Pass a non-empty path.")

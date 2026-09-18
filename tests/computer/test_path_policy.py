@@ -178,9 +178,7 @@ class TestResolveUserPath:
         dest = home / "Desktop" / "Aadhaar_on_white.pdf"
         dest.parent.mkdir()
         assert (
-            safety.precheck_policy(
-                "computer_move", {"path": str(target), "destination": str(dest)}
-            )
+            safety.precheck_policy("computer_move", {"path": str(target), "destination": str(dest)})
             is None
         )
         assert (
@@ -191,6 +189,26 @@ class TestResolveUserPath:
                     "destination": str(workspace / "imported.pdf"),
                 },
             )
+            is not None
+        )
+
+    def test_open_still_rejects_nested_credential_store_in_workspace(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace = home / ".monkeybot" / "agents" / "default" / "workspace"
+        workspace.mkdir(parents=True)
+        monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(workspace))
+        target = workspace / ".ssh" / "config"
+        target.parent.mkdir()
+        target.write_text("secret")
+        with pytest.raises(safety.ComputerToolError) as exc:
+            safety.resolve_user_path(str(target), must_exist=True, allow_workspace=True)
+        assert exc.value.kind == "policy"
+        assert safety.precheck_policy("computer_open", {"path": str(target)}) is not None
+        dest = home / "Desktop" / "config"
+        dest.parent.mkdir()
+        assert (
+            safety.precheck_policy("computer_move", {"path": str(target), "destination": str(dest)})
             is not None
         )
 
