@@ -192,6 +192,36 @@ class TestResolveUserPath:
             is not None
         )
 
+    def test_precheck_open_denies_workspace_exec_surfaces(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace = home / ".monkeybot" / "agents" / "default" / "workspace"
+        workspace.mkdir(parents=True)
+        monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(workspace))
+        for suffix in (".terminal", ".fileloc", ".webloc", ".inetloc"):
+            target = workspace / f"x{suffix}"
+            target.write_text("x")
+            assert safety.precheck_policy("computer_open", {"path": str(target)}) is not None
+            dest = home / "Desktop" / target.name
+            dest.parent.mkdir(exist_ok=True)
+            assert (
+                safety.precheck_policy(
+                    "computer_move", {"path": str(target), "destination": str(dest)}
+                )
+                is not None
+            )
+
+    def test_precheck_open_denies_workspace_nonsuffix_file(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace = home / "my-agent" / "workspace"
+        workspace.mkdir(parents=True)
+        monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(workspace))
+        target = workspace / "notes"
+        target.write_text("x")
+        assert safety.precheck_policy("computer_open", {"path": str(target)}) is not None
+        assert safety.precheck_policy("computer_open", {"path": str(workspace)}) is None
+
     def test_open_still_rejects_nested_credential_store_in_workspace(
         self, home: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -264,7 +294,21 @@ class TestIsPathDenied:
 
 class TestExecSurfaceAndAppGuards:
     @pytest.mark.parametrize(
-        "suffix", [".command", ".sh", ".app", ".scpt", ".workflow", ".pkg", ".dmg", ".py"]
+        "suffix",
+        [
+            ".command",
+            ".sh",
+            ".app",
+            ".scpt",
+            ".workflow",
+            ".pkg",
+            ".dmg",
+            ".py",
+            ".terminal",
+            ".fileloc",
+            ".webloc",
+            ".inetloc",
+        ],
     )
     def test_refuses_exec_suffixes(self, home: Path, suffix: str) -> None:
         target = home / f"thing{suffix}"

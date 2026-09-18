@@ -119,6 +119,10 @@ _EXEC_SUFFIXES: frozenset[str] = frozenset(
         ".applescript",
         ".workflow",
         ".term",
+        ".terminal",
+        ".fileloc",
+        ".webloc",
+        ".inetloc",
         ".pkg",
         ".mpkg",
         ".dmg",
@@ -130,6 +134,39 @@ _EXEC_SUFFIXES: frozenset[str] = frozenset(
         ".rb",
         ".pl",
         ".exe",
+    }
+)
+
+# Workspace open/export is a read carve-out for generated documents, not a
+# general ``open`` of whatever ``write_file`` just dropped in the workspace.
+_WORKSPACE_DOCUMENT_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".pdf",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".heic",
+        ".tif",
+        ".tiff",
+        ".bmp",
+        ".txt",
+        ".md",
+        ".csv",
+        ".rtf",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".ppt",
+        ".pptx",
+        ".mp3",
+        ".mp4",
+        ".mov",
+        ".wav",
+        ".m4a",
+        ".webm",
     }
 )
 
@@ -215,7 +252,7 @@ def _app_home() -> Path | None:
         return None
 
 
-def _denied_dirs(*, include_workspace: bool = True) -> tuple[Path, ...]:
+def _denied_dirs() -> tuple[Path, ...]:
     home = Path.home().resolve()
     dirs = [(home / rel).resolve() for rel in _DENIED_HOME_SUBDIRS]
     app_home = _app_home()
@@ -236,11 +273,9 @@ def _denied_dirs(*, include_workspace: bool = True) -> tuple[Path, ...]:
     # `computer_move`/`computer_trash` could relocate a file straight into
     # (or out of) that workspace, one click away from smuggling the exact
     # thing the read-only file tools' workspace boundary exists to prevent.
-    # Open/export callers pass allow_workspace=True to skip this root only.
-    if include_workspace:
-        workspace_root = _configured_workspace_root()
-        if workspace_root is not None:
-            dirs.append(workspace_root)
+    workspace_root = _configured_workspace_root()
+    if workspace_root is not None:
+        dirs.append(workspace_root)
     return tuple(dirs)
 
 
@@ -255,7 +290,8 @@ def _configured_workspace_root() -> Path | None:
     return None
 
 
-def _is_under_workspace(path: Path) -> bool:
+def is_workspace_path(path: Path) -> bool:
+    """True when ``path`` is the configured workspace root or a file under it."""
     root = _configured_workspace_root()
     if root is None:
         return False
@@ -286,17 +322,21 @@ def _check_filename_denied(path: Path) -> None:
 
 
 def _check_denied_dirs(path: Path, *, allow_workspace: bool = False) -> None:
-    under_workspace = allow_workspace and _is_under_workspace(path)
-    workspace_root = _configured_workspace_root() if under_workspace else None
-    # Skip the dedicated workspace denylist entry so open/export can read
-    # generated files. Nested credential stores (.ssh, .aws, …) stay denied;
-    # wrapping ancestors (e.g. ~/.monkeybot) are skipped only so the workspace
-    # itself is reachable.
-    for denied_root in _denied_dirs(include_workspace=not under_workspace):
+    workspace_root = _configured_workspace_root()
+    under_workspace = bool(
+        allow_workspace
+        and workspace_root is not None
+        and (path == workspace_root or is_within(path, workspace_root))
+    )
+    # Skip denied roots that *are* the workspace or that contain it (e.g.
+    # ~/.monkeybot wrapping a desktop workspace). Nested credential stores
+    # (.ssh, .aws, …) stay denied because they neither equal the workspace
+    # nor contain it.
+    for denied_root in _denied_dirs():
         if (
-            workspace_root is not None
-            and workspace_root != denied_root
-            and is_within(workspace_root, denied_root)
+            under_workspace
+            and workspace_root is not None
+            and (denied_root == workspace_root or is_within(workspace_root, denied_root))
         ):
             continue
         if path == denied_root or is_within(path, denied_root):
@@ -305,7 +345,11 @@ def _check_denied_dirs(path: Path, *, allow_workspace: bool = False) -> None:
                 f"Path is inside a protected directory: {path}",
                 "This directory holds credentials, browser data, or app-internal state and is always denied.",
             )
-    parts = path.relative_to(workspace_root).parts if workspace_root is not None else path.parts
+    parts = (
+        path.relative_to(workspace_root).parts
+        if under_workspace and workspace_root is not None
+        else path.parts
+    )
     for part in parts:
         if part in _DENIED_BASENAMES_ANYWHERE:
             raise ComputerToolError(
@@ -330,9 +374,10 @@ def resolve_user_path(
     ``allow_workspace`` lets *read/export* callers (``computer_open``,
     ``computer_move`` source) touch files inside ``MONKEYBOT_WORKSPACE_ROOT``
     even when that root sits under ``~/.monkeybot``. Nested credential stores
-    (``.ssh``, ``.aws``, …) inside the workspace stay denied. Destinations,
-    trash, and find still use the default so the agent cannot smuggle files
-    *into* the workspace around ``write_file``.
+    (``.ssh``, ``.aws``, …) inside the workspace stay denied. Callers still
+    have to pass generated documents (see ``check_workspace_document``).
+    Destinations, trash, and find still use the default so the agent cannot
+    smuggle files *into* the workspace around ``write_file``.
     """
     if not raw or not raw.strip():
         raise ComputerToolError("validation", "path is required", "Pass a non-empty path.")
@@ -396,6 +441,19 @@ def is_path_denied(path: Path) -> bool:
     except (OSError, ValueError):
         return True
     return is_credential_path(path)
+
+
+def check_workspace_document(path: Path, *, allow_dir: bool) -> None:
+    """Limit the workspace carve-out to generated documents (and optional dirs)."""
+    if allow_dir and path.is_dir():
+        return
+    if path.suffix.lower() in _WORKSPACE_DOCUMENT_SUFFIXES:
+        return
+    raise ComputerToolError(
+        "policy",
+        f"Refusing a non-document workspace path: {path.suffix or path.name}",
+        "Workspace open/export is limited to generated documents (PDF, images, office files).",
+    )
 
 
 def check_not_exec_surface(path: Path) -> None:
@@ -508,6 +566,8 @@ def run_argv(
 
 def open_path(path: Path, *, reveal: bool = False) -> None:
     check_not_exec_surface(path)
+    if is_workspace_path(path):
+        check_workspace_document(path, allow_dir=True)
     argv = [_OPEN_BIN, "-R", str(path)] if reveal else [_OPEN_BIN, str(path)]
     result = run_argv(argv)
     if result.returncode != 0:
@@ -520,6 +580,8 @@ def open_path(path: Path, *, reveal: bool = False) -> None:
 
 def open_path_with_app(path: Path, app_name: str) -> None:
     check_not_exec_surface(path)
+    if is_workspace_path(path):
+        check_workspace_document(path, allow_dir=True)
     bundle = resolve_app_bundle(app_name)
     result = run_argv([_OPEN_BIN, "-a", str(bundle), str(path)])
     if result.returncode != 0:
@@ -691,11 +753,14 @@ def precheck_policy(tool: str, args: dict[str, object]) -> ComputerToolError | N
         exec_surface: bool,
         trashable: bool,
         allow_workspace: bool = False,
+        workspace_dirs: bool = False,
     ) -> ComputerToolError | None:
         try:
             resolved = resolve_user_path(raw, allow_workspace=allow_workspace)
             if exec_surface:
                 check_not_exec_surface(resolved)
+            if allow_workspace and is_workspace_path(resolved):
+                check_workspace_document(resolved, allow_dir=workspace_dirs)
             if trashable:
                 check_trashable_cheap(resolved)
         except ComputerToolError as e:
@@ -714,7 +779,11 @@ def precheck_policy(tool: str, args: dict[str, object]) -> ComputerToolError | N
         app = _str_arg(args, "app")
         if path is not None:
             err = _policy_error_from_path(
-                path, exec_surface=True, trashable=False, allow_workspace=True
+                path,
+                exec_surface=True,
+                trashable=False,
+                allow_workspace=True,
+                workspace_dirs=True,
             )
             if err is not None:
                 return err

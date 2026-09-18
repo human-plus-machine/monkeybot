@@ -317,6 +317,19 @@ def test_sse_file_block_path_omits_data_on_wire() -> None:
     assert event_from_json(event_to_json(ev)).path == "./generated-media/doc.pdf"
 
 
+def test_sse_file_block_never_serializes_data() -> None:
+    ev = FileBlock(
+        request_id="r",
+        file_id="c1:0",
+        mime_type="application/pdf",
+        data="A" * 8_000,
+        filename="doc.pdf",
+    )
+    d = json.loads(event_to_json(ev))
+    assert "data" not in d
+    assert d["filename"] == "doc.pdf"
+
+
 @pytest.mark.parametrize("signature", (None, "sig"))
 def test_sse_thinking_block_delta_roundtrip(signature: str | None) -> None:
     ev = ThinkingBlockDelta(request_id="r", text="t", signature=signature)

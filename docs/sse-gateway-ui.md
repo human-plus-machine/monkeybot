@@ -104,7 +104,8 @@ Common types you will handle in a chat UI:
 | `ToolCallStarted` / `ToolCallResult` | Tool name, args, result text / error. |
 | `TurnComplete` | Turn finished; includes `usage` (`input_tokens`, `output_tokens`, `cached_tokens`, `cost_usd`, `duration_ms`, `estimated_prompt_tokens` — see [Session usage endpoint](#session-usage-endpoint)). |
 | `Error` | Recoverable stream error string in `error`. |
-| `ImageBlock` | Inline image (`mime_type`, base64 `data`). |
+| `ImageBlock` | Inline image (`mime_type`, workspace `path`, or base64 `data` when no path). |
+| `FileBlock` | Generated document (`mime_type`, workspace `path`, `filename`, `file_id`). Path-only — clients load from disk; raw PDF bytes are never sent on the wire. |
 | `ThinkingBlockDelta` / `ThinkingBlockComplete` / `RedactedThinkingBlock` | Extended thinking blocks where the model exposes them. |
 | `ToolConfirmationRequest` | User must approve/deny; POST to `tool-confirmations` with `tool_call_id`. Carries `tool_name`, `arguments` (the tool's raw call args — e.g. `path`/`url`/`app` for `computer_*` tools, useful for showing *what* is being approved), and an optional human-readable `prompt`. The reference Textual client can auto-answer these client-side in `auto-approve`/`deny-confirms` mode (`Shift+Tab` in `monkeybot chat`) — this is purely a UI convenience, no gateway change; `ActionRequiredEvent` elicitations are never auto-answered. |
 | `ActionRequiredEvent` | e.g. `action_type: "elicitation"` with `id` and `payload`; POST to `elicitations/{id}`. |
