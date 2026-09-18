@@ -35,6 +35,7 @@ def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
     monkeypatch.delenv("MONKEYBOT_APP_HOME", raising=False)
     monkeypatch.delenv("MONKEYBOT_CONFIG", raising=False)
+    monkeypatch.delenv("MONKEYBOT_WORKSPACE_ROOT", raising=False)
     return fake_home
 
 
@@ -285,6 +286,44 @@ class TestMove:
         assert result["ok"] is False
         assert result["error_kind"] == "validation"
         assert dest.read_text() == "existing"
+
+    @pytest.mark.asyncio
+    async def test_workspace_source_is_copied_not_moved(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace = home / "my-agent" / "workspace"
+        workspace.mkdir(parents=True)
+        monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(workspace))
+        src = workspace / "Aadhaar_on_white.pdf"
+        src.write_text("pdf")
+        dest = home / "Desktop" / "Aadhaar_on_white.pdf"
+        dest.parent.mkdir()
+        result = json.loads(
+            await ComputerMoveTool().execute({"path": str(src), "destination": str(dest)})
+        )
+        assert result["ok"] is True
+        assert result["copied"] is True
+        assert src.read_text() == "pdf"
+        assert dest.read_text() == "pdf"
+
+    @pytest.mark.asyncio
+    async def test_workspace_exec_surface_cannot_be_exported(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace = home / "my-agent" / "workspace"
+        workspace.mkdir(parents=True)
+        monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(workspace))
+        src = workspace / "x.terminal"
+        src.write_text("x")
+        dest = home / "Desktop" / "x.terminal"
+        dest.parent.mkdir()
+        result = json.loads(
+            await ComputerMoveTool().execute({"path": str(src), "destination": str(dest)})
+        )
+        assert result["ok"] is False
+        assert result["error_kind"] == "policy"
+        assert src.exists()
+        assert not dest.exists()
 
     @pytest.mark.asyncio
     async def test_refuses_moving_dir_into_itself(self, home: Path) -> None:

@@ -141,6 +141,24 @@ class ImageBlock:
 
 
 @dataclass(frozen=True)
+class FileBlock:
+    """SSE payload for a non-image document (PDF) loaded from disk.
+
+    Clients should load from ``path``. ``data`` is accepted on decode for
+    older payloads but is never serialized — PDFs are not downscaled the
+    way ``ImageBlock`` previews are.
+    """
+
+    kind: Literal["FileBlock"] = "FileBlock"
+    request_id: str = ""
+    file_id: str = ""
+    mime_type: str = ""
+    data: str = ""
+    path: str = ""
+    filename: str = ""
+
+
+@dataclass(frozen=True)
 class ThinkingBlockDelta:
     kind: Literal["ThinkingBlockDelta"] = "ThinkingBlockDelta"
     request_id: str = ""
@@ -443,6 +461,7 @@ AgentEvent: TypeAlias = (
     | ContextUsage
     | SystemPromptSnapshot
     | ImageBlock
+    | FileBlock
     | ThinkingBlockDelta
     | ThinkingBlockComplete
     | RedactedThinkingBlock
@@ -582,6 +601,11 @@ def _usage_from_obj(raw: object | None) -> UsageTotals:
     )
 
 
+def _str_payload(payload: dict[str, Any], key: str, *, default: str = "") -> str:
+    raw = payload.get(key, default)
+    return raw if isinstance(raw, str) else default
+
+
 def _context_token_fields(payload: dict[str, Any]) -> tuple[int, int]:
     """Parse ``estimated_tokens`` / ``context_window_tokens`` from a wire payload."""
     et_raw = payload.get("estimated_tokens", 0)
@@ -647,6 +671,15 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
         else:
             out["data"] = event.data
         return out
+    if isinstance(event, FileBlock):
+        file_out: dict[str, object] = {**base, "mime_type": event.mime_type}
+        if event.file_id:
+            file_out["file_id"] = event.file_id
+        if event.filename:
+            file_out["filename"] = event.filename
+        if event.path:
+            file_out["path"] = event.path
+        return file_out
     if isinstance(event, ThinkingBlockDelta):
         return {**base, "text": event.text, "signature": event.signature}
     if isinstance(event, ThinkingBlockComplete):
@@ -834,6 +867,7 @@ def event_to_json(event: AgentEvent) -> str:
         event,
         (
             ImageBlock,
+            FileBlock,
             ThinkingBlockDelta,
             ThinkingBlockComplete,
             RedactedThinkingBlock,
@@ -991,21 +1025,25 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         text_raw = payload.get("text", "")
         text = text_raw if isinstance(text_raw, str) else ""
         return SystemPromptSnapshot(request_id=rid, inner_turn=inner_turn, text=text)
-    if t == "ImageBlock":
-        mt = payload.get("mime_type", "")
-        data = payload.get("data", "")
-        img_raw = payload.get("image_id", "")
-        path_raw = payload.get("path", "")
-        mime_type = mt if isinstance(mt, str) else ""
-        data_s = data if isinstance(data, str) else ""
-        image_id = img_raw if isinstance(img_raw, str) else ""
-        path = path_raw.strip() if isinstance(path_raw, str) else ""
-        return ImageBlock(
+    if t in ("ImageBlock", "FileBlock"):
+        path = _str_payload(payload, "path").strip()
+        mime_type = _str_payload(payload, "mime_type")
+        data = _str_payload(payload, "data")
+        if t == "ImageBlock":
+            return ImageBlock(
+                request_id=rid,
+                image_id=_str_payload(payload, "image_id"),
+                mime_type=mime_type,
+                data=data,
+                path=path,
+            )
+        return FileBlock(
             request_id=rid,
-            image_id=image_id,
+            file_id=_str_payload(payload, "file_id"),
             mime_type=mime_type,
-            data=data_s,
+            data=data,
             path=path,
+            filename=_str_payload(payload, "filename").strip(),
         )
     if t == "ThinkingBlockDelta":
         text_raw = payload.get("text", "")
