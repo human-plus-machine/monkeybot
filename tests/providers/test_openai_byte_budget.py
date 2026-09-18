@@ -304,6 +304,66 @@ async def test_non_ollama_body_read_400_is_not_retried(
 
 
 @pytest.mark.asyncio
+async def test_compat_budget_extracts_oversized_pdf_before_enforcement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, Any]] = []
+    extracted: list[File] = []
+
+    async def _extract_pdf_text(block: File) -> str:
+        extracted.append(block)
+        return "important extracted PDF text"
+
+    async def _create(**kwargs: Any) -> Any:
+        captured.append(kwargs)
+
+        async def _stream() -> Any:
+            yield _text_chunk("ok")
+
+        return _stream()
+
+    fake_openai = ModuleType("openai")
+    fake_openai.AsyncOpenAI = lambda *_a, **_kw: SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=_create))
+    )
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    monkeypatch.setattr(
+        "monkeybot.providers._openai_compat._extract_pdf_text",
+        _extract_pdf_text,
+    )
+
+    _ = [
+        event
+        async for event in stream_chat_completions_with_tool_fallback(
+            base_url="https://openrouter.ai/api/v1",
+            api_key="key",
+            provider="openrouter",
+            messages=[
+                Message(
+                    role="user",
+                    content=[
+                        File(
+                            mime_type="application/pdf",
+                            data="A" * 8_000,
+                            metadata={"filename": "report.pdf"},
+                        )
+                    ],
+                )
+            ],
+            tools=[],
+            model="m",
+            temperature=0.2,
+            max_tokens=64,
+            max_request_bytes=5_000,
+        )
+    ]
+
+    assert len(extracted) == 1
+    content = captured[0]["messages"][0]["content"]
+    assert any("important extracted PDF text" in part["text"] for part in content)
+
+
+@pytest.mark.asyncio
 async def test_direct_openai_checks_budget_after_file_conversion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -313,6 +373,7 @@ async def test_direct_openai_checks_budget_after_file_conversion(
     async def _messages_to_openai(
         _messages: list[Message],
     ) -> tuple[None, list[dict[str, Any]]]:
+        assert isinstance(_messages[0].content[0], File)
         return None, [{"role": "user", "content": "X" * 20_000}]
 
     fake_openai = ModuleType("openai")
@@ -328,7 +389,7 @@ async def test_direct_openai_checks_budget_after_file_conversion(
                 [
                     Message(
                         role="user",
-                        content=[File(mime_type="application/pdf", data="A")],
+                        content=[File(mime_type="application/pdf", data="A" * 20_000)],
                     )
                 ],
                 [],

@@ -7,7 +7,7 @@ import json
 import pytest
 
 from monkeybot.core.llm.provider import Message
-from monkeybot.core.types.content_blocks import Image, Text, ToolResponse
+from monkeybot.core.types.content_blocks import File, Image, Text, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers.request_budget import (
     RequestByteBudgetError,
@@ -45,6 +45,52 @@ def test_request_budget_stubs_oldest_media_and_keeps_latest() -> None:
     assert 'load_file(attachment_id="att_old")' in trimmed[0].content[1].text
     assert isinstance(trimmed[1].content[1], Image)
     assert isinstance(messages[0].content[1], Image)
+
+
+def test_request_budget_can_preserve_files_for_text_extracting_providers() -> None:
+    messages = [
+        Message(
+            role="user",
+            content=[
+                File(mime_type="application/pdf", data="A" * 8_000),
+                Image(mime_type="image/png", data="B" * 8_000),
+            ],
+        )
+    ]
+    trimmed = trim_message_media_for_byte_budget(
+        messages,
+        [],
+        max_bytes=6_000,
+        provider="openrouter",
+        trim_files=False,
+    )
+    assert isinstance(trimmed[0].content[0], File)
+    assert isinstance(trimmed[0].content[1], Text)
+
+
+def test_request_budget_stub_is_neutral_and_escapes_reload_argument() -> None:
+    messages = [
+        Message(
+            role="user",
+            content=[
+                Image(
+                    mime_type="image/png",
+                    data="A" * 8_000,
+                    metadata={"path": 'folder/"quoted".png'},
+                )
+            ],
+        )
+    ]
+    trimmed = trim_message_media_for_byte_budget(
+        messages,
+        [],
+        max_bytes=5_000,
+        provider="gemini",
+    )
+    stub = trimmed[0].content[0]
+    assert isinstance(stub, Text)
+    assert "previously shown" not in stub.text
+    assert 'load_file(path="folder/\\"quoted\\".png")' in stub.text
 
 
 def test_request_budget_stubs_media_nested_in_tool_response() -> None:

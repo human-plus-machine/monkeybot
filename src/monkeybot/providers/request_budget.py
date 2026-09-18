@@ -72,24 +72,27 @@ def _media_stub(block: Image | File) -> Text:
     path = _metadata_str(block, "path")
     filename = _metadata_str(block, "original_filename", "filename", "name")
     if attachment_id:
-        recovery = f'Call load_file(attachment_id="{attachment_id}") to reload it.'
+        recovery = (
+            f"Call load_file(attachment_id={json.dumps(attachment_id, ensure_ascii=False)}) "
+            "to reload it."
+        )
     elif path:
-        recovery = f'Call load_file(path="{path}") to reload it.'
+        recovery = f"Call load_file(path={json.dumps(path, ensure_ascii=False)}) to reload it."
     elif filename:
         recovery = f"Ask the user to reattach {filename} if it is needed again."
     else:
         recovery = "Ask the user to reattach it if it is needed again."
-    return Text(
-        text=f"[media omitted to fit the provider request size; previously shown. {recovery}]"
-    )
+    return Text(text=f"[media omitted to fit the provider request size. {recovery}]")
 
 
-def _block_bytes(block: ContentBlock) -> int:
+def _block_bytes(block: ContentBlock, *, count_file_data: bool = True) -> int:
     if isinstance(block, (Image, File)):
         # Base64 is ASCII without JSON escapes; serialize only the small envelope.
         payload = block.to_dict()
         data = str(payload.pop("data"))
         payload["data"] = ""
+        if isinstance(block, File) and not count_file_data:
+            return _json_bytes(payload)
         return len(data) + _json_bytes(payload)
     if isinstance(block, ToolResponse):
         payload = block.to_dict()
@@ -97,7 +100,9 @@ def _block_bytes(block: ContentBlock) -> int:
         return (
             _json_bytes(payload)
             - 2
-            + _json_list_bytes([_block_bytes(item) for item in block.result])
+            + _json_list_bytes(
+                [_block_bytes(item, count_file_data=count_file_data) for item in block.result]
+            )
         )
     return _json_bytes(block.to_dict())
 
@@ -112,11 +117,20 @@ def _json_list_bytes(item_sizes: Sequence[int]) -> int:
     return 2 + sum(item_sizes) + max(0, len(item_sizes) - 1)
 
 
-def _request_bytes(messages: Sequence[Message], tools: Sequence[ToolDef]) -> int:
+def _request_bytes(
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+    *,
+    count_file_data: bool = True,
+) -> int:
     message_sizes = []
     for message in messages:
         envelope = _json_bytes({"role": message.role, "content": []})
-        content_size = _json_list_bytes([_block_bytes(block) for block in message.content])
+        # Metadata is deliberately included even though some provider converters
+        # omit it: this estimate is a conservative pre-conversion guard.
+        content_size = _json_list_bytes(
+            [_block_bytes(block, count_file_data=count_file_data) for block in message.content]
+        )
         message_sizes.append(envelope - 2 + content_size)
     tool_sizes = [_json_bytes(tool.to_model_schema()) for tool in tools]
     empty_payload = _json_bytes({"messages": [], "tools": []})
@@ -136,6 +150,7 @@ def trim_message_media_for_byte_budget(
     max_bytes: int | None = None,
     provider: str,
     raise_if_oversized: bool = True,
+    trim_files: bool = True,
 ) -> list[Message]:
     """Stub oldest media until a conservative provider-neutral request estimate fits.
 
@@ -146,22 +161,26 @@ def trim_message_media_for_byte_budget(
     fail closed instead of shipping a request the transport will reject. Token
     counting passes False: an over-cap text-only history is exactly what the
     caller is measuring to decide whether to compact, so it must not raise.
+
+    OpenAI-compatible callers pass ``trim_files=False`` because their converter
+    replaces files with bounded extracted text before constructing the request.
     """
     if max_bytes is None:
         max_bytes = configured_request_byte_budget(provider=provider)
-    current = _request_bytes(messages, tools)
+    current = _request_bytes(messages, tools, count_file_data=trim_files)
     if current <= max_bytes:
         return list(messages)
 
+    trimmable: tuple[type[ContentBlock], ...] = (Image, File) if trim_files else (Image,)
     contents = [list(message.content) for message in messages]
     locations: list[tuple[int, int, int | None]] = []
     for message_index, blocks in enumerate(contents):
         for block_index, block in enumerate(blocks):
-            if isinstance(block, (Image, File)):
+            if isinstance(block, trimmable):
                 locations.append((message_index, block_index, None))
             elif isinstance(block, ToolResponse):
                 for nested_index, result_block in enumerate(block.result):
-                    if isinstance(result_block, (Image, File)):
+                    if isinstance(result_block, trimmable):
                         locations.append((message_index, block_index, nested_index))
 
     stubbed = 0

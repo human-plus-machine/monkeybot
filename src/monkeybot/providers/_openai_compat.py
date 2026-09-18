@@ -18,6 +18,7 @@ import io
 import json
 import logging
 import random
+import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
@@ -932,6 +933,7 @@ async def count_input_tokens_tiktoken(
         max_bytes=max_request_bytes,
         provider=provider,
         raise_if_oversized=False,
+        trim_files=False,
     )
     try:
         enc = tiktoken.encoding_for_model(model)
@@ -941,13 +943,15 @@ async def count_input_tokens_tiktoken(
 
 
 _OMITTED_IMAGE_TEXT = (
-    "[image omitted to fit the provider request size; previously shown. "
+    "[image omitted to fit the provider request size. "
     "Ask the user to reattach it if it is needed again.]"
 )
 _STUB_IMAGE_PART = {"type": "text", "text": _OMITTED_IMAGE_TEXT}
 _STUB_IMAGE_JSON_LEN = len(json.dumps(_STUB_IMAGE_PART, ensure_ascii=False).encode("utf-8"))
 _TOOL_TRIM_KEEP_CHARS = 1500
 _REQUEST_BODY_RETRY_MAX = 1
+# Characters JSON encodes as more than one byte inside an ASCII string literal.
+_JSON_ESCAPED_RE = re.compile(r'["\\\x00-\x1f]')
 
 
 def openai_chat_request_body_bytes(kwargs: dict[str, Any]) -> int:
@@ -955,6 +959,8 @@ def openai_chat_request_body_bytes(kwargs: dict[str, Any]) -> int:
 
     The OpenAI SDK currently delegates JSON encoding to httpx with compact
     separators. Keep this estimator conservative by retaining default separators.
+    Compute structural byte lengths directly so large base64 strings are never
+    copied into a second full-body serialization.
     """
     payload: dict[str, Any] = {}
     extra = kwargs.get("extra_body")
@@ -964,7 +970,28 @@ def openai_chat_request_body_bytes(kwargs: dict[str, Any]) -> int:
         if key == "extra_body" or val is None:
             continue
         payload[key] = val
-    return len(json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8"))
+    return _json_value_bytes(payload)
+
+
+def _json_value_bytes(value: Any) -> int:
+    """Return default-separator JSON byte length without materializing large strings."""
+    if isinstance(value, str):
+        # Plain ASCII needs no escaping, so a data URL's megabytes are measured
+        # by length alone rather than encoded and escaped into a throwaway copy.
+        if value.isascii() and not _JSON_ESCAPED_RE.search(value):
+            return len(value) + 2
+        return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+    if isinstance(value, list):
+        return 2 + sum(_json_value_bytes(item) for item in value) + 2 * max(0, len(value) - 1)
+    if isinstance(value, dict) and all(isinstance(key, str) for key in value):
+        return (
+            2
+            + sum(
+                _json_value_bytes(key) + 2 + _json_value_bytes(item) for key, item in value.items()
+            )
+            + 2 * max(0, len(value) - 1)
+        )
+    return len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
 
 
 def _image_url_locations(messages: list[dict[str, Any]]) -> list[tuple[int, int]]:
@@ -997,10 +1024,6 @@ def _drop_image_order(
     historical = [loc for loc in locs if loc[0] != last_keep]
     current = [loc for loc in locs if loc[0] == last_keep]
     return historical + current
-
-
-def _part_json_len(part: dict[str, Any]) -> int:
-    return len(json.dumps(part, ensure_ascii=False).encode("utf-8"))
 
 
 def _trim_old_tool_text(
@@ -1049,7 +1072,7 @@ def _trim_openai_messages_for_byte_budget(
         part = content[pi]
         if not isinstance(part, dict):
             continue
-        current += _STUB_IMAGE_JSON_LEN - _part_json_len(part)
+        current += _STUB_IMAGE_JSON_LEN - _json_value_bytes(part)
         content[pi] = dict(_STUB_IMAGE_PART)
         stubbed += 1
     if current > max_bytes:
@@ -1160,6 +1183,7 @@ async def stream_chat_completions_with_tool_fallback(
             tools,
             max_bytes=max_request_bytes,
             provider=provider,
+            trim_files=False,
         )
     system, oai_messages = await messages_to_openai(msgs)
     if system:

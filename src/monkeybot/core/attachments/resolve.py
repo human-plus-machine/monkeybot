@@ -34,10 +34,14 @@ class AttachmentResolveError(MonkeybotError):
     """Failed to load attachment bytes for provider resolution."""
 
 
-def _preview_bucket(store: AttachmentStore) -> _PreviewBucket | None:
+def _preview_bucket(store: AttachmentStore, *, create: bool) -> _PreviewBucket | None:
     """Bucket for *store*, or None for stores that cannot be weak-referenced or hashed."""
     try:
-        return _preview_cache.setdefault(store, OrderedDict())
+        bucket = _preview_cache.get(store)
+        if bucket is None and create:
+            bucket = OrderedDict()
+            _preview_cache[store] = bucket
+        return bucket
     except TypeError:
         return None
 
@@ -60,15 +64,16 @@ def _cached_preview(
     max_bytes = preview_max_bytes()
     key = (session_id, attachment_id, mime, max_dim, max_bytes)
     with _preview_cache_lock:
-        bucket = _preview_bucket(store)
+        bucket = _preview_bucket(store, create=False)
         if bucket is not None and key in bucket:
             bucket.move_to_end(key)
             return bucket[key]
 
-    # Encoding stays outside the lock; *store* is live here, so *bucket* is too.
+    # Encoding stays outside the lock.
     value = make_provider_preview(raw, mime, max_dim=max_dim, max_bytes=max_bytes)
-    if bucket is not None:
-        with _preview_cache_lock:
+    with _preview_cache_lock:
+        bucket = _preview_bucket(store, create=True)
+        if bucket is not None:
             bucket[key] = value
             bucket.move_to_end(key)
             _evict_preview_overflow(bucket)

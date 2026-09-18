@@ -83,6 +83,7 @@ class OpenAIProvider:
             tools,
             provider=self.name,
             raise_if_oversized=False,
+            trim_files=False,
         )
         try:
             enc = tiktoken.encoding_for_model(model)
@@ -108,6 +109,7 @@ class OpenAIProvider:
             tools,
             max_bytes=max_request_bytes,
             provider=self.name,
+            trim_files=False,
         )
 
         system, oai_messages = await messages_to_openai(msgs)
