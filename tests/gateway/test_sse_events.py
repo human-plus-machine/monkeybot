@@ -6,6 +6,7 @@ import json
 
 from monkeybot.core.runtime.events import (
     ActionRequiredEvent,
+    FileBlock,
     FrontendToolRequestEvent,
     ImageBlock,
     RedactedThinkingBlock,
@@ -33,6 +34,22 @@ def test_sse_wire_shape_image_block_with_path() -> None:
     d = json.loads(event_to_json(ev))
     assert d["type"] == "ImageBlock"
     assert d["path"] == "./generated-media/images/x.png"
+    assert "data" not in d
+
+
+def test_sse_wire_shape_file_block_with_path() -> None:
+    ev = FileBlock(
+        request_id="r",
+        file_id="c1:0",
+        mime_type="application/pdf",
+        path="./generated-media/doc.pdf",
+        filename="doc.pdf",
+    )
+    d = json.loads(event_to_json(ev))
+    assert d["type"] == "FileBlock"
+    assert d["path"] == "./generated-media/doc.pdf"
+    assert d["filename"] == "doc.pdf"
+    assert d["file_id"] == "c1:0"
     assert "data" not in d
 
 

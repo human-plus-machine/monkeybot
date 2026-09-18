@@ -141,6 +141,21 @@ class ImageBlock:
 
 
 @dataclass(frozen=True)
+class FileBlock:
+    """SSE payload for a non-image document (PDF) loaded from disk."""
+
+    kind: Literal["FileBlock"] = "FileBlock"
+    request_id: str = ""
+    file_id: str = ""
+    mime_type: str = ""
+    # Base64 bytes when no durable workspace path is available.
+    data: str = ""
+    # Workspace-relative path; preferred over data for UI clients.
+    path: str = ""
+    filename: str = ""
+
+
+@dataclass(frozen=True)
 class ThinkingBlockDelta:
     kind: Literal["ThinkingBlockDelta"] = "ThinkingBlockDelta"
     request_id: str = ""
@@ -443,6 +458,7 @@ AgentEvent: TypeAlias = (
     | ContextUsage
     | SystemPromptSnapshot
     | ImageBlock
+    | FileBlock
     | ThinkingBlockDelta
     | ThinkingBlockComplete
     | RedactedThinkingBlock
@@ -647,6 +663,17 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
         else:
             out["data"] = event.data
         return out
+    if isinstance(event, FileBlock):
+        file_out: dict[str, object] = {**base, "mime_type": event.mime_type}
+        if event.file_id:
+            file_out["file_id"] = event.file_id
+        if event.filename:
+            file_out["filename"] = event.filename
+        if event.path:
+            file_out["path"] = event.path
+        else:
+            file_out["data"] = event.data
+        return file_out
     if isinstance(event, ThinkingBlockDelta):
         return {**base, "text": event.text, "signature": event.signature}
     if isinstance(event, ThinkingBlockComplete):
@@ -834,6 +861,7 @@ def event_to_json(event: AgentEvent) -> str:
         event,
         (
             ImageBlock,
+            FileBlock,
             ThinkingBlockDelta,
             ThinkingBlockComplete,
             RedactedThinkingBlock,
@@ -1006,6 +1034,25 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
             mime_type=mime_type,
             data=data_s,
             path=path,
+        )
+    if t == "FileBlock":
+        mt = payload.get("mime_type", "")
+        data = payload.get("data", "")
+        file_raw = payload.get("file_id", "")
+        path_raw = payload.get("path", "")
+        name_raw = payload.get("filename", "")
+        mime_type = mt if isinstance(mt, str) else ""
+        data_s = data if isinstance(data, str) else ""
+        file_id = file_raw if isinstance(file_raw, str) else ""
+        path = path_raw.strip() if isinstance(path_raw, str) else ""
+        filename = name_raw.strip() if isinstance(name_raw, str) else ""
+        return FileBlock(
+            request_id=rid,
+            file_id=file_id,
+            mime_type=mime_type,
+            data=data_s,
+            path=path,
+            filename=filename,
         )
     if t == "ThinkingBlockDelta":
         text_raw = payload.get("text", "")

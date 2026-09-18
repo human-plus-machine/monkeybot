@@ -88,7 +88,7 @@ class ComputerOpenTool:
                 return _err("validation", "path is required", "Pass a path string.")
             reveal = bool(args.get("reveal", False))
             app = args.get("app")
-            resolved = safety.resolve_user_path(raw_path, must_exist=True)
+            resolved = safety.resolve_user_path(raw_path, must_exist=True, allow_workspace=True)
             if isinstance(app, str) and app.strip():
                 safety.open_path_with_app(resolved, app)
                 return _ok(path=str(resolved), opened_with=app)
@@ -358,7 +358,7 @@ class ComputerMoveTool:
                 return _err("validation", "path is required", "Pass the item to move.")
             if not isinstance(raw_dest, str):
                 return _err("validation", "destination is required", "Pass a destination path.")
-            src = safety.resolve_user_path(raw_path, must_exist=True)
+            src = safety.resolve_user_path(raw_path, must_exist=True, allow_workspace=True)
             dest = safety.resolve_user_path(raw_dest, must_exist=False)
             overwrite = bool(args.get("overwrite", False))
 

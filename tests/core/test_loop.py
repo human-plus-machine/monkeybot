@@ -49,11 +49,11 @@ from monkeybot.core.runtime.loop import run
 from monkeybot.core.runtime.loop_messages import _messages_for_provider
 from monkeybot.core.runtime.loop_usage import _merge_usage_event, _usage_to_totals
 from monkeybot.core.runtime.tool_batch import _chunk_tool_calls
-from monkeybot.core.runtime.tool_dispatch import _image_events, _resolved_path_for_call
+from monkeybot.core.runtime.tool_dispatch import _file_events, _image_events, _resolved_path_for_call
 from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
 from monkeybot.core.tools.inspector import Decision
 from monkeybot.core.tools.types import ToolExecutionResult
-from monkeybot.core.types.content_blocks import Image, Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import File, Image, Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
 
 
@@ -1316,6 +1316,25 @@ def test_image_events_assign_unique_image_ids() -> None:
     assert events[0].image_id == "call-9:0"
     assert events[1].image_id == "call-9:1"
     assert events[0].request_id == events[1].request_id == "req-1"
+
+
+def test_file_events_from_pdf_block() -> None:
+    result = ToolExecutionResult.ok_blocks(
+        [
+            File(
+                mime_type="application/pdf",
+                data="abc",
+                metadata={"path": "generated-media/doc.pdf", "filename": "doc.pdf"},
+            )
+        ]
+    )
+    events = _file_events("req-1", "call-9", result)
+    assert len(events) == 1
+    assert events[0].file_id == "call-9:0"
+    assert events[0].path == "generated-media/doc.pdf"
+    assert events[0].filename == "doc.pdf"
+    assert events[0].mime_type == "application/pdf"
+    assert events[0].data == ""
 
 
 @pytest.mark.asyncio

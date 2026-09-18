@@ -131,6 +131,83 @@ class TestResolveUserPath:
             safety.resolve_user_path(str(target))
         assert exc.value.kind == "policy"
 
+    def test_open_allows_workspace_root(self, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        workspace = home / "my-agent" / "workspace"
+        workspace.mkdir(parents=True)
+        monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(workspace))
+        target = workspace / "Aadhaar_on_white.pdf"
+        target.write_text("x")
+        resolved = safety.resolve_user_path(str(target), must_exist=True, allow_workspace=True)
+        assert resolved == target.resolve()
+
+    def test_open_allows_workspace_under_dot_monkeybot(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace = home / ".monkeybot" / "agents" / "default" / "workspace"
+        workspace.mkdir(parents=True)
+        monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(workspace))
+        target = workspace / "generated-media" / "Aadhaar_on_white.pdf"
+        target.parent.mkdir()
+        target.write_text("x")
+        resolved = safety.resolve_user_path(str(target), must_exist=True, allow_workspace=True)
+        assert resolved == target.resolve()
+        with pytest.raises(safety.ComputerToolError) as exc:
+            safety.resolve_user_path(str(target))
+        assert exc.value.kind == "policy"
+
+    def test_move_destination_still_rejects_workspace(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace = home / "my-agent" / "workspace"
+        workspace.mkdir(parents=True)
+        monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(workspace))
+        dest = workspace / "imported.txt"
+        with pytest.raises(safety.ComputerToolError) as exc:
+            safety.resolve_user_path(str(dest), must_exist=False, allow_workspace=False)
+        assert exc.value.kind == "policy"
+
+    def test_precheck_open_and_move_source_allow_workspace(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        workspace = home / ".monkeybot" / "agents" / "default" / "workspace"
+        workspace.mkdir(parents=True)
+        monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(workspace))
+        target = workspace / "Aadhaar_on_white.pdf"
+        target.write_text("x")
+        assert safety.precheck_policy("computer_open", {"path": str(target)}) is None
+        dest = home / "Desktop" / "Aadhaar_on_white.pdf"
+        dest.parent.mkdir()
+        assert (
+            safety.precheck_policy(
+                "computer_move", {"path": str(target), "destination": str(dest)}
+            )
+            is None
+        )
+        assert (
+            safety.precheck_policy(
+                "computer_move",
+                {
+                    "path": str(home / "scan.pdf"),
+                    "destination": str(workspace / "imported.pdf"),
+                },
+            )
+            is not None
+        )
+
+    def test_open_still_rejects_agent_config_next_to_workspace(
+        self, home: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent = home / ".monkeybot" / "agents" / "default"
+        workspace = agent / "workspace"
+        workspace.mkdir(parents=True)
+        config = agent / "monkeybot_config" / "permissions.yaml"
+        config.parent.mkdir(parents=True)
+        config.write_text("default: allow\n")
+        monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(workspace))
+        with pytest.raises(safety.ComputerToolError) as exc:
+            safety.resolve_user_path(str(config), allow_workspace=True)
+        assert exc.value.kind == "policy"
+
     def test_rejects_own_agent_config_dir(
         self, home: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

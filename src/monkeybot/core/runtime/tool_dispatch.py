@@ -36,12 +36,13 @@ from monkeybot.core.runtime.context_budget import ContextBudgeter
 from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector
 from monkeybot.core.tools.permission import remember_always_approval, resource_for_call
 from monkeybot.core.tools.types import ToolExecutionResult
-from monkeybot.core.types.content_blocks import ContentBlock, Image, Text, ToolResponse
+from monkeybot.core.types.content_blocks import ContentBlock, File, Image, Text, ToolResponse
 
 from .doom_loop import _doom_loop_exempt_names, _DoomLoopTracker
 from .events import (
     AgentEvent,
     Error,
+    FileBlock,
     ImageBlock,
     ToolCallResult,
     ToolCallStarted,
@@ -163,6 +164,39 @@ def _image_events(
                 # Keep pixels only when there is no durable path (SSE omits data if path set).
                 data="" if path else b.data,
                 path=path,
+            )
+        )
+    return events
+
+
+def _file_events(
+    request_id: str,
+    call_id: str,
+    result: ToolExecutionResult,
+) -> list[FileBlock]:
+    """SSE document payloads for tool results that include ``File`` content blocks."""
+    if result.error is not None:
+        return []
+    events: list[FileBlock] = []
+    for idx, b in enumerate(result.blocks):
+        if not isinstance(b, File):
+            continue
+        meta = b.metadata or {}
+        path_raw = meta.get("path")
+        path = path_raw.strip() if isinstance(path_raw, str) else ""
+        name_raw = meta.get("filename")
+        filename = name_raw.strip() if isinstance(name_raw, str) else ""
+        if not path and not b.data:
+            continue
+        file_id = f"{call_id}:{idx}" if call_id else f"{request_id}:{idx}"
+        events.append(
+            FileBlock(
+                request_id=request_id,
+                file_id=file_id,
+                mime_type=b.mime_type,
+                data="" if path else b.data,
+                path=path,
+                filename=filename,
             )
         )
     return events
@@ -665,6 +699,8 @@ async def _execute_serial_chunk(
     yield event
     for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
         yield img_evt
+    for file_evt in _file_events(ctx.request_id, call.call_id, tool_result):
+        yield file_evt
     chunk_responses.append(response)
     mcp_mutated, loops_mutated = _note_registry_mutation(
         call,
@@ -757,6 +793,8 @@ async def _execute_parallel_chunk(
         yield event
         for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
             yield img_evt
+        for file_evt in _file_events(ctx.request_id, call.call_id, tool_result):
+            yield file_evt
         chunk_responses.append(response)
         mcp_mutated, loops_mutated = _note_registry_mutation(
             call,
