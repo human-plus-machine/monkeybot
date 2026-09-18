@@ -51,6 +51,7 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("model", "context_window"): "MODEL_CONTEXT_WINDOW",
     ("model", "summarization_model"): "CONTEXT_SUMMARIZATION_MODEL",
     ("model", "max_turns"): "MAX_TURNS",
+    ("model", "max_request_bytes"): "MODEL_MAX_REQUEST_BYTES",
     ("model", "cache_retention"): "MODEL_CACHE_RETENTION",
     ("gcp", "project_id"): "VERTEX_AI_PROJECT_ID",
     ("gcp", "location"): "VERTEX_AI_LOCATION",
@@ -131,6 +132,7 @@ ENV_SPEC: dict[str, tuple[ConfigTier, str]] = {
     # HOT — next turn reads the new snapshot.
     "MODEL_NAME": (ConfigTier.HOT, "model.name"),
     "MAX_TURNS": (ConfigTier.HOT, "model.max_turns"),
+    "MODEL_MAX_REQUEST_BYTES": (ConfigTier.HOT, "model.max_request_bytes"),
     "MODEL_CONTEXT_WINDOW": (ConfigTier.HOT, "model.context_window"),
     "CONTEXT_SUMMARIZATION_MODEL": (ConfigTier.HOT, "model.summarization_model"),
     "MODEL_CACHE_RETENTION": (ConfigTier.HOT, "model.cache_retention"),

@@ -8,6 +8,7 @@ import os
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+from monkeybot.core.attachments.image_preview import ImagePreviewError, make_provider_preview
 from monkeybot.core.knowledge.extractors import IMAGE_SUFFIXES, content_hash
 from monkeybot.core.knowledge.types import CaptionMode
 
@@ -95,7 +96,12 @@ async def default_vision_caption(
     except OSError as exc:
         logger.warning("knowledge llm caption read failed %s: %r", file_path, exc)
         return None
-    data_url = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+    try:
+        preview, preview_mime = make_provider_preview(raw, mime)
+    except ImagePreviewError as exc:
+        logger.warning("knowledge llm caption preview failed %s: %r", file_path, exc)
+        return None
+    data_url = f"data:{preview_mime};base64,{base64.b64encode(preview).decode('ascii')}"
     client = AsyncOpenAI(
         api_key=key,
         base_url=base_url.rstrip("/") if base_url else None,
@@ -123,9 +129,7 @@ async def default_vision_caption(
     try:
         text = (resp.choices[0].message.content or "").strip()
     except (AttributeError, IndexError, TypeError) as exc:
-        logger.warning(
-            "knowledge llm caption malformed response for %s: %r", file_path, exc
-        )
+        logger.warning("knowledge llm caption malformed response for %s: %r", file_path, exc)
         return None
     return text or None
 

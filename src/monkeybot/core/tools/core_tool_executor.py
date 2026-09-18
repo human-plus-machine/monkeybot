@@ -23,6 +23,11 @@ from monkeybot.core.attachments.config import (
     max_image_bytes,
     max_pdf_bytes,
 )
+from monkeybot.core.attachments.image_preview import (
+    ImagePreviewError,
+    make_provider_preview,
+    provider_preview_metadata,
+)
 from monkeybot.core.attachments.store import (
     AttachmentStore,
     attachment_workspace_path,
@@ -1301,11 +1306,22 @@ class CoreToolExecutor(ToolExecutorPort):
         return ToolExecutionResult.err("load_file requires attachment_id or path")
 
     @staticmethod
-    def _media_result(mime: str, data_b64: str, meta: dict[str, object]) -> ToolExecutionResult:
+    def _media_result(raw: bytes, mime: str, meta: dict[str, object]) -> ToolExecutionResult:
         if mime in IMAGE_MIME_TYPES:
-            return ToolExecutionResult.ok_blocks(
-                [Image(mime_type=mime, data=data_b64, metadata=meta)]
+            try:
+                preview_bytes, preview_mime = make_provider_preview(raw, mime)
+            except ImagePreviewError as exc:
+                return ToolExecutionResult.err(f"Could not prepare image for the provider: {exc}")
+            data_b64 = base64.b64encode(preview_bytes).decode("ascii")
+            preview_meta = provider_preview_metadata(
+                meta,
+                original_mime=mime,
+                preview_mime=preview_mime,
             )
+            return ToolExecutionResult.ok_blocks(
+                [Image(mime_type=preview_mime, data=data_b64, metadata=preview_meta)]
+            )
+        data_b64 = base64.b64encode(raw).decode("ascii")
         return ToolExecutionResult.ok_blocks([File(mime_type=mime, data=data_b64, metadata=meta)])
 
     def _load_file_from_attachment(
@@ -1316,9 +1332,7 @@ class CoreToolExecutor(ToolExecutorPort):
         if not self._attachment_store.exists(ctx.thread_id, attachment_id):
             return ToolExecutionResult.err(f"Unknown attachment_id: {attachment_id}")
         try:
-            data_b64, mime, filename = self._attachment_store.read_base64(
-                ctx.thread_id, attachment_id
-            )
+            raw, mime, filename = self._attachment_store.read(ctx.thread_id, attachment_id)
         except FileNotFoundError:
             return ToolExecutionResult.err(
                 f"Attachment {attachment_id} expired or removed; ask user to re-upload"
@@ -1328,7 +1342,7 @@ class CoreToolExecutor(ToolExecutorPort):
             "filename": filename,
             "path": attachment_workspace_path(ctx.thread_id, attachment_id),
         }
-        return self._media_result(mime, data_b64, meta)
+        return self._media_result(raw, mime, meta)
 
     def _load_file_from_path(self, path: str, ctx: TurnContext) -> ToolExecutionResult:
         try:
@@ -1365,7 +1379,6 @@ class CoreToolExecutor(ToolExecutorPort):
                 f"File too large ({len(raw)} bytes); max for {mime} is {max_bytes}"
             )
 
-        data_b64 = base64.b64encode(raw).decode("ascii")
         filename = fp.name
         meta: dict[str, object] = {"filename": filename, "path": path}
         if self._attachment_store is not None:
@@ -1388,7 +1401,7 @@ class CoreToolExecutor(ToolExecutorPort):
                     exc_info=True,
                 )
 
-        return self._media_result(mime, data_b64, meta)
+        return self._media_result(raw, mime, meta)
 
     def _tool_read_file(
         self, args: dict[str, Any], ctx: TurnContext

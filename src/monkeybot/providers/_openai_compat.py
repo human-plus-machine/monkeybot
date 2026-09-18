@@ -12,11 +12,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import copy
 import hashlib
 import io
 import json
 import logging
 import random
+import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
@@ -44,6 +46,10 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import safe_parse_tool_args
+from monkeybot.providers.request_budget import (
+    RequestByteBudgetError,
+    trim_message_media_for_byte_budget,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -902,24 +908,241 @@ async def count_input_tokens_tiktoken(
     tools: Sequence[ToolDef],
     *,
     model: str,
+    provider: str,
+    max_request_bytes: int,
     thinking_budget: int | None = None,
 ) -> int:
     """Shared ``count_input_tokens`` body for tiktoken-based providers.
 
     Falls back to ``cl100k_base`` when ``model`` isn't a tiktoken-known model id
     (true for most non-OpenAI models served through an OpenAI-compat endpoint).
+
+    Media is stubbed against ``max_request_bytes`` so the count reflects what
+    ``stream`` will actually send, but never raises when text alone stays over
+    the cap — the caller counts tokens precisely to decide whether to compact.
+
     ``thinking_budget`` is accepted for ``Provider`` protocol symmetry but unused:
     none of these providers' token counts vary with reasoning configuration.
     """
     del thinking_budget
     import tiktoken  # noqa: PLC0415
 
-    msgs = list(messages)
+    msgs = trim_message_media_for_byte_budget(
+        messages,
+        tools,
+        max_bytes=max_request_bytes,
+        provider=provider,
+        raise_if_oversized=False,
+        trim_files=False,
+    )
     try:
         enc = tiktoken.encoding_for_model(model)
     except KeyError:
         enc = tiktoken.get_encoding("cl100k_base")
     return await count_openai_compat_input_tokens(enc, msgs, tools)
+
+
+_OMITTED_IMAGE_TEXT = (
+    "[image omitted to fit the provider request size. "
+    "Ask the user to reattach it if it is needed again.]"
+)
+_STUB_IMAGE_PART = {"type": "text", "text": _OMITTED_IMAGE_TEXT}
+_STUB_IMAGE_JSON_LEN = len(json.dumps(_STUB_IMAGE_PART, ensure_ascii=False).encode("utf-8"))
+_TOOL_TRIM_KEEP_CHARS = 1500
+_REQUEST_BODY_RETRY_MAX = 1
+# Characters JSON encodes as more than one byte inside an ASCII string literal.
+_JSON_ESCAPED_RE = re.compile(r'["\\\x00-\x1f]')
+
+
+def openai_chat_request_body_bytes(kwargs: dict[str, Any]) -> int:
+    """Conservative UTF-8 size estimate for the Chat Completions JSON body.
+
+    The OpenAI SDK currently delegates JSON encoding to httpx with compact
+    separators. Keep this estimator conservative by retaining default separators.
+    Compute structural byte lengths directly so large base64 strings are never
+    copied into a second full-body serialization.
+    """
+    payload: dict[str, Any] = {}
+    extra = kwargs.get("extra_body")
+    if isinstance(extra, dict):
+        payload.update(extra)
+    for key, val in kwargs.items():
+        if key == "extra_body" or val is None:
+            continue
+        payload[key] = val
+    return _json_value_bytes(payload)
+
+
+def _json_value_bytes(value: Any) -> int:
+    """Return default-separator JSON byte length without materializing large strings."""
+    if isinstance(value, str):
+        # Plain ASCII needs no escaping, so a data URL's megabytes are measured
+        # by length alone rather than encoded and escaped into a throwaway copy.
+        if value.isascii() and not _JSON_ESCAPED_RE.search(value):
+            return len(value) + 2
+        return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+    if isinstance(value, list):
+        return 2 + sum(_json_value_bytes(item) for item in value) + 2 * max(0, len(value) - 1)
+    if isinstance(value, dict) and all(isinstance(key, str) for key in value):
+        return (
+            2
+            + sum(
+                _json_value_bytes(key) + 2 + _json_value_bytes(item) for key, item in value.items()
+            )
+            + 2 * max(0, len(value) - 1)
+        )
+    return len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
+
+
+def _image_url_locations(messages: list[dict[str, Any]]) -> list[tuple[int, int]]:
+    locs: list[tuple[int, int]] = []
+    for mi, msg in enumerate(messages):
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for pi, part in enumerate(content):
+            if not isinstance(part, dict) or part.get("type") != "image_url":
+                continue
+            image_url = part.get("image_url")
+            url = ""
+            if isinstance(image_url, dict):
+                url = str(image_url.get("url") or "")
+            elif isinstance(image_url, str):
+                url = image_url
+            if url.startswith("data:"):
+                locs.append((mi, pi))
+    return locs
+
+
+def _drop_image_order(
+    messages: list[dict[str, Any]], locs: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    last_keep = -1
+    for i, msg in enumerate(messages):
+        if msg.get("role") in {"user", "assistant"}:
+            last_keep = i
+    historical = [loc for loc in locs if loc[0] != last_keep]
+    current = [loc for loc in locs if loc[0] == last_keep]
+    return historical + current
+
+
+def _trim_old_tool_text(
+    messages: list[dict[str, Any]],
+    current: int,
+    max_bytes: int,
+) -> int:
+    for msg in messages:
+        if current <= max_bytes:
+            break
+        if msg.get("role") != "tool":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str) or len(content) <= _TOOL_TRIM_KEEP_CHARS * 2:
+            continue
+        new = content[:_TOOL_TRIM_KEEP_CHARS] + "\n[truncated to fit request size]"
+        current += len(new.encode("utf-8")) - len(content.encode("utf-8"))
+        msg["content"] = new
+        _log.warning(
+            "openai-compat trimmed tool text %s",
+            kv(kept=_TOOL_TRIM_KEEP_CHARS, original_chars=len(content)),
+        )
+    return current
+
+
+def _trim_openai_messages_for_byte_budget(
+    kwargs: dict[str, Any],
+    max_bytes: int,
+    *,
+    drop_all_media: bool = False,
+    current_bytes: int | None = None,
+) -> tuple[dict[str, Any], int, int]:
+    out = dict(kwargs)
+    messages = copy.deepcopy(list(kwargs.get("messages") or []))
+    out["messages"] = messages
+    current = openai_chat_request_body_bytes(out) if current_bytes is None else current_bytes
+    locs = _image_url_locations(messages)
+    order = locs if drop_all_media else _drop_image_order(messages, locs)
+    stubbed = 0
+    for mi, pi in order:
+        if not drop_all_media and current <= max_bytes:
+            break
+        content = messages[mi].get("content")
+        if not isinstance(content, list):
+            continue
+        part = content[pi]
+        if not isinstance(part, dict):
+            continue
+        current += _STUB_IMAGE_JSON_LEN - _json_value_bytes(part)
+        content[pi] = dict(_STUB_IMAGE_PART)
+        stubbed += 1
+    if current > max_bytes:
+        current = _trim_old_tool_text(messages, current, max_bytes)
+    return out, stubbed, current
+
+
+def enforce_openai_request_byte_budget(
+    kwargs: dict[str, Any],
+    max_bytes: int,
+    *,
+    provider: str,
+    model: str,
+) -> dict[str, Any]:
+    """Trim a converted Chat Completions request and reject it if it still exceeds the cap."""
+    before = openai_chat_request_body_bytes(kwargs)
+    if before <= max_bytes:
+        # Nothing to trim — skip the deep copy of every data URL in the body.
+        return kwargs
+    out, stubbed, after = _trim_openai_messages_for_byte_budget(
+        kwargs,
+        max_bytes,
+        current_bytes=before,
+    )
+    if stubbed:
+        _log.warning(
+            "openai-compat trimmed request media %s",
+            kv(
+                provider=provider,
+                model=model,
+                body_bytes_before=before,
+                body_bytes_after=after,
+                trimmed_images=stubbed,
+                max_request_bytes=max_bytes,
+            ),
+        )
+    if after > max_bytes:
+        _log.error(
+            "openai-compat request remains over byte cap %s",
+            kv(
+                provider=provider,
+                model=model,
+                body_bytes=after,
+                max_request_bytes=max_bytes,
+            ),
+        )
+        raise RequestByteBudgetError(
+            f"{provider} request exceeds configured byte cap after trimming ({after} > {max_bytes})"
+        )
+    return out
+
+
+def is_ollama_request_body_read_error(exc: BaseException) -> bool:
+    """True for Ollama Cloud's request-body parsing 400."""
+    blob = str(exc).lower()
+    body = getattr(exc, "body", None)
+    if body is not None:
+        blob = f"{blob} {body!s}".lower()
+    message = getattr(exc, "message", None)
+    if message is not None:
+        blob = f"{blob} {message!s}".lower()
+    if "failed to read request body" not in blob:
+        return False
+    try:
+        from openai import APIStatusError  # noqa: PLC0415
+    except ImportError:
+        return True
+    if isinstance(exc, APIStatusError):
+        return bool(exc.status_code == 400)
+    return True
 
 
 async def stream_chat_completions_with_tool_fallback(
@@ -934,6 +1157,7 @@ async def stream_chat_completions_with_tool_fallback(
     max_tokens: int,
     reasoning_effort: str | None = None,
     extra_body: dict[str, Any] | None = None,
+    max_request_bytes: int | None = None,
 ) -> AsyncIterator[ProviderEvent]:
     """Shared ``stream`` body for OpenAI-compat providers.
 
@@ -946,10 +1170,21 @@ async def stream_chat_completions_with_tool_fallback(
     ``extra_body`` is forwarded to the OpenAI SDK for vendor fields the typed
     Chat Completions schema does not list (Ollama ``keep_alive`` / ``options``).
     HuggingFace and NVIDIA omit it.
+
+    ``max_request_bytes`` is a hard JSON-body cap. When set, oldest historical
+    ``image_url`` data URLs are stubbed before the request is sent.
     """
     from openai import AsyncOpenAI  # noqa: PLC0415
 
     msgs = list(messages)
+    if max_request_bytes is not None and max_request_bytes > 0:
+        msgs = trim_message_media_for_byte_budget(
+            msgs,
+            tools,
+            max_bytes=max_request_bytes,
+            provider=provider,
+            trim_files=False,
+        )
     system, oai_messages = await messages_to_openai(msgs)
     if system:
         oai_messages = [{"role": "system", "content": system}, *oai_messages]
@@ -968,6 +1203,13 @@ async def stream_chat_completions_with_tool_fallback(
         kwargs["reasoning_effort"] = reasoning_effort
     if extra_body:
         kwargs["extra_body"] = extra_body
+    if max_request_bytes is not None and max_request_bytes > 0:
+        kwargs = enforce_openai_request_byte_budget(
+            kwargs,
+            max_request_bytes,
+            provider=provider,
+            model=model,
+        )
 
     n_tools = len(tools)
     sem = _provider_semaphore(provider)
@@ -976,6 +1218,7 @@ async def stream_chat_completions_with_tool_fallback(
     # rate-limit retry, and a rate limit shouldn't burn a server-error retry).
     rate_limit_attempts = 0
     server_error_attempts = 0
+    body_read_retries = 0
     while True:
         yielded_any = False
         retry_delay: float | None = None
@@ -1002,6 +1245,36 @@ async def stream_chat_completions_with_tool_fallback(
                     )
                     kwargs.pop("tools", None)
                     n_tools = 0
+                    continue
+                if (
+                    provider.startswith("ollama")
+                    and is_ollama_request_body_read_error(exc)
+                    and not yielded_any
+                    and body_read_retries < _REQUEST_BODY_RETRY_MAX
+                ):
+                    body_read_retries += 1
+                    before = openai_chat_request_body_bytes(kwargs)
+                    cap = (
+                        max_request_bytes
+                        if max_request_bytes is not None and max_request_bytes > 0
+                        else before
+                    )
+                    kwargs, stubbed, after = _trim_openai_messages_for_byte_budget(
+                        kwargs,
+                        cap,
+                        drop_all_media=True,
+                        current_bytes=before,
+                    )
+                    _log.warning(
+                        "retrying after request-body 400 %s",
+                        kv(
+                            provider=provider,
+                            model=model,
+                            body_bytes_before=before,
+                            body_bytes_after=after,
+                            trimmed_images=stubbed,
+                        ),
+                    )
                     continue
                 if is_rate_limit_error(exc):
                     rate_limit_attempts, retry_delay = _retry_delay_or_raise(

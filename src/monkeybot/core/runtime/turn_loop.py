@@ -1652,10 +1652,12 @@ async def _run_inner_core(
             if state.action == "return":
                 # Cancel/error mid-stream skips _handle_empty_or_final_text —
                 # persist any text already shown to the user before exiting.
+                # Break (do not return) so freeze_attachments_in_history still runs.
+                state.needs_followup_after_tools = False
                 await _persist_partial_assistant_on_abort(
                     state, history=history, last_assistant=last_assistant
                 )
-                return
+                break
             state.action = None
 
             if cancelled is not None and cancelled.is_set():
@@ -1695,7 +1697,7 @@ async def _run_inner_core(
                 ):
                     yield evt
                 if state.action == "return":
-                    return
+                    break
 
         finally:
             set_turn_prompt_tokens(usage.estimated_prompt_tokens)
