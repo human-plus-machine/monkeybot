@@ -446,6 +446,8 @@ class VerifierVerdict:
         }
         if self.correction is not None:
             payload["correction"] = self.correction
+        if self.judge_tokens:
+            payload["judgeTokens"] = self.judge_tokens
         return payload
 
 
@@ -756,6 +758,8 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
         }
         if event.correction is not None:
             payload["correction"] = event.correction
+        if event.judge_tokens:
+            payload["judge_tokens"] = event.judge_tokens
         return payload
     if isinstance(event, QueuedInputAccepted):
         return {**base, "queue": event.queue, "position": event.position}
@@ -1201,6 +1205,8 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         correction = corr_raw if isinstance(corr_raw, str) else None
         conf_raw = payload.get("confidence", 0.0)
         confidence = float(conf_raw) if isinstance(conf_raw, (int, float)) else 0.0
+        tokens_raw = payload.get("judge_tokens", 0)
+        judge_tokens = int(tokens_raw) if isinstance(tokens_raw, (int, float)) else 0
         return VerifierVerdict(
             request_id=rid,
             verdict_id=str(payload.get("verdict_id") or ""),
@@ -1211,6 +1217,7 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
             rationale=str(payload.get("rationale") or ""),
             correction=correction,
             triggering_signals=signals,
+            judge_tokens=max(0, judge_tokens),
         )
     if t == "QueuedInputAccepted":
         q_raw = payload.get("queue", "follow_up")

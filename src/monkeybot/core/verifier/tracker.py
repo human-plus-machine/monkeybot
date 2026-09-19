@@ -111,6 +111,7 @@ class ProgressTracker:
 
     def _observe_tool(self, payload: HookPayload) -> None:
         state = self._state(payload.thread_id)
+        state.inner_turn = payload.inner_turn or state.inner_turn
         warm = state.seen_tool
         name = payload.tool_name or ""
         args = payload.tool_args
@@ -135,6 +136,10 @@ class ProgressTracker:
                 signals.append("rewrite_churn")
         signals.extend(self._ledger_signals(payload.thread_id, name, args))
         state.seen_tool = True
+        live = list(signals)
+        if state.error_streak > 0 and "error_streak" not in live:
+            live.append("error_streak")
+        self._publish_signals(payload, live)
         self._maybe_emit(payload, state, signals)
 
     def _observe_provider(self, payload: HookPayload) -> None:
@@ -181,7 +186,18 @@ class ProgressTracker:
     def _observe_turn_end(self, payload: HookPayload) -> None:
         signals = self._ledger_signals(payload.thread_id, "", None, turn_end=True)
         state = self._state(payload.thread_id)
+        self._publish_signals(payload, signals)
         self._maybe_emit(payload, state, signals)
+
+    def _publish_signals(self, payload: HookPayload, signals: list[str]) -> None:
+        try:
+            self._mailbox.set_current_signals(payload.thread_id, payload.request_id, signals)
+        except Exception:
+            logger.warning(
+                "progress_tracker signal publish failed %s",
+                kv(thread_id=payload.thread_id),
+                exc_info=True,
+            )
 
     def _ledger_signals(
         self,

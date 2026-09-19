@@ -6,6 +6,29 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Verifier nudges stay in the system prompt for every provider call of the originating request until tracker signals recover, instead of a one-shot `PRE_TOOL` note.
+
+### Fixed
+
+- Turn-end drain waits out `verifier.judge.tail_grace_s` (default 16s) after POST_TOOL settlement so an in-flight ProviderJudge can land a `VerifierVerdict` before `TurnComplete`.
+- `verifier.enabled: true` turns on omitted ledger/tracker/judge flags instead of leaving those nested defaults off.
+- POST_TOOL now forwards `inner_turn` so non-ledger tracker signals are not stripped on inner turn 1.
+
+## [cli v0.7.0] - 2026-09-18
+
+### Added
+
+- New agent scaffolds enable the verifier with ledger, tracker, and judge inheriting `model.name`.
+
+## [core v3.5.0] - 2026-09-18
+
+### Added
+
+- Provider-backed verifier judge uses the agent's live `model.name` (and provider) unless `verifier.ledger.model` / `verifier.judge.model` override it.
+- New agent scaffolds enable the verifier with ledger, tracker, judge, and `escalation.max_severity: nudge`.
+
 ## [browser v0.7.2] - 2026-09-13
 
 #### Fixed

@@ -63,7 +63,12 @@ class FakeHistory:
         return list(self.rows)
 
     async def append(
-        self, thread_id: str, message: Message, *, turn_id: str | None = None, message_id: str | None = None
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str | None = None,
+        message_id: str | None = None,
     ) -> None:
         del thread_id, turn_id, message_id
         self.rows.append(message)
@@ -390,12 +395,7 @@ async def test_pre_tool_injection_lands_on_next_system_prompt_only() -> None:
 
     # Tool result in history must be the raw executor output, unmodified.
     tool_response = next(
-        (
-            b
-            for m in hist.rows
-            for b in m.content
-            if isinstance(b, ToolResponse)
-        ),
+        (b for m in hist.rows for b in m.content if isinstance(b, ToolResponse)),
         None,
     )
     assert tool_response is not None
@@ -554,6 +554,52 @@ async def test_before_provider_request_can_rewrite_messages() -> None:
 
 
 @pytest.mark.asyncio
+async def test_system_prompt_snapshot_matches_provider_verifier_block() -> None:
+    from dataclasses import replace
+
+    from monkeybot.core.runtime.events import SystemPromptSnapshot, VerifierVerdict
+    from monkeybot.core.verifier.actuator import NudgeActuator
+    from monkeybot.core.verifier.mailbox import VerdictMailbox
+
+    mailbox = VerdictMailbox()
+    mailbox.put(
+        "t1",
+        VerifierVerdict(
+            request_id="r1",
+            verdict_id="v1",
+            checkpoint_id="r1:1",
+            status="drifting",
+            severity="nudge",
+            triggering_signals=("constraint_touch",),
+            correction="leave the migrations alone",
+        ),
+    )
+    mgr = HookManager()
+    NudgeActuator(mailbox).register(mgr)
+    ctx = replace(_ctx(), verdict_mailbox=mailbox)
+    prov = CapturingProvider([[TextDelta(text="ok"), Done()]])
+    events = []
+    async for event in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=2,
+        hook_manager=mgr,
+    ):
+        events.append(event)
+    snaps = [e for e in events if isinstance(e, SystemPromptSnapshot)]
+    assert snaps
+    assert "## Verifier" in snaps[0].text
+    assert "[Verifier] leave the migrations alone" in snaps[0].text
+    assert prov.system_texts
+    assert "## Verifier" in prov.system_texts[0]
+    assert "[Verifier] leave the migrations alone" in prov.system_texts[0]
+
+
+@pytest.mark.asyncio
 async def test_after_provider_response_fires_with_usage() -> None:
     mgr = HookManager()
     seen: list[HookPayload] = []
@@ -668,9 +714,7 @@ class _MarkerScanner:
     def scan(self, texts: list[str]) -> list[object]:
         from monkeybot.core.context.secret_egress import Hit
 
-        return [
-            Hit(index=i, kind="secret") for i, t in enumerate(texts) if self.MARKER in t
-        ]
+        return [Hit(index=i, kind="secret") for i, t in enumerate(texts) if self.MARKER in t]
 
 
 @pytest.mark.asyncio

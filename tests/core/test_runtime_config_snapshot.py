@@ -447,6 +447,29 @@ def test_verifier_included_in_snapshot_and_diff(
     assert get_verifier_config(config=reloaded).tracker.suspicion_threshold == 9
 
 
+def test_verifier_model_inherits_agent_model_when_omitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.settings import effective_verifier_model, get_verifier_config
+
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(
+        tmp_path,
+        "model:\n  provider: fake\n  name: glm-5.3-flash\n"
+        "verifier:\n  enabled: true\n"
+        "  ledger:\n    enabled: true\n"
+        "  judge:\n    enabled: true\n",
+    )
+    apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    pinned = get_config_store().current()
+    assert pinned.verifier.ledger.model is None
+    assert pinned.verifier.judge.model is None
+    assert effective_verifier_model(pinned, pinned.verifier.ledger.model) == "glm-5.3-flash"
+    assert effective_verifier_model(pinned, pinned.verifier.judge.model) == "glm-5.3-flash"
+    assert effective_verifier_model(pinned, "explicit-judge") == "explicit-judge"
+    assert get_verifier_config(config=pinned).judge.model is None
+
+
 def test_invalid_verifier_section_does_not_abort_apply(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

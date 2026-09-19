@@ -103,6 +103,7 @@ from .loop_messages import (
     _load_agent_chat_history,
     _messages_for_provider,
     _provider_messages_prompt_summary,
+    _snapshot_system_message,
     _system_message_from_text,
     _system_prompt_snapshot_text,
     _user_text_from_content,
@@ -247,8 +248,6 @@ async def _drain_steers(
                 text=preview,
                 queued_request_id=item.queued_request_id or "",
             )
-    async for verdict_evt in _drain_verdicts(ctx, history):
-        yield verdict_evt
 
 
 async def _take_ready(
@@ -347,14 +346,25 @@ async def _drain_verdicts(
 def _stash_escalation(
     mailbox: VerdictMailbox, thread_id: str, capped: str, verdict: VerifierVerdict
 ) -> None:
-    """Queue one-shot nudge/replan for the next inner turn of the verdict's own
-    request. Request-scoped like ``block``: a note whose request has already
-    finished is dropped rather than applied to the next user message. Fail-open.
+    """Arm a sticky nudge or one-shot replan for this verdict's own request.
+
+    Nudges stay active while tracker signals still overlap. A note whose
+    request has already finished is dropped rather than applied to the next
+    user message. Fail-open.
     """
     text = verdict.correction or f"[Verifier] {verdict.rationale}"
     try:
         if capped == "nudge":
-            mailbox.put_nudge(thread_id, verdict.request_id, text)
+            armed = mailbox.activate_nudge(thread_id, verdict.request_id, verdict, text)
+            logger.info(
+                "verifier nudge stash %s",
+                kv(
+                    thread_id=thread_id,
+                    request_id=verdict.request_id,
+                    verdict_id=verdict.verdict_id,
+                    armed=armed,
+                ),
+            )
         elif capped in ("replan", "steer"):
             mailbox.put_replan(
                 thread_id,
@@ -857,7 +867,10 @@ async def _apply_pressure_and_before_provider(
     yield SystemPromptSnapshot(
         request_id=state.ctx.request_id,
         inner_turn=state.turn_index,
-        text=_system_prompt_snapshot_text(system_msg, admit.mid_conversation_update),
+        text=_system_prompt_snapshot_text(
+            _snapshot_system_message(state.provider_messages, system_msg),
+            admit.mid_conversation_update,
+        ),
     )
 
 
@@ -1496,6 +1509,7 @@ async def _append_tool_requests_and_dispatch(
         tools_dirty=state.tools_dirty,
         tools_dirty_reason=state.tools_dirty_reason,
         pre_tool_extra_next=state.pre_tool_extra_next,
+        inner_turn=state.turn_index,
     )
     async for evt in dispatch_tool_batch(
         ordered=ordered,
@@ -1592,6 +1606,8 @@ async def _run_inner_core(
         # Settlement barrier: fire-and-forget hooks from the prior tool batch
         # must finish (or time out) before the next provider call.
         await _drain_hook_settlement(hook_manager)
+        async for verdict_evt in _drain_verdicts(state.ctx, history):
+            yield verdict_evt
 
         state.turn_index += 1
         state.turn_input_text = state.user_text
@@ -1719,6 +1735,9 @@ async def _run_inner_core(
     # below (freeze) so the assistant row is durable and not overwritten.
     await _await_history_write(state.assistant_write_task)
 
+    # Last POST_TOOL is fire-and-forget; settle it so the judge is pending
+    # before the tail grace wait, otherwise ProviderJudge loses the race.
+    await _drain_hook_settlement(hook_manager)
     grace_s = 0.0
     if state.ctx.config is not None:
         grace_s = state.ctx.config.verifier.judge.tail_grace_s
@@ -1746,7 +1765,7 @@ async def _run_inner_core(
         ctx=state.ctx,
         timeout_s=0,
     )
-    # Settlement for POST_TURN / lingering POST_TOOL runs in run() finally
-    # before TurnComplete — do not drain twice here.
+    # POST_TURN settlement + a second tail drain run in run() finally
+    # before TurnComplete so done_unmet judges can still land.
     if state.needs_followup_after_tools:
         yield Error(request_id=state.ctx.request_id, error=MAX_TURNS_ERROR)

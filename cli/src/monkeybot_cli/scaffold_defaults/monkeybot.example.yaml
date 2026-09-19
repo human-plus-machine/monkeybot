@@ -253,6 +253,19 @@ scheduler:
   # Env override: MONKEYBOT_SCHEDULER_ENABLED (1 | true | yes | on).
   enabled: false
 
+# Background verifier (YAML-only). Ledger classifier and judge inherit model.name
+# unless ledger.model / judge.model are set explicitly. Realtime loops ignore this.
+verifier:
+  enabled: true
+  ledger:
+    enabled: true
+  tracker:
+    enabled: true
+  judge:
+    enabled: true
+  escalation:
+    max_severity: nudge
+
 # Optional JSON for model.provider: fake tests (env: MONKEYBOT_FAKE_PROVIDER_EVENTS)
 # fake_provider:
 #   events_json: '[[]]'

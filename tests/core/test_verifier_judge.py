@@ -258,3 +258,219 @@ async def test_signal_judge_shares_tracker_status_confidence() -> None:
     )
     assert stuck.status == "stuck"
     assert stuck.confidence == 0.9
+
+
+@pytest.mark.asyncio
+async def test_provider_judge_parses_verdict_and_usage() -> None:
+    from collections.abc import AsyncIterator, Sequence
+
+    from monkeybot.core.llm.provider import Done, Message, TextDelta, UsageEvent
+    from monkeybot.core.types.types_tools import ToolDef
+    from monkeybot.core.verifier.judge import ProviderJudge
+
+    class _ScriptedProvider:
+        def __init__(self) -> None:
+            self.models: list[str] = []
+
+        @property
+        def name(self) -> str:
+            return "fake"
+
+        @property
+        def supports_streaming(self) -> bool:
+            return True
+
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[ToolDef],
+            *,
+            model: str,
+            thinking_budget: int | None = None,
+        ) -> AsyncIterator[object]:
+            del messages, tools, thinking_budget
+            self.models.append(model)
+            yield TextDelta(
+                text='{"status":"drifting","severity":"nudge","confidence":0.8,'
+                '"rationale":"write_without_read","correction":"Stay on the goal."}'
+            )
+            yield UsageEvent(input_tokens=10, output_tokens=5)
+            yield Done()
+
+    provider = _ScriptedProvider()
+    judge = ProviderJudge(provider, model="glm-5.3-flash")
+    verdict = await judge.verify(None, _evidence("r1", 3))
+    assert provider.models == ["glm-5.3-flash"]
+    assert verdict.status == "drifting"
+    assert verdict.severity == "nudge"
+    assert verdict.confidence == 0.8
+    assert verdict.judge_tokens == 15
+    assert verdict.correction == "Stay on the goal."
+
+
+@pytest.mark.asyncio
+async def test_provider_judge_inherits_model_from_callable() -> None:
+    from collections.abc import AsyncIterator, Sequence
+
+    from monkeybot.core.llm.provider import Done, Message, TextDelta
+    from monkeybot.core.types.types_tools import ToolDef
+    from monkeybot.core.verifier.judge import ProviderJudge
+
+    class _NamedProvider:
+        @property
+        def name(self) -> str:
+            return "fake"
+
+        @property
+        def supports_streaming(self) -> bool:
+            return True
+
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[ToolDef],
+            *,
+            model: str,
+            thinking_budget: int | None = None,
+        ) -> AsyncIterator[object]:
+            del messages, tools, thinking_budget
+            yield TextDelta(
+                text='{"status":"on_track","severity":"none","confidence":0.5,"rationale":"ok"}'
+            )
+            yield Done()
+
+    seen: list[str] = []
+
+    def current_model() -> str:
+        seen.append("read")
+        return "live-model"
+
+    judge = ProviderJudge(_NamedProvider(), model=current_model)
+    verdict = await judge.verify(None, _evidence("r1", 1))
+    assert seen == ["read"]
+    assert verdict.status == "on_track"
+    assert verdict.severity == "none"
+    assert verdict.judge_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_provider_judge_malformed_output_raises() -> None:
+    from collections.abc import AsyncIterator, Sequence
+
+    from monkeybot.core.llm.provider import Done, Message, TextDelta
+    from monkeybot.core.types.types_tools import ToolDef
+    from monkeybot.core.verifier.judge import ProviderJudge
+
+    class _BadProvider:
+        @property
+        def name(self) -> str:
+            return "fake"
+
+        @property
+        def supports_streaming(self) -> bool:
+            return True
+
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[ToolDef],
+            *,
+            model: str,
+            thinking_budget: int | None = None,
+        ) -> AsyncIterator[object]:
+            del messages, tools, model, thinking_budget
+            yield TextDelta(text="not json")
+            yield Done()
+
+    judge = ProviderJudge(_BadProvider(), model="x")
+    with pytest.raises(RuntimeError, match="unparseable"):
+        await judge.verify(None, _evidence("r1", 1))
+
+
+@pytest.mark.asyncio
+async def test_provider_judge_timeout_raises() -> None:
+    from collections.abc import AsyncIterator, Sequence
+
+    from monkeybot.core.llm.provider import Done, Message
+    from monkeybot.core.types.types_tools import ToolDef
+    from monkeybot.core.verifier.judge import ProviderJudge
+
+    class _HangProvider:
+        @property
+        def name(self) -> str:
+            return "fake"
+
+        @property
+        def supports_streaming(self) -> bool:
+            return True
+
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[ToolDef],
+            *,
+            model: str,
+            thinking_budget: int | None = None,
+        ) -> AsyncIterator[object]:
+            del messages, tools, model, thinking_budget
+            await asyncio.sleep(1)
+            yield Done()
+
+    judge = ProviderJudge(_HangProvider(), model="x", timeout_s=0.05)
+    with pytest.raises(TimeoutError):
+        await judge.verify(None, _evidence("r1", 1))
+
+
+@pytest.mark.asyncio
+async def test_provider_judge_timeout_fail_opens_in_worker() -> None:
+    from collections.abc import AsyncIterator, Sequence
+
+    from monkeybot.core.llm.provider import Done, Message
+    from monkeybot.core.types.types_tools import ToolDef
+    from monkeybot.core.verifier.judge import ProviderJudge
+
+    class _HangProvider:
+        @property
+        def name(self) -> str:
+            return "fake"
+
+        @property
+        def supports_streaming(self) -> bool:
+            return True
+
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[ToolDef],
+            *,
+            model: str,
+            thinking_budget: int | None = None,
+        ) -> AsyncIterator[object]:
+            del messages, tools, model, thinking_budget
+            await asyncio.sleep(1)
+            yield Done()
+
+    mailbox = VerdictMailbox()
+    worker = JudgeWorker(
+        mailbox,
+        ProviderJudge(_HangProvider(), model="x", timeout_s=0.05),
+        ledger_fn=lambda: None,
+        config=VerifierJudgeConfig(max_verdicts_per_message=1, min_turns_between_verdicts=0),
+    )
+    worker.enqueue(_evidence("r1", 1))
+    await asyncio.sleep(0.2)
+    assert mailbox.take_ready("t1") == []
+    assert mailbox.pending("t1") is False
+    worker.close()
+
+
+def test_parse_judge_verdict_accepts_fenced_json() -> None:
+    from monkeybot.core.verifier.judge import parse_judge_verdict
+
+    parsed = parse_judge_verdict(
+        '```json\n{"status":"stuck","severity":"replan","confidence":1,"rationale":"loop"}\n```'
+    )
+    assert parsed is not None
+    assert parsed["status"] == "stuck"
+    assert parsed["severity"] == "replan"
+    assert parse_judge_verdict("nonsense") is None

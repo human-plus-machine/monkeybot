@@ -20,6 +20,7 @@ from monkeybot.core.prompts.headings import (
     RUNTIME_NOTES_HEADING,
     SKILLS_HEADING,
     TODO_LIST_HEADING,
+    VERIFIER_HEADING,
     VOLATILE_SECTION_HEADINGS,
     VOLATILE_SECTION_MARKERS,
     heading_marker,
@@ -139,6 +140,7 @@ def test_volatile_markers_cover_every_heading_constant() -> None:
         INVOKED_SKILL_HEADING,
         CURRENT_REQUEST_HEADING,
         RUNTIME_NOTES_HEADING,
+        VERIFIER_HEADING,
         SYSTEM_CONTEXT_UPDATE_HEADING,
     ):
         assert heading in VOLATILE_SECTION_HEADINGS
