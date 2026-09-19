@@ -11,6 +11,7 @@ ALLOWED_MIME_TYPES: frozenset[str] = frozenset(
         "image/gif",
         "image/webp",
         "application/pdf",
+        "text/html",
     }
 )
 
