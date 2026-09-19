@@ -593,10 +593,14 @@ async def test_system_prompt_snapshot_matches_provider_verifier_block() -> None:
     snaps = [e for e in events if isinstance(e, SystemPromptSnapshot)]
     assert snaps
     assert "## Verifier" in snaps[0].text
-    assert "[Verifier] leave the migrations alone" in snaps[0].text
+    assert "[Verifier] Stay inside the user's stated constraints" in snaps[0].text or (
+        "Stay inside the user's stated constraints" in snaps[0].text
+    )
     assert prov.system_texts
     assert "## Verifier" in prov.system_texts[0]
-    assert "[Verifier] leave the migrations alone" in prov.system_texts[0]
+    assert "Stay inside the user's stated constraints" in prov.system_texts[0]
+    assert "leave the migrations alone" not in snaps[0].text
+    assert "leave the migrations alone" not in prov.system_texts[0]
 
 
 @pytest.mark.asyncio

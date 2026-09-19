@@ -9,6 +9,7 @@ from monkeybot.core.context import TurnContext
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.tools.inspector import Decision, InspectorToolCall
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.core.verifier.intervention import correction_text
 from monkeybot.core.verifier.mailbox import VerdictMailbox
 from monkeybot.core.verifier.severity import cap_severity
 
@@ -47,7 +48,7 @@ class VerifierInspector:
                 return Decision(kind="allow")
             if _is_read_only(call.name, ctx.tools):
                 return Decision(kind="allow")
-            message = last.correction or last.rationale or "blocked by verifier"
+            message = last.correction or correction_text(last.triggering_signals)
             logger.info(
                 "verifier inspector deny %s",
                 kv(

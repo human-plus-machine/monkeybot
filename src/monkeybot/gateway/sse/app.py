@@ -29,7 +29,6 @@ from monkeybot.core.config.settings import (
     ConfigError,
     SubagentConfig,
     auto_schema_enabled_from_config,
-    effective_verifier_model,
     get_provider_config,
     get_subagent_registry,
     normalize_model_provider,
@@ -93,6 +92,12 @@ from monkeybot.core.tools.path_grant_inspector import PathGrantInspector
 from monkeybot.core.tools.permission import try_load_permission_inspector
 from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.core.verifier.actuator import NudgeActuator
+from monkeybot.core.verifier.binding import (
+    bind_verifier_session,
+    current_verifier_binding,
+    reset_verifier_session,
+    resolve_session_verifier_model,
+)
 from monkeybot.core.verifier.classify import ProviderClassifier
 from monkeybot.core.verifier.inspector import VerifierInspector
 from monkeybot.core.verifier.judge import JudgeWorker, ProviderJudge
@@ -300,17 +305,25 @@ class GatewayRuntime:
         cfg: RuntimeConfig | None,
         *,
         storage: StorageBackend | None,
+        replace: bool = True,
     ) -> None:
-        """Construct ledger and observe-only tracker from ``verifier:`` flags."""
-        old = self.goal_ledger
-        if old is not None:
-            old.close()
+        """Construct ledger and observe-only tracker from ``verifier:`` flags.
+
+        ``replace=True`` (boot / explicit rebuild on the live runtime) closes
+        existing ledger/judge workers. Staging copies must pass ``replace=False``
+        so a later rollback cannot leave the live runtime pointing at closed
+        objects that ``copy.copy`` still shares.
+        """
+        if replace:
+            old = self.goal_ledger
+            if old is not None:
+                old.close()
+            old_judge = self.judge_worker
+            if old_judge is not None:
+                old_judge.close()
         self.goal_ledger = None
         self.progress_tracker = None
         self.verdict_mailbox = None
-        old_judge = self.judge_worker
-        if old_judge is not None:
-            old_judge.close()
         self.judge_worker = None
         self.nudge_actuator = None
         if cfg is None or not cfg.verifier.enabled:
@@ -325,7 +338,7 @@ class GatewayRuntime:
                     logger.warning("goal ledger skipped: backend has no durable ledger")
                 else:
                     classifier = ProviderClassifier(
-                        lambda: self.provider,
+                        lambda: current_verifier_binding().provider or self.provider,
                         model=lambda: self._live_ledger_model(cfg),
                     )
                     self.goal_ledger = GoalLedger(
@@ -344,7 +357,7 @@ class GatewayRuntime:
                 judge = JudgeWorker(
                     self.verdict_mailbox,
                     ProviderJudge(
-                        lambda: self.provider,
+                        lambda: current_verifier_binding().provider or self.provider,
                         model=lambda: self._live_judge_model(cfg),
                     ),
                     ledger_fn=lambda: self.goal_ledger,
@@ -365,15 +378,33 @@ class GatewayRuntime:
             logger.info("progress tracker enabled")
         self._attach_verifier_inspector()
 
+    def _release_replaced_verifier(self, live: GatewayRuntime) -> None:
+        """Close newly staged verifier resources that are not shared with ``live``."""
+        if self.goal_ledger is not None and self.goal_ledger is not live.goal_ledger:
+            self.goal_ledger.close()
+            self.goal_ledger = None
+        if self.judge_worker is not None and self.judge_worker is not live.judge_worker:
+            self.judge_worker.close()
+            self.judge_worker = None
+
+    def _close_replaced_after_commit(
+        self, previous_ledger: GoalLedger | None, previous_judge: JudgeWorker | None
+    ) -> None:
+        """After staging is installed, close the previous live ledger/judge if replaced."""
+        if previous_ledger is not None and previous_ledger is not self.goal_ledger:
+            previous_ledger.close()
+        if previous_judge is not None and previous_judge is not self.judge_worker:
+            previous_judge.close()
+
     @staticmethod
     def _live_ledger_model(fallback: RuntimeConfig) -> str:
         current = get_config_store().current_or_none() or fallback
-        return effective_verifier_model(current, current.verifier.ledger.model)
+        return resolve_session_verifier_model(current, current.verifier.ledger.model)
 
     @staticmethod
     def _live_judge_model(fallback: RuntimeConfig) -> str:
         current = get_config_store().current_or_none() or fallback
-        return effective_verifier_model(current, current.verifier.judge.model)
+        return resolve_session_verifier_model(current, current.verifier.judge.model)
 
     def _attach_verifier_inspector(self) -> None:
         """Keep ``VerifierInspector`` in the chain iff a mailbox exists."""
@@ -509,7 +540,7 @@ class GatewayRuntime:
             storage = (
                 getattr(fastapi_app.state, "storage", None) if fastapi_app is not None else None
             )
-            self.build_verifier(cfg, storage=storage)
+            self.build_verifier(cfg, storage=storage, replace=False)
             self.rebuild_memory_hooks(cfg, fastapi_app)
             applied.append(VERIFIER_DIFF_KEY)
             logger.info(
@@ -542,9 +573,12 @@ class GatewayRuntime:
         applied: list[str] = []
         mcp_result = MCPCatalogApplyResult()
         memory_prev = _app_memory_state(fastapi_app)
+        prev_ledger = self.goal_ledger
+        prev_judge = self.judge_worker
         if ConfigTier.REBUILD in diff.tiers:
             applied, error = staging._rebuild_live_slices(cfg, diff, layout, fastapi_app)
             if error:
+                staging._release_replaced_verifier(self)
                 _restore_app_memory(fastapi_app, memory_prev)
                 return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
         if self.needs_mcp_apply(cfg, diff) and self.mcp is not None:
@@ -568,6 +602,7 @@ class GatewayRuntime:
                     "MCP reload idle wait timed out %s",
                     kv(path=str(mcp_path), revision=cfg.revision),
                 )
+                staging._release_replaced_verifier(self)
                 _restore_app_memory(fastapi_app, memory_prev)
                 return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
             except Exception as exc:
@@ -580,12 +615,14 @@ class GatewayRuntime:
                         error=str(exc),
                     ),
                 )
+                staging._release_replaced_verifier(self)
                 _restore_app_memory(fastapi_app, memory_prev)
                 return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
             finally:
                 if not overlay_committed:
                     self.mcp.set_env_overlay(prev_overlay)
         self._install_live_slices(staging)
+        self._close_replaced_after_commit(prev_ledger, prev_judge)
         return RuntimeApplyResult(applied=applied, mcp=mcp_result)
 
 
@@ -980,41 +1017,45 @@ class GatewayLoopPort:
                     request_id=request_id,
                     content=_content_blocks_to_text(user_content),
                 )
-            async for evt in run_loop(
-                user_content,
-                ctx,
-                provider=provider,
-                history=history,
-                inspectors=inspectors,
-                tool_executor=executor,
-                cancelled=cancel_event,
-                hook_manager=hook_manager,
-                attachment_store=attachment_store,
-                attachment_catalog=bus.attachment_catalog,
-                transcript_writer=transcript_writer,
-                vertex_google_search=vertex_google_search_enabled_from_config(),
-                input_admission=bus.admission,
-            ):
-                if isinstance(evt, TurnComplete):
-                    u = evt.usage
-                    await usage_store.record(
-                        session_id,
-                        model_name,
-                        UsageRecord(
-                            input_tokens=u.input_tokens,
-                            output_tokens=u.output_tokens,
-                            cached_tokens=u.cached_tokens,
-                            cache_read_tokens=u.cache_read_tokens,
-                            cache_creation_tokens=u.cache_creation_tokens,
-                            cost_usd=u.cost_usd,
-                            duration_ms=u.duration_ms,
-                            estimated_prompt_tokens=u.estimated_prompt_tokens,
-                        ),
-                        run_id=request_id,
-                    )
-                if transcript_writer is not None:
-                    await transcript_writer.write_event(evt)
-                await bus.publish_data(event_to_json(evt))
+            token = bind_verifier_session(provider, model_name)
+            try:
+                async for evt in run_loop(
+                    user_content,
+                    ctx,
+                    provider=provider,
+                    history=history,
+                    inspectors=inspectors,
+                    tool_executor=executor,
+                    cancelled=cancel_event,
+                    hook_manager=hook_manager,
+                    attachment_store=attachment_store,
+                    attachment_catalog=bus.attachment_catalog,
+                    transcript_writer=transcript_writer,
+                    vertex_google_search=vertex_google_search_enabled_from_config(),
+                    input_admission=bus.admission,
+                ):
+                    if isinstance(evt, TurnComplete):
+                        u = evt.usage
+                        await usage_store.record(
+                            session_id,
+                            model_name,
+                            UsageRecord(
+                                input_tokens=u.input_tokens,
+                                output_tokens=u.output_tokens,
+                                cached_tokens=u.cached_tokens,
+                                cache_read_tokens=u.cache_read_tokens,
+                                cache_creation_tokens=u.cache_creation_tokens,
+                                cost_usd=u.cost_usd,
+                                duration_ms=u.duration_ms,
+                                estimated_prompt_tokens=u.estimated_prompt_tokens,
+                            ),
+                            run_id=request_id,
+                        )
+                    if transcript_writer is not None:
+                        await transcript_writer.write_event(evt)
+                    await bus.publish_data(event_to_json(evt))
+            finally:
+                reset_verifier_session(token)
         finally:
             if in_flight:
                 end_in_flight_turn()

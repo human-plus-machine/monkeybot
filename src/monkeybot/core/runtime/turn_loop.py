@@ -253,22 +253,28 @@ async def _drain_steers(
 async def _take_ready(
     mailbox: VerdictMailbox, thread_id: str, request_id: str, *, grace_s: float
 ) -> list[VerifierVerdict]:
-    """Pop ready verdicts, waiting out ``grace_s`` only while a judge call is in flight."""
-    ready = mailbox.take_ready(thread_id)
-    if ready or grace_s <= 0 or not mailbox.pending(thread_id):
-        return ready
+    """Pop ready verdicts for this request.
+
+    Waits out ``grace_s`` only while a request-specific judge call is still in
+    flight. Fast failures (pending drops to zero) return immediately instead of
+    paying the full deadline.
+    """
+    collected = mailbox.take_ready(thread_id, request_id)
+    if grace_s <= 0 or not mailbox.pending(thread_id, request_id):
+        collected.extend(mailbox.take_ready(thread_id, request_id))
+        return collected
     loop = asyncio.get_running_loop()
     deadline = loop.time() + grace_s
-    while loop.time() < deadline:
+    while mailbox.pending(thread_id, request_id) and loop.time() < deadline:
         await asyncio.sleep(min(0.05, max(0.0, deadline - loop.time())))
-        ready = mailbox.take_ready(thread_id)
-        if ready:
-            return ready
-    logger.info(
-        "verdict tail stale %s",
-        kv(thread_id=thread_id, request_id=request_id),
-    )
-    return []
+        collected.extend(mailbox.take_ready(thread_id, request_id))
+    collected.extend(mailbox.take_ready(thread_id, request_id))
+    if mailbox.pending(thread_id, request_id):
+        logger.info(
+            "verdict tail stale %s",
+            kv(thread_id=thread_id, request_id=request_id),
+        )
+    return collected
 
 
 async def _drain_verdicts(
@@ -313,7 +319,16 @@ async def _drain_verdicts(
                     maximum=max_sev,
                 ),
             )
-            verdict = dataclasses.replace(verdict, severity=capped)
+        from monkeybot.core.verifier.intervention import correction_text
+
+        trusted = (
+            None
+            if capped in ("none", "") or verdict.status == "on_track"
+            else correction_text(verdict.triggering_signals)
+        )
+        if capped != requested or trusted != verdict.correction:
+            verdict = dataclasses.replace(verdict, severity=capped, correction=trusted)
+        mailbox.set_last(ctx.thread_id, verdict)
         if history is not None:
             try:
                 await persist_message(
@@ -348,14 +363,18 @@ def _stash_escalation(
 ) -> None:
     """Arm a sticky nudge or one-shot replan for this verdict's own request.
 
-    Nudges stay active while tracker signals still overlap. A note whose
+    Injected text is always a trusted signal template, never model/rationale
+    copy. Nudges stay active while tracker signals still overlap. A note whose
     request has already finished is dropped rather than applied to the next
     user message. Fail-open.
     """
-    text = verdict.correction or f"[Verifier] {verdict.rationale}"
+    from monkeybot.core.verifier.intervention import replan_text
+
+    if capped in ("none", "") or verdict.status == "on_track":
+        return
     try:
         if capped == "nudge":
-            armed = mailbox.activate_nudge(thread_id, verdict.request_id, verdict, text)
+            armed = mailbox.activate_nudge(thread_id, verdict.request_id, verdict)
             logger.info(
                 "verifier nudge stash %s",
                 kv(
@@ -369,7 +388,7 @@ def _stash_escalation(
             mailbox.put_replan(
                 thread_id,
                 verdict.request_id,
-                f"{text}\nDo not call tools this turn. Restate the plan.",
+                replan_text(verdict.triggering_signals),
             )
     except Exception:
         logger.warning("verdict escalation stash failed %s", kv(thread_id=thread_id), exc_info=True)

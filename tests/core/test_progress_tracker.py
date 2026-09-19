@@ -411,7 +411,7 @@ async def test_tail_grace_is_skipped_when_no_judge_call_is_pending() -> None:
     assert await _take_ready(mailbox, "t1", "r1", grace_s=1.0) == []
     assert time.monotonic() - started < 0.2
 
-    mailbox.mark_pending("t1")
+    mailbox.mark_pending("t1", "r1")
     started = time.monotonic()
     assert await _take_ready(mailbox, "t1", "r1", grace_s=0.2) == []
     assert time.monotonic() - started >= 0.2
@@ -430,17 +430,16 @@ async def test_run_commits_pending_judge_after_tail_grace() -> None:
     mgr = HookManager()
 
     async def _late_judge(payload: HookPayload) -> None:
-        del payload
-        mailbox.mark_pending("t1")
+        mailbox.mark_pending(payload.thread_id, payload.request_id)
 
         async def _deposit() -> None:
             import asyncio
 
             await asyncio.sleep(0.12)
             mailbox.put(
-                "t1",
+                payload.thread_id,
                 VerifierVerdict(
-                    request_id="r1",
+                    request_id=payload.request_id,
                     verdict_id="v-late",
                     checkpoint_id="r1:1",
                     status="drifting",
@@ -450,7 +449,7 @@ async def test_run_commits_pending_judge_after_tail_grace() -> None:
                     correction="[Verifier] stop retrying the missing file",
                 ),
             )
-            mailbox.clear_pending("t1")
+            mailbox.clear_pending(payload.thread_id, payload.request_id)
 
         import asyncio
 
@@ -543,10 +542,13 @@ async def test_nudge_reaches_provider_while_active() -> None:
     assert len(prov.stream_messages) >= 2
     for msgs in prov.stream_messages:
         joined = " ".join(b.text for msg in msgs for b in msg.content if isinstance(b, Text))
-        assert "leave the migrations alone" in joined
+        assert "Stay inside the user's stated constraints" in joined
         assert "## Verifier" in joined
     snaps = [e for e in events if isinstance(e, SystemPromptSnapshot)]
-    assert any("## Verifier" in e.text and "leave the migrations alone" in e.text for e in snaps)
+    assert any(
+        "## Verifier" in e.text and "Stay inside the user's stated constraints" in e.text
+        for e in snaps
+    )
 
 
 @pytest.mark.asyncio
@@ -629,7 +631,7 @@ async def test_stale_verdict_does_not_activate_after_recovery() -> None:
     assert mailbox.peek_nudge("t1", "r1") is None
 
 
-def test_active_nudge_dedupes_overlapping_signals() -> None:
+def test_active_nudge_merges_overlapping_signals() -> None:
     mailbox = VerdictMailbox()
     first = VerifierVerdict(
         request_id="r1",
@@ -649,9 +651,16 @@ def test_active_nudge_dedupes_overlapping_signals() -> None:
         triggering_signals=("error_streak", "write_without_read"),
         correction="second",
     )
-    assert mailbox.activate_nudge("t1", "r1", first, "first")
-    assert mailbox.activate_nudge("t1", "r1", second, "second") is False
-    assert mailbox.peek_nudge("t1", "r1") == "first"
+    assert mailbox.activate_nudge("t1", "r1", first)
+    assert mailbox.activate_nudge("t1", "r1", second) is True
+    note = mailbox.peek_nudge("t1", "r1")
+    assert note is not None
+    assert "Stop retrying the same failing action" in note
+    assert "Read the file first" in note
+    mailbox.set_current_signals("t1", "r1", ["write_without_read"])
+    assert mailbox.peek_nudge("t1", "r1") is not None
+    mailbox.set_current_signals("t1", "r1", [])
+    assert mailbox.peek_nudge("t1", "r1") is None
 
 
 def test_nudge_does_not_leak_across_requests() -> None:
@@ -665,7 +674,7 @@ def test_nudge_does_not_leak_across_requests() -> None:
         triggering_signals=("error_streak",),
         correction="stay",
     )
-    assert mailbox.activate_nudge("t1", "r1", verdict, "stay")
+    assert mailbox.activate_nudge("t1", "r1", verdict)
     mailbox.clear_request("t1", "r1")
     assert mailbox.peek_nudge("t1", "r1") is None
     assert mailbox.peek_nudge("t1", "r2") is None
@@ -726,7 +735,7 @@ async def test_replan_empties_tools_for_exactly_one_turn() -> None:
     first = " ".join(
         b.text for msg in prov.stream_messages[0] for b in msg.content if isinstance(b, Text)
     )
-    assert "leave the migrations alone" in first
+    assert "Stay inside the user's stated constraints" in first
     assert "Do not call tools this turn" in first
 
 
@@ -852,7 +861,7 @@ async def test_block_denies_mutating_tool_and_allows_read_only() -> None:
         isinstance(e, ToolCallResult)
         and e.tool == "run_command"
         and isinstance(e.error, str)
-        and "leave the migrations alone" in e.error
+        and "Stay inside the user's stated constraints" in e.error
         for e in events
     )
 
@@ -934,7 +943,7 @@ def test_mailbox_sticky_nudge_and_last_caps_after_drain() -> None:
         triggering_signals=("error_streak",),
         correction="first",
     )
-    mailbox.activate_nudge("t1", "r1", first, "first")
+    mailbox.activate_nudge("t1", "r1", first)
     mailbox.activate_nudge(
         "t1",
         "r1",
@@ -947,9 +956,10 @@ def test_mailbox_sticky_nudge_and_last_caps_after_drain() -> None:
             triggering_signals=("error_streak",),
             correction="second",
         ),
-        "second",
     )
-    assert mailbox.peek_nudge("t1", "r1") == "first"
+    note = mailbox.peek_nudge("t1", "r1")
+    assert note is not None
+    assert "Stop retrying the same failing action" in note
     assert mailbox.peek_nudge("t1", "r2") is None
     mailbox.clear_request("t1", "r1")
     assert mailbox.peek_nudge("t1", "r1") is None
@@ -980,3 +990,72 @@ def test_done_when_requires_path_boundary() -> None:
     assert _done_when_satisfied("docs/a.md", {"docs/a.md"})
     assert _done_when_satisfied("docs/a.md", {"src/docs/a.md"})
     assert _done_when_satisfied("notes.md", written)
+
+
+def _scoped_verdict(verdict_id: str, request_id: str) -> VerifierVerdict:
+    return VerifierVerdict(
+        request_id=request_id,
+        verdict_id=verdict_id,
+        checkpoint_id=f"{request_id}:1",
+        status="drifting",
+        severity="nudge",
+        triggering_signals=("error_streak",),
+        correction="ignore this free-form text",
+    )
+
+
+def test_ready_and_pending_are_request_scoped() -> None:
+    mailbox = VerdictMailbox()
+    mailbox.mark_pending("t1", "r1")
+    mailbox.put("t1", _scoped_verdict("v1", "r1"))
+    mailbox.put("t1", _scoped_verdict("v2", "r2"))
+    assert mailbox.pending("t1", "r1") is True
+    assert mailbox.pending("t1", "r2") is False
+    assert [v.verdict_id for v in mailbox.take_ready("t1", "r1")] == ["v1"]
+    assert [v.verdict_id for v in mailbox.take_ready("t1", "r2")] == ["v2"]
+
+
+def test_put_after_clear_request_is_dropped() -> None:
+    mailbox = VerdictMailbox()
+    mailbox.clear_request("t1", "r1")
+    assert mailbox.put("t1", _scoped_verdict("late", "r1")) is False
+    assert mailbox.take_ready("t1", "r1") == []
+    assert mailbox.put("t1", _scoped_verdict("next", "r2")) is True
+    assert [v.verdict_id for v in mailbox.take_ready("t1", "r2")] == ["next"]
+
+
+@pytest.mark.asyncio
+async def test_take_ready_collects_all_ready_verdicts_for_the_request() -> None:
+    from monkeybot.core.runtime.turn_loop import _take_ready
+
+    mailbox = VerdictMailbox()
+    mailbox.mark_pending("t1", "r1")
+    mailbox.mark_pending("t1", "r1")
+    mailbox.put("t1", _scoped_verdict("v1", "r1"))
+    mailbox.put("t1", _scoped_verdict("v2", "r1"))
+    mailbox.put("t1", _scoped_verdict("other", "r2"))
+    mailbox.clear_pending("t1", "r1")
+    mailbox.clear_pending("t1", "r1")
+    ready = await _take_ready(mailbox, "t1", "r1", grace_s=1.0)
+    assert [v.verdict_id for v in ready] == ["v1", "v2"]
+    assert [v.verdict_id for v in mailbox.take_ready("t1", "r2")] == ["other"]
+
+
+@pytest.mark.asyncio
+async def test_tail_grace_exits_when_request_pending_reaches_zero() -> None:
+    import asyncio
+    import time
+
+    from monkeybot.core.runtime.turn_loop import _take_ready
+
+    mailbox = VerdictMailbox()
+    mailbox.mark_pending("t1", "r1")
+
+    async def _settle() -> None:
+        await asyncio.sleep(0.04)
+        mailbox.clear_pending("t1", "r1")
+
+    asyncio.create_task(_settle())
+    started = time.monotonic()
+    assert await _take_ready(mailbox, "t1", "r1", grace_s=2.0) == []
+    assert time.monotonic() - started < 0.4

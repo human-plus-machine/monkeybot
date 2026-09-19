@@ -15,6 +15,13 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - Turn-end drain waits out `verifier.judge.tail_grace_s` (default 16s) after POST_TOOL settlement so an in-flight ProviderJudge can land a `VerifierVerdict` before `TurnComplete`.
 - `verifier.enabled: true` turns on omitted ledger/tracker/judge flags instead of leaving those nested defaults off.
 - POST_TOOL now forwards `inner_turn` so non-ledger tracker signals are not stripped on inner turn 1.
+- Verifier mailbox ready/pending state is request-scoped; late verdicts after `clear_request` are dropped instead of leaking into the next user turn.
+- Tail grace returns as soon as request-specific judge work settles, so a fast judge failure no longer pays the full 16s wait.
+- Failed judge attempts refund both the verdict-count and `min_turns_between_verdicts` charges.
+- `status=on_track` always normalizes to `severity=none`; overlapping sticky nudges union their triggering signals.
+- Injected verifier/replan text is a trusted signal template; judge free-form `correction` is telemetry only.
+- Classifier/judge inherit the originating session provider and model (YAML overrides still win).
+- Staged verifier reload no longer closes live ledger/judge workers before commit; rollback closes only newly staged resources.
 
 ## [cli v0.7.0] - 2026-09-18
 

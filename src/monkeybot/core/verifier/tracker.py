@@ -258,12 +258,17 @@ class ProgressTracker:
         if not signals:
             return
         if self._judge is not None:
+            from monkeybot.core.verifier.binding import current_verifier_binding
+
+            binding = current_verifier_binding()
             self._judge.enqueue(
                 EvidenceBundle(
                     thread_id=payload.thread_id,
                     request_id=payload.request_id,
                     inner_turn=inner,
                     signals=tuple(signals),
+                    model=binding.model,
+                    provider=binding.provider,
                 )
             )
             state.emitted_this_turn = True

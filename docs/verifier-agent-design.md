@@ -67,7 +67,7 @@ A new session should read this section, then Part 8. Phases 0–6 are in the tre
 **Phase 4 left in the tree (do not recreate):**
 
 - `VerifierPort` / `ScriptedVerifier` / `SignalJudge` / `JudgeWorker` (off-loop queue).
-- `NudgeActuator` on `BEFORE_PROVIDER_REQUEST`; drain caps severity and arms a sticky nudge while tracker signals still overlap.
+- `NudgeActuator` on `BEFORE_PROVIDER_REQUEST`; drain caps severity and arms a sticky nudge while tracker signals still overlap. Injected text is a trusted signal template, never free-form judge copy.
 - `tail_grace_s` on the turn-tail drain only, and only while the judge has a call in flight
   (`mailbox.pending`) — an idle turn never pays the grace.
 - Nudge/replan notes are request-scoped (`activate_nudge`/`peek_nudge` and `put_replan`/`take_replan` take a `request_id`): a note

@@ -101,7 +101,7 @@ class JudgeWorker:
         # otherwise let every in-flight turn past both rate limits.
         self._bump(self._verdicts_this_request, request_id, 1)
         self._store(self._last_turn, request_id, evidence.inner_turn)
-        self._mailbox.mark_pending(thread_id)
+        self._mailbox.mark_pending(thread_id, request_id)
 
     async def _run(self) -> None:
         while True:
@@ -118,9 +118,18 @@ class JudgeWorker:
                     exc_info=True,
                 )
             finally:
-                self._mailbox.clear_pending(evidence.thread_id)
+                self._mailbox.clear_pending(evidence.thread_id, evidence.request_id)
 
     async def _handle(self, evidence: EvidenceBundle) -> None:
+        from monkeybot.core.verifier.binding import bind_verifier_session, reset_verifier_session
+
+        token = bind_verifier_session(evidence.provider, evidence.model)
+        try:
+            await self._verify_and_deposit(evidence)
+        finally:
+            reset_verifier_session(token)
+
+    async def _verify_and_deposit(self, evidence: EvidenceBundle) -> None:
         ledger = self._ledger_fn()
         intent = ledger.resolved_intent(evidence.thread_id) if ledger is not None else None
         try:
@@ -157,6 +166,9 @@ class JudgeWorker:
         charged = self._verdicts_this_request.get(evidence.request_id, 0)
         if charged > 0:
             self._store(self._verdicts_this_request, evidence.request_id, charged - 1)
+        last = self._last_turn.get(evidence.request_id)
+        if last == evidence.inner_turn:
+            self._last_turn.pop(evidence.request_id, None)
 
     @staticmethod
     def _store(store: OrderedDict[str, int], key: str, value: int) -> None:
@@ -174,6 +186,8 @@ class SignalJudge:
 
     async def verify(self, intent: object, evidence: EvidenceBundle) -> VerifierVerdict:
         del intent
+        from monkeybot.core.verifier.intervention import correction_text
+
         status, confidence = verdict_status(evidence.signals)
         return VerifierVerdict(
             request_id=evidence.request_id,
@@ -184,11 +198,7 @@ class SignalJudge:
             confidence=confidence,
             rationale=", ".join(evidence.signals),
             triggering_signals=evidence.signals,
-            correction=(
-                "[Verifier] " + ", ".join(evidence.signals) + ". Stay on the user's stated goal."
-                if evidence.signals
-                else None
-            ),
+            correction=correction_text(evidence.signals) if evidence.signals else None,
             judge_tokens=0,
         )
 
@@ -200,20 +210,29 @@ _JUDGE_SYSTEM = """\
 You are a background verifier. Given the agent's current goal and tracker signals,
 return ONLY compact JSON with this schema:
 {"status":"on_track|drifting|stuck","severity":"none|nudge|replan|steer|block",\
-"confidence":0.0,"rationale":"...","correction":"<short steering note or null>"}
+"confidence":0.0,"rationale":"..."}
 
 Rules:
 - status is required. Use on_track when the signals are noise, drifting when the
   agent is veering off the stated goal, stuck when it is looping or blocked.
 - severity is required. Prefer none for on_track. Prefer nudge when a short
   correction would help. Use replan/block only for severe, repeated drift.
-- correction is a one-sentence instruction the agent should follow next turn, or null.
+- If status is on_track, severity MUST be none.
+- rationale is a short telemetry note for operators. It is never shown to the agent.
 - Do not invent facts that are not in the goal or signals.
 """
 
 
 def parse_judge_verdict(raw: str) -> dict[str, Any] | None:
-    """Extract a validated judge JSON object, or None if unusable."""
+    """Extract a validated judge JSON object, or None if unusable.
+
+    Accepted combinations after normalization:
+    - ``on_track`` → ``severity="none"`` (model severity is ignored)
+    - ``drifting`` / ``stuck`` → ``nudge`` / ``replan`` / ``steer`` / ``block``
+      (missing, invalid, or ``none`` severity becomes ``nudge``)
+
+    Model ``correction`` is discarded. Callers own trusted actuation text.
+    """
     from monkeybot.core.config.settings import VERIFIER_SEVERITY_ORDER
 
     text = raw.strip()
@@ -236,9 +255,13 @@ def parse_judge_verdict(raw: str) -> dict[str, Any] | None:
     status = str(payload.get("status") or "").strip()
     if status not in _JUDGE_STATUSES:
         return None
-    severity = str(payload.get("severity") or "").strip()
-    if severity not in VERIFIER_SEVERITY_ORDER:
-        severity = "none" if status == "on_track" else "nudge"
+    # on_track is never actuating: ignore a model that pairs it with nudge/replan/block.
+    if status == "on_track":
+        severity = "none"
+    else:
+        severity = str(payload.get("severity") or "").strip()
+        if severity not in VERIFIER_SEVERITY_ORDER or severity == "none":
+            severity = "nudge"
     confidence_raw = payload.get("confidence", 0.6)
     try:
         confidence = float(confidence_raw)
@@ -246,14 +269,12 @@ def parse_judge_verdict(raw: str) -> dict[str, Any] | None:
         confidence = 0.6
     confidence = min(1.0, max(0.0, confidence))
     rationale = str(payload.get("rationale") or "").strip()
-    corr_raw = payload.get("correction")
-    correction = str(corr_raw).strip() if corr_raw not in (None, "", "null") else None
     return {
         "status": status,
         "severity": severity,
         "confidence": confidence,
         "rationale": rationale,
-        "correction": correction,
+        "correction": None,
     }
 
 
@@ -319,13 +340,9 @@ class ProviderJudge:
             raise RuntimeError("verifier judge returned unparseable verdict")
         if tokens <= 0:
             logger.info("verifier judge missing usage %s", kv(model=model, chars=len(text)))
-        correction = parsed["correction"]
-        if correction is None and parsed["severity"] != "none":
-            correction = (
-                "[Verifier] " + ", ".join(evidence.signals) + ". Stay on the user's stated goal."
-                if evidence.signals
-                else None
-            )
+        from monkeybot.core.verifier.intervention import correction_text
+
+        correction = correction_text(evidence.signals) if parsed["severity"] != "none" else None
         return VerifierVerdict(
             request_id=evidence.request_id,
             verdict_id=str(uuid.uuid4()),

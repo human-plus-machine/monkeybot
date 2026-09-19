@@ -16,6 +16,8 @@ class EvidenceBundle:
     request_id: str
     inner_turn: int
     signals: tuple[str, ...]
+    model: str = ""
+    provider: object | None = None
 
 
 class VerifierPort(Protocol):
