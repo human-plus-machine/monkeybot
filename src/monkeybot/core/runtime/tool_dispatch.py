@@ -194,6 +194,7 @@ class ToolBatchState:
     ctx: TurnContext
     tools_dirty: bool
     pre_tool_extra_next: str | None
+    inner_turn: int = 1
     aborted: bool = False
     needs_followup_after_tools: bool = True
     tools_dirty_reason: str | None = None
@@ -645,6 +646,7 @@ async def _execute_one_tool_call(
             tool_args=dict(call.args),
             tool_result=result_summary,
             tool_error=tool_result.error,
+            inner_turn=state.inner_turn,
         )
         _record_tool_hook_span_event("post_tool", call.name)
     return tool_result

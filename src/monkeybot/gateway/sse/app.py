@@ -29,6 +29,7 @@ from monkeybot.core.config.settings import (
     ConfigError,
     SubagentConfig,
     auto_schema_enabled_from_config,
+    effective_verifier_model,
     get_provider_config,
     get_subagent_registry,
     normalize_model_provider,
@@ -94,7 +95,7 @@ from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.core.verifier.actuator import NudgeActuator
 from monkeybot.core.verifier.classify import ProviderClassifier
 from monkeybot.core.verifier.inspector import VerifierInspector
-from monkeybot.core.verifier.judge import JudgeWorker, SignalJudge
+from monkeybot.core.verifier.judge import JudgeWorker, ProviderJudge
 from monkeybot.core.verifier.ledger import GoalLedger
 from monkeybot.core.verifier.mailbox import VerdictMailbox
 from monkeybot.core.verifier.tracker import ProgressTracker
@@ -325,7 +326,7 @@ class GatewayRuntime:
                 else:
                     classifier = ProviderClassifier(
                         lambda: self.provider,
-                        model=cfg.verifier.ledger.model,
+                        model=lambda: self._live_ledger_model(cfg),
                     )
                     self.goal_ledger = GoalLedger(
                         store,
@@ -334,7 +335,7 @@ class GatewayRuntime:
                     )
                     logger.info(
                         "goal ledger enabled %s",
-                        kv(model=cfg.verifier.ledger.model),
+                        kv(model=self._live_ledger_model(cfg) or "(inherit)"),
                     )
         if cfg.verifier.tracker.enabled:
             self.verdict_mailbox = VerdictMailbox()
@@ -342,14 +343,17 @@ class GatewayRuntime:
             if cfg.verifier.judge.enabled:
                 judge = JudgeWorker(
                     self.verdict_mailbox,
-                    SignalJudge(),
+                    ProviderJudge(
+                        lambda: self.provider,
+                        model=lambda: self._live_judge_model(cfg),
+                    ),
                     ledger_fn=lambda: self.goal_ledger,
                     config=cfg.verifier.judge,
                 )
                 self.judge_worker = judge
                 logger.info(
                     "verifier judge enabled %s",
-                    kv(model=cfg.verifier.judge.model),
+                    kv(model=self._live_judge_model(cfg) or "(inherit)"),
                 )
             self.progress_tracker = ProgressTracker(
                 self.verdict_mailbox,
@@ -360,6 +364,16 @@ class GatewayRuntime:
             self.nudge_actuator = NudgeActuator(self.verdict_mailbox)
             logger.info("progress tracker enabled")
         self._attach_verifier_inspector()
+
+    @staticmethod
+    def _live_ledger_model(fallback: RuntimeConfig) -> str:
+        current = get_config_store().current_or_none() or fallback
+        return effective_verifier_model(current, current.verifier.ledger.model)
+
+    @staticmethod
+    def _live_judge_model(fallback: RuntimeConfig) -> str:
+        current = get_config_store().current_or_none() or fallback
+        return effective_verifier_model(current, current.verifier.judge.model)
 
     def _attach_verifier_inspector(self) -> None:
         """Keep ``VerifierInspector`` in the chain iff a mailbox exists."""

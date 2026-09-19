@@ -54,7 +54,7 @@ A new session should read this section, then Part 8. Phases 0–6 are in the tre
 - Mailbox: `src/monkeybot/core/verifier/mailbox.py` (`take_ready` never waits).
 - Tracker: `src/monkeybot/core/verifier/tracker.py` on `POST_TOOL` / `AFTER_PROVIDER_RESPONSE` / `POST_TURN`. `budget_burn` and `no_progress` are logged only (they false-positive on healthy long tool loops); mailbox/SSE emits ledger signals plus `error_streak` / `rewrite_churn` / `write_without_read`.
 - Event: `VerifierVerdict` in `runtime/events.py`. Phase 3 adds it to `DURABLE_EVENT_KINDS`.
-- Drain: `_drain_verdicts` at inner preamble (via `_drain_steers`) and `loop.py` `finally` before `TurnComplete`.
+- Drain: `_drain_verdicts` at inner preamble (after hook settlement) and `loop.py` `finally` before `TurnComplete`.
 - Gateway: `build_verifier` constructs mailbox + tracker when `tracker.enabled`; `build_context(..., verdict_mailbox=)`.
 - Tests: `tests/core/test_progress_tracker.py` plus `VerifierVerdict` roundtrip in `test_events.py`.
 
@@ -67,14 +67,14 @@ A new session should read this section, then Part 8. Phases 0–6 are in the tre
 **Phase 4 left in the tree (do not recreate):**
 
 - `VerifierPort` / `ScriptedVerifier` / `SignalJudge` / `JudgeWorker` (off-loop queue).
-- `NudgeActuator` on `PRE_TOOL`; drain caps severity and stashes one nudge.
+- `NudgeActuator` on `BEFORE_PROVIDER_REQUEST`; drain caps severity and arms a sticky nudge while tracker signals still overlap.
 - `tail_grace_s` on the turn-tail drain only, and only while the judge has a call in flight
   (`mailbox.pending`) — an idle turn never pays the grace.
-- Nudge/replan notes are request-scoped (`put_nudge`/`take_nudge` take a `request_id`): a note
+- Nudge/replan notes are request-scoped (`activate_nudge`/`peek_nudge` and `put_replan`/`take_replan` take a `request_id`): a note
   whose request has already finished is dropped, not applied to the next user message.
 - Judge rate limits are charged at `enqueue` and refunded when no verdict lands, so a slow port
   cannot slip past `max_verdicts_per_message` while a call is in flight.
-- Tests: `tests/core/test_progress_tracker.py` (`test_nudge_reaches_next_system_message_once`), `tests/evals/test_verifier_port.py`.
+- Tests: `tests/core/test_progress_tracker.py` (`test_nudge_reaches_provider_while_active`), `tests/evals/test_verifier_port.py`.
 
 **Phase 5 left in the tree (do not recreate):**
 

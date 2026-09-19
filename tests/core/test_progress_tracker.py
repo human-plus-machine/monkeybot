@@ -19,7 +19,13 @@ from monkeybot.core.persistence.goal_ledger import (
     Intent,
     Provenance,
 )
-from monkeybot.core.runtime.events import Error, ToolCallResult, TurnComplete, VerifierVerdict
+from monkeybot.core.runtime.events import (
+    Error,
+    SystemPromptSnapshot,
+    ToolCallResult,
+    TurnComplete,
+    VerifierVerdict,
+)
 from monkeybot.core.runtime.loop import run
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.core.verifier.ledger import GoalLedger
@@ -51,7 +57,7 @@ def _payload(
     tool_name: str | None = None,
     tool_args: dict | None = None,
     tool_error: str | None = None,
-    inner_turn: int = 3,
+    inner_turn: int | None = 3,
     assistant_text: str | None = None,
     tool_requests: list | None = None,
     usage: dict | None = None,
@@ -191,6 +197,35 @@ def test_min_turn_suppresses_non_ledger_signals() -> None:
         )
     )
     assert mailbox.take_ready("t1") == []
+
+
+def test_error_streak_uses_provider_inner_turn_when_tool_omits_it() -> None:
+    mailbox = VerdictMailbox()
+    tracker = ProgressTracker(
+        mailbox,
+        ledger_fn=lambda: None,
+        config=VerifierTrackerConfig(enabled=True, min_turn_before_verdict=3),
+    )
+    tracker._observe_provider(
+        _payload(
+            event=HookEvent.AFTER_PROVIDER_RESPONSE,
+            inner_turn=3,
+            assistant_text="",
+            tool_requests=[{"name": "read_file"}],
+        )
+    )
+    for _ in range(3):
+        tracker._observe_tool(
+            _payload(
+                event=HookEvent.POST_TOOL,
+                tool_name="read_file",
+                tool_args={"path": "x"},
+                tool_error="boom",
+                inner_turn=None,
+            )
+        )
+    verdicts = mailbox.take_ready("t1")
+    assert any("error_streak" in v.triggering_signals for v in verdicts)
 
 
 def test_error_streak_emits_after_three() -> None:
@@ -382,6 +417,73 @@ async def test_tail_grace_is_skipped_when_no_judge_call_is_pending() -> None:
     assert time.monotonic() - started >= 0.2
 
 
+@pytest.mark.asyncio
+async def test_run_commits_pending_judge_after_tail_grace() -> None:
+    from monkeybot.core.config.settings import VerifierConfig, VerifierJudgeConfig
+    from monkeybot.core.hooks import HookEvent, HookManager
+
+    class _Cfg:
+        env_values: dict[str, str] = {}
+        verifier = VerifierConfig(judge=VerifierJudgeConfig(tail_grace_s=0.4))
+
+    mailbox = VerdictMailbox()
+    mgr = HookManager()
+
+    async def _late_judge(payload: HookPayload) -> None:
+        del payload
+        mailbox.mark_pending("t1")
+
+        async def _deposit() -> None:
+            import asyncio
+
+            await asyncio.sleep(0.12)
+            mailbox.put(
+                "t1",
+                VerifierVerdict(
+                    request_id="r1",
+                    verdict_id="v-late",
+                    checkpoint_id="r1:1",
+                    status="drifting",
+                    severity="nudge",
+                    rationale="error_streak",
+                    triggering_signals=("error_streak",),
+                    correction="[Verifier] stop retrying the missing file",
+                ),
+            )
+            mailbox.clear_pending("t1")
+
+        import asyncio
+
+        asyncio.create_task(_deposit())
+
+    mgr.register(HookEvent.POST_TOOL, _late_judge)
+    ctx = replace(loop_ctx(), verdict_mailbox=mailbox, config=_Cfg())  # type: ignore[arg-type]
+    from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
+
+    events = []
+    async for event in run(
+        "hello",
+        ctx,
+        provider=FakeProvider(
+            [
+                [
+                    ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                    UsageEvent(input_tokens=1, output_tokens=1),
+                    Done(),
+                ],
+                [TextDelta(text="done"), UsageEvent(input_tokens=1, output_tokens=1), Done()],
+            ]
+        ),
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+        hook_manager=mgr,
+    ):
+        events.append(event)
+    assert any(isinstance(e, VerifierVerdict) and e.verdict_id == "v-late" for e in events)
+
+
 def test_cap_severity() -> None:
     from monkeybot.core.verifier.severity import cap_severity
 
@@ -392,7 +494,7 @@ def test_cap_severity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_nudge_reaches_next_system_message_once() -> None:
+async def test_nudge_reaches_provider_while_active() -> None:
     from monkeybot.core.hooks import HookManager
     from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
     from monkeybot.core.types.content_blocks import Text
@@ -439,10 +541,134 @@ async def test_nudge_reaches_next_system_message_once() -> None:
         events.append(event)
     assert any(isinstance(e, VerifierVerdict) for e in events)
     assert len(prov.stream_messages) >= 2
+    for msgs in prov.stream_messages:
+        joined = " ".join(b.text for msg in msgs for b in msg.content if isinstance(b, Text))
+        assert "leave the migrations alone" in joined
+        assert "## Verifier" in joined
+    snaps = [e for e in events if isinstance(e, SystemPromptSnapshot)]
+    assert any("## Verifier" in e.text and "leave the migrations alone" in e.text for e in snaps)
+
+
+@pytest.mark.asyncio
+async def test_nudge_clears_after_successful_tool() -> None:
+    from monkeybot.core.hooks import HookManager
+    from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
+    from monkeybot.core.types.content_blocks import Text
+    from monkeybot.core.verifier.actuator import NudgeActuator
+
+    mailbox = VerdictMailbox()
+    mailbox.put(
+        "t1",
+        VerifierVerdict(
+            request_id="r1",
+            verdict_id="v1",
+            checkpoint_id="r1:1",
+            status="stuck",
+            severity="nudge",
+            rationale="error_streak",
+            triggering_signals=("error_streak",),
+            correction="Stop retrying the same failing action",
+        ),
+    )
+    mgr = HookManager()
+    NudgeActuator(mailbox).register(mgr)
+    ProgressTracker(
+        mailbox,
+        ledger_fn=lambda: None,
+        config=VerifierTrackerConfig(
+            enabled=True, min_turn_before_verdict=0, suspicion_threshold=1
+        ),
+    ).register(mgr)
+    ctx = replace(loop_ctx(), verdict_mailbox=mailbox)
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                UsageEvent(input_tokens=1, output_tokens=1),
+                Done(),
+            ],
+            [TextDelta(text="ok"), UsageEvent(input_tokens=1, output_tokens=1), Done()],
+        ]
+    )
+    async for _ in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+        hook_manager=mgr,
+    ):
+        pass
+    first = " ".join(
+        b.text for msg in prov.stream_messages[0] for b in msg.content if isinstance(b, Text)
+    )
     second = " ".join(
         b.text for msg in prov.stream_messages[1] for b in msg.content if isinstance(b, Text)
     )
-    assert "leave the migrations alone" in second
+    assert "Stop retrying" in first
+    assert "Stop retrying" not in second
+
+
+@pytest.mark.asyncio
+async def test_stale_verdict_does_not_activate_after_recovery() -> None:
+    mailbox = VerdictMailbox()
+    mailbox.set_current_signals("t1", "r1", [])
+    verdict = VerifierVerdict(
+        request_id="r1",
+        verdict_id="v-stale",
+        checkpoint_id="r1:3",
+        status="stuck",
+        severity="nudge",
+        rationale="error_streak",
+        triggering_signals=("error_streak",),
+        correction="Stop retrying",
+    )
+    assert mailbox.activate_nudge("t1", "r1", verdict, "Stop retrying") is False
+    assert mailbox.peek_nudge("t1", "r1") is None
+
+
+def test_active_nudge_dedupes_overlapping_signals() -> None:
+    mailbox = VerdictMailbox()
+    first = VerifierVerdict(
+        request_id="r1",
+        verdict_id="v1",
+        checkpoint_id="r1:3",
+        status="stuck",
+        severity="nudge",
+        triggering_signals=("error_streak",),
+        correction="first",
+    )
+    second = VerifierVerdict(
+        request_id="r1",
+        verdict_id="v2",
+        checkpoint_id="r1:5",
+        status="stuck",
+        severity="nudge",
+        triggering_signals=("error_streak", "write_without_read"),
+        correction="second",
+    )
+    assert mailbox.activate_nudge("t1", "r1", first, "first")
+    assert mailbox.activate_nudge("t1", "r1", second, "second") is False
+    assert mailbox.peek_nudge("t1", "r1") == "first"
+
+
+def test_nudge_does_not_leak_across_requests() -> None:
+    mailbox = VerdictMailbox()
+    verdict = VerifierVerdict(
+        request_id="r1",
+        verdict_id="v1",
+        checkpoint_id="r1:1",
+        status="stuck",
+        severity="nudge",
+        triggering_signals=("error_streak",),
+        correction="stay",
+    )
+    assert mailbox.activate_nudge("t1", "r1", verdict, "stay")
+    mailbox.clear_request("t1", "r1")
+    assert mailbox.peek_nudge("t1", "r1") is None
+    assert mailbox.peek_nudge("t1", "r2") is None
 
 
 @pytest.mark.asyncio
@@ -695,20 +921,38 @@ def test_mailbox_caps_per_thread_and_evicts_idle_threads() -> None:
     assert len(mailbox.take_ready(f"t{_THREAD_CAP}")) == 1
 
 
-def test_mailbox_nudge_overwrites_and_last_caps_after_drain() -> None:
+def test_mailbox_sticky_nudge_and_last_caps_after_drain() -> None:
     from monkeybot.core.verifier.mailbox import _THREAD_CAP
 
     mailbox = VerdictMailbox()
-    mailbox.put_nudge("t1", "r1", "first")
-    mailbox.put_nudge("t1", "r1", "second")
-    assert mailbox.take_nudge("t1", "r1") == "second"
-    assert mailbox.take_nudge("t1", "r1") is None
-
-    # A note is scoped to the request that produced it: a later, unrelated
-    # request must not pick up a leftover from a finished one.
-    mailbox.put_nudge("t1", "r1", "stale")
-    assert mailbox.take_nudge("t1", "r2") is None
-    assert mailbox.take_nudge("t1", "r1") is None
+    first = VerifierVerdict(
+        request_id="r1",
+        verdict_id="v1",
+        checkpoint_id="r1:1",
+        status="stuck",
+        severity="nudge",
+        triggering_signals=("error_streak",),
+        correction="first",
+    )
+    mailbox.activate_nudge("t1", "r1", first, "first")
+    mailbox.activate_nudge(
+        "t1",
+        "r1",
+        VerifierVerdict(
+            request_id="r1",
+            verdict_id="v2",
+            checkpoint_id="r1:2",
+            status="stuck",
+            severity="nudge",
+            triggering_signals=("error_streak",),
+            correction="second",
+        ),
+        "second",
+    )
+    assert mailbox.peek_nudge("t1", "r1") == "first"
+    assert mailbox.peek_nudge("t1", "r2") is None
+    mailbox.clear_request("t1", "r1")
+    assert mailbox.peek_nudge("t1", "r1") is None
     mailbox.put_replan("t1", "r1", "stale")
     assert mailbox.take_replan("t1", "r2") is None
 
