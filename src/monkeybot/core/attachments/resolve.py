@@ -1,4 +1,4 @@
-"""Resolve attachmentRef blocks to Image/File for provider calls."""
+"""Resolve attachmentRef blocks to Image/File/Text for provider calls."""
 
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ from monkeybot.core.types.content_blocks import (
     ContentBlock,
     File,
     Image,
+    Text,
 )
 from monkeybot.core.types.interfaces import MonkeybotError
 
@@ -84,9 +85,9 @@ def _ref_to_media(
     store: AttachmentStore,
     session_id: str,
     ref: AttachmentRef,
-) -> Image | File:
+) -> Image | File | Text:
     try:
-        raw, mime, _filename = store.read(session_id, ref.attachment_id)
+        raw, mime, stored_filename = store.read(session_id, ref.attachment_id)
     except FileNotFoundError as exc:
         raise AttachmentResolveError(str(exc)) from exc
     mime_use = ref.mime_type or mime
@@ -108,6 +109,17 @@ def _ref_to_media(
         )
         data_b64 = base64.b64encode(preview_bytes).decode("ascii")
         return Image(mime_type=preview_mime, data=data_b64, metadata=preview_meta)
+    if mime_use == "text/plain":
+        filename = meta.get("filename")
+        label = (
+            filename.strip()
+            if isinstance(filename, str) and filename.strip()
+            else stored_filename
+        )
+        body = raw.decode("utf-8", errors="replace")
+        if label:
+            return Text(text=f"[Attached file: {label}]\n{body}")
+        return Text(text=body)
     data_b64 = base64.b64encode(raw).decode("ascii")
     return File(mime_type=mime_use, data=data_b64, metadata=meta)
 
