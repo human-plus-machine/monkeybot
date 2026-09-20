@@ -127,7 +127,7 @@ class VerifierLedgerConfig:
     """``verifier.ledger`` — classifier that maintains the goal ledger."""
 
     enabled: bool = False
-    model: str = "gemini-2.5-flash"
+    model: str | None = None
     max_entries_per_thread: int = 64
 
 
@@ -145,11 +145,12 @@ class VerifierJudgeConfig:
     """``verifier.judge`` — async LLM verdicts off the critical path."""
 
     enabled: bool = False
-    model: str = "gemini-2.5-flash"
+    model: str | None = None
     max_verdicts_per_message: int = 3
     min_turns_between_verdicts: int = 2
     max_spend_ratio: float = 0.25
-    tail_grace_s: float = 0.0
+    # Default outlasts the 15s classifier/judge timeout so an in-flight call can land.
+    tail_grace_s: float = 16.0
 
 
 @dataclass(frozen=True)
@@ -541,6 +542,25 @@ def _verifier_str(raw: Any, label: str, default: str) -> str:
     return raw.strip()
 
 
+def _verifier_optional_str(raw: Any, label: str) -> str | None:
+    """Absent/null → inherit the agent model; empty string is invalid."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw.strip():
+        raise ConfigError(f"{label} must be a non-empty string, got {raw!r}")
+    return raw.strip()
+
+
+def effective_verifier_model(cfg: Any | None, override: str | None) -> str:
+    """Resolve ledger/judge model: explicit override, else pinned ``model.name``."""
+    if override and override.strip():
+        return override.strip()
+    if cfg is None:
+        return ""
+    name = getattr(getattr(cfg, "model", None), "name", None)
+    return name.strip() if isinstance(name, str) else ""
+
+
 def _verifier_nested(section: dict[str, Any], key: str) -> dict[str, Any]:
     raw = section.get(key)
     if raw is None:
@@ -555,6 +575,10 @@ def verifier_config_from_section(section: dict[str, Any]) -> VerifierConfig:
 
     Shared by :func:`get_verifier_config` and the ``RuntimeConfig`` snapshot
     builder so the two never validate the section differently.
+
+    When ``verifier.enabled`` is true, omitted nested ``ledger`` / ``tracker`` /
+    ``judge`` ``enabled`` flags default on. Explicit ``enabled: false`` still
+    opts a nested section out.
     """
     if not section:
         return _DEFAULT_VERIFIER_CONFIG
@@ -576,15 +600,17 @@ def verifier_config_from_section(section: dict[str, Any]) -> VerifierConfig:
             f"verifier.escalation.max_severity must be one of {allowed}, got {severity!r}"
         )
 
+    parent_on = _verifier_bool(section.get("enabled"), "verifier.enabled", defaults.enabled)
+    nested_enabled_default = parent_on
     return VerifierConfig(
-        enabled=_verifier_bool(section.get("enabled"), "verifier.enabled", defaults.enabled),
+        enabled=parent_on,
         ledger=VerifierLedgerConfig(
             enabled=_verifier_bool(
-                ledger_raw.get("enabled"), "verifier.ledger.enabled", defaults.ledger.enabled
+                ledger_raw.get("enabled"),
+                "verifier.ledger.enabled",
+                nested_enabled_default,
             ),
-            model=_verifier_str(
-                ledger_raw.get("model"), "verifier.ledger.model", defaults.ledger.model
-            ),
+            model=_verifier_optional_str(ledger_raw.get("model"), "verifier.ledger.model"),
             max_entries_per_thread=_verifier_int(
                 ledger_raw.get("max_entries_per_thread"),
                 "verifier.ledger.max_entries_per_thread",
@@ -596,7 +622,7 @@ def verifier_config_from_section(section: dict[str, Any]) -> VerifierConfig:
             enabled=_verifier_bool(
                 tracker_raw.get("enabled"),
                 "verifier.tracker.enabled",
-                defaults.tracker.enabled,
+                nested_enabled_default,
             ),
             suspicion_threshold=_verifier_int(
                 tracker_raw.get("suspicion_threshold"),
@@ -613,11 +639,11 @@ def verifier_config_from_section(section: dict[str, Any]) -> VerifierConfig:
         ),
         judge=VerifierJudgeConfig(
             enabled=_verifier_bool(
-                judge_raw.get("enabled"), "verifier.judge.enabled", defaults.judge.enabled
+                judge_raw.get("enabled"),
+                "verifier.judge.enabled",
+                nested_enabled_default,
             ),
-            model=_verifier_str(
-                judge_raw.get("model"), "verifier.judge.model", defaults.judge.model
-            ),
+            model=_verifier_optional_str(judge_raw.get("model"), "verifier.judge.model"),
             max_verdicts_per_message=_verifier_int(
                 judge_raw.get("max_verdicts_per_message"),
                 "verifier.judge.max_verdicts_per_message",

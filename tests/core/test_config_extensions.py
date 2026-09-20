@@ -316,8 +316,10 @@ class TestVerifierConfig:
         cfg = get_verifier_config()
         assert cfg.enabled is False
         assert cfg.ledger.enabled is False
+        assert cfg.ledger.model is None
         assert cfg.tracker.enabled is False
         assert cfg.judge.enabled is False
+        assert cfg.judge.model is None
         assert cfg.escalation.max_severity == "nudge"
 
     def test_reads_nested_yaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -346,10 +348,49 @@ class TestVerifierConfig:
         cfg = get_verifier_config()
         assert cfg.enabled is True
         assert cfg.ledger.enabled is True
+        assert cfg.ledger.model == "gemini-2.5-flash"
         assert cfg.ledger.max_entries_per_thread == 32
         assert cfg.tracker.suspicion_threshold == 4
         assert cfg.judge.tail_grace_s == 1.5
         assert cfg.escalation.max_severity == "replan"
+
+    def test_parent_enabled_turns_on_omitted_nested_flags(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._write_config(tmp_path, "verifier:\n  enabled: true\n")
+        cfg = get_verifier_config()
+        assert cfg.enabled is True
+        assert cfg.ledger.enabled is True
+        assert cfg.tracker.enabled is True
+        assert cfg.judge.enabled is True
+        assert cfg.judge.tail_grace_s == 16.0
+
+    def test_parent_enabled_respects_nested_opt_out(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._write_config(
+            tmp_path,
+            "verifier:\n  enabled: true\n  judge:\n    enabled: false\n",
+        )
+        cfg = get_verifier_config()
+        assert cfg.enabled is True
+        assert cfg.ledger.enabled is True
+        assert cfg.tracker.enabled is True
+        assert cfg.judge.enabled is False
+
+    def test_omitted_model_is_none(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        self._write_config(
+            tmp_path,
+            "model:\n  provider: ollama-cloud\n  name: glm-5.3-flash\n"
+            "verifier:\n  enabled: true\n  ledger:\n    enabled: true\n"
+            "  judge:\n    enabled: true\n",
+        )
+        cfg = get_verifier_config()
+        assert cfg.ledger.model is None
+        assert cfg.judge.model is None
 
     def test_rejects_non_boolean_enabled(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
