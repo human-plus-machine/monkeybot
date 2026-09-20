@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -315,6 +316,100 @@ async def test_staged_verifier_reload_closes_replaced_only_after_commit(
         assert runtime.goal_ledger is not None and runtime.goal_ledger._closed is False
         assert runtime.judge_worker is not None and runtime.judge_worker._closed is False
     finally:
+        if runtime.judge_worker is not None:
+            runtime.judge_worker.close()
+        if runtime.goal_ledger is not None:
+            runtime.goal_ledger.close()
+        reset_runtime_env_state_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_staged_verifier_reload_drains_replaced_ledger_before_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from monkeybot.core.config import apply_monkeybot_runtime_env, get_config_store
+    from monkeybot.core.config.runtime_env import (
+        VERIFIER_DIFF_KEY,
+        ConfigTier,
+        reset_runtime_env_state_for_tests,
+    )
+    from monkeybot.core.config.snapshot import ConfigDiff
+    from monkeybot.core.persistence.goal_ledger import (
+        Channel,
+        Classification,
+        InMemoryGoalLedgerStore,
+        Intent,
+        Provenance,
+    )
+    from monkeybot.core.verifier.ledger import GoalLedger
+
+    class _SlowClassifier:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def classify(self, verbatim: str, open_entries: object) -> Classification:
+            del verbatim, open_entries
+            self.started.set()
+            await self.release.wait()
+            return Classification(intent=Intent.NEW_GOAL, relates_to=None, constraints=())
+
+    monkeypatch.chdir(tmp_path)
+    reset_runtime_env_state_for_tests()
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    yaml_path = cfg_dir / "monkeybot.yaml"
+    yaml_path.write_text(_verifier_yaml(), encoding="utf-8")
+    apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    layout = _layout(tmp_path, command_allowlist=tmp_path / "missing.yaml")
+    monkeypatch.setattr(
+        "monkeybot.gateway.sse.app.AgentLayout.from_environment",
+        lambda *a, **k: layout,
+    )
+    runtime = GatewayRuntime()
+    app = SimpleNamespace(state=SimpleNamespace(storage=_ledger_storage(), memory=None))
+    store = InMemoryGoalLedgerStore()
+    classifier = _SlowClassifier()
+    old_ledger = GoalLedger(store, classifier)
+    try:
+        runtime.build_verifier(get_config_store().current(), storage=app.state.storage)
+        assert runtime.goal_ledger is not None
+        runtime.goal_ledger.close()
+        runtime.goal_ledger = old_ledger
+        old_ledger.admit(
+            "t1",
+            "important user goal",
+            provenance=Provenance.HUMAN,
+            channel=Channel.MESSAGE,
+        )
+        await classifier.started.wait()
+
+        diff = ConfigDiff(
+            noop=False,
+            changed_env_keys=frozenset({VERIFIER_DIFF_KEY}),
+            changed_content=frozenset(),
+            tiers=frozenset({ConfigTier.REBUILD}),
+        )
+        apply_task = asyncio.create_task(
+            runtime.apply(
+                get_config_store().current(),
+                diff,
+                fastapi_app=app,  # type: ignore[arg-type]
+            )
+        )
+        await asyncio.sleep(0.02)
+        assert apply_task.done() is False
+
+        classifier.release.set()
+        result = await apply_task
+
+        assert result.error is None
+        assert len(await store.list_entries("t1")) == 1
+        assert old_ledger._closed is True
+    finally:
+        old_ledger.close()
         if runtime.judge_worker is not None:
             runtime.judge_worker.close()
         if runtime.goal_ledger is not None:

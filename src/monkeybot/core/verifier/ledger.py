@@ -137,6 +137,16 @@ class GoalLedger:
             return
         await asyncio.wait_for(queue.join(), timeout=timeout_s)
 
+    async def wait_all_idle(self, *, timeout_s: float = 16.0) -> None:
+        """Wait for every admitted classification to become durable."""
+        queues = tuple(self._queues.values())
+        if not queues:
+            return
+        await asyncio.wait_for(
+            asyncio.gather(*(queue.join() for queue in queues)),
+            timeout=timeout_s,
+        )
+
     def close(self) -> None:
         self._closed = True
         for task in self._workers.values():

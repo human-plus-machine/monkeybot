@@ -428,6 +428,7 @@ def test_verifier_verdict_roundtrip() -> None:
         confidence=0.9,
         rationale="constraint_touch",
         triggering_signals=("constraint_touch",),
+        triggering_signal_epochs=(("constraint_touch", 2),),
     )
     assert event_from_json(event_to_json(ev)) == ev
     assert VerifierVerdict in get_args(AgentEvent)

@@ -11,6 +11,7 @@ import uuid
 from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import aclosing
+from dataclasses import replace
 from typing import Any, cast
 
 from monkeybot.core.config.settings import VerifierJudgeConfig
@@ -47,6 +48,7 @@ class JudgeWorker:
         self._config = config
         self._jobs: set[asyncio.Task[None]] = set()
         self._sema: asyncio.Semaphore | None = None
+        self._scope_locks: OrderedDict[ScopeKey, asyncio.Lock] = OrderedDict()
         self._closed = False
         self._verdicts_this_request: OrderedDict[ScopeKey, int] = OrderedDict()
         self._last_turn: OrderedDict[ScopeKey, int] = OrderedDict()
@@ -86,13 +88,7 @@ class JudgeWorker:
                 ),
             )
             return
-        agent = self._agent_spend.get(key, 0)
-        spend = self._spend.get(key, 0)
-        if agent > 0 and spend / agent > self._config.max_spend_ratio:
-            logger.warning(
-                "judge skip spend_ratio %s",
-                kv(thread_id=thread_id, request_id=request_id, spend=spend, agent=agent),
-            )
+        if self._spend_limit_reached(key, phase="enqueue"):
             return
         if len(self._jobs) >= _QUEUE_CAP:
             logger.warning(
@@ -128,28 +124,59 @@ class JudgeWorker:
             self._sema = asyncio.Semaphore(_MAX_IN_FLIGHT)
         return self._sema
 
+    def _scope_lock(self, key: ScopeKey) -> asyncio.Lock:
+        """Serialize this scope's jobs so each one sees the spend of the ones before it."""
+        lock = self._scope_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._scope_locks[key] = lock
+        self._scope_locks.move_to_end(key)
+        while len(self._scope_locks) > _STATE_CAP:
+            # A lock carries no state, so evicting an idle one only costs a re-create.
+            victim = next(
+                (k for k, held in self._scope_locks.items() if k != key and not held.locked()),
+                None,
+            )
+            if victim is None:
+                break
+            self._scope_locks.pop(victim)
+        return lock
+
+    def _spend_limit_reached(self, key: ScopeKey, *, phase: str) -> bool:
+        agent = self._agent_spend.get(key, 0)
+        spend = self._spend.get(key, 0)
+        if agent <= 0 or spend <= 0 or spend / agent < self._config.max_spend_ratio:
+            return False
+        logger.warning(
+            "judge skip spend_ratio %s",
+            kv(thread_id=key[0], request_id=key[1], phase=phase, spend=spend, agent=agent),
+        )
+        return True
+
     async def _run_one(self, evidence: EvidenceBundle, queued_at: float) -> None:
-        acquired = False
+        key = (evidence.thread_id, evidence.request_id)
         try:
             if self._closed:
                 self._refund(evidence)
                 return
-            await self._semaphore().acquire()
-            acquired = True
-            wait_ms = int((time.monotonic() - queued_at) * 1000)
-            logger.info(
-                "judge start %s",
-                kv(
-                    thread_id=evidence.thread_id,
-                    request_id=evidence.request_id,
-                    queue_wait_ms=wait_ms,
-                    queue_depth=len(self._jobs),
-                ),
-            )
-            if self._closed:
-                self._refund(evidence)
-                return
-            await self._handle(evidence)
+            async with self._scope_lock(key):
+                if self._closed or self._spend_limit_reached(key, phase="before_start"):
+                    self._refund(evidence)
+                    return
+                async with self._semaphore():
+                    logger.info(
+                        "judge start %s",
+                        kv(
+                            thread_id=evidence.thread_id,
+                            request_id=evidence.request_id,
+                            queue_wait_ms=int((time.monotonic() - queued_at) * 1000),
+                            queue_depth=len(self._jobs),
+                        ),
+                    )
+                    if self._closed:
+                        self._refund(evidence)
+                        return
+                    await self._handle(evidence)
         except asyncio.CancelledError:
             self._refund(evidence)
             raise
@@ -161,8 +188,6 @@ class JudgeWorker:
                 exc_info=True,
             )
         finally:
-            if acquired:
-                self._semaphore().release()
             self._mailbox.clear_pending(evidence.thread_id, evidence.request_id)
 
     async def _handle(self, evidence: EvidenceBundle) -> None:
@@ -194,6 +219,8 @@ class JudgeWorker:
                 kv(thread_id=evidence.thread_id, type=type(verdict).__name__),
             )
             return
+        if evidence.signal_epochs and not verdict.triggering_signal_epochs:
+            verdict = replace(verdict, triggering_signal_epochs=evidence.signal_epochs)
         self._mailbox.put(evidence.thread_id, verdict)
         key = (evidence.thread_id, evidence.request_id)
         self._bump(self._spend, key, max(0, verdict.judge_tokens))
@@ -246,6 +273,7 @@ class SignalJudge:
             confidence=confidence,
             rationale=", ".join(evidence.signals),
             triggering_signals=evidence.signals,
+            triggering_signal_epochs=evidence.signal_epochs,
             correction=correction_text(evidence.signals) if evidence.signals else None,
             judge_tokens=0,
         )
@@ -418,6 +446,7 @@ class ProviderJudge:
             confidence=parsed["confidence"],
             rationale=parsed["rationale"] or ", ".join(evidence.signals),
             triggering_signals=evidence.signals,
+            triggering_signal_epochs=evidence.signal_epochs,
             correction=correction,
             judge_tokens=max(0, tokens),
         )

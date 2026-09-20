@@ -257,6 +257,7 @@ class ProgressTracker:
         signals = ledger_hit if inner < self._config.min_turn_before_verdict else ledger_hit + other
         if not signals:
             return
+        signal_epochs = self._mailbox.signal_epochs(payload.thread_id, payload.request_id, signals)
         if self._judge is not None:
             from monkeybot.core.verifier.binding import current_verifier_binding
 
@@ -267,6 +268,7 @@ class ProgressTracker:
                     request_id=payload.request_id,
                     inner_turn=inner,
                     signals=tuple(signals),
+                    signal_epochs=signal_epochs,
                     model=binding.model,
                     provider=binding.provider,
                 )
@@ -283,6 +285,7 @@ class ProgressTracker:
             confidence=confidence,
             rationale=", ".join(signals),
             triggering_signals=tuple(signals),
+            triggering_signal_epochs=signal_epochs,
         )
         self._mailbox.put(payload.thread_id, verdict)
         state.emitted_this_turn = True

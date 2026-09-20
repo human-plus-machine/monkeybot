@@ -632,8 +632,10 @@ class GatewayRuntime:
         if self._verifier_slice_replaced(staging):
             try:
                 await wait_for_idle_turns()
+                if prev_ledger is not None and prev_ledger is not staging.goal_ledger:
+                    await prev_ledger.wait_all_idle()
             except TimeoutError:
-                error = "verifier reload timed out waiting for in-flight turns"
+                error = "verifier reload timed out waiting for in-flight work"
                 logger.warning(
                     "verifier reload idle wait timed out %s",
                     kv(revision=cfg.revision),

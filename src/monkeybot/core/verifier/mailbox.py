@@ -60,6 +60,40 @@ class ActiveNudge:
     injections: int = 0
 
 
+@dataclass
+class _SignalEpisode:
+    """Tracker's live suspicion set plus the episode counter for each signal.
+
+    ``epochs[signal]`` increments every time a signal re-enters ``signals``, so a
+    verdict judged during an earlier episode can be told apart from one judged
+    against the episode that is live now.
+    """
+
+    request_id: str
+    signals: frozenset[str]
+    epochs: dict[str, int]
+
+
+def _fence_signals(
+    episode: _SignalEpisode,
+    verdict: VerifierVerdict,
+    incoming: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Keep only signals still live in the episode the verdict was judged against.
+
+    A verdict carrying no epoch snapshot predates episode fencing, so it keeps
+    every triggering signal as long as one of them is still live.
+    """
+    verdict_epochs = dict(verdict.triggering_signal_epochs)
+    if not verdict_epochs:
+        return incoming if set(incoming) & episode.signals else ()
+    return ordered_signals(
+        signal
+        for signal in incoming
+        if signal in episode.signals and episode.epochs.get(signal) == verdict_epochs.get(signal)
+    )
+
+
 class VerdictMailbox:
     """Loop-owned drain target. ``take_ready`` never waits on the judge."""
 
@@ -69,7 +103,7 @@ class VerdictMailbox:
         self._last: OrderedDict[str, VerifierVerdict] = OrderedDict()
         self._pending: OrderedDict[ScopeKey, int] = OrderedDict()
         self._active: OrderedDict[str, ActiveNudge] = OrderedDict()
-        self._current_signals: OrderedDict[str, tuple[str, frozenset[str]]] = OrderedDict()
+        self._episodes: OrderedDict[str, _SignalEpisode] = OrderedDict()
         self._current: OrderedDict[str, str] = OrderedDict()
         self._last_closed: OrderedDict[str, str] = OrderedDict()
 
@@ -99,6 +133,15 @@ class VerdictMailbox:
         self._current[thread_id] = request_id
         self._current.move_to_end(thread_id)
 
+    def _is_stale(self, thread_id: str, verdict: VerifierVerdict) -> bool:
+        """True when a newer verdict for the same request already landed."""
+        current = self._last.get(thread_id)
+        return (
+            current is not None
+            and current.request_id == verdict.request_id
+            and not _newer_verdict(current, verdict)
+        )
+
     def put(self, thread_id: str, verdict: VerifierVerdict) -> bool:
         """Deposit a verdict. Requests that are not currently open are dropped."""
         if not self._accept(thread_id, verdict.request_id):
@@ -108,6 +151,18 @@ class VerdictMailbox:
                     thread_id=thread_id,
                     request_id=verdict.request_id,
                     verdict_id=verdict.verdict_id,
+                ),
+            )
+            return False
+        if self._is_stale(thread_id, verdict):
+            logger.info(
+                "verifier verdict dropped stale checkpoint %s",
+                kv(
+                    thread_id=thread_id,
+                    request_id=verdict.request_id,
+                    verdict_id=verdict.verdict_id,
+                    checkpoint_id=verdict.checkpoint_id,
+                    latest_checkpoint_id=self._last[thread_id].checkpoint_id,
                 ),
             )
             return False
@@ -127,12 +182,7 @@ class VerdictMailbox:
         return self._last.get(thread_id)
 
     def set_last(self, thread_id: str, verdict: VerifierVerdict) -> None:
-        current = self._last.get(thread_id)
-        if (
-            current is not None
-            and current.request_id == verdict.request_id
-            and not _newer_verdict(current, verdict)
-        ):
+        if self._is_stale(thread_id, verdict):
             return
         self._last[thread_id] = verdict
         self._last.move_to_end(thread_id)
@@ -160,14 +210,27 @@ class VerdictMailbox:
             return self._pending.get(self._scope(thread_id, request_id), 0) > 0
         return any(tid == thread_id and count > 0 for (tid, _), count in self._pending.items())
 
+    def _episode(self, thread_id: str, request_id: str) -> _SignalEpisode | None:
+        """The live signal episode for this request, or None when it belongs elsewhere."""
+        episode = self._episodes.get(thread_id)
+        if episode is None or episode.request_id != request_id:
+            return None
+        return episode
+
     def set_current_signals(self, thread_id: str, request_id: str, signals: Iterable[str]) -> None:
         """Publish the tracker's live suspicion set; drop a recovered active nudge."""
         if not self._accept(thread_id, request_id):
             return
         sigs = frozenset(s for s in signals if s)
-        self._current_signals[thread_id] = (request_id, sigs)
-        self._current_signals.move_to_end(thread_id)
-        _cap(self._current_signals)
+        episode = self._episode(thread_id, request_id)
+        if episode is None:
+            episode = _SignalEpisode(request_id=request_id, signals=frozenset(), epochs={})
+            self._episodes[thread_id] = episode
+        for signal in sigs - episode.signals:
+            episode.epochs[signal] = episode.epochs.get(signal, 0) + 1
+        episode.signals = sigs
+        self._episodes.move_to_end(thread_id)
+        _cap(self._episodes)
         active = self._active.get(thread_id)
         if active is None:
             return
@@ -183,6 +246,19 @@ class VerdictMailbox:
                 ),
             )
             self._active.pop(thread_id, None)
+
+    def signal_epochs(
+        self, thread_id: str, request_id: str, signals: Iterable[str]
+    ) -> tuple[tuple[str, int], ...]:
+        """Snapshot the current episode number for each live signal."""
+        episode = self._episode(thread_id, request_id)
+        if episode is None:
+            return ()
+        return tuple(
+            (signal, episode.epochs[signal])
+            for signal in ordered_signals(signals)
+            if signal in episode.signals and signal in episode.epochs
+        )
 
     def activate_nudge(
         self,
@@ -201,11 +277,14 @@ class VerdictMailbox:
         if not self._accept(thread_id, request_id):
             return False
         incoming = ordered_signals(verdict.triggering_signals)
-        current = self._current_signals.get(thread_id)
-        if current is not None and current[0] != request_id:
-            return False
-        if current is not None and incoming and not (set(incoming) & current[1]):
-            return False
+        episode = self._episodes.get(thread_id)
+        if episode is not None:
+            if episode.request_id != request_id:
+                return False
+            if incoming:
+                incoming = _fence_signals(episode, verdict, incoming)
+                if not incoming:
+                    return False
         existing = self._active.get(thread_id)
         if existing is not None and existing.request_id == request_id:
             merged = ordered_signals((*existing.triggering_signals, *incoming))
@@ -251,9 +330,8 @@ class VerdictMailbox:
                 ),
             )
             self._active.pop(thread_id, None)
-        current = self._current_signals.get(thread_id)
-        if current is not None and current[0] == request_id:
-            self._current_signals.pop(thread_id, None)
+        if self._episode(thread_id, request_id) is not None:
+            self._episodes.pop(thread_id, None)
         replan = self._replans.get(thread_id)
         if replan is not None and replan[0] == request_id:
             self._replans.pop(thread_id, None)

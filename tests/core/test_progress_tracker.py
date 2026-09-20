@@ -631,6 +631,53 @@ async def test_stale_verdict_does_not_activate_after_recovery() -> None:
     assert mailbox.peek_nudge("t1", "r1") is None
 
 
+def test_stale_verdict_does_not_activate_for_new_signal_episode() -> None:
+    mailbox = VerdictMailbox()
+    mailbox.set_current_signals("t1", "r1", ["error_streak"])
+    original_epochs = mailbox.signal_epochs("t1", "r1", ["error_streak"])
+    verdict = VerifierVerdict(
+        request_id="r1",
+        verdict_id="v-old-episode",
+        checkpoint_id="r1:3",
+        status="stuck",
+        severity="nudge",
+        rationale="error_streak",
+        triggering_signals=("error_streak",),
+        triggering_signal_epochs=original_epochs,
+    )
+
+    mailbox.set_current_signals("t1", "r1", [])
+    mailbox.set_current_signals("t1", "r1", ["error_streak"])
+
+    assert mailbox.signal_epochs("t1", "r1", ["error_streak"]) != original_epochs
+    assert mailbox.activate_nudge("t1", "r1", verdict) is False
+    assert mailbox.peek_nudge("t1", "r1") is None
+
+
+def test_out_of_order_verdict_deposit_drops_older_checkpoint() -> None:
+    mailbox = VerdictMailbox()
+    newer = VerifierVerdict(
+        request_id="r1",
+        verdict_id="new",
+        checkpoint_id="r1:4",
+        status="on_track",
+        severity="none",
+    )
+    older = VerifierVerdict(
+        request_id="r1",
+        verdict_id="old",
+        checkpoint_id="r1:1",
+        status="stuck",
+        severity="nudge",
+        triggering_signals=("error_streak",),
+    )
+
+    assert mailbox.put("t1", newer) is True
+    assert mailbox.put("t1", older) is False
+    assert [verdict.verdict_id for verdict in mailbox.take_ready("t1", "r1")] == ["new"]
+    assert mailbox.last("t1") is newer
+
+
 def test_active_nudge_merges_overlapping_signals() -> None:
     mailbox = VerdictMailbox()
     first = VerifierVerdict(
@@ -924,6 +971,7 @@ def test_mailbox_caps_per_thread_and_evicts_idle_threads() -> None:
     assert len(ready) == _PER_THREAD_MAX
     assert ready[0].verdict_id == "5"
 
+    mailbox = VerdictMailbox()
     for i in range(_THREAD_CAP + 1):
         mailbox.put(f"t{i}", _verdict(i))
     assert mailbox.take_ready("t0") == []
@@ -1118,6 +1166,38 @@ async def test_drain_does_not_rewrite_newer_last() -> None:
     assert [v.verdict_id for v in drained] == ["old", "new"]
     assert mailbox.last("t1") is newer
     assert mailbox.last("t1").severity == "block"
+
+
+@pytest.mark.asyncio
+async def test_drain_does_not_actuate_older_verdict_when_newer_is_on_track() -> None:
+    from monkeybot.core.runtime.turn_loop import _drain_verdicts
+
+    mailbox = VerdictMailbox()
+    mailbox.set_current_signals("t1", "r1", ["error_streak"])
+    older = VerifierVerdict(
+        request_id="r1",
+        verdict_id="old",
+        checkpoint_id="r1:1",
+        status="drifting",
+        severity="nudge",
+        triggering_signals=("error_streak",),
+    )
+    newer = VerifierVerdict(
+        request_id="r1",
+        verdict_id="new",
+        checkpoint_id="r1:4",
+        status="on_track",
+        severity="none",
+        triggering_signals=("error_streak",),
+    )
+    mailbox.put("t1", older)
+    mailbox.put("t1", newer)
+    ctx = replace(loop_ctx(), verdict_mailbox=mailbox)
+
+    drained = [evt async for evt in _drain_verdicts(ctx)]
+
+    assert [verdict.verdict_id for verdict in drained] == ["old", "new"]
+    assert mailbox.peek_nudge("t1", "r1") is None
 
 
 def test_idle_thread_cap_does_not_drop_live_nudge() -> None:

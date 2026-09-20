@@ -369,6 +369,22 @@ def _stash_escalation(
     """
     from monkeybot.core.verifier.intervention import replan_text
 
+    latest = mailbox.last(thread_id)
+    if (
+        latest is not None
+        and latest.request_id == verdict.request_id
+        and latest.verdict_id != verdict.verdict_id
+    ):
+        logger.info(
+            "verdict escalation skipped stale checkpoint %s",
+            kv(
+                thread_id=thread_id,
+                request_id=verdict.request_id,
+                verdict_id=verdict.verdict_id,
+                latest_verdict_id=latest.verdict_id,
+            ),
+        )
+        return
     if capped in ("none", "") or verdict.status == "on_track":
         return
     try:

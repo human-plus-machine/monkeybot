@@ -75,6 +75,32 @@ async def test_spend_ratio_compares_judge_tokens_to_agent_tokens() -> None:
 
 
 @pytest.mark.asyncio
+async def test_in_flight_jobs_recheck_spend_before_start() -> None:
+    mailbox = VerdictMailbox()
+    port = _TokenPort(tokens=100)
+    worker = JudgeWorker(
+        mailbox,
+        port,
+        ledger_fn=lambda: None,
+        config=VerifierJudgeConfig(
+            max_spend_ratio=0.25,
+            max_verdicts_per_message=10,
+            min_turns_between_verdicts=0,
+        ),
+    )
+    worker.note_agent_tokens("t1", "r1", 100)
+
+    for turn in (1, 2, 3):
+        worker.enqueue(_evidence("r1", turn))
+    await asyncio.sleep(0.1)
+
+    assert port.calls == 1
+    assert len(mailbox.take_ready("t1", "r1")) == 1
+    assert worker._spend[("t1", "r1")] == 100
+    worker.close()
+
+
+@pytest.mark.asyncio
 async def test_min_turns_is_per_request_not_thread() -> None:
     mailbox = VerdictMailbox()
     port = _CountingPort()
