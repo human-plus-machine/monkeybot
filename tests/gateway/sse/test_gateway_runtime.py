@@ -619,3 +619,197 @@ async def test_verifier_reload_times_out_while_turn_in_flight(
         if runtime.goal_ledger is not None:
             runtime.goal_ledger.close()
         reset_runtime_env_state_for_tests()
+
+
+def test_close_verifier_stops_live_workers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config import apply_monkeybot_runtime_env, get_config_store
+    from monkeybot.core.config.runtime_env import reset_runtime_env_state_for_tests
+
+    monkeypatch.chdir(tmp_path)
+    reset_runtime_env_state_for_tests()
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    yaml_path = cfg_dir / "monkeybot.yaml"
+    yaml_path.write_text(_verifier_yaml(), encoding="utf-8")
+    apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    runtime = GatewayRuntime()
+    try:
+        runtime.build_verifier(get_config_store().current(), storage=_ledger_storage())  # type: ignore[arg-type]
+        live_ledger = runtime.goal_ledger
+        live_judge = runtime.judge_worker
+        assert live_ledger is not None and live_judge is not None
+        runtime.close_verifier()
+        assert live_ledger._closed is True
+        assert live_judge._closed is True
+        runtime.build_verifier(get_config_store().current(), storage=_ledger_storage())  # type: ignore[arg-type]
+        assert runtime.goal_ledger is not live_ledger
+        assert runtime.judge_worker is not live_judge
+        assert runtime.goal_ledger is not None and runtime.goal_ledger._closed is False
+    finally:
+        runtime.close_verifier()
+        reset_runtime_env_state_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_memory_hook_reload_does_not_take_verifier_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from monkeybot.core.config import apply_monkeybot_runtime_env, get_config_store
+    from monkeybot.core.config.runtime_env import ConfigTier, reset_runtime_env_state_for_tests
+    from monkeybot.core.config.snapshot import ConfigDiff
+
+    calls = {"n": 0}
+
+    async def _idle(*, timeout_sec: float | None = None) -> None:
+        del timeout_sec
+        calls["n"] += 1
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("monkeybot.gateway.sse.app.wait_for_idle_turns", _idle)
+    reset_runtime_env_state_for_tests()
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    yaml_path = cfg_dir / "monkeybot.yaml"
+    yaml_path.write_text(_verifier_yaml(), encoding="utf-8")
+    apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    layout = _layout(tmp_path, command_allowlist=tmp_path / "missing.yaml")
+    monkeypatch.setattr(
+        "monkeybot.gateway.sse.app.AgentLayout.from_environment",
+        lambda *a, **k: layout,
+    )
+    runtime = GatewayRuntime()
+    app = SimpleNamespace(state=SimpleNamespace(storage=_ledger_storage(), memory=None))
+    try:
+        runtime.build_verifier(get_config_store().current(), storage=app.state.storage)
+        runtime.rebuild_memory_hooks(get_config_store().current(), app)  # type: ignore[arg-type]
+        live_ledger = runtime.goal_ledger
+        live_judge = runtime.judge_worker
+        live_mailbox = runtime.verdict_mailbox
+        live_hooks = runtime.hook_manager
+        assert live_ledger is not None and live_judge is not None
+        diff = ConfigDiff(
+            noop=False,
+            changed_env_keys=frozenset({"MONKEYBOT_MEMORY_HOOK_ENABLED"}),
+            changed_content=frozenset(),
+            tiers=frozenset({ConfigTier.REBUILD}),
+        )
+        result = await runtime.apply(
+            get_config_store().current(),
+            diff,
+            fastapi_app=app,  # type: ignore[arg-type]
+        )
+        assert result.error is None
+        assert calls["n"] == 0
+        assert runtime.goal_ledger is live_ledger
+        assert runtime.judge_worker is live_judge
+        assert runtime.verdict_mailbox is live_mailbox
+        assert runtime.hook_manager is not live_hooks
+        assert live_ledger._closed is False
+        assert live_judge._closed is False
+    finally:
+        runtime.close_verifier()
+        reset_runtime_env_state_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_staged_verifier_reload_keeps_sticky_nudge_and_drains_judge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from monkeybot.core.config import apply_monkeybot_runtime_env, get_config_store
+    from monkeybot.core.config.runtime_env import (
+        VERIFIER_DIFF_KEY,
+        ConfigTier,
+        reset_runtime_env_state_for_tests,
+    )
+    from monkeybot.core.config.settings import VerifierJudgeConfig
+    from monkeybot.core.config.snapshot import ConfigDiff
+    from monkeybot.core.runtime.events import VerifierVerdict
+    from monkeybot.core.verifier.intervention import correction_text
+    from monkeybot.core.verifier.judge import JudgeWorker
+    from monkeybot.core.verifier.port import EvidenceBundle
+
+    class _SlowPort:
+        async def verify(self, intent: object, evidence: EvidenceBundle) -> VerifierVerdict:
+            del intent
+            await asyncio.sleep(0.05)
+            return VerifierVerdict(
+                request_id=evidence.request_id,
+                verdict_id="drained",
+                checkpoint_id=f"{evidence.request_id}:{evidence.inner_turn}",
+                status="drifting",
+                severity="nudge",
+                triggering_signals=("constraint_touch",),
+            )
+
+    monkeypatch.chdir(tmp_path)
+    reset_runtime_env_state_for_tests()
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    yaml_path = cfg_dir / "monkeybot.yaml"
+    yaml_path.write_text(_verifier_yaml(), encoding="utf-8")
+    apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    layout = _layout(tmp_path, command_allowlist=tmp_path / "missing.yaml")
+    monkeypatch.setattr(
+        "monkeybot.gateway.sse.app.AgentLayout.from_environment",
+        lambda *a, **k: layout,
+    )
+    runtime = GatewayRuntime()
+    app = SimpleNamespace(state=SimpleNamespace(storage=_ledger_storage(), memory=None))
+    try:
+        runtime.build_verifier(get_config_store().current(), storage=app.state.storage)
+        mailbox = runtime.verdict_mailbox
+        assert mailbox is not None and runtime.judge_worker is not None
+        mailbox.open_request("t1", "r1")
+        mailbox.set_current_signals("t1", "r1", ["constraint_touch"])
+        sticky = VerifierVerdict(
+            request_id="r1",
+            verdict_id="sticky",
+            checkpoint_id="r1:1",
+            status="drifting",
+            severity="nudge",
+            triggering_signals=("constraint_touch",),
+        )
+        assert mailbox.activate_nudge("t1", "r1", sticky) is True
+        runtime.judge_worker.close()
+        runtime.judge_worker = JudgeWorker(
+            mailbox,
+            _SlowPort(),
+            ledger_fn=lambda: runtime.goal_ledger,
+            config=VerifierJudgeConfig(max_verdicts_per_message=10, min_turns_between_verdicts=0),
+        )
+        runtime.judge_worker.enqueue(
+            EvidenceBundle(
+                thread_id="t1",
+                request_id="r1",
+                inner_turn=2,
+                signals=("constraint_touch",),
+            )
+        )
+        diff = ConfigDiff(
+            noop=False,
+            changed_env_keys=frozenset({VERIFIER_DIFF_KEY}),
+            changed_content=frozenset(),
+            tiers=frozenset({ConfigTier.REBUILD}),
+        )
+        result = await runtime.apply(
+            get_config_store().current(),
+            diff,
+            fastapi_app=app,  # type: ignore[arg-type]
+        )
+        assert result.error is None
+        assert runtime.verdict_mailbox is not mailbox
+        assert runtime.verdict_mailbox is not None
+        assert runtime.verdict_mailbox.peek_nudge("t1", "r1") == correction_text(
+            ("constraint_touch",)
+        )
+        ready = runtime.verdict_mailbox.take_ready("t1", "r1")
+        assert [item.verdict_id for item in ready] == ["drained"]
+    finally:
+        runtime.close_verifier()
+        reset_runtime_env_state_for_tests()

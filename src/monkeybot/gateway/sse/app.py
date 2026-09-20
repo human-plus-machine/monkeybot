@@ -317,7 +317,10 @@ class GatewayRuntime:
 
         Staging copies must call this without ``close_verifier`` so rollback cannot
         leave the live runtime pointing at closed objects that ``copy.copy`` still shares.
-        Callers replacing the live runtime must ``close_verifier`` first.
+        Startup and other in-place rebuilds of the live runtime must
+        ``close_verifier`` first so a lifespan re-entry cannot leak the previous
+        generation. Live reload closes the outgoing generation with
+        ``_close_replaced_after_commit`` after the staging swap.
         """
         self.goal_ledger = None
         self.progress_tracker = None
@@ -588,12 +591,11 @@ class GatewayRuntime:
         memory_prev = _app_memory_state(fastapi_app)
         prev_ledger = self.goal_ledger
         prev_judge = self.judge_worker
+        prev_mailbox = self.verdict_mailbox
         if ConfigTier.REBUILD in diff.tiers:
             applied, error = staging._rebuild_live_slices(cfg, diff, layout, fastapi_app)
             if error:
-                staging._release_replaced_verifier(self)
-                _restore_app_memory(fastapi_app, memory_prev)
-                return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
+                return self._abort_staged(staging, fastapi_app, memory_prev, mcp_result, error)
         if self.needs_mcp_apply(cfg, diff) and self.mcp is not None:
             mcp_path = self._mcp_config_path(cfg, layout)
             prev_overlay = self.mcp.env_overlay
@@ -615,9 +617,7 @@ class GatewayRuntime:
                     "MCP reload idle wait timed out %s",
                     kv(path=str(mcp_path), revision=cfg.revision),
                 )
-                staging._release_replaced_verifier(self)
-                _restore_app_memory(fastapi_app, memory_prev)
-                return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
+                return self._abort_staged(staging, fastapi_app, memory_prev, mcp_result, error)
             except Exception as exc:
                 error = f"MCP catalog diff failed: {exc}"
                 logger.exception(
@@ -628,31 +628,63 @@ class GatewayRuntime:
                         error=str(exc),
                     ),
                 )
-                staging._release_replaced_verifier(self)
-                _restore_app_memory(fastapi_app, memory_prev)
-                return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
+                return self._abort_staged(staging, fastapi_app, memory_prev, mcp_result, error)
             finally:
                 if not overlay_committed:
                     self.mcp.set_env_overlay(prev_overlay)
         if self._verifier_slice_replaced(staging):
             try:
                 await wait_for_idle_turns()
+                ledger_jobs = 0
+                judge_jobs = 0
+                hydrated_views = 0
+                hydrated_nudges = 0
                 if prev_ledger is not None and prev_ledger is not staging.goal_ledger:
-                    await prev_ledger.wait_all_idle()
+                    ledger_jobs = await prev_ledger.wait_all_idle()
                     if staging.goal_ledger is not None:
-                        staging.goal_ledger.hydrate_from(prev_ledger)
+                        hydrated_views = staging.goal_ledger.restore_views(
+                            prev_ledger.snapshot_views()
+                        )
+                if prev_judge is not None and prev_judge is not staging.judge_worker:
+                    judge_jobs = await prev_judge.wait_idle()
+                if (
+                    prev_mailbox is not None
+                    and staging.verdict_mailbox is not None
+                    and prev_mailbox is not staging.verdict_mailbox
+                ):
+                    hydrated_nudges = staging.verdict_mailbox.restore(prev_mailbox.snapshot())
+                logger.info(
+                    "verifier reload drained %s",
+                    kv(
+                        revision=cfg.revision,
+                        ledger_jobs=ledger_jobs,
+                        judge_jobs=judge_jobs,
+                        hydrated_views=hydrated_views,
+                        hydrated_nudges=hydrated_nudges,
+                    ),
+                )
             except TimeoutError:
                 error = "verifier reload timed out waiting for in-flight work"
                 logger.warning(
                     "verifier reload idle wait timed out %s",
                     kv(revision=cfg.revision),
                 )
-                staging._release_replaced_verifier(self)
-                _restore_app_memory(fastapi_app, memory_prev)
-                return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
+                return self._abort_staged(staging, fastapi_app, memory_prev, mcp_result, error)
         self._install_live_slices(staging)
         self._close_replaced_after_commit(prev_ledger, prev_judge)
         return RuntimeApplyResult(applied=applied, mcp=mcp_result)
+
+    def _abort_staged(
+        self,
+        staging: GatewayRuntime,
+        fastapi_app: FastAPI | None,
+        memory_prev: tuple[Any, Any, Any] | None,
+        mcp_result: MCPCatalogApplyResult,
+        error: str,
+    ) -> RuntimeApplyResult:
+        staging._release_replaced_verifier(self)
+        _restore_app_memory(fastapi_app, memory_prev)
+        return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
 
     def _verifier_slice_replaced(self, staging: GatewayRuntime) -> bool:
         return (
@@ -660,7 +692,6 @@ class GatewayRuntime:
             or staging.judge_worker is not self.judge_worker
             or staging.verdict_mailbox is not self.verdict_mailbox
             or staging.progress_tracker is not self.progress_tracker
-            or staging.hook_manager is not self.hook_manager
         )
 
 
@@ -1278,6 +1309,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
         logger.error("invalid subagents config: %s", exc)
         raise
 
+    gateway_runtime.close_verifier()
     gateway_runtime.build_verifier(cfg, storage=fastapi_app.state.storage)
     gateway_runtime.rebuild_memory_hooks(cfg, fastapi_app)
 
@@ -1356,19 +1388,12 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
         except Exception as exc:
             logger.warning("knowledge state clear failed: %s", exc)
 
-    if gateway_runtime.goal_ledger is not None:
-        try:
-            gateway_runtime.goal_ledger.close()
-        except Exception as exc:
-            logger.warning("goal ledger close failed: %s", exc)
-        gateway_runtime.goal_ledger = None
-
-    if gateway_runtime.judge_worker is not None:
-        try:
-            gateway_runtime.judge_worker.close()
-        except Exception as exc:
-            logger.warning("judge worker close failed: %s", exc)
-        gateway_runtime.judge_worker = None
+    try:
+        gateway_runtime.close_verifier()
+    except Exception as exc:
+        logger.warning("verifier close failed: %s", exc)
+    gateway_runtime.goal_ledger = None
+    gateway_runtime.judge_worker = None
     gateway_runtime.progress_tracker = None
     gateway_runtime.nudge_actuator = None
     gateway_runtime.verdict_mailbox = None

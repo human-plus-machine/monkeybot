@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections import OrderedDict, deque
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, TypeVar
 
 from monkeybot.core.logging_utils import kv
@@ -92,6 +92,19 @@ def _fence_signals(
     )
 
 
+@dataclass
+class MailboxSnapshot:
+    """Continuity state copied onto a replacement mailbox during reload."""
+
+    ready: OrderedDict[ScopeKey, deque[VerifierVerdict]]
+    nudges: OrderedDict[str, tuple[str, str]]
+    replans: OrderedDict[str, tuple[str, str]]
+    last: OrderedDict[str, VerifierVerdict]
+    current: OrderedDict[str, str]
+    active: OrderedDict[str, ActiveNudge]
+    episodes: OrderedDict[str, _SignalEpisode]
+
+
 class VerdictMailbox:
     """Loop-owned drain target. ``take_ready`` never waits on the judge.
 
@@ -107,6 +120,52 @@ class VerdictMailbox:
         self._current: OrderedDict[str, str] = OrderedDict()
         self._active: OrderedDict[str, ActiveNudge] = OrderedDict()
         self._episodes: OrderedDict[str, _SignalEpisode] = OrderedDict()
+
+    def snapshot(self) -> MailboxSnapshot:
+        """Copy request-local continuity state for a replacement mailbox."""
+        return MailboxSnapshot(
+            ready=OrderedDict(
+                (key, deque(bucket, maxlen=_PER_SCOPE_MAX)) for key, bucket in self._ready.items()
+            ),
+            nudges=OrderedDict(self._nudges),
+            replans=OrderedDict(self._replans),
+            last=OrderedDict(self._last),
+            current=OrderedDict(self._current),
+            active=OrderedDict(
+                (key, replace(nudge, signal_epochs=dict(nudge.signal_epochs)))
+                for key, nudge in self._active.items()
+            ),
+            episodes=OrderedDict(
+                (key, replace(episode, epochs=dict(episode.epochs)))
+                for key, episode in self._episodes.items()
+            ),
+        )
+
+    def restore(self, snapshot: MailboxSnapshot) -> int:
+        """Install continuity state. Returns the number of sticky nudges kept."""
+        self._ready = OrderedDict(
+            (key, deque(bucket, maxlen=_PER_SCOPE_MAX)) for key, bucket in snapshot.ready.items()
+        )
+        self._nudges = OrderedDict(snapshot.nudges)
+        self._replans = OrderedDict(snapshot.replans)
+        self._last = OrderedDict(snapshot.last)
+        self._current = OrderedDict(snapshot.current)
+        self._active = OrderedDict(
+            (key, replace(nudge, signal_epochs=dict(nudge.signal_epochs)))
+            for key, nudge in snapshot.active.items()
+        )
+        self._episodes = OrderedDict(
+            (key, replace(episode, epochs=dict(episode.epochs)))
+            for key, episode in snapshot.episodes.items()
+        )
+        _cap(self._ready)
+        _cap(self._nudges)
+        _cap(self._replans)
+        _cap(self._last)
+        _cap(self._current)
+        self._cap_idle_threads(self._active)
+        _cap(self._episodes)
+        return len(self._active)
 
     @staticmethod
     def _scope(thread_id: str, request_id: str) -> ScopeKey:

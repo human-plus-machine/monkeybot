@@ -321,3 +321,28 @@ def test_unparseable_checkpoint_does_not_overwrite_numeric() -> None:
     assert mailbox.put("t1", empty) is True
     assert mailbox.put("t1", numeric) is True
     assert mailbox.last("t1") is numeric
+
+
+def test_restore_keeps_sticky_nudge_and_open_request() -> None:
+    from monkeybot.core.verifier.intervention import correction_text
+
+    old = VerdictMailbox()
+    old.open_request("t1", "r1")
+    old.set_current_signals("t1", "r1", ["constraint_touch"])
+    verdict = VerifierVerdict(
+        request_id="r1",
+        verdict_id="sticky",
+        checkpoint_id="r1:2",
+        status="drifting",
+        severity="nudge",
+        triggering_signals=("constraint_touch",),
+    )
+    assert old.activate_nudge("t1", "r1", verdict) is True
+    old.put("t1", verdict)
+    replacement = VerdictMailbox()
+    kept = replacement.restore(old.snapshot())
+    assert kept == 1
+    assert replacement.peek_nudge("t1", "r1") == correction_text(("constraint_touch",))
+    assert [item.verdict_id for item in replacement.take_ready("t1", "r1")] == ["sticky"]
+    later = replace(_verdict("r1", "after"), checkpoint_id="r1:3")
+    assert replacement.put("t1", later) is True
