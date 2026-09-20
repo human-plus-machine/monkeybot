@@ -618,11 +618,10 @@ def verifier_config_from_section(section: dict[str, Any]) -> VerifierConfig:
         )
 
     parent_on = _verifier_bool(section.get("enabled"), "verifier.enabled", defaults.enabled)
-    nested_enabled_default = parent_on
     tracker_enabled = _verifier_bool(
         tracker_raw.get("enabled"),
         "verifier.tracker.enabled",
-        nested_enabled_default,
+        parent_on,
     )
     judge_enabled = _verifier_bool(
         judge_raw.get("enabled"),
@@ -635,7 +634,7 @@ def verifier_config_from_section(section: dict[str, Any]) -> VerifierConfig:
             enabled=_verifier_bool(
                 ledger_raw.get("enabled"),
                 "verifier.ledger.enabled",
-                nested_enabled_default,
+                parent_on,
             ),
             model=_verifier_optional_str(ledger_raw.get("model"), "verifier.ledger.model"),
             max_entries_per_thread=_verifier_int(
