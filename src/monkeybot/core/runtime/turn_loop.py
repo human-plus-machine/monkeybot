@@ -14,6 +14,7 @@ from typing import Any, Literal, cast
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.freeze import freeze_attachments_in_history
 from monkeybot.core.attachments.store import AttachmentStore
+from monkeybot.core.config.settings import VERIFIER_SEVERITY_RANK
 from monkeybot.core.context import (
     TurnContext,
     refresh_memory_index,
@@ -55,7 +56,7 @@ from monkeybot.core.types.content_blocks import (
 from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.core.verifier.intervention import correction_text, replan_text
-from monkeybot.core.verifier.mailbox import VerdictMailbox
+from monkeybot.core.verifier.mailbox import VerdictMailbox, _newer_verdict
 from monkeybot.core.verifier.severity import cap_severity
 from monkeybot.providers._utils import note_anthropic_token_estimate_observation
 from monkeybot.providers.pricing import estimate_cost
@@ -365,19 +366,22 @@ def _stash_escalation(
     Injected text is always a trusted signal template, never model/rationale
     copy. Nudges stay active while tracker signals still overlap. Fail-open.
 
-    Sticky nudges from one drain are unioned by ``activate_nudge``; skipping
-    older nudge verdicts would drop overlapping signals from the same batch.
-    One-shot replan/steer still last-wins against ``mailbox.last``, including
-    a newer deposit that arrives while an earlier verdict is being persisted.
+    Concurrent drains can land several verdicts in one batch. Actuate this
+    verdict unless a strictly stronger (or same-severity newer) verdict for
+    the same request has already landed — a later ``none`` must not swallow
+    an earlier ``replan`` / ``block``.
     """
     if capped in ("none", "") or verdict.status == "on_track":
         return
-    if capped in ("replan", "steer"):
+    if capped in ("replan", "steer", "block"):
         latest = mailbox.last(thread_id)
         if (
             latest is not None
             and latest.request_id == verdict.request_id
             and latest.verdict_id != verdict.verdict_id
+            and VERIFIER_SEVERITY_RANK.get(latest.severity, 0)
+            >= VERIFIER_SEVERITY_RANK.get(capped, 0)
+            and _newer_verdict(verdict, latest)
         ):
             logger.info(
                 "verdict escalation skipped stale checkpoint %s",
@@ -386,6 +390,7 @@ def _stash_escalation(
                     request_id=verdict.request_id,
                     verdict_id=verdict.verdict_id,
                     latest_verdict_id=latest.verdict_id,
+                    latest_severity=latest.severity,
                 ),
             )
             return

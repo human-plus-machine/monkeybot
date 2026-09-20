@@ -320,6 +320,8 @@ class TestVerifierConfig:
         assert cfg.tracker.enabled is False
         assert cfg.judge.enabled is False
         assert cfg.judge.model is None
+        assert cfg.judge.queue_cap == 32
+        assert cfg.judge.max_in_flight == 8
         assert cfg.escalation.max_severity == "nudge"
 
     def test_reads_nested_yaml(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -342,6 +344,8 @@ class TestVerifierConfig:
             "    min_turns_between_verdicts: 3\n"
             "    max_spend_ratio: 0.1\n"
             "    tail_grace_s: 1.5\n"
+            "    queue_cap: 4\n"
+            "    max_in_flight: 2\n"
             "  escalation:\n"
             "    max_severity: replan\n",
         )
@@ -352,6 +356,8 @@ class TestVerifierConfig:
         assert cfg.ledger.max_entries_per_thread == 32
         assert cfg.tracker.suspicion_threshold == 4
         assert cfg.judge.tail_grace_s == 1.5
+        assert cfg.judge.queue_cap == 4
+        assert cfg.judge.max_in_flight == 2
         assert cfg.escalation.max_severity == "replan"
 
     def test_parent_enabled_turns_on_omitted_nested_flags(

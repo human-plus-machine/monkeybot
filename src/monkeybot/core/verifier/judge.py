@@ -7,9 +7,11 @@ import json
 import logging
 import math
 import re
+import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import TypedDict
 
 from monkeybot.core.config.settings import VERIFIER_SEVERITY_ORDER, VerifierJudgeConfig
@@ -26,13 +28,12 @@ from monkeybot.core.verifier.binding import (
 from monkeybot.core.verifier.classify import collect_verifier_stream
 from monkeybot.core.verifier.intervention import correction_text
 from monkeybot.core.verifier.ledger import GoalLedger
-from monkeybot.core.verifier.mailbox import VerdictMailbox
+from monkeybot.core.verifier.mailbox import ScopeKey, VerdictMailbox
 from monkeybot.core.verifier.match import verdict_status
 from monkeybot.core.verifier.port import EvidenceBundle, VerifierPort
 
 logger = logging.getLogger(__name__)
 
-_QUEUE_CAP = 32
 _STATE_CAP = 256
 _JUDGE_TIMEOUT_S = 15.0
 _RATIONALE_MAX = 480
@@ -55,6 +56,26 @@ Rules:
 """
 
 
+@dataclass
+class _JudgeJob:
+    evidence: EvidenceBundle
+    prev_turn: int
+    queued: bool = True
+    pending: bool = True
+    refunded: bool = False
+    deposited: bool = False
+
+    @property
+    def key(self) -> ScopeKey:
+        return (self.evidence.thread_id, self.evidence.request_id)
+
+    def release_pending(self, mailbox: VerdictMailbox) -> None:
+        if not self.pending:
+            return
+        self.pending = False
+        mailbox.clear_pending(self.evidence.thread_id, self.evidence.request_id)
+
+
 class JudgeWorker:
     """Per-process worker that calls ``VerifierPort`` and deposits mailbox verdicts."""
 
@@ -70,90 +91,211 @@ class JudgeWorker:
         self._port = port
         self._ledger_fn = ledger_fn
         self._config = config
-        self._queue: asyncio.Queue[EvidenceBundle] = asyncio.Queue(maxsize=_QUEUE_CAP)
-        self._task: asyncio.Task[None] | None = None
+        self._jobs: dict[asyncio.Task[None], _JudgeJob] = {}
+        self._sema: asyncio.Semaphore | None = None
+        self._scope_locks: OrderedDict[ScopeKey, asyncio.Lock] = OrderedDict()
+        self._scope_lock_holders: dict[ScopeKey, int] = {}
+        self._queued = 0
         self._closed = False
-        self._verdicts_this_request: OrderedDict[str, int] = OrderedDict()
-        self._last_turn: OrderedDict[str, int] = OrderedDict()
-        self._spend: OrderedDict[str, int] = OrderedDict()
-        self._agent_spend: OrderedDict[str, int] = OrderedDict()
-
-    def start(self) -> None:
-        if self._task is None:
-            self._task = asyncio.create_task(self._run(), name="verifier-judge")
+        self._verdicts_this_request: OrderedDict[ScopeKey, int] = OrderedDict()
+        self._last_turn: OrderedDict[ScopeKey, int] = OrderedDict()
+        self._spend: OrderedDict[ScopeKey, int] = OrderedDict()
+        self._agent_spend: OrderedDict[ScopeKey, int] = OrderedDict()
 
     def close(self) -> None:
+        """Cancel in-flight jobs and drop their pending marks without awaiting."""
         self._closed = True
-        task = self._task
-        self._task = None
-        if task is not None:
+        jobs = dict(self._jobs)
+        self._jobs.clear()
+        for task, job in jobs.items():
             task.cancel()
+            job.release_pending(self._mailbox)
+            if not job.deposited:
+                self._refund(job)
 
-    def note_agent_tokens(self, request_id: str, tokens: int) -> None:
-        self._bump(self._agent_spend, request_id, tokens)
+    async def aclose(self) -> None:
+        jobs = list(self._jobs)
+        self.close()
+        if jobs:
+            await asyncio.gather(*jobs, return_exceptions=True)
+
+    def note_agent_tokens(self, thread_id: str, request_id: str, tokens: int) -> None:
+        self._bump(self._agent_spend, (thread_id, request_id), tokens)
 
     def enqueue(self, evidence: EvidenceBundle) -> None:
         if self._closed:
             return
-        self.start()
         request_id = evidence.request_id
         thread_id = evidence.thread_id
-        if self._verdicts_this_request.get(request_id, 0) >= self._config.max_verdicts_per_message:
+        key = (thread_id, request_id)
+        if self._verdicts_this_request.get(key, 0) >= self._config.max_verdicts_per_message:
             logger.info(
                 "judge skip rate_limit %s",
-                kv(thread_id=thread_id, reason="max_verdicts_per_message"),
+                kv(thread_id=thread_id, request_id=request_id, reason="max_verdicts_per_message"),
             )
             return
-        last = self._last_turn.get(request_id, 0)
+        last = self._last_turn.get(key, 0)
         if last > 0 and evidence.inner_turn - last < self._config.min_turns_between_verdicts:
             logger.info(
                 "judge skip rate_limit %s",
-                kv(thread_id=thread_id, reason="min_turns_between_verdicts"),
+                kv(
+                    thread_id=thread_id,
+                    request_id=request_id,
+                    reason="min_turns_between_verdicts",
+                ),
             )
             return
-        agent = self._agent_spend.get(request_id, 0)
-        spend = self._spend.get(request_id, 0)
-        if agent > 0 and spend / agent > self._config.max_spend_ratio:
+        if self._spend_limit_reached(key, phase="enqueue"):
+            return
+        if self._queued >= self._config.queue_cap:
             logger.warning(
-                "judge skip spend_ratio %s",
-                kv(request_id=request_id, spend=spend, agent=agent),
+                "judge queue full %s",
+                kv(
+                    thread_id=thread_id,
+                    request_id=request_id,
+                    queue_depth=self._queued,
+                    in_flight=len(self._jobs),
+                ),
             )
-            return
-        try:
-            self._queue.put_nowait(evidence)
-        except asyncio.QueueFull:
-            logger.warning("judge queue full %s", kv(thread_id=thread_id))
             return
         # Count the attempt now, not when the call returns: a slow port would
         # otherwise let every in-flight turn past both rate limits.
-        self._bump(self._verdicts_this_request, request_id, 1)
-        self._store(self._last_turn, request_id, evidence.inner_turn)
+        prev_turn = self._last_turn.get(key, 0)
+        self._bump(self._verdicts_this_request, key, 1)
+        self._store(self._last_turn, key, evidence.inner_turn)
         self._mailbox.mark_pending(thread_id, request_id)
+        self._queued += 1
+        job = _JudgeJob(evidence=evidence, prev_turn=prev_turn)
+        queued_at = time.monotonic()
+        task = asyncio.create_task(self._run_one(job, queued_at), name="verifier-judge")
+        self._jobs[task] = job
+        task.add_done_callback(self._forget_job)
+        logger.info(
+            "judge enqueue %s",
+            kv(
+                thread_id=thread_id,
+                request_id=request_id,
+                queue_depth=self._queued,
+                inner_turn=evidence.inner_turn,
+            ),
+        )
 
-    async def _run(self) -> None:
-        while True:
-            evidence = await self._queue.get()
-            try:
-                await self._verify_and_deposit(evidence)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                self._refund(evidence)
-                logger.warning(
-                    "judge handle failed %s",
-                    kv(thread_id=evidence.thread_id, request_id=evidence.request_id),
-                    exc_info=True,
-                )
-            finally:
-                self._mailbox.clear_pending(evidence.thread_id, evidence.request_id)
+    def _forget_job(self, task: asyncio.Task[None]) -> None:
+        self._jobs.pop(task, None)
 
-    async def _verify_and_deposit(self, evidence: EvidenceBundle) -> None:
+    def _semaphore(self) -> asyncio.Semaphore:
+        if self._sema is None:
+            self._sema = asyncio.Semaphore(self._config.max_in_flight)
+        return self._sema
+
+    def _scope_lock(self, key: ScopeKey) -> asyncio.Lock:
+        """Serialize this scope's jobs so each one sees the spend of the ones before it.
+
+        Holders are refcounted so eviction cannot drop a lock a created-but-not-
+        yet-started job still plans to acquire.
+        """
+        lock = self._scope_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._scope_locks[key] = lock
+            self._scope_lock_holders[key] = 0
+        self._scope_lock_holders[key] = self._scope_lock_holders.get(key, 0) + 1
+        self._scope_locks.move_to_end(key)
+        while len(self._scope_locks) > _STATE_CAP:
+            victim = next(
+                (
+                    k
+                    for k in self._scope_locks
+                    if k != key and self._scope_lock_holders.get(k, 0) == 0
+                ),
+                None,
+            )
+            if victim is None:
+                break
+            self._scope_locks.pop(victim, None)
+            self._scope_lock_holders.pop(victim, None)
+        return lock
+
+    def _release_scope_lock(self, key: ScopeKey) -> None:
+        holders = self._scope_lock_holders.get(key, 0) - 1
+        if holders > 0:
+            self._scope_lock_holders[key] = holders
+            return
+        self._scope_lock_holders.pop(key, None)
+
+    def _spend_limit_reached(self, key: ScopeKey, *, phase: str) -> bool:
+        agent = self._agent_spend.get(key, 0)
+        spend = self._spend.get(key, 0)
+        if agent <= 0 or spend / agent <= self._config.max_spend_ratio:
+            return False
+        logger.warning(
+            "judge skip spend_ratio %s",
+            kv(thread_id=key[0], request_id=key[1], phase=phase, spend=spend, agent=agent),
+        )
+        return True
+
+    def _dequeue(self, job: _JudgeJob) -> None:
+        if not job.queued:
+            return
+        job.queued = False
+        self._queued = max(0, self._queued - 1)
+
+    def _bail(self, job: _JudgeJob, *, phase: str) -> bool:
+        """Refund and return True when this job must not call the provider."""
+        if not self._closed and not self._spend_limit_reached(job.key, phase=phase):
+            return False
+        self._refund(job)
+        return True
+
+    async def _run_one(self, job: _JudgeJob, queued_at: float) -> None:
+        evidence = job.evidence
+        key = job.key
+        lock: asyncio.Lock | None = None
+        try:
+            if self._bail(job, phase="before_start"):
+                return
+            lock = self._scope_lock(key)
+            async with lock:
+                if self._bail(job, phase="before_start"):
+                    return
+                async with self._semaphore():
+                    self._dequeue(job)
+                    logger.info(
+                        "judge start %s",
+                        kv(
+                            thread_id=evidence.thread_id,
+                            request_id=evidence.request_id,
+                            queue_wait_ms=int((time.monotonic() - queued_at) * 1000),
+                            queue_depth=self._queued,
+                        ),
+                    )
+                    if self._bail(job, phase="before_start"):
+                        return
+                    await self._verify_and_deposit(job)
+        except asyncio.CancelledError:
+            self._refund(job)
+            raise
+        except Exception:
+            self._refund(job)
+            logger.warning(
+                "judge handle failed %s",
+                kv(thread_id=evidence.thread_id, request_id=evidence.request_id),
+                exc_info=True,
+            )
+        finally:
+            self._dequeue(job)
+            if lock is not None:
+                self._release_scope_lock(key)
+            job.release_pending(self._mailbox)
+
+    async def _verify_and_deposit(self, job: _JudgeJob) -> None:
+        evidence = job.evidence
         ledger = self._ledger_fn()
         intent = ledger.resolved_intent(evidence.thread_id) if ledger is not None else None
         try:
             verdict = await self._port.verify(intent, evidence)
         except Exception:
-            self._refund(evidence)
+            self._refund(job)
             logger.warning(
                 "judge failed %s",
                 kv(thread_id=evidence.thread_id, request_id=evidence.request_id),
@@ -161,34 +303,49 @@ class JudgeWorker:
             )
             return
         if not isinstance(verdict, VerifierVerdict):
-            self._refund(evidence)
+            self._refund(job)
             return
+        if evidence.signal_epochs and not verdict.triggering_signal_epochs:
+            verdict = replace(verdict, triggering_signal_epochs=evidence.signal_epochs)
         self._mailbox.put(evidence.thread_id, verdict)
-        self._bump(self._spend, evidence.request_id, max(0, verdict.judge_tokens))
-        agent = self._agent_spend.get(evidence.request_id, 0)
+        job.deposited = True
+        self._bump(self._spend, job.key, max(0, verdict.judge_tokens))
+        agent = self._agent_spend.get(job.key, 0)
         logger.info(
             "judge spend %s",
             kv(
+                thread_id=evidence.thread_id,
                 request_id=evidence.request_id,
-                judge_tokens=self._spend[evidence.request_id],
+                judge_tokens=self._spend[job.key],
                 agent_tokens=agent,
             ),
         )
 
-    def _refund(self, evidence: EvidenceBundle) -> None:
+    def _refund(self, job: _JudgeJob) -> None:
         """Give back the verdict budget charged at enqueue when no verdict landed."""
-        charged = self._verdicts_this_request.get(evidence.request_id, 0)
+        if job.refunded or job.deposited:
+            return
+        job.refunded = True
+        key = job.key
+        charged = self._verdicts_this_request.get(key, 0)
         if charged > 0:
-            self._store(self._verdicts_this_request, evidence.request_id, charged - 1)
+            self._store(self._verdicts_this_request, key, charged - 1)
+        last = self._last_turn.get(key)
+        if last != job.evidence.inner_turn:
+            return
+        if job.prev_turn > 0:
+            self._store(self._last_turn, key, job.prev_turn)
+        else:
+            self._last_turn.pop(key, None)
 
     @staticmethod
-    def _store(store: OrderedDict[str, int], key: str, value: int) -> None:
+    def _store(store: OrderedDict[ScopeKey, int], key: ScopeKey, value: int) -> None:
         store[key] = value
         store.move_to_end(key)
         while len(store) > _STATE_CAP:
             store.popitem(last=False)
 
-    def _bump(self, store: OrderedDict[str, int], key: str, delta: int) -> None:
+    def _bump(self, store: OrderedDict[ScopeKey, int], key: ScopeKey, delta: int) -> None:
         self._store(store, key, store.get(key, 0) + delta)
 
 
@@ -207,6 +364,7 @@ class SignalJudge:
             confidence=confidence,
             rationale=", ".join(evidence.signals),
             triggering_signals=evidence.signals,
+            triggering_signal_epochs=evidence.signal_epochs,
             correction=correction_text(evidence.signals) if evidence.signals else None,
             judge_tokens=0,
         )
@@ -349,6 +507,7 @@ class ProviderJudge:
             confidence=parsed["confidence"],
             rationale=parsed["rationale"] or ", ".join(evidence.signals),
             triggering_signals=evidence.signals,
+            triggering_signal_epochs=evidence.signal_epochs,
             correction=correction_text(evidence.signals) if parsed["severity"] != "none" else None,
             judge_tokens=max(0, tokens),
         )

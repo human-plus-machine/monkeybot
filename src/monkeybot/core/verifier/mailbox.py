@@ -26,6 +26,31 @@ def _cap(store: OrderedDict[Any, _T]) -> None:
         store.popitem(last=False)
 
 
+def _checkpoint_turn(verdict: VerifierVerdict) -> int | None:
+    """Parse the trailing turn from ``request_id:turn``. Unknown ids are None, not 0."""
+    raw = (verdict.checkpoint_id or "").rsplit(":", 1)[-1]
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _newer_verdict(current: VerifierVerdict, incoming: VerifierVerdict) -> bool:
+    """True when ``incoming`` should replace ``current`` for the same request."""
+    incoming_turn = _checkpoint_turn(incoming)
+    current_turn = _checkpoint_turn(current)
+    if incoming_turn is None:
+        return False
+    if current_turn is None:
+        return True
+    if incoming_turn != current_turn:
+        return incoming_turn > current_turn
+    # Same turn: later arrival wins so an on_track recovery can replace a nudge.
+    return True
+
+
 @dataclass
 class ActiveNudge:
     """Request-scoped sticky correction shown until tracker signals recover."""
@@ -45,6 +70,26 @@ class _SignalEpisode:
     request_id: str
     signals: frozenset[str]
     epochs: dict[str, int]
+
+
+def _fence_signals(
+    episode: _SignalEpisode,
+    verdict: VerifierVerdict,
+    incoming: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Keep only signals still live in the episode the verdict was judged against.
+
+    A verdict carrying no epoch snapshot predates episode fencing, so it keeps
+    only the triggering signals that are still live — never recovered ones.
+    """
+    verdict_epochs = dict(verdict.triggering_signal_epochs)
+    if not verdict_epochs:
+        return ordered_signals(signal for signal in incoming if signal in episode.signals)
+    return ordered_signals(
+        signal
+        for signal in incoming
+        if signal in episode.signals and episode.epochs.get(signal) == verdict_epochs.get(signal)
+    )
 
 
 class VerdictMailbox:
@@ -74,9 +119,7 @@ class VerdictMailbox:
         """Allow deposits only for the open request. Never auto-open."""
         return bool(request_id) and self._is_open(thread_id, request_id)
 
-    def _drop_closed(
-        self, thread_id: str, request_id: str, kind: str, **extra: object
-    ) -> None:
+    def _drop_closed(self, thread_id: str, request_id: str, kind: str, **extra: object) -> None:
         logger.info(
             "verifier %s dropped closed request %s",
             kind,
@@ -89,6 +132,15 @@ class VerdictMailbox:
         self._current.move_to_end(thread_id)
         _cap(self._current)
 
+    def _is_stale(self, thread_id: str, verdict: VerifierVerdict) -> bool:
+        """True when a newer verdict for the same request already landed."""
+        current = self._last.get(thread_id)
+        return (
+            current is not None
+            and current.request_id == verdict.request_id
+            and not _newer_verdict(current, verdict)
+        )
+
     def put(self, thread_id: str, verdict: VerifierVerdict) -> bool:
         """Deposit a verdict. Requests that are not currently open are dropped."""
         if not self._accept(thread_id, verdict.request_id):
@@ -97,6 +149,18 @@ class VerdictMailbox:
                 verdict.request_id,
                 "verdict",
                 verdict_id=verdict.verdict_id,
+            )
+            return False
+        if self._is_stale(thread_id, verdict):
+            logger.info(
+                "verifier verdict dropped stale checkpoint %s",
+                kv(
+                    thread_id=thread_id,
+                    request_id=verdict.request_id,
+                    verdict_id=verdict.verdict_id,
+                    checkpoint_id=verdict.checkpoint_id,
+                    latest_checkpoint_id=self._last[thread_id].checkpoint_id,
+                ),
             )
             return False
         key = self._scope(thread_id, verdict.request_id)
@@ -115,6 +179,7 @@ class VerdictMailbox:
         return self._last.get(thread_id)
 
     def set_last(self, thread_id: str, verdict: VerifierVerdict) -> None:
+        """Record ``verdict`` as the latest for ``thread_id``. ``put`` already fenced stale."""
         self._last[thread_id] = verdict
         self._last.move_to_end(thread_id)
         _cap(self._last)
@@ -239,7 +304,7 @@ class VerdictMailbox:
         incoming = ordered_signals(verdict.triggering_signals)
         episode = self._episode(thread_id, request_id)
         if episode is not None:
-            incoming = ordered_signals(signal for signal in incoming if signal in episode.signals)
+            incoming = _fence_signals(episode, verdict, incoming)
             if not incoming:
                 return False
         epochs = dict(self.signal_epochs(thread_id, request_id, incoming))

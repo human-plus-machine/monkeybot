@@ -182,6 +182,28 @@ def test_replan_batch_keeps_latest_checkpoint() -> None:
     assert SIGNAL_INSTRUCTIONS["error_streak"] not in note
 
 
+def test_replan_survives_later_none_in_same_drain() -> None:
+    mailbox = _mailbox()
+    replan = replace(
+        _nudge("r1", "error_streak", verdict_id="v3"),
+        severity="replan",
+        checkpoint_id="r1:3",
+    )
+    recovered = replace(
+        _nudge("r1", "error_streak", verdict_id="v4"),
+        status="on_track",
+        severity="none",
+        checkpoint_id="r1:4",
+    )
+    mailbox.put("t1", replan)
+    mailbox.put("t1", recovered)
+    _stash_escalation(mailbox, "t1", "replan", replan)
+    _stash_escalation(mailbox, "t1", "none", recovered)
+    note = mailbox.take_replan("t1", "r1")
+    assert note is not None
+    assert SIGNAL_INSTRUCTIONS["error_streak"] in note
+
+
 def test_rewrite_churn_resets_counts_on_recovery() -> None:
     mailbox = _mailbox()
     tracker = ProgressTracker(

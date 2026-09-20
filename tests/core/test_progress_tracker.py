@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 
 import pytest
 
@@ -171,6 +172,46 @@ def test_second_unread_write_emits_write_without_read() -> None:
     assert len(verdicts) == 1
     assert "write_without_read" in verdicts[0].triggering_signals
     assert verdicts[0].severity == "none"
+
+
+def test_fresh_signal_evidence_includes_epochs() -> None:
+    class _RecordingJudge:
+        def __init__(self) -> None:
+            self.bundles: list = []
+
+        def enqueue(self, evidence: object) -> None:
+            self.bundles.append(evidence)
+
+        def note_agent_tokens(self, thread_id: str, request_id: str, tokens: int) -> None:
+            del thread_id, request_id, tokens
+
+    mailbox = _mailbox()
+    judge: Any = _RecordingJudge()
+    tracker = ProgressTracker(
+        mailbox,
+        ledger_fn=lambda: None,
+        config=VerifierTrackerConfig(enabled=True, min_turn_before_verdict=1),
+        judge=judge,
+    )
+    tracker._observe_tool(
+        _payload(
+            event=HookEvent.POST_TOOL,
+            tool_name="read_file",
+            tool_args={"path": "a.md"},
+            inner_turn=3,
+        )
+    )
+    tracker._observe_tool(
+        _payload(
+            event=HookEvent.POST_TOOL,
+            tool_name="write_file",
+            tool_args={"path": "b.md"},
+            inner_turn=3,
+        )
+    )
+    assert len(judge.bundles) == 1
+    epochs = dict(judge.bundles[0].signal_epochs)
+    assert epochs.get("write_without_read", 0) >= 1
 
 
 def test_min_turn_suppresses_non_ledger_signals() -> None:
@@ -699,8 +740,17 @@ def test_mailbox_caps_per_thread_and_evicts_idle_threads() -> None:
     assert ready[0].verdict_id == "5"
 
     for i in range(_THREAD_CAP + 1):
-        mailbox.open_request(f"t{i}", "r")
-        mailbox.put(f"t{i}", _verdict(i))
+        mailbox.open_request(f"t{i}", f"r{i}")
+        mailbox.put(
+            f"t{i}",
+            VerifierVerdict(
+                request_id=f"r{i}",
+                verdict_id=str(i),
+                checkpoint_id=f"r{i}:1",
+                status="drifting",
+                severity="none",
+            ),
+        )
     assert mailbox.take_ready("t0") == []
     assert len(mailbox.take_ready(f"t{_THREAD_CAP}")) == 1
 

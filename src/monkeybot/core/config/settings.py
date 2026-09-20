@@ -157,6 +157,10 @@ class VerifierJudgeConfig:
     # Ship at 0: the tail drain commits ready verdicts and never blocks. Raise
     # only after measuring how often in-flight ``done`` verdicts miss TurnComplete.
     tail_grace_s: float = 0.0
+    # Max jobs waiting to start. Running jobs use ``max_in_flight``, so a
+    # saturated semaphore does not consume this backlog budget.
+    queue_cap: int = 32
+    max_in_flight: int = 8
 
 
 @dataclass(frozen=True)
@@ -685,6 +689,18 @@ def verifier_config_from_section(section: dict[str, Any]) -> VerifierConfig:
                 "verifier.judge.tail_grace_s",
                 defaults.judge.tail_grace_s,
                 min_value=0.0,
+            ),
+            queue_cap=_verifier_int(
+                judge_raw.get("queue_cap"),
+                "verifier.judge.queue_cap",
+                defaults.judge.queue_cap,
+                min_value=1,
+            ),
+            max_in_flight=_verifier_int(
+                judge_raw.get("max_in_flight"),
+                "verifier.judge.max_in_flight",
+                defaults.judge.max_in_flight,
+                min_value=1,
             ),
         ),
         escalation=VerifierEscalationConfig(max_severity=severity),

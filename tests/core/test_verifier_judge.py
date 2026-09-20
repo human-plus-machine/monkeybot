@@ -69,6 +69,23 @@ class _CountingPort:
         )
 
 
+class _SlowPort:
+    def __init__(self, delay_s: float) -> None:
+        self.delay_s = delay_s
+        self.calls = 0
+
+    async def verify(self, intent: object, evidence: EvidenceBundle) -> VerifierVerdict:
+        del intent
+        self.calls += 1
+        await asyncio.sleep(self.delay_s)
+        return VerifierVerdict(
+            request_id=evidence.request_id,
+            verdict_id=f"v{self.calls}",
+            severity="nudge",
+            judge_tokens=0,
+        )
+
+
 @pytest.mark.asyncio
 async def test_spend_ratio_compares_judge_tokens_to_agent_tokens() -> None:
     mailbox = _mailbox()
@@ -79,7 +96,7 @@ async def test_spend_ratio_compares_judge_tokens_to_agent_tokens() -> None:
         ledger_fn=lambda: None,
         config=VerifierJudgeConfig(max_spend_ratio=0.25, max_verdicts_per_message=10),
     )
-    worker.note_agent_tokens("r1", 100)
+    worker.note_agent_tokens("t1", "r1", 100)
     worker.enqueue(_evidence("r1", 1))
     await asyncio.sleep(0.05)
     assert len(mailbox.take_ready("t1")) == 1
@@ -87,6 +104,32 @@ async def test_spend_ratio_compares_judge_tokens_to_agent_tokens() -> None:
     await asyncio.sleep(0.05)
     assert mailbox.take_ready("t1") == []
     assert port.calls == 1
+    worker.close()
+
+
+@pytest.mark.asyncio
+async def test_in_flight_jobs_recheck_spend_before_start() -> None:
+    mailbox = _mailbox()
+    port = _TokenPort(tokens=100)
+    worker = JudgeWorker(
+        mailbox,
+        port,
+        ledger_fn=lambda: None,
+        config=VerifierJudgeConfig(
+            max_spend_ratio=0.25,
+            max_verdicts_per_message=10,
+            min_turns_between_verdicts=0,
+        ),
+    )
+    worker.note_agent_tokens("t1", "r1", 100)
+
+    for turn in (1, 2, 3):
+        worker.enqueue(_evidence("r1", turn))
+    await asyncio.sleep(0.1)
+
+    assert port.calls == 1
+    assert len(mailbox.take_ready("t1", "r1")) == 1
+    assert worker._spend[("t1", "r1")] == 100
     worker.close()
 
 
@@ -137,23 +180,6 @@ async def test_handle_error_does_not_kill_worker() -> None:
     assert len(mailbox.take_ready("t1")) == 1
     assert port.calls == 1
     worker.close()
-
-
-class _SlowPort:
-    def __init__(self, delay_s: float) -> None:
-        self.delay_s = delay_s
-        self.calls = 0
-
-    async def verify(self, intent: object, evidence: EvidenceBundle) -> VerifierVerdict:
-        del intent
-        self.calls += 1
-        await asyncio.sleep(self.delay_s)
-        return VerifierVerdict(
-            request_id=evidence.request_id,
-            verdict_id=f"v{self.calls}",
-            severity="nudge",
-            judge_tokens=0,
-        )
 
 
 @pytest.mark.asyncio
@@ -216,7 +242,6 @@ async def test_failed_judge_call_refunds_the_verdict_budget() -> None:
     await asyncio.sleep(0.05)
     assert _BoomPort.calls == 1
     assert mailbox.pending("t1") is False
-    # The failed attempt was refunded, so the budget is available again.
     worker.enqueue(_evidence("r1", 2))
     await asyncio.sleep(0.05)
     assert _BoomPort.calls == 2
@@ -224,22 +249,25 @@ async def test_failed_judge_call_refunds_the_verdict_budget() -> None:
 
 
 @pytest.mark.asyncio
-async def test_close_cancels_worker_task() -> None:
+async def test_close_cancels_in_flight_jobs_and_clears_pending() -> None:
     mailbox = _mailbox()
     worker = JudgeWorker(
         mailbox,
-        _CountingPort(),
+        _SlowPort(delay_s=1.0),
         ledger_fn=lambda: None,
-        config=VerifierJudgeConfig(),
+        config=VerifierJudgeConfig(max_verdicts_per_message=10, min_turns_between_verdicts=0),
     )
-    worker.start()
-    task = worker._task
-    assert task is not None
-    worker.close()
-    assert worker._task is None
-    with pytest.raises(asyncio.CancelledError):
-        await task
     worker.enqueue(_evidence("r1", 1))
+    await asyncio.sleep(0.02)
+    jobs = list(worker._jobs)
+    assert jobs
+    worker.close()
+    assert worker._jobs == {}
+    assert mailbox.pending("t1") is False
+    for task in jobs:
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    worker.enqueue(_evidence("r1", 2))
     await asyncio.sleep(0.02)
     assert mailbox.take_ready("t1") == []
 
@@ -253,9 +281,9 @@ def test_judge_state_dicts_are_capped() -> None:
         config=VerifierJudgeConfig(),
     )
     for i in range(_STATE_CAP + 1):
-        worker.note_agent_tokens(f"r{i}", 1)
-    assert "r0" not in worker._agent_spend
-    assert f"r{_STATE_CAP}" in worker._agent_spend
+        worker.note_agent_tokens("t1", f"r{i}", 1)
+    assert ("t1", "r0") not in worker._agent_spend
+    assert ("t1", f"r{_STATE_CAP}") in worker._agent_spend
     worker.close()
 
 
@@ -485,67 +513,113 @@ async def test_provider_judge_rejects_free_form_correction() -> None:
 
 
 @pytest.mark.asyncio
-async def test_serial_worker_still_processes_one_job_at_a_time() -> None:
-    class _SlowPort:
-        inflight = 0
-        peak = 0
+async def test_failed_judge_refunds_min_turns_so_retry_is_not_blocked() -> None:
+    class _BoomThenOk:
+        calls = 0
 
         async def verify(self, intent: object, evidence: EvidenceBundle) -> VerifierVerdict:
             del intent
-            type(self).inflight += 1
-            type(self).peak = max(type(self).peak, type(self).inflight)
-            await asyncio.sleep(0.05)
-            type(self).inflight -= 1
+            type(self).calls += 1
+            if type(self).calls == 1:
+                raise RuntimeError("judge down")
             return VerifierVerdict(
                 request_id=evidence.request_id,
-                verdict_id=f"v{evidence.inner_turn}",
+                verdict_id="retry",
                 severity="nudge",
+                judge_tokens=0,
             )
 
     mailbox = _mailbox()
-    mailbox.open_request("t2", "r2")
     worker = JudgeWorker(
         mailbox,
-        _SlowPort(),
+        _BoomThenOk(),
         ledger_fn=lambda: None,
-        config=VerifierJudgeConfig(max_verdicts_per_message=10, min_turns_between_verdicts=0),
+        config=VerifierJudgeConfig(max_verdicts_per_message=2, min_turns_between_verdicts=2),
     )
-    worker.enqueue(_evidence("r1", 1, thread_id="t1"))
-    worker.enqueue(_evidence("r2", 1, thread_id="t2"))
-    await asyncio.sleep(0.2)
-    assert _SlowPort.peak == 1
-    assert [v.verdict_id for v in mailbox.take_ready("t1")] == ["v1"]
-    assert [v.verdict_id for v in mailbox.take_ready("t2")] == ["v1"]
+    worker.enqueue(_evidence("r1", 1))
+    await asyncio.sleep(0.05)
+    assert _BoomThenOk.calls == 1
+    assert mailbox.take_ready("t1") == []
+    worker.enqueue(_evidence("r1", 2))
+    await asyncio.sleep(0.05)
+    assert _BoomThenOk.calls == 2
+    assert [v.verdict_id for v in mailbox.take_ready("t1")] == ["retry"]
     worker.close()
 
-    class _SlowPort:
-        inflight = 0
-        peak = 0
 
+@pytest.mark.asyncio
+async def test_failed_refund_preserves_newer_queued_last_turn() -> None:
+    class _SlowFailThenOk:
         async def verify(self, intent: object, evidence: EvidenceBundle) -> VerifierVerdict:
             del intent
-            type(self).inflight += 1
-            type(self).peak = max(type(self).peak, type(self).inflight)
-            await asyncio.sleep(0.05)
-            type(self).inflight -= 1
+            if evidence.inner_turn == 1:
+                await asyncio.sleep(0.05)
+                raise RuntimeError("first failed")
             return VerifierVerdict(
                 request_id=evidence.request_id,
                 verdict_id=f"v{evidence.inner_turn}",
                 severity="nudge",
+                judge_tokens=0,
             )
 
     mailbox = _mailbox()
-    mailbox.open_request("t2", "r2")
     worker = JudgeWorker(
         mailbox,
-        _SlowPort(),
+        _SlowFailThenOk(),
+        ledger_fn=lambda: None,
+        config=VerifierJudgeConfig(max_verdicts_per_message=10, min_turns_between_verdicts=0),
+    )
+    worker.enqueue(_evidence("r1", 1))
+    worker.enqueue(_evidence("r1", 4))
+    await asyncio.sleep(0.2)
+    assert worker._last_turn.get(("t1", "r1")) == 4
+    assert [v.verdict_id for v in mailbox.take_ready("t1")] == ["v4"]
+    worker.close()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_threads_do_not_head_of_line_block() -> None:
+    from monkeybot.core.runtime.turn_loop import _take_ready
+
+    mailbox = _mailbox()
+    mailbox.open_request("t2", "r2")
+    port = _SlowPort(delay_s=0.2)
+    worker = JudgeWorker(
+        mailbox,
+        port,
         ledger_fn=lambda: None,
         config=VerifierJudgeConfig(max_verdicts_per_message=10, min_turns_between_verdicts=0),
     )
     worker.enqueue(_evidence("r1", 1, thread_id="t1"))
     worker.enqueue(_evidence("r2", 1, thread_id="t2"))
-    await asyncio.sleep(0.2)
-    assert _SlowPort.peak == 1
-    assert [v.verdict_id for v in mailbox.take_ready("t1")] == ["v1"]
-    assert [v.verdict_id for v in mailbox.take_ready("t2")] == ["v1"]
+    await asyncio.sleep(0.05)
+    assert port.calls == 2
+    first, second = await asyncio.gather(
+        _take_ready(mailbox, "t1", "r1", grace_s=1.0),
+        _take_ready(mailbox, "t2", "r2", grace_s=1.0),
+    )
+    assert len(first) == 1
+    assert len(second) == 1
+    worker.close()
+
+
+@pytest.mark.asyncio
+async def test_rate_limits_are_scoped_to_thread_and_request() -> None:
+    mailbox = VerdictMailbox()
+    mailbox.open_request("t1", "shared")
+    mailbox.open_request("t2", "shared")
+    port = _CountingPort()
+    worker = JudgeWorker(
+        mailbox,
+        port,
+        ledger_fn=lambda: None,
+        config=VerifierJudgeConfig(min_turns_between_verdicts=2, max_verdicts_per_message=10),
+    )
+    worker.enqueue(_evidence("shared", 5, thread_id="t1"))
+    await asyncio.sleep(0.05)
+    assert len(mailbox.take_ready("t1")) == 1
+    worker.enqueue(_evidence("shared", 1, thread_id="t2"))
+    await asyncio.sleep(0.05)
+    assert len(mailbox.take_ready("t2")) == 1
+    assert port.calls == 2
     worker.close()
