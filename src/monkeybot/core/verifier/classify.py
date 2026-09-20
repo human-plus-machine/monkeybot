@@ -126,7 +126,7 @@ class ProviderClassifier:
         self,
         provider: Provider | Callable[[], Provider | None] | None,
         *,
-        model: str,
+        model: str | Callable[[], str],
         timeout_s: float = _CLASSIFIER_TIMEOUT_S,
     ) -> None:
         self._provider = provider
@@ -139,14 +139,24 @@ class ProviderClassifier:
             return provider()
         return provider
 
+    def _current_model(self) -> str:
+        model = self._model
+        if callable(model):
+            return (model() or "").strip()
+        return (model or "").strip()
+
     async def classify(
         self,
         verbatim: str,
         open_entries: Sequence[GoalEntry],
     ) -> Classification:
         provider = self._current_provider()
-        if provider is None:
-            logger.warning("classifier skipped: no provider")
+        model = self._current_model()
+        if provider is None or not model:
+            logger.warning(
+                "classifier skipped: no provider %s",
+                kv(has_provider=provider is not None, model=model or ""),
+            )
             return fail_open_classification(open_entries)
         open_blob = _open_entries_blob(open_entries)
         messages = [
@@ -160,19 +170,19 @@ class ProviderClassifier:
         ]
         try:
             text = await asyncio.wait_for(
-                _collect_classifier_text(provider, messages, self._model),
+                _collect_classifier_text(provider, messages, model),
                 timeout=self._timeout_s,
             )
         except TimeoutError:
             logger.warning(
                 "goal_ledger classifier timed out %s",
-                kv(model=self._model, timeout_s=self._timeout_s),
+                kv(model=model, timeout_s=self._timeout_s),
             )
             return fail_open_classification(open_entries)
         except Exception:
             logger.warning(
                 "goal_ledger classifier failed %s",
-                kv(model=self._model),
+                kv(model=model),
                 exc_info=True,
             )
             return fail_open_classification(open_entries)
@@ -180,7 +190,7 @@ class ProviderClassifier:
         if parsed is None:
             logger.warning(
                 "goal_ledger classifier unparseable %s",
-                kv(model=self._model, chars=len(text)),
+                kv(model=model, chars=len(text)),
             )
             return fail_open_classification(open_entries)
         return parsed

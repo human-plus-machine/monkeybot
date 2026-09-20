@@ -99,3 +99,167 @@ def test_build_inspectors_tiers_file_present(
     tiers = [i for i in runtime.inspectors if isinstance(i, CommandTierInspector)]
     assert len(tiers) == 1
     assert runtime.run_command_allowed_commands == ["echo"]
+
+
+def test_build_verifier_wires_ledger_tracker_judge_and_inspector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config import apply_monkeybot_runtime_env, get_config_store
+    from monkeybot.core.config.runtime_env import reset_runtime_env_state_for_tests
+    from monkeybot.core.persistence.goal_ledger import InMemoryGoalLedgerStore
+    from monkeybot.core.verifier.inspector import VerifierInspector
+    from monkeybot.core.verifier.judge import ProviderJudge
+
+    class _Storage:
+        def __init__(self) -> None:
+            self._store = InMemoryGoalLedgerStore()
+
+        def goal_ledger(self) -> InMemoryGoalLedgerStore:
+            return self._store
+
+    monkeypatch.chdir(tmp_path)
+    reset_runtime_env_state_for_tests()
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    yaml_path = cfg_dir / "monkeybot.yaml"
+    yaml_path.write_text(
+        "model:\n  provider: fake\n  name: glm-5.3-flash\n"
+        "verifier:\n  enabled: true\n"
+        "  ledger:\n    enabled: true\n"
+        "  tracker:\n    enabled: true\n"
+        "  judge:\n    enabled: true\n"
+        "  escalation:\n    max_severity: nudge\n",
+        encoding="utf-8",
+    )
+    apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    runtime = GatewayRuntime()
+    try:
+        runtime.build_verifier(get_config_store().current(), storage=_Storage())
+        assert runtime.goal_ledger is not None
+        assert runtime.progress_tracker is not None
+        assert runtime.verdict_mailbox is not None
+        assert runtime.judge_worker is not None
+        assert isinstance(runtime.judge_worker._port, ProviderJudge)
+        assert any(isinstance(i, VerifierInspector) for i in runtime.inspectors)
+        assert runtime._live_judge_model(get_config_store().current()) == "glm-5.3-flash"
+    finally:
+        if runtime.judge_worker is not None:
+            runtime.judge_worker.close()
+        if runtime.goal_ledger is not None:
+            runtime.goal_ledger.close()
+        reset_runtime_env_state_for_tests()
+
+
+def test_build_verifier_parent_enabled_implies_nested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config import apply_monkeybot_runtime_env, get_config_store
+    from monkeybot.core.config.runtime_env import reset_runtime_env_state_for_tests
+    from monkeybot.core.persistence.goal_ledger import InMemoryGoalLedgerStore
+    from monkeybot.core.verifier.judge import ProviderJudge
+
+    class _Storage:
+        def __init__(self) -> None:
+            self._store = InMemoryGoalLedgerStore()
+
+        def goal_ledger(self) -> InMemoryGoalLedgerStore:
+            return self._store
+
+    monkeypatch.chdir(tmp_path)
+    reset_runtime_env_state_for_tests()
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    yaml_path = cfg_dir / "monkeybot.yaml"
+    yaml_path.write_text(
+        "model:\n  provider: fake\n  name: glm-5.3-flash\nverifier:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    runtime = GatewayRuntime()
+    try:
+        runtime.build_verifier(get_config_store().current(), storage=_Storage())
+        assert runtime.goal_ledger is not None
+        assert runtime.progress_tracker is not None
+        assert runtime.judge_worker is not None
+        assert isinstance(runtime.judge_worker._port, ProviderJudge)
+    finally:
+        if runtime.judge_worker is not None:
+            runtime.judge_worker.close()
+        if runtime.goal_ledger is not None:
+            runtime.goal_ledger.close()
+        reset_runtime_env_state_for_tests()
+
+
+def _verifier_yaml(extra: str = "") -> str:
+    return (
+        "model:\n  provider: fake\n  name: glm-5.3-flash\n"
+        "verifier:\n  enabled: true\n"
+        "  ledger:\n    enabled: true\n"
+        "  tracker:\n    enabled: true\n"
+        "  judge:\n    enabled: true\n"
+        f"{extra}"
+        "  escalation:\n    max_severity: nudge\n"
+    )
+
+
+def _ledger_storage() -> object:
+    from monkeybot.core.persistence.goal_ledger import InMemoryGoalLedgerStore
+
+    class _Storage:
+        def __init__(self) -> None:
+            self._store = InMemoryGoalLedgerStore()
+
+        def goal_ledger(self) -> InMemoryGoalLedgerStore:
+            return self._store
+
+    return _Storage()
+
+
+def test_session_binding_overrides_pinned_model_but_yaml_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    from monkeybot.core.config import apply_monkeybot_runtime_env, get_config_store
+    from monkeybot.core.config.runtime_env import reset_runtime_env_state_for_tests
+    from monkeybot.core.verifier.binding import bind_verifier_session, reset_verifier_session
+
+    monkeypatch.chdir(tmp_path)
+    reset_runtime_env_state_for_tests()
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir()
+    yaml_path = cfg_dir / "monkeybot.yaml"
+    yaml_path.write_text(
+        _verifier_yaml("    model: explicit-judge\n"),
+        encoding="utf-8",
+    )
+    apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    runtime = GatewayRuntime()
+    session_provider = SimpleNamespace(name="session")
+    try:
+        runtime.build_verifier(get_config_store().current(), storage=_ledger_storage())  # type: ignore[arg-type]
+        runtime.provider = SimpleNamespace(name="gateway")
+        cfg = get_config_store().current()
+        token = bind_verifier_session(session_provider, "session-model")
+        try:
+            assert runtime._live_judge_model(cfg) == "explicit-judge"
+            assert runtime.judge_worker is not None
+            assert runtime.judge_worker._port._current_provider() is session_provider
+        finally:
+            reset_verifier_session(token)
+        yaml_path.write_text(_verifier_yaml(), encoding="utf-8")
+        apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+        cfg = get_config_store().current()
+        token = bind_verifier_session(session_provider, "session-model")
+        try:
+            assert runtime._live_judge_model(cfg) == "session-model"
+            assert runtime._live_ledger_model(cfg) == "session-model"
+        finally:
+            reset_verifier_session(token)
+        assert runtime._live_judge_model(cfg) == "glm-5.3-flash"
+    finally:
+        if runtime.judge_worker is not None:
+            runtime.judge_worker.close()
+        if runtime.goal_ledger is not None:
+            runtime.goal_ledger.close()
+        reset_runtime_env_state_for_tests()

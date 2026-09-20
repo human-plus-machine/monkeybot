@@ -29,7 +29,6 @@ from monkeybot.core.config.settings import (
     ConfigError,
     SubagentConfig,
     auto_schema_enabled_from_config,
-    effective_verifier_model,
     get_provider_config,
     get_subagent_registry,
     normalize_model_provider,
@@ -93,9 +92,13 @@ from monkeybot.core.tools.path_grant_inspector import PathGrantInspector
 from monkeybot.core.tools.permission import try_load_permission_inspector
 from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.core.verifier.actuator import NudgeActuator
+from monkeybot.core.verifier.binding import (
+    current_verifier_binding,
+    resolve_session_verifier_model,
+)
 from monkeybot.core.verifier.classify import ProviderClassifier
 from monkeybot.core.verifier.inspector import VerifierInspector
-from monkeybot.core.verifier.judge import JudgeWorker, SignalJudge
+from monkeybot.core.verifier.judge import JudgeWorker, ProviderJudge
 from monkeybot.core.verifier.ledger import GoalLedger
 from monkeybot.core.verifier.mailbox import VerdictMailbox
 from monkeybot.core.verifier.tracker import ProgressTracker
@@ -324,10 +327,9 @@ class GatewayRuntime:
                 if store is None:
                     logger.warning("goal ledger skipped: backend has no durable ledger")
                 else:
-                    ledger_model = effective_verifier_model(cfg, cfg.verifier.ledger.model)
                     classifier = ProviderClassifier(
-                        lambda: self.provider,
-                        model=ledger_model,
+                        lambda: current_verifier_binding().provider or self.provider,
+                        model=lambda: self._live_ledger_model(cfg),
                     )
                     self.goal_ledger = GoalLedger(
                         store,
@@ -336,7 +338,7 @@ class GatewayRuntime:
                     )
                     logger.info(
                         "goal ledger enabled %s",
-                        kv(model=ledger_model or "(inherit)"),
+                        kv(model=self._live_ledger_model(cfg) or "(inherit)"),
                     )
         if cfg.verifier.tracker.enabled:
             self.verdict_mailbox = VerdictMailbox()
@@ -344,16 +346,17 @@ class GatewayRuntime:
             if cfg.verifier.judge.enabled:
                 judge = JudgeWorker(
                     self.verdict_mailbox,
-                    SignalJudge(),
+                    ProviderJudge(
+                        lambda: current_verifier_binding().provider or self.provider,
+                        model=lambda: self._live_judge_model(cfg),
+                    ),
                     ledger_fn=lambda: self.goal_ledger,
                     config=cfg.verifier.judge,
                 )
                 self.judge_worker = judge
                 logger.info(
                     "verifier judge enabled %s",
-                    kv(
-                        model=effective_verifier_model(cfg, cfg.verifier.judge.model) or "(inherit)"
-                    ),
+                    kv(model=self._live_judge_model(cfg) or "(inherit)"),
                 )
             self.progress_tracker = ProgressTracker(
                 self.verdict_mailbox,
@@ -364,6 +367,16 @@ class GatewayRuntime:
             self.nudge_actuator = NudgeActuator(self.verdict_mailbox)
             logger.info("progress tracker enabled")
         self._attach_verifier_inspector()
+
+    @staticmethod
+    def _live_ledger_model(fallback: RuntimeConfig) -> str:
+        current = get_config_store().current_or_none() or fallback
+        return resolve_session_verifier_model(current, current.verifier.ledger.model)
+
+    @staticmethod
+    def _live_judge_model(fallback: RuntimeConfig) -> str:
+        current = get_config_store().current_or_none() or fallback
+        return resolve_session_verifier_model(current, current.verifier.judge.model)
 
     def _attach_verifier_inspector(self) -> None:
         """Keep ``VerifierInspector`` in the chain iff a mailbox exists."""
