@@ -35,6 +35,7 @@ class _FakeGatewayRuntime:
         self.computer_tools = ["new-tool"]
         self.computer_approvals_persist = "new-persist"
         self.grants_persist = "new-grants-persist"
+        self.verdict_mailbox = "new-mailbox"
 
 
 def test_sync_live_slices_updates_reloadable_fields_after_freeze() -> None:
@@ -51,6 +52,7 @@ def test_sync_live_slices_updates_reloadable_fields_after_freeze() -> None:
     assert deps.computer_tools == ["new-tool"]
     assert deps.computer_approvals_persist == "new-persist"
     assert deps.grants_persist == "new-grants-persist"
+    assert deps.verdict_mailbox == "new-mailbox"
     # Still frozen for every other field.
     with pytest.raises(RuntimeError, match="frozen"):
         deps.storage = None

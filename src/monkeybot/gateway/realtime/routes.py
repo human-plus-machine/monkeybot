@@ -205,6 +205,7 @@ async def _build_realtime_context(
             grants_persist=live.grants_persist,
             cancelled=cancelled,
             config=cfg,
+            verdict_mailbox=live.verdict_mailbox,
         )
     finally:
         end_in_flight_turn()
@@ -835,6 +836,7 @@ def create_realtime_router(
         )
 
         state: RealtimeConnectionState | None = None
+        ctx: TurnContext | None = None
         close_reason = "connection_closed"
         try:
             provider = deps.realtime_provider
@@ -856,6 +858,8 @@ def create_realtime_router(
                 todo_store=todo_store,
                 cancelled=cancelled,
             )
+            if ctx.verdict_mailbox is not None:
+                ctx.verdict_mailbox.open_request(session_id, request_id)
             session_config = _make_realtime_session_config(ctx, manager.config)
             try:
                 realtime_session = await provider.connect(config=session_config)
@@ -979,6 +983,8 @@ def create_realtime_router(
                 await _safe_client_notify(ws, _send_frame(ws, ServerErrorFrame(error=str(exc))))
                 await _safe_client_notify(ws, ws.close(code=1011, reason="Internal error"))
         finally:
+            if ctx is not None and ctx.verdict_mailbox is not None:
+                ctx.verdict_mailbox.clear_request(session_id, request_id)
             if state is not None:
                 await _close_session(state, manager, reason=close_reason)
             else:

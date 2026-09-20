@@ -44,6 +44,7 @@ async def _combined_lifespan(app: FastAPI) -> AsyncIterator[None]:
     deps.inspectors = list(sse_runtime.inspectors)
     deps.memory = sse_runtime.memory
     deps.hook_manager = sse_runtime.hook_manager
+    deps.verdict_mailbox = sse_runtime.verdict_mailbox
     deps.web_search_tool = sse_runtime.web_search_tool
     deps.run_command_allowed_commands = sse_runtime.run_command_allowed_commands
     deps.run_command_allowed_path_prefixes = sse_runtime.run_command_allowed_path_prefixes

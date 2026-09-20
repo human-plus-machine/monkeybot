@@ -15,6 +15,12 @@ from monkeybot.core.verifier.mailbox import VerdictMailbox
 from tests.core.test_loop import _ctx as loop_ctx
 
 
+def _mailbox(thread_id: str = "t1", request_id: str = "r1") -> VerdictMailbox:
+    mailbox = VerdictMailbox()
+    mailbox.open_request(thread_id, request_id)
+    return mailbox
+
+
 def _block(request_id: str = "r1") -> VerifierVerdict:
     return VerifierVerdict(
         request_id=request_id,
@@ -37,7 +43,7 @@ def _cfg() -> object:
 
 @pytest.mark.asyncio
 async def test_block_expires_when_request_id_changes() -> None:
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox("t1", "old")
     mailbox.put("t1", _block("old"))
     inspector = VerifierInspector(mailbox)
     ctx = replace(
@@ -56,7 +62,7 @@ async def test_block_expires_when_request_id_changes() -> None:
 
 @pytest.mark.asyncio
 async def test_block_without_request_id_is_treated_as_expired() -> None:
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     mailbox.put("t1", replace(_block(), request_id=""))
     inspector = VerifierInspector(mailbox)
     ctx = replace(
@@ -74,7 +80,7 @@ async def test_block_without_request_id_is_treated_as_expired() -> None:
 
 @pytest.mark.asyncio
 async def test_block_denies_parallel_safe_mutating_tool() -> None:
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     mailbox.put("t1", _block("r1"))
     inspector = VerifierInspector(mailbox)
     ctx = replace(
@@ -92,7 +98,7 @@ async def test_block_denies_parallel_safe_mutating_tool() -> None:
 
 @pytest.mark.asyncio
 async def test_block_allows_explicit_read_only_tool() -> None:
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     mailbox.put("t1", _block("r1"))
     inspector = VerifierInspector(mailbox)
     ctx = replace(

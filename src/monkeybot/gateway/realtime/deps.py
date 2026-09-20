@@ -22,6 +22,7 @@ from monkeybot.core.mcp.ports_mcp import MCPClientPort
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import StorageBackend
 from monkeybot.core.tools.inspector import ToolInspector
+from monkeybot.core.verifier.mailbox import VerdictMailbox
 from monkeybot.providers.gemini_live import GeminiLiveProvider
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class LivePolicySlices(Protocol):
     computer_tools: list[Any]
     computer_approvals_persist: Callable[[str, str], bool] | None
     grants_persist: Callable[[str, str], bool] | None
+    verdict_mailbox: VerdictMailbox | None
 
 
 @dataclass
@@ -68,6 +70,7 @@ class RealtimeDependencies:
     computer_tools: list[Any] = field(default_factory=list)
     computer_approvals_persist: Callable[[str, str], bool] | None = None
     grants_persist: Callable[[str, str], bool] | None = None
+    verdict_mailbox: VerdictMailbox | None = None
     _frozen: bool = field(default=False, repr=False)
 
     def freeze(self) -> None:
