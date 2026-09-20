@@ -54,6 +54,7 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.core.verifier.intervention import correction_text, replan_text
 from monkeybot.core.verifier.mailbox import VerdictMailbox
 from monkeybot.core.verifier.severity import cap_severity
 from monkeybot.providers._utils import note_anthropic_token_estimate_observation
@@ -103,6 +104,7 @@ from .loop_messages import (
     _load_agent_chat_history,
     _messages_for_provider,
     _provider_messages_prompt_summary,
+    _snapshot_system_message,
     _system_message_from_text,
     _system_prompt_snapshot_text,
     _user_text_from_content,
@@ -319,6 +321,13 @@ async def _drain_verdicts(
                 ),
             )
             verdict = dataclasses.replace(verdict, severity=capped)
+        trusted = (
+            None
+            if capped in ("none", "") or verdict.status == "on_track"
+            else correction_text(verdict.triggering_signals)
+        )
+        if trusted != verdict.correction:
+            verdict = dataclasses.replace(verdict, correction=trusted)
         if history is not None:
             try:
                 await persist_message(
@@ -351,19 +360,52 @@ async def _drain_verdicts(
 def _stash_escalation(
     mailbox: VerdictMailbox, thread_id: str, capped: str, verdict: VerifierVerdict
 ) -> None:
-    """Queue one-shot nudge/replan for the next inner turn of the verdict's own
-    request. Request-scoped like ``block``: a note whose request has already
-    finished is dropped rather than applied to the next user message. Fail-open.
+    """Arm a sticky nudge or one-shot replan for this verdict's own request.
+
+    Injected text is always a trusted signal template, never model/rationale
+    copy. Nudges stay active while tracker signals still overlap. Fail-open.
+
+    Sticky nudges from one drain are unioned by ``activate_nudge``; skipping
+    older nudge verdicts would drop overlapping signals from the same batch.
+    One-shot replan/steer still last-wins against ``mailbox.last``, including
+    a newer deposit that arrives while an earlier verdict is being persisted.
     """
-    text = verdict.correction or f"[Verifier] {verdict.rationale}"
+    if capped in ("none", "") or verdict.status == "on_track":
+        return
+    if capped in ("replan", "steer"):
+        latest = mailbox.last(thread_id)
+        if (
+            latest is not None
+            and latest.request_id == verdict.request_id
+            and latest.verdict_id != verdict.verdict_id
+        ):
+            logger.info(
+                "verdict escalation skipped stale checkpoint %s",
+                kv(
+                    thread_id=thread_id,
+                    request_id=verdict.request_id,
+                    verdict_id=verdict.verdict_id,
+                    latest_verdict_id=latest.verdict_id,
+                ),
+            )
+            return
     try:
         if capped == "nudge":
-            mailbox.put_nudge(thread_id, verdict.request_id, text)
+            armed = mailbox.activate_nudge(thread_id, verdict.request_id, verdict)
+            logger.info(
+                "verifier nudge stash %s",
+                kv(
+                    thread_id=thread_id,
+                    request_id=verdict.request_id,
+                    verdict_id=verdict.verdict_id,
+                    armed=armed,
+                ),
+            )
         elif capped in ("replan", "steer"):
             mailbox.put_replan(
                 thread_id,
                 verdict.request_id,
-                f"{text}\nDo not call tools this turn. Restate the plan.",
+                replan_text(verdict.triggering_signals),
             )
     except Exception:
         logger.warning("verdict escalation stash failed %s", kv(thread_id=thread_id), exc_info=True)
@@ -861,7 +903,10 @@ async def _apply_pressure_and_before_provider(
     yield SystemPromptSnapshot(
         request_id=state.ctx.request_id,
         inner_turn=state.turn_index,
-        text=_system_prompt_snapshot_text(system_msg, admit.mid_conversation_update),
+        text=_system_prompt_snapshot_text(
+            _snapshot_system_message(state.provider_messages, system_msg),
+            admit.mid_conversation_update,
+        ),
     )
 
 

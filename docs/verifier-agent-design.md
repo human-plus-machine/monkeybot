@@ -70,8 +70,9 @@ A new session should read this section, then Part 8. Phases 0–6 are in the tre
 - `NudgeActuator` on `PRE_TOOL`; drain caps severity and stashes one nudge.
 - `tail_grace_s` on the turn-tail drain only, and only while the judge has a call in flight
   (`mailbox.pending`) — an idle turn never pays the grace.
-- Nudge/replan notes are request-scoped (`put_nudge`/`take_nudge` take a `request_id`): a note
-  whose request has already finished is dropped, not applied to the next user message.
+- Sticky nudges (`activate_nudge`/`peek_nudge`) and replan notes (`put_replan`/`take_replan`)
+  are request-scoped: a note whose request has already finished is dropped, not applied to
+  the next user message.
 - Judge rate limits are charged at `enqueue` and refunded when no verdict lands, so a slow port
   cannot slip past `max_verdicts_per_message` while a call is in flight.
 - Tests: `tests/core/test_progress_tracker.py` (`test_nudge_reaches_next_system_message_once`), `tests/evals/test_verifier_port.py`.

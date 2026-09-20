@@ -63,13 +63,17 @@ def test_clear_request_drops_last_pending_and_notes() -> None:
     mailbox.open_request("t1", "r1")
     mailbox.mark_pending("t1", "r1")
     mailbox.put("t1", _verdict("r1"))
-    mailbox.put_nudge("t1", "r1", "nudge")
+    mailbox.activate_nudge(
+        "t1",
+        "r1",
+        replace(_verdict("r1"), severity="nudge", triggering_signals=("error_streak",)),
+    )
     mailbox.put_replan("t1", "r1", "replan")
     mailbox.clear_request("t1", "r1")
     assert mailbox.last("t1") is None
     assert mailbox.pending("t1", "r1") is False
     assert mailbox.take_ready("t1", "r1") == []
-    assert mailbox.take_nudge("t1", "r1") is None
+    assert mailbox.peek_nudge("t1", "r1") is None
     assert mailbox.take_replan("t1", "r1") is None
 
 
@@ -78,13 +82,17 @@ def test_sequential_live_connections_do_not_leak_state() -> None:
     mailbox.open_request("sess", "rt-1")
     mailbox.mark_pending("sess", "rt-1")
     mailbox.put("sess", _verdict("rt-1", "first"))
-    mailbox.put_nudge("sess", "rt-1", "first-nudge")
+    mailbox.activate_nudge(
+        "sess",
+        "rt-1",
+        replace(_verdict("rt-1", "first"), severity="nudge", triggering_signals=("error_streak",)),
+    )
     mailbox.clear_request("sess", "rt-1")
 
     assert mailbox.last("sess") is None
     assert mailbox.pending("sess") is False
     assert mailbox.take_ready("sess", "rt-1") == []
-    assert mailbox.take_nudge("sess", "rt-2") is None
+    assert mailbox.peek_nudge("sess", "rt-2") is None
 
     mailbox.open_request("sess", "rt-2")
     assert mailbox.put("sess", _verdict("rt-1", "late")) is False

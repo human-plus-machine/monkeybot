@@ -445,10 +445,11 @@ async def test_nudge_reaches_next_system_message_once() -> None:
         events.append(event)
     assert any(isinstance(e, VerifierVerdict) for e in events)
     assert len(prov.stream_messages) >= 2
-    second = " ".join(
-        b.text for msg in prov.stream_messages[1] for b in msg.content if isinstance(b, Text)
-    )
-    assert "leave the migrations alone" in second
+    for msgs in prov.stream_messages:
+        joined = " ".join(b.text for msg in msgs for b in msg.content if isinstance(b, Text))
+        assert "Stay inside the user's stated constraints" in joined
+        assert "## Verifier" in joined
+        assert "leave the migrations alone" not in joined
 
 
 @pytest.mark.asyncio
@@ -506,8 +507,9 @@ async def test_replan_empties_tools_for_exactly_one_turn() -> None:
     first = " ".join(
         b.text for msg in prov.stream_messages[0] for b in msg.content if isinstance(b, Text)
     )
-    assert "leave the migrations alone" in first
+    assert "Stay inside the user's stated constraints" in first
     assert "Do not call tools this turn" in first
+    assert "leave the migrations alone" not in first
 
 
 @pytest.mark.asyncio
@@ -707,16 +709,13 @@ def test_mailbox_nudge_overwrites_and_last_caps_after_drain() -> None:
     from monkeybot.core.verifier.mailbox import _THREAD_CAP
 
     mailbox = _mailbox()
-    mailbox.put_nudge("t1", "r1", "first")
-    mailbox.put_nudge("t1", "r1", "second")
-    assert mailbox.take_nudge("t1", "r1") == "second"
-    assert mailbox.take_nudge("t1", "r1") is None
+    mailbox.put_replan("t1", "r1", "first")
+    mailbox.put_replan("t1", "r1", "second")
+    assert mailbox.take_replan("t1", "r1") == "second"
+    assert mailbox.take_replan("t1", "r1") is None
 
     # A note is scoped to the request that produced it: a later, unrelated
     # request must not pick up a leftover from a finished one.
-    mailbox.put_nudge("t1", "r1", "stale")
-    assert mailbox.take_nudge("t1", "r2") is None
-    assert mailbox.take_nudge("t1", "r1") is None
     mailbox.put_replan("t1", "r1", "stale")
     assert mailbox.take_replan("t1", "r2") is None
 
