@@ -688,3 +688,72 @@ async def test_provider_classifier_times_out() -> None:
     result = await classifier.classify("hello", [])
     assert result.intent == Intent.NEW_GOAL
     assert result.constraints == ()
+
+
+@pytest.mark.asyncio
+async def test_wait_idle_includes_cache_refresh() -> None:
+    store = InMemoryGoalLedgerStore()
+    classifier = ScriptedClassifier(
+        [Classification(intent=Intent.NEW_GOAL, relates_to=None, constraints=())]
+    )
+    ledger = GoalLedger(store, classifier)
+    original = ledger._refresh_view
+    started = asyncio.Event()
+    release = asyncio.Event()
+    refresh_done = asyncio.Event()
+
+    async def delayed_refresh(thread_id: str) -> None:
+        started.set()
+        await release.wait()
+        await original(thread_id)
+        refresh_done.set()
+
+    ledger._refresh_view = delayed_refresh  # type: ignore[method-assign]
+    try:
+        ledger.admit(
+            "t1",
+            "keep going",
+            provenance=Provenance.HUMAN,
+            channel=Channel.MESSAGE,
+        )
+        await started.wait()
+        idle = asyncio.create_task(ledger.wait_idle("t1"))
+        await asyncio.sleep(0.02)
+        assert idle.done() is False
+        assert refresh_done.is_set() is False
+        release.set()
+        await idle
+        assert refresh_done.is_set()
+        view = ledger.resolved_intent("t1")
+        assert view is not None
+        assert view.active_goal is not None
+        assert view.active_goal.verbatim == "keep going"
+    finally:
+        ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_hydrate_from_copies_resolved_cache() -> None:
+    store = InMemoryGoalLedgerStore()
+    classifier = ScriptedClassifier(
+        [Classification(intent=Intent.NEW_GOAL, relates_to=None, constraints=())]
+    )
+    old = GoalLedger(store, classifier)
+    old.admit(
+        "t1",
+        "standing goal",
+        provenance=Provenance.HUMAN,
+        channel=Channel.MESSAGE,
+    )
+    await old.wait_idle("t1")
+    replacement = GoalLedger(store, classifier)
+    try:
+        assert replacement.resolved_intent("t1") is None
+        replacement.hydrate_from(old)
+        view = replacement.resolved_intent("t1")
+        assert view is not None
+        assert view.active_goal is not None
+        assert view.active_goal.verbatim == "standing goal"
+    finally:
+        old.close()
+        replacement.close()
