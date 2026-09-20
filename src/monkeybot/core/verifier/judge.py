@@ -35,6 +35,8 @@ from monkeybot.core.verifier.port import EvidenceBundle, VerifierPort
 logger = logging.getLogger(__name__)
 
 _STATE_CAP = 256
+_IDLE_SLOT_S = 16.0
+_IDLE_CEILING_S = 64.0
 _JUDGE_TIMEOUT_S = 15.0
 _RATIONALE_MAX = 480
 _JUDGE_STATUSES = frozenset({"on_track", "drifting", "stuck"})
@@ -107,6 +109,8 @@ class JudgeWorker:
         self._closed = True
         jobs = dict(self._jobs)
         self._jobs.clear()
+        if jobs:
+            logger.info("judge close cancelling %s", kv(jobs=len(jobs)))
         for task, job in jobs.items():
             task.cancel()
             job.release_pending(self._mailbox)
@@ -118,6 +122,26 @@ class JudgeWorker:
         self.close()
         if jobs:
             await asyncio.gather(*jobs, return_exceptions=True)
+
+    async def wait_idle(self) -> int:
+        """Wait for in-flight jobs to finish so a reload can deposit their verdicts.
+
+        Jobs run concurrently up to ``max_in_flight``, so the deadline is waves
+        of one judge slot, capped so a wedged port cannot hold the reload lock.
+        Returns the number of jobs observed at the start of the wait.
+        """
+        jobs = [task for task in self._jobs if not task.done()]
+        if not jobs:
+            return 0
+        inflight = max(1, self._config.max_in_flight)
+        waves = max(1, (len(jobs) + inflight - 1) // inflight)
+        _done, pending = await asyncio.wait(
+            jobs,
+            timeout=min(_IDLE_CEILING_S, waves * _IDLE_SLOT_S),
+        )
+        if pending:
+            raise TimeoutError
+        return len(jobs)
 
     def note_agent_tokens(self, thread_id: str, request_id: str, tokens: int) -> None:
         self._bump(self._agent_spend, (thread_id, request_id), tokens)

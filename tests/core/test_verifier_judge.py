@@ -272,6 +272,24 @@ async def test_close_cancels_in_flight_jobs_and_clears_pending() -> None:
     assert mailbox.take_ready("t1") == []
 
 
+@pytest.mark.asyncio
+async def test_wait_idle_finishes_in_flight_jobs() -> None:
+    mailbox = _mailbox()
+    worker = JudgeWorker(
+        mailbox,
+        _SlowPort(delay_s=0.05),
+        ledger_fn=lambda: None,
+        config=VerifierJudgeConfig(max_verdicts_per_message=10, min_turns_between_verdicts=0),
+    )
+    worker.enqueue(_evidence("r1", 1))
+    drained = await worker.wait_idle()
+    assert drained == 1
+    assert mailbox.take_ready("t1")[0].verdict_id == "v1"
+    worker.close()
+    worker.enqueue(_evidence("r1", 2))
+    assert mailbox.take_ready("t1") == []
+
+
 def test_judge_state_dicts_are_capped() -> None:
     mailbox = _mailbox()
     worker = JudgeWorker(

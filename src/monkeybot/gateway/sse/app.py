@@ -298,80 +298,117 @@ class GatewayRuntime:
                 ", ".join(sorted(self.subagent_registry)),
             )
 
+    def close_verifier(self) -> None:
+        """Stop ledger/judge workers owned by this runtime. Does not clear slice pointers."""
+        old = self.goal_ledger
+        if old is not None:
+            old.close()
+        old_judge = self.judge_worker
+        if old_judge is not None:
+            old_judge.close()
+
     def build_verifier(
         self,
         cfg: RuntimeConfig | None,
         *,
         storage: StorageBackend | None,
     ) -> None:
-        """Construct ledger and observe-only tracker from ``verifier:`` flags."""
-        old = self.goal_ledger
-        if old is not None:
-            old.close()
+        """Construct ledger/tracker/judge from ``verifier:`` flags. Does not close live workers.
+
+        Staging copies must call this without ``close_verifier`` so rollback cannot
+        leave the live runtime pointing at closed objects that ``copy.copy`` still shares.
+        Startup and other in-place rebuilds of the live runtime must
+        ``close_verifier`` first so a lifespan re-entry cannot leak the previous
+        generation. Live reload closes the outgoing generation with
+        ``_close_replaced_after_commit`` after the staging swap.
+        """
         self.goal_ledger = None
         self.progress_tracker = None
         self.verdict_mailbox = None
-        old_judge = self.judge_worker
-        if old_judge is not None:
-            old_judge.close()
         self.judge_worker = None
         self.nudge_actuator = None
         if cfg is None or not cfg.verifier.enabled:
             self._attach_verifier_inspector()
             return
-        if cfg.verifier.ledger.enabled:
-            if storage is None:
-                logger.warning("goal ledger skipped: no storage backend")
-            else:
-                store = storage.goal_ledger()
-                if store is None:
-                    logger.warning("goal ledger skipped: backend has no durable ledger")
-                else:
-                    classifier = ProviderClassifier(
-                        lambda: current_verifier_binding().provider or self.provider,
-                        model=lambda: self._live_ledger_model(cfg),
-                    )
-                    self.goal_ledger = GoalLedger(
-                        store,
-                        classifier,
-                        max_entries_per_thread=cfg.verifier.ledger.max_entries_per_thread,
-                    )
-                    logger.info(
-                        "goal ledger enabled %s",
-                        kv(model=self._live_ledger_model(cfg) or "(inherit)"),
-                    )
-        if cfg.verifier.tracker.enabled:
-            self.verdict_mailbox = VerdictMailbox()
-            judge = None
-            if cfg.verifier.judge.enabled:
-                judge = JudgeWorker(
-                    self.verdict_mailbox,
-                    ProviderJudge(
-                        lambda: self.provider,
-                        model=lambda session="": self._live_judge_model(cfg, session),
-                    ),
-                    ledger_fn=lambda: self.goal_ledger,
-                    config=cfg.verifier.judge,
-                )
-                self.judge_worker = judge
-                logger.info(
-                    "verifier judge enabled %s",
-                    kv(
-                        port="ProviderJudge",
-                        model=self._live_judge_model(cfg) or "(inherit)",
-                    ),
-                )
-            self.progress_tracker = ProgressTracker(
-                self.verdict_mailbox,
-                ledger_fn=lambda: self.goal_ledger,
-                config=cfg.verifier.tracker,
-                judge=judge,
-            )
-            self.nudge_actuator = NudgeActuator(self.verdict_mailbox)
-            logger.info("progress tracker enabled")
-        elif cfg.verifier.judge.enabled:
-            logger.info("verifier judge skipped: tracker is disabled")
+        self._build_goal_ledger(cfg, storage)
+        self._build_progress_tracker(cfg)
         self._attach_verifier_inspector()
+
+    def _build_goal_ledger(self, cfg: RuntimeConfig, storage: StorageBackend | None) -> None:
+        if not cfg.verifier.ledger.enabled:
+            return
+        if storage is None:
+            logger.warning("goal ledger skipped: no storage backend")
+            return
+        store = storage.goal_ledger()
+        if store is None:
+            logger.warning("goal ledger skipped: backend has no durable ledger")
+            return
+        classifier = ProviderClassifier(
+            lambda: current_verifier_binding().provider or self.provider,
+            model=lambda: self._live_ledger_model(cfg),
+        )
+        self.goal_ledger = GoalLedger(
+            store,
+            classifier,
+            max_entries_per_thread=cfg.verifier.ledger.max_entries_per_thread,
+        )
+        logger.info(
+            "goal ledger enabled %s",
+            kv(model=self._live_ledger_model(cfg) or "(inherit)"),
+        )
+
+    def _build_progress_tracker(self, cfg: RuntimeConfig) -> None:
+        if not cfg.verifier.tracker.enabled:
+            if cfg.verifier.judge.enabled:
+                logger.info("verifier judge skipped: tracker is disabled")
+            return
+        self.verdict_mailbox = VerdictMailbox()
+        judge = None
+        if cfg.verifier.judge.enabled:
+            judge = JudgeWorker(
+                self.verdict_mailbox,
+                ProviderJudge(
+                    lambda: self.provider,
+                    model=lambda session="": self._live_judge_model(cfg, session),
+                ),
+                ledger_fn=lambda: self.goal_ledger,
+                config=cfg.verifier.judge,
+            )
+            self.judge_worker = judge
+            logger.info(
+                "verifier judge enabled %s",
+                kv(
+                    port="ProviderJudge",
+                    model=self._live_judge_model(cfg) or "(inherit)",
+                ),
+            )
+        self.progress_tracker = ProgressTracker(
+            self.verdict_mailbox,
+            ledger_fn=lambda: self.goal_ledger,
+            config=cfg.verifier.tracker,
+            judge=judge,
+        )
+        self.nudge_actuator = NudgeActuator(self.verdict_mailbox)
+        logger.info("progress tracker enabled")
+
+    def _release_replaced_verifier(self, live: GatewayRuntime) -> None:
+        """Close newly staged verifier resources that are not shared with ``live``."""
+        if self.goal_ledger is not None and self.goal_ledger is not live.goal_ledger:
+            self.goal_ledger.close()
+            self.goal_ledger = None
+        if self.judge_worker is not None and self.judge_worker is not live.judge_worker:
+            self.judge_worker.close()
+            self.judge_worker = None
+
+    def _close_replaced_after_commit(
+        self, previous_ledger: GoalLedger | None, previous_judge: JudgeWorker | None
+    ) -> None:
+        """After staging is installed, close the previous live ledger/judge if replaced."""
+        if previous_ledger is not None and previous_ledger is not self.goal_ledger:
+            previous_ledger.close()
+        if previous_judge is not None and previous_judge is not self.judge_worker:
+            previous_judge.close()
 
     @staticmethod
     def _live_ledger_model(fallback: RuntimeConfig) -> str:
@@ -552,11 +589,13 @@ class GatewayRuntime:
         applied: list[str] = []
         mcp_result = MCPCatalogApplyResult()
         memory_prev = _app_memory_state(fastapi_app)
+        prev_ledger = self.goal_ledger
+        prev_judge = self.judge_worker
+        prev_mailbox = self.verdict_mailbox
         if ConfigTier.REBUILD in diff.tiers:
             applied, error = staging._rebuild_live_slices(cfg, diff, layout, fastapi_app)
             if error:
-                _restore_app_memory(fastapi_app, memory_prev)
-                return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
+                return self._abort_staged(staging, fastapi_app, memory_prev, mcp_result, error)
         if self.needs_mcp_apply(cfg, diff) and self.mcp is not None:
             mcp_path = self._mcp_config_path(cfg, layout)
             prev_overlay = self.mcp.env_overlay
@@ -578,8 +617,7 @@ class GatewayRuntime:
                     "MCP reload idle wait timed out %s",
                     kv(path=str(mcp_path), revision=cfg.revision),
                 )
-                _restore_app_memory(fastapi_app, memory_prev)
-                return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
+                return self._abort_staged(staging, fastapi_app, memory_prev, mcp_result, error)
             except Exception as exc:
                 error = f"MCP catalog diff failed: {exc}"
                 logger.exception(
@@ -590,13 +628,71 @@ class GatewayRuntime:
                         error=str(exc),
                     ),
                 )
-                _restore_app_memory(fastapi_app, memory_prev)
-                return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
+                return self._abort_staged(staging, fastapi_app, memory_prev, mcp_result, error)
             finally:
                 if not overlay_committed:
                     self.mcp.set_env_overlay(prev_overlay)
+        if self._verifier_slice_replaced(staging):
+            try:
+                await wait_for_idle_turns()
+                ledger_jobs = 0
+                judge_jobs = 0
+                hydrated_views = 0
+                hydrated_nudges = 0
+                if prev_ledger is not None and prev_ledger is not staging.goal_ledger:
+                    ledger_jobs = await prev_ledger.wait_all_idle()
+                    if staging.goal_ledger is not None:
+                        hydrated_views = staging.goal_ledger.restore_views(
+                            prev_ledger.snapshot_views()
+                        )
+                if prev_judge is not None and prev_judge is not staging.judge_worker:
+                    judge_jobs = await prev_judge.wait_idle()
+                if (
+                    prev_mailbox is not None
+                    and staging.verdict_mailbox is not None
+                    and prev_mailbox is not staging.verdict_mailbox
+                ):
+                    hydrated_nudges = staging.verdict_mailbox.restore(prev_mailbox.snapshot())
+                logger.info(
+                    "verifier reload drained %s",
+                    kv(
+                        revision=cfg.revision,
+                        ledger_jobs=ledger_jobs,
+                        judge_jobs=judge_jobs,
+                        hydrated_views=hydrated_views,
+                        hydrated_nudges=hydrated_nudges,
+                    ),
+                )
+            except TimeoutError:
+                error = "verifier reload timed out waiting for in-flight work"
+                logger.warning(
+                    "verifier reload idle wait timed out %s",
+                    kv(revision=cfg.revision),
+                )
+                return self._abort_staged(staging, fastapi_app, memory_prev, mcp_result, error)
         self._install_live_slices(staging)
+        self._close_replaced_after_commit(prev_ledger, prev_judge)
         return RuntimeApplyResult(applied=applied, mcp=mcp_result)
+
+    def _abort_staged(
+        self,
+        staging: GatewayRuntime,
+        fastapi_app: FastAPI | None,
+        memory_prev: tuple[Any, Any, Any] | None,
+        mcp_result: MCPCatalogApplyResult,
+        error: str,
+    ) -> RuntimeApplyResult:
+        staging._release_replaced_verifier(self)
+        _restore_app_memory(fastapi_app, memory_prev)
+        return RuntimeApplyResult(applied=[], mcp=mcp_result, error=error)
+
+    def _verifier_slice_replaced(self, staging: GatewayRuntime) -> bool:
+        return (
+            staging.goal_ledger is not self.goal_ledger
+            or staging.judge_worker is not self.judge_worker
+            or staging.verdict_mailbox is not self.verdict_mailbox
+            or staging.progress_tracker is not self.progress_tracker
+        )
 
 
 gateway_runtime = GatewayRuntime()
@@ -1213,6 +1309,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
         logger.error("invalid subagents config: %s", exc)
         raise
 
+    gateway_runtime.close_verifier()
     gateway_runtime.build_verifier(cfg, storage=fastapi_app.state.storage)
     gateway_runtime.rebuild_memory_hooks(cfg, fastapi_app)
 
@@ -1291,19 +1388,12 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
         except Exception as exc:
             logger.warning("knowledge state clear failed: %s", exc)
 
-    if gateway_runtime.goal_ledger is not None:
-        try:
-            gateway_runtime.goal_ledger.close()
-        except Exception as exc:
-            logger.warning("goal ledger close failed: %s", exc)
-        gateway_runtime.goal_ledger = None
-
-    if gateway_runtime.judge_worker is not None:
-        try:
-            gateway_runtime.judge_worker.close()
-        except Exception as exc:
-            logger.warning("judge worker close failed: %s", exc)
-        gateway_runtime.judge_worker = None
+    try:
+        gateway_runtime.close_verifier()
+    except Exception as exc:
+        logger.warning("verifier close failed: %s", exc)
+    gateway_runtime.goal_ledger = None
+    gateway_runtime.judge_worker = None
     gateway_runtime.progress_tracker = None
     gateway_runtime.nudge_actuator = None
     gateway_runtime.verdict_mailbox = None

@@ -35,7 +35,13 @@ from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.core.verifier.classify import ProviderClassifier, parse_classification
-from monkeybot.core.verifier.ledger import GoalLedger, format_compaction_facts
+from monkeybot.core.verifier.ledger import (
+    _IDLE_CEILING_S,
+    _IDLE_SLOT_S,
+    GoalLedger,
+    _all_idle_timeout_s,
+    format_compaction_facts,
+)
 from tests.core.test_loop import AllowInspector, FakeHistory, FakeProvider, RecordingExecutor
 from tests.core.test_loop import _ctx as loop_ctx
 
@@ -690,3 +696,145 @@ async def test_provider_classifier_times_out() -> None:
     result = await classifier.classify("hello", [])
     assert result.intent == Intent.NEW_GOAL
     assert result.constraints == ()
+
+
+@pytest.mark.asyncio
+async def test_wait_idle_includes_cache_refresh() -> None:
+    store = InMemoryGoalLedgerStore()
+    classifier = ScriptedClassifier(
+        [Classification(intent=Intent.NEW_GOAL, relates_to=None, constraints=())]
+    )
+    ledger = GoalLedger(store, classifier)
+    original = ledger._refresh_view
+    started = asyncio.Event()
+    release = asyncio.Event()
+    refresh_done = asyncio.Event()
+
+    async def delayed_refresh(thread_id: str) -> None:
+        started.set()
+        await release.wait()
+        await original(thread_id)
+        refresh_done.set()
+
+    ledger._refresh_view = delayed_refresh  # type: ignore[method-assign]
+    try:
+        ledger.admit(
+            "t1",
+            "keep going",
+            provenance=Provenance.HUMAN,
+            channel=Channel.MESSAGE,
+        )
+        await started.wait()
+        idle = asyncio.create_task(ledger.wait_idle("t1"))
+        await asyncio.sleep(0.02)
+        assert idle.done() is False
+        assert refresh_done.is_set() is False
+        release.set()
+        await idle
+        assert refresh_done.is_set()
+        view = ledger.resolved_intent("t1")
+        assert view is not None
+        assert view.active_goal is not None
+        assert view.active_goal.verbatim == "keep going"
+    finally:
+        ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_restore_views_copies_resolved_cache() -> None:
+    store = InMemoryGoalLedgerStore()
+    classifier = ScriptedClassifier(
+        [Classification(intent=Intent.NEW_GOAL, relates_to=None, constraints=())]
+    )
+    old = GoalLedger(store, classifier)
+    old.admit(
+        "t1",
+        "standing goal",
+        provenance=Provenance.HUMAN,
+        channel=Channel.MESSAGE,
+    )
+    await old.wait_idle("t1")
+    replacement = GoalLedger(store, classifier)
+    try:
+        assert replacement.resolved_intent("t1") is None
+        kept = replacement.restore_views(old.snapshot_views())
+        assert kept == 1
+        view = replacement.resolved_intent("t1")
+        assert view is not None
+        assert view.active_goal is not None
+        assert view.active_goal.verbatim == "standing goal"
+    finally:
+        old.close()
+        replacement.close()
+
+
+def test_restore_views_enforces_thread_cap() -> None:
+    store = InMemoryGoalLedgerStore()
+    classifier = ScriptedClassifier([])
+    source = GoalLedger(store, classifier, thread_cap=8)
+    replacement = GoalLedger(store, classifier, thread_cap=2)
+    try:
+        for i in range(4):
+            source._touch_pending_view(f"t{i}")
+        kept = replacement.restore_views(source.snapshot_views())
+        assert kept == 2
+        assert set(replacement._cache) == {"t2", "t3"}
+    finally:
+        source.close()
+        replacement.close()
+
+
+def test_all_idle_timeout_is_per_queue_max_with_ceiling() -> None:
+    idle = asyncio.Queue()
+    shallow = asyncio.Queue()
+    shallow.put_nowait(object())
+    deep = asyncio.Queue()
+    for _ in range(8):
+        deep.put_nowait(object())
+    assert _all_idle_timeout_s((idle, idle, idle)) == _IDLE_SLOT_S
+    assert _all_idle_timeout_s((idle, shallow, deep)) == min(_IDLE_CEILING_S, 8 * _IDLE_SLOT_S)
+    overflow = asyncio.Queue()
+    for _ in range(20):
+        overflow.put_nowait(object())
+    assert _all_idle_timeout_s((overflow,)) == _IDLE_CEILING_S
+
+
+@pytest.mark.asyncio
+async def test_refresh_failure_does_not_kill_worker() -> None:
+    store = InMemoryGoalLedgerStore()
+    classifier = ScriptedClassifier(
+        [
+            Classification(intent=Intent.NEW_GOAL, relates_to=None, constraints=()),
+            Classification(intent=Intent.REFINEMENT, relates_to=None, constraints=()),
+        ]
+    )
+    ledger = GoalLedger(store, classifier)
+    original = ledger._refresh_view
+
+    async def boom(_thread_id: str) -> None:
+        raise RuntimeError("store down")
+
+    ledger._refresh_view = boom  # type: ignore[method-assign]
+    try:
+        ledger.admit(
+            "t1",
+            "first",
+            provenance=Provenance.HUMAN,
+            channel=Channel.MESSAGE,
+        )
+        await asyncio.sleep(0.05)
+        assert "t1" in ledger._workers
+        assert ledger._workers["t1"].done() is False
+        ledger._refresh_view = original  # type: ignore[method-assign]
+        ledger.admit(
+            "t1",
+            "second",
+            provenance=Provenance.HUMAN,
+            channel=Channel.MESSAGE,
+        )
+        await ledger.wait_idle("t1")
+        view = ledger.resolved_intent("t1")
+        assert view is not None
+        assert view.active_goal is not None
+    finally:
+        ledger.close()

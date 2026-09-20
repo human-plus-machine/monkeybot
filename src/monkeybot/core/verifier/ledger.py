@@ -36,8 +36,21 @@ from monkeybot.core.verifier.classify import ClassifierPort, fail_open_classific
 logger = logging.getLogger(__name__)
 
 _THREAD_STATE_CAP = 256
+_IDLE_SLOT_S = 16.0
+_IDLE_CEILING_S = 64.0
 _RECORD_INTENTS = (Intent.CORRECTION, Intent.ANSWER, Intent.NOISE)
 _TERMINAL_STATUSES = (Status.SATISFIED, Status.SUPERSEDED, Status.ABANDONED)
+
+
+def _queue_unfinished(queue: asyncio.Queue[_Job]) -> int:
+    unfinished = getattr(queue, "_unfinished_tasks", None)
+    return unfinished if isinstance(unfinished, int) else queue.qsize()
+
+
+def _all_idle_timeout_s(queues: tuple[asyncio.Queue[_Job], ...]) -> float:
+    """Per-queue max unfinished work, not a sum across idle historical queues."""
+    depth = max((_queue_unfinished(queue) for queue in queues), default=0)
+    return min(_IDLE_CEILING_S, max(1, depth) * _IDLE_SLOT_S)
 
 
 @dataclass(frozen=True)
@@ -141,6 +154,33 @@ class GoalLedger:
             return
         await asyncio.wait_for(queue.join(), timeout=timeout_s)
 
+    async def wait_all_idle(self) -> int:
+        """Wait until every admitted job is persisted and the cache is refreshed.
+
+        Timeout is the deepest single queue times one classifier slot, capped so
+        a wedged worker cannot hold the reload lock indefinitely. Returns the
+        number of unfinished jobs observed at the start of the wait.
+        """
+        queues = tuple(self._queues.values())
+        if not queues:
+            return 0
+        jobs = sum(_queue_unfinished(queue) for queue in queues)
+        await asyncio.wait_for(
+            asyncio.gather(*(queue.join() for queue in queues)),
+            timeout=_all_idle_timeout_s(queues),
+        )
+        return jobs
+
+    def snapshot_views(self) -> OrderedDict[str, ResolvedIntent]:
+        """Copy resolved views without exposing the live cache object."""
+        return OrderedDict(self._cache)
+
+    def restore_views(self, views: OrderedDict[str, ResolvedIntent]) -> int:
+        """Install resolved views and enforce ``_thread_cap``. Returns kept count."""
+        self._cache = OrderedDict(views)
+        self._trim_cache()
+        return len(self._cache)
+
     def close(self) -> None:
         self._closed = True
         for task in self._workers.values():
@@ -183,14 +223,24 @@ class GoalLedger:
                     exc_info=True,
                 )
             finally:
-                queue.task_done()
                 pending = self._pending.get(thread_id, 0) - 1
                 if pending <= 0:
                     self._pending.pop(thread_id, None)
                 else:
                     self._pending[thread_id] = pending
-                if not self._closed:
-                    await self._refresh_view(thread_id)
+                try:
+                    if not self._closed:
+                        await self._refresh_view(thread_id)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.warning(
+                        "goal_ledger refresh failed %s",
+                        kv(thread_id=thread_id),
+                        exc_info=True,
+                    )
+                finally:
+                    queue.task_done()
 
     async def _classify_job(self, job: _Job) -> None:
         token = bind_verifier_session(job.provider, job.model)
@@ -332,8 +382,7 @@ class GoalLedger:
         view = resolve_intent(entries, pending_classification=pending)
         self._cache[thread_id] = view
         self._cache.move_to_end(thread_id)
-        while len(self._cache) > self._thread_cap:
-            self._cache.popitem(last=False)
+        self._trim_cache()
 
     def _touch_pending_view(self, thread_id: str) -> None:
         view = self._cache.get(thread_id)
@@ -342,6 +391,9 @@ class GoalLedger:
         elif not view.pending_classification:
             self._cache[thread_id] = replace(view, pending_classification=True)
         self._cache.move_to_end(thread_id)
+        self._trim_cache()
+
+    def _trim_cache(self) -> None:
         while len(self._cache) > self._thread_cap:
             self._cache.popitem(last=False)
 
