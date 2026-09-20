@@ -256,9 +256,9 @@ scheduler:
 # Background verifier (YAML-only). Off by default: ledger costs one model call
 # per human message. `enabled: true` turns on omitted ledger/tracker flags;
 # omitted judge.enabled turns on only when the tracker is on. Explicit
-# `enabled: false` still opts a nested section out. Omitted ledger.model
-# inherits model.name (same fallback as the agent). judge.model is reserved —
-# SignalJudge ignores it. Realtime loops ignore this block.
+# `enabled: false` still opts a nested section out. Omitted ledger.model /
+# judge.model inherit model.name (same fallback as the agent). The live
+# worker is session-bound ProviderJudge. Realtime loops ignore this block.
 # verifier:
 #   enabled: true
 #   escalation:
