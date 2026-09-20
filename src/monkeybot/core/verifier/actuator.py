@@ -34,8 +34,6 @@ def _append_verifier_block(system: Message, block: str) -> Message:
     if not extra:
         return system
     base = "".join(b.text for b in system.content if isinstance(b, Text))
-    if VERIFIER_HEADING.strip() in base and extra.split("\n", 1)[0] in base:
-        return system
     return Message(role="system", content=[Text(text=f"{base}{VERIFIER_HEADING}{extra}\n")])
 
 
@@ -50,8 +48,10 @@ class NudgeActuator:
 
     async def on_before_provider(self, payload: HookPayload) -> None:
         try:
+            if payload.provider_messages is None:
+                return
             text = self._mailbox.peek_nudge(payload.thread_id, payload.request_id)
-            if not text or payload.provider_messages is None:
+            if not text:
                 return
             block = format_nudge_block(text)
             if not block:
@@ -76,6 +76,7 @@ class NudgeActuator:
                         ),
                     )
                 payload.provider_messages = messages
+            self._mailbox.note_nudge_injection(payload.thread_id, payload.request_id)
             logger.info(
                 "verifier nudge injected %s",
                 kv(thread_id=payload.thread_id, request_id=payload.request_id),

@@ -54,6 +54,7 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.core.verifier.intervention import correction_text, replan_text
 from monkeybot.core.verifier.mailbox import VerdictMailbox
 from monkeybot.core.verifier.severity import cap_severity
 from monkeybot.providers._utils import note_anthropic_token_estimate_observation
@@ -322,8 +323,6 @@ async def _drain_verdicts(
                 ),
             )
             verdict = dataclasses.replace(verdict, severity=capped)
-        from monkeybot.core.verifier.intervention import correction_text
-
         trusted = (
             None
             if capped in ("none", "") or verdict.status == "on_track"
@@ -367,27 +366,31 @@ def _stash_escalation(
 
     Injected text is always a trusted signal template, never model/rationale
     copy. Nudges stay active while tracker signals still overlap. Fail-open.
-    """
-    from monkeybot.core.verifier.intervention import replan_text
 
-    latest = mailbox.last(thread_id)
-    if (
-        latest is not None
-        and latest.request_id == verdict.request_id
-        and latest.verdict_id != verdict.verdict_id
-    ):
-        logger.info(
-            "verdict escalation skipped stale checkpoint %s",
-            kv(
-                thread_id=thread_id,
-                request_id=verdict.request_id,
-                verdict_id=verdict.verdict_id,
-                latest_verdict_id=latest.verdict_id,
-            ),
-        )
-        return
+    Sticky nudges from one drain are unioned by ``activate_nudge``; skipping
+    older nudge verdicts would drop overlapping signals from the same batch.
+    One-shot replan/steer still last-wins against ``mailbox.last``, including
+    a newer deposit that arrives while an earlier verdict is being persisted.
+    """
     if capped in ("none", "") or verdict.status == "on_track":
         return
+    if capped in ("replan", "steer"):
+        latest = mailbox.last(thread_id)
+        if (
+            latest is not None
+            and latest.request_id == verdict.request_id
+            and latest.verdict_id != verdict.verdict_id
+        ):
+            logger.info(
+                "verdict escalation skipped stale checkpoint %s",
+                kv(
+                    thread_id=thread_id,
+                    request_id=verdict.request_id,
+                    verdict_id=verdict.verdict_id,
+                    latest_verdict_id=latest.verdict_id,
+                ),
+            )
+            return
     try:
         if capped == "nudge":
             armed = mailbox.activate_nudge(thread_id, verdict.request_id, verdict)

@@ -7,13 +7,15 @@ from dataclasses import replace
 import pytest
 
 from monkeybot.core.config.settings import VerifierTrackerConfig
-from monkeybot.core.hooks import HookEvent, HookManager
-from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
+from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
+from monkeybot.core.llm.provider import Done, Message, TextDelta, ToolCall, UsageEvent
 from monkeybot.core.runtime.events import SystemPromptSnapshot, VerifierVerdict
 from monkeybot.core.runtime.loop import run
+from monkeybot.core.runtime.turn_loop import _stash_escalation
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.verifier.actuator import NudgeActuator
 from monkeybot.core.verifier.intervention import SIGNAL_INSTRUCTIONS, correction_text
+from monkeybot.core.verifier.mailbox import VerdictMailbox
 from monkeybot.core.verifier.tracker import ProgressTracker
 from tests.core.test_loop import AllowInspector, FakeHistory, FakeProvider, RecordingExecutor
 from tests.core.test_loop import _ctx as loop_ctx
@@ -149,6 +151,120 @@ def test_correction_text_is_trusted_templates_only() -> None:
     assert text.startswith("[Verifier]")
     assert SIGNAL_INSTRUCTIONS["constraint_touch"] in text
     assert "unknown_signal" not in text
+
+
+def test_nudge_batch_unions_older_verdicts() -> None:
+    mailbox = _mailbox()
+    first = _nudge("r1", "error_streak", verdict_id="v1")
+    second = _nudge("r1", "write_without_read", verdict_id="v2")
+    mailbox.put("t1", first)
+    mailbox.put("t1", second)
+    mailbox.set_current_signals("t1", "r1", ["error_streak", "write_without_read"])
+    _stash_escalation(mailbox, "t1", "nudge", first)
+    _stash_escalation(mailbox, "t1", "nudge", second)
+    note = mailbox.peek_nudge("t1", "r1")
+    assert note is not None
+    assert SIGNAL_INSTRUCTIONS["error_streak"] in note
+    assert SIGNAL_INSTRUCTIONS["write_without_read"] in note
+
+
+def test_replan_batch_keeps_latest_checkpoint() -> None:
+    mailbox = _mailbox()
+    first = replace(_nudge("r1", "error_streak", verdict_id="v1"), severity="replan")
+    second = replace(_nudge("r1", "done_unmet", verdict_id="v2"), severity="replan")
+    mailbox.put("t1", first)
+    mailbox.put("t1", second)
+    _stash_escalation(mailbox, "t1", "replan", first)
+    _stash_escalation(mailbox, "t1", "replan", second)
+    note = mailbox.take_replan("t1", "r1")
+    assert note is not None
+    assert SIGNAL_INSTRUCTIONS["done_unmet"] in note
+    assert SIGNAL_INSTRUCTIONS["error_streak"] not in note
+
+
+def test_rewrite_churn_resets_counts_on_recovery() -> None:
+    mailbox = _mailbox()
+    tracker = ProgressTracker(
+        mailbox,
+        ledger_fn=lambda: None,
+        config=VerifierTrackerConfig(
+            enabled=True, min_turn_before_verdict=1, suspicion_threshold=2
+        ),
+    )
+    tracker._observe_tool(
+        _payload(event=HookEvent.POST_TOOL, tool_name="read_file", tool_args={"path": "a.md"})
+    )
+    tracker._observe_tool(
+        _payload(event=HookEvent.POST_TOOL, tool_name="write_file", tool_args={"path": "b.md"})
+    )
+    tracker._observe_tool(
+        _payload(event=HookEvent.POST_TOOL, tool_name="write_file", tool_args={"path": "b.md"})
+    )
+    mailbox.take_ready("t1")
+    mailbox.activate_nudge("t1", "r1", _nudge("r1", "rewrite_churn"))
+    tracker._observe_tool(
+        _payload(event=HookEvent.POST_TOOL, tool_name="read_file", tool_args={"path": "b.md"})
+    )
+    assert mailbox.peek_nudge("t1", "r1") is None
+    tracker._observe_tool(
+        _payload(event=HookEvent.POST_TOOL, tool_name="write_file", tool_args={"path": "b.md"})
+    )
+    assert "rewrite_churn" not in tracker._by_thread["t1"].latched
+    assert mailbox.peek_nudge("t1", "r1") is None
+
+
+def test_episode_cap_does_not_evict_open_nudge() -> None:
+    from monkeybot.core.verifier.mailbox import _THREAD_CAP
+
+    mailbox = VerdictMailbox()
+    mailbox.open_request("victim", "r1")
+    mailbox.set_current_signals("victim", "r1", ["error_streak", "write_without_read"])
+    mailbox.activate_nudge("victim", "r1", _nudge("r1", "error_streak", "write_without_read"))
+    mailbox.set_current_signals("victim", "r1", ["write_without_read"])
+    mailbox.set_current_signals("victim", "r1", ["error_streak", "write_without_read"])
+    mailbox.activate_nudge("victim", "r1", _nudge("r1", "error_streak", verdict_id="v2"))
+
+    mailbox.open_request("spare", "r")
+    mailbox.set_current_signals("spare", "r", ["error_streak"])
+    for i in range(_THREAD_CAP - 2):
+        mailbox.open_request(f"t{i}", "r")
+        mailbox.set_current_signals(f"t{i}", "r", ["error_streak"])
+
+    mailbox.open_request("victim", "r1")
+    mailbox.open_request("extra", "r")
+    mailbox.set_current_signals("extra", "r", ["error_streak"])
+    mailbox.set_current_signals("victim", "r1", ["error_streak", "write_without_read"])
+    kept = mailbox.peek_nudge("victim", "r1")
+    assert kept is not None
+    assert SIGNAL_INSTRUCTIONS["error_streak"] in kept
+    assert SIGNAL_INSTRUCTIONS["write_without_read"] in kept
+
+
+@pytest.mark.asyncio
+async def test_missing_provider_messages_does_not_count_injection() -> None:
+    mailbox = _mailbox()
+    mailbox.set_current_signals("t1", "r1", ["error_streak"])
+    mailbox.activate_nudge("t1", "r1", _nudge("r1", "error_streak"))
+    await NudgeActuator(mailbox).on_before_provider(
+        HookPayload(
+            event=HookEvent.BEFORE_PROVIDER_REQUEST,
+            thread_id="t1",
+            request_id="r1",
+            ctx=loop_ctx(),
+            provider_messages=None,
+        )
+    )
+    assert mailbox._active["t1"].injections == 0
+    await NudgeActuator(mailbox).on_before_provider(
+        HookPayload(
+            event=HookEvent.BEFORE_PROVIDER_REQUEST,
+            thread_id="t1",
+            request_id="r1",
+            ctx=loop_ctx(),
+            provider_messages=[Message(role="system", content=[Text(text="base")])],
+        )
+    )
+    assert mailbox._active["t1"].injections == 1
 
 
 @pytest.mark.asyncio

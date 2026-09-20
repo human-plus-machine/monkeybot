@@ -57,7 +57,6 @@ class VerdictMailbox:
 
     def __init__(self) -> None:
         self._ready: OrderedDict[ScopeKey, deque[VerifierVerdict]] = OrderedDict()
-        self._nudges: OrderedDict[str, tuple[str, str]] = OrderedDict()
         self._replans: OrderedDict[str, tuple[str, str]] = OrderedDict()
         self._last: OrderedDict[str, VerifierVerdict] = OrderedDict()
         self._pending: OrderedDict[ScopeKey, int] = OrderedDict()
@@ -155,7 +154,8 @@ class VerdictMailbox:
             episode.epochs[signal] = episode.epochs.get(signal, 0) + 1
         episode.signals = sigs
         self._episodes.move_to_end(thread_id)
-        _cap(self._episodes)
+        self._cap_idle_threads(self._episodes, label="episodes")
+        self._cap_idle_threads(self._active, label="active")
         active = self._active.get(thread_id)
         if active is None or active.request_id != request_id:
             return
@@ -181,6 +181,19 @@ class VerdictMailbox:
             return
         if kept == active.triggering_signals:
             return
+        dropped = ordered_signals(
+            signal for signal in active.triggering_signals if signal not in kept
+        )
+        logger.info(
+            "verifier nudge pruned %s",
+            kv(
+                thread_id=thread_id,
+                request_id=request_id,
+                verdict_id=active.verdict_id,
+                kept=",".join(kept),
+                dropped=",".join(dropped),
+            ),
+        )
         active.triggering_signals = kept
         active.signal_epochs = {
             signal: episode.epochs[signal] for signal in kept if signal in episode.epochs
@@ -206,15 +219,13 @@ class VerdictMailbox:
         thread_id: str,
         request_id: str,
         verdict: VerifierVerdict,
-        text: str | None = None,
     ) -> bool:
         """Arm a sticky nudge when the verdict's signals are still live (or unpublished).
 
         Overlapping verdicts union their triggering signals and regenerate the
         trusted template. Recovered signals are pruned by :meth:`set_current_signals`.
-        ``text`` is ignored; actuation always uses :func:`correction_text`.
+        Actuation always uses :func:`correction_text`.
         """
-        del text
         if not self._accept(thread_id, request_id):
             return False
         incoming = ordered_signals(verdict.triggering_signals)
@@ -243,7 +254,7 @@ class VerdictMailbox:
             signal_epochs=epochs,
         )
         self._active.move_to_end(thread_id)
-        self._cap_idle_threads(self._active)
+        self._cap_idle_threads(self._active, label="active")
         return True
 
     def peek_nudge(self, thread_id: str, request_id: str) -> str | None:
@@ -251,17 +262,14 @@ class VerdictMailbox:
         active = self._active.get(thread_id)
         if active is None or active.request_id != request_id:
             return None
-        active.injections += 1
         return active.text
 
-    def put_nudge(self, thread_id: str, request_id: str, text: str) -> None:
-        if not self._accept(thread_id, request_id):
+    def note_nudge_injection(self, thread_id: str, request_id: str) -> None:
+        """Count a provider injection only after the actuator actually appended it."""
+        active = self._active.get(thread_id)
+        if active is None or active.request_id != request_id:
             return
-        self._put_note(self._nudges, thread_id, request_id, text)
-        _cap(self._nudges)
-
-    def take_nudge(self, thread_id: str, request_id: str) -> str | None:
-        return self._take_note(self._nudges, thread_id, request_id)
+        active.injections += 1
 
     def put_replan(self, thread_id: str, request_id: str, text: str) -> None:
         if not self._accept(thread_id, request_id):
@@ -306,21 +314,22 @@ class VerdictMailbox:
             self._active.pop(thread_id, None)
         if self._episode(thread_id, request_id) is not None:
             self._episodes.pop(thread_id, None)
-        nudge = self._nudges.get(thread_id)
-        if nudge is not None and nudge[0] == request_id:
-            self._nudges.pop(thread_id, None)
         replan = self._replans.get(thread_id)
         if replan is not None and replan[0] == request_id:
             self._replans.pop(thread_id, None)
         if self._current.get(thread_id) == request_id:
             self._current.pop(thread_id, None)
 
-    def _cap_idle_threads(self, store: OrderedDict[str, Any]) -> None:
+    def _cap_idle_threads(self, store: OrderedDict[str, Any], *, label: str) -> None:
         while len(store) > _THREAD_CAP:
             victim = next((key for key in store if key not in self._current), None)
             if victim is None:
                 break
             store.pop(victim, None)
+            logger.warning(
+                "verifier mailbox evicted idle thread %s",
+                kv(thread_id=victim, store=label),
+            )
 
     @staticmethod
     def _put_note(

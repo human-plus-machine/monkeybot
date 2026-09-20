@@ -154,6 +154,8 @@ class ProgressTracker:
             writing_churn = name in WRITE_TOOLS and bool(set(paths) & state.churn_paths)
             if not writing_churn:
                 state.latched.discard("rewrite_churn")
+                for path in state.churn_paths:
+                    state.write_counts.pop(path, None)
                 state.churn_paths.clear()
         ledger = self._ledger_signals(payload.thread_id, name, args)
         fired.extend(ledger)

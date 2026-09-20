@@ -709,16 +709,13 @@ def test_mailbox_nudge_overwrites_and_last_caps_after_drain() -> None:
     from monkeybot.core.verifier.mailbox import _THREAD_CAP
 
     mailbox = _mailbox()
-    mailbox.put_nudge("t1", "r1", "first")
-    mailbox.put_nudge("t1", "r1", "second")
-    assert mailbox.take_nudge("t1", "r1") == "second"
-    assert mailbox.take_nudge("t1", "r1") is None
+    mailbox.put_replan("t1", "r1", "first")
+    mailbox.put_replan("t1", "r1", "second")
+    assert mailbox.take_replan("t1", "r1") == "second"
+    assert mailbox.take_replan("t1", "r1") is None
 
     # A note is scoped to the request that produced it: a later, unrelated
     # request must not pick up a leftover from a finished one.
-    mailbox.put_nudge("t1", "r1", "stale")
-    assert mailbox.take_nudge("t1", "r2") is None
-    assert mailbox.take_nudge("t1", "r1") is None
     mailbox.put_replan("t1", "r1", "stale")
     assert mailbox.take_replan("t1", "r2") is None
 
