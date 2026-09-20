@@ -50,7 +50,7 @@ from .loop_hooks import _drain_hook_settlement
 from .loop_messages import _normalize_user_content
 from .loop_ports import ToolExecutorPort
 from .loop_usage import _effective_max_turns, _usage_to_totals
-from .turn_loop import _drain_verdicts, _run_inner
+from .turn_loop import _drain_verdicts, _run_inner, _verdict_grace_s
 
 __all__ = [
     "SUMMARY_TRIGGER_RATIO",
@@ -153,10 +153,7 @@ async def run(
     finally:
         try:
             await _drain_hook_settlement(hook_manager)
-            grace_s = 0.0
-            if ctx.config is not None:
-                grace_s = ctx.config.verifier.judge.tail_grace_s
-            async for verdict_evt in _drain_verdicts(ctx, history, grace_s=grace_s):
+            async for verdict_evt in _drain_verdicts(ctx, history, grace_s=_verdict_grace_s(ctx)):
                 yield verdict_evt
             mailbox = ctx.verdict_mailbox
             if mailbox is not None:

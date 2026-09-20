@@ -374,6 +374,7 @@ class GatewayRuntime:
                 ),
                 ledger_fn=lambda: self.goal_ledger,
                 config=cfg.verifier.judge,
+                max_severity=cfg.verifier.escalation.max_severity,
             )
             self.judge_worker = judge
             logger.info(

@@ -156,6 +156,7 @@ class VerifierJudgeConfig:
     max_spend_ratio: float = 0.25
     # Ship at 0: the tail drain commits ready verdicts and never blocks. Raise
     # only after measuring how often in-flight ``done`` verdicts miss TurnComplete.
+    # Inner turns never wait on the judge; deposit arms the nudge immediately.
     tail_grace_s: float = 0.0
     # Max jobs waiting to start. Running jobs use ``max_in_flight``, so a
     # saturated semaphore does not consume this backlog budget.

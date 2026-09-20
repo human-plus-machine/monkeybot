@@ -641,3 +641,33 @@ async def test_rate_limits_are_scoped_to_thread_and_request() -> None:
     assert len(mailbox.take_ready("t2")) == 1
     assert port.calls == 2
     worker.close()
+
+
+@pytest.mark.asyncio
+async def test_worker_deposit_arms_nudge_without_drain() -> None:
+    mailbox = _mailbox()
+    mailbox.set_current_signals("t1", "r1", ["constraint_touch"])
+
+    class _ActuatingPort:
+        async def verify(self, intent: object, evidence: EvidenceBundle) -> VerifierVerdict:
+            del intent
+            return VerifierVerdict(
+                request_id=evidence.request_id,
+                verdict_id="v1",
+                status="drifting",
+                severity="nudge",
+                triggering_signals=evidence.signals,
+            )
+
+    worker = JudgeWorker(
+        mailbox,
+        _ActuatingPort(),
+        ledger_fn=lambda: None,
+        config=VerifierJudgeConfig(max_verdicts_per_message=10, min_turns_between_verdicts=0),
+    )
+    worker.enqueue(_evidence("r1", 1))
+    await worker.wait_idle()
+    note = mailbox.peek_nudge("t1", "r1")
+    assert note is not None
+    assert "constraint" in note.lower()
+    worker.close()

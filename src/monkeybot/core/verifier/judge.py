@@ -88,11 +88,13 @@ class JudgeWorker:
         *,
         ledger_fn: Callable[[], GoalLedger | None],
         config: VerifierJudgeConfig,
+        max_severity: str = "nudge",
     ) -> None:
         self._mailbox = mailbox
         self._port = port
         self._ledger_fn = ledger_fn
         self._config = config
+        self._max_severity = max_severity
         self._jobs: dict[asyncio.Task[None], _JudgeJob] = {}
         self._sema: asyncio.Semaphore | None = None
         self._scope_locks: OrderedDict[ScopeKey, asyncio.Lock] = OrderedDict()
@@ -331,7 +333,10 @@ class JudgeWorker:
             return
         if evidence.signal_epochs and not verdict.triggering_signal_epochs:
             verdict = replace(verdict, triggering_signal_epochs=evidence.signal_epochs)
-        self._mailbox.put(evidence.thread_id, verdict)
+        if self._mailbox.put(evidence.thread_id, verdict):
+            self._mailbox.arm_escalation(
+                evidence.thread_id, verdict, max_severity=self._max_severity
+            )
         job.deposited = True
         self._bump(self._spend, job.key, max(0, verdict.judge_tokens))
         agent = self._agent_spend.get(job.key, 0)
