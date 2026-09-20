@@ -34,7 +34,7 @@ def test_bind_pins_provider_and_model_until_reset() -> None:
 
 
 def test_resolve_prefers_yaml_then_session_then_pinned() -> None:
-    pinned = SimpleNamespace(model=SimpleNamespace(name="glm-5.3-flash"))
+    pinned = SimpleNamespace(env_values={"MODEL_NAME": "glm-5.3-flash"})
     assert resolve_session_verifier_model(pinned, None) == "glm-5.3-flash"
     token = bind_verifier_session(None, "session-model")
     try:
