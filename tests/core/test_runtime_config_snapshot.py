@@ -470,6 +470,23 @@ def test_verifier_model_inherits_agent_model_when_omitted(
     assert get_verifier_config(config=pinned).judge.model is None
 
 
+def test_verifier_model_inherits_agent_default_when_name_omitted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.settings import effective_verifier_model
+
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(
+        tmp_path,
+        "model:\n  provider: fake\nverifier:\n  enabled: true\n",
+    )
+    apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    pinned = get_config_store().current()
+    assert not (pinned.model.name or "").strip()
+    assert effective_verifier_model(pinned, None) == "gemini-2.5-flash"
+    assert effective_verifier_model(None, None) == "gemini-2.5-flash"
+
+
 def test_invalid_verifier_section_does_not_abort_apply(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

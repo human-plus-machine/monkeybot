@@ -325,19 +325,22 @@ class GatewayRuntime:
                     logger.warning("goal ledger skipped: backend has no durable ledger")
                 else:
                     ledger_model = effective_verifier_model(cfg, cfg.verifier.ledger.model)
-                    classifier = ProviderClassifier(
-                        lambda: self.provider,
-                        model=ledger_model,
-                    )
-                    self.goal_ledger = GoalLedger(
-                        store,
-                        classifier,
-                        max_entries_per_thread=cfg.verifier.ledger.max_entries_per_thread,
-                    )
-                    logger.info(
-                        "goal ledger enabled %s",
-                        kv(model=ledger_model or "(inherit)"),
-                    )
+                    if not ledger_model:
+                        logger.error("goal ledger skipped: no model to inherit")
+                    else:
+                        classifier = ProviderClassifier(
+                            lambda: self.provider,
+                            model=ledger_model,
+                        )
+                        self.goal_ledger = GoalLedger(
+                            store,
+                            classifier,
+                            max_entries_per_thread=cfg.verifier.ledger.max_entries_per_thread,
+                        )
+                        logger.info(
+                            "goal ledger enabled %s",
+                            kv(model=ledger_model),
+                        )
         if cfg.verifier.tracker.enabled:
             self.verdict_mailbox = VerdictMailbox()
             judge = None
@@ -352,7 +355,8 @@ class GatewayRuntime:
                 logger.info(
                     "verifier judge enabled %s",
                     kv(
-                        model=effective_verifier_model(cfg, cfg.verifier.judge.model) or "(inherit)"
+                        port="SignalJudge",
+                        model=effective_verifier_model(cfg, cfg.verifier.judge.model),
                     ),
                 )
             self.progress_tracker = ProgressTracker(
@@ -363,6 +367,8 @@ class GatewayRuntime:
             )
             self.nudge_actuator = NudgeActuator(self.verdict_mailbox)
             logger.info("progress tracker enabled")
+        elif cfg.verifier.judge.enabled:
+            logger.info("verifier judge skipped: tracker is disabled")
         self._attach_verifier_inspector()
 
     def _attach_verifier_inspector(self) -> None:

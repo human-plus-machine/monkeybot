@@ -99,3 +99,101 @@ def test_build_inspectors_tiers_file_present(
     tiers = [i for i in runtime.inspectors if isinstance(i, CommandTierInspector)]
     assert len(tiers) == 1
     assert runtime.run_command_allowed_commands == ["echo"]
+
+
+def _write_verifier_yaml(tmp_path: Path, body: str) -> Path:
+    from monkeybot.core.config import apply_monkeybot_runtime_env
+    from monkeybot.core.config.runtime_env import reset_runtime_env_state_for_tests
+
+    reset_runtime_env_state_for_tests()
+    cfg_dir = tmp_path / "monkeybot_config"
+    cfg_dir.mkdir(exist_ok=True)
+    yaml_path = cfg_dir / "monkeybot.yaml"
+    yaml_path.write_text(body, encoding="utf-8")
+    apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    return yaml_path
+
+
+class _LedgerStorage:
+    def __init__(self) -> None:
+        from monkeybot.core.persistence.goal_ledger import InMemoryGoalLedgerStore
+
+        self._store = InMemoryGoalLedgerStore()
+
+    def goal_ledger(self) -> object:
+        return self._store
+
+
+def test_build_verifier_passes_resolved_model_to_classifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config import get_config_store
+    from monkeybot.core.config.runtime_env import reset_runtime_env_state_for_tests
+    from monkeybot.core.verifier.classify import ProviderClassifier
+
+    monkeypatch.chdir(tmp_path)
+    _write_verifier_yaml(
+        tmp_path,
+        "model:\n  provider: fake\n"
+        "verifier:\n  enabled: true\n  ledger:\n    enabled: true\n"
+        "  tracker:\n    enabled: false\n",
+    )
+    runtime = GatewayRuntime()
+    try:
+        runtime.build_verifier(get_config_store().current(), storage=_LedgerStorage())
+        assert runtime.goal_ledger is not None
+        classifier = runtime.goal_ledger._classifier
+        assert isinstance(classifier, ProviderClassifier)
+        assert classifier._model == "gemini-2.5-flash"
+    finally:
+        if runtime.goal_ledger is not None:
+            runtime.goal_ledger.close()
+        reset_runtime_env_state_for_tests()
+
+
+def test_build_verifier_uses_explicit_ledger_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config import get_config_store
+    from monkeybot.core.config.runtime_env import reset_runtime_env_state_for_tests
+
+    monkeypatch.chdir(tmp_path)
+    _write_verifier_yaml(
+        tmp_path,
+        "model:\n  provider: fake\n  name: glm-5.3-flash\n"
+        "verifier:\n  enabled: true\n  ledger:\n    enabled: true\n"
+        "    model: explicit-ledger\n  tracker:\n    enabled: false\n",
+    )
+    runtime = GatewayRuntime()
+    try:
+        runtime.build_verifier(get_config_store().current(), storage=_LedgerStorage())
+        assert runtime.goal_ledger is not None
+        assert runtime.goal_ledger._classifier._model == "explicit-ledger"
+    finally:
+        if runtime.goal_ledger is not None:
+            runtime.goal_ledger.close()
+        reset_runtime_env_state_for_tests()
+
+
+def test_build_verifier_skips_judge_when_tracker_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from monkeybot.core.config import get_config_store
+    from monkeybot.core.config.runtime_env import reset_runtime_env_state_for_tests
+
+    monkeypatch.chdir(tmp_path)
+    _write_verifier_yaml(
+        tmp_path,
+        "model:\n  provider: fake\n  name: glm-5.3-flash\n"
+        "verifier:\n  enabled: true\n  tracker:\n    enabled: false\n"
+        "  judge:\n    enabled: true\n",
+    )
+    runtime = GatewayRuntime()
+    try:
+        with caplog.at_level("INFO"):
+            runtime.build_verifier(get_config_store().current(), storage=_LedgerStorage())
+        assert runtime.progress_tracker is None
+        assert runtime.judge_worker is None
+        assert "verifier judge skipped: tracker is disabled" in caplog.text
+    finally:
+        reset_runtime_env_state_for_tests()

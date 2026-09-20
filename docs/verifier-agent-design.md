@@ -725,16 +725,16 @@ New `verifier:` block in `monkeybot.yaml`, defaulted off. The section is **YAML-
 verifier:
   enabled: false               # master switch; when false, NOTHING below runs
   ledger:
-    enabled: false             # one classifier call per human input when on
-    model: gemini-2.5-flash    # classifier; see Open decision 2
+    enabled: false             # omitted → follows verifier.enabled
+    # model:                   # omitted / null → inherit model.name (then gemini-2.5-flash)
     max_entries_per_thread: 64
   tracker:
-    enabled: false             # requires ledger.enabled for constraint signals
+    enabled: false             # omitted → follows verifier.enabled
     suspicion_threshold: 3
     min_turn_before_verdict: 3
   judge:
-    enabled: false             # requires tracker.enabled
-    model: gemini-2.5-flash    # small + fast; not the main agent's model
+    enabled: false             # omitted → on only when parent and tracker are on
+    # model:                   # reserved; SignalJudge ignores it today
     max_verdicts_per_message: 3
     min_turns_between_verdicts: 2
     max_spend_ratio: 0.25      # of main-agent tokens for this message
@@ -743,16 +743,18 @@ verifier:
     max_severity: nudge        # nudge | replan | steer | block
 ```
 
-**Gating is explicit and hierarchical.** Precedence, highest first:
+**Gating is hierarchical.** Precedence, highest first:
 
 1. **`verifier.enabled` is the master switch.** When `false`, nothing below runs — not the ledger, not the tracker, not the judge, and not actuation — regardless of child `enabled` flags or `escalation.max_severity`. That is the one switch an operator needs to turn the whole feature off.
-2. **Child `enabled` flags** (`ledger`, `tracker`, `judge`) only apply when the master switch is on. A child set `true` while the master is `false` is a no-op, not an override.
-3. **`judge` requires `tracker`.** `tracker` without `ledger` runs only the ledger-independent signals (`error_streak`, `no_progress`, `write_without_read`, `budget_burn`, `rewrite_churn`). `ledger` can run alone (Phase 1 ships this way).
+2. **When the master is on, omitted child `enabled` flags inherit on** for `ledger` and `tracker`. Omitted `judge.enabled` inherits on only if the tracker is on. Explicit `enabled: false` still opts a nested section out. A child set `true` while the master is `false` is a no-op, not an override.
+3. **`judge` requires `tracker` at runtime.** `build_verifier` skips an explicit `judge.enabled: true` when the tracker is off and logs that skip. `tracker` without `ledger` runs only the ledger-independent signals (`error_streak`, `no_progress`, `write_without_read`, `budget_burn`, `rewrite_churn`). `ledger` can run alone (Phase 1 ships this way).
 4. **`escalation.max_severity` caps actuation, it does not enable anything.** `enabled: true` plus `max_severity: none` is "on but muted": observe/record verdicts at `none`, never nudge/replan/steer/block. Raising the cap cannot turn on a disabled child. The smoke fixture `evals/smoke_agent/monkeybot_config/monkeybot.verifier-on.yaml` uses this shape on purpose.
 
 The parser does not rewrite child flags when the master is off; readers must check `verifier.enabled` first. `max_severity` values are `none | nudge | replan | steer | block` in that rank order (`VERIFIER_SEVERITY_ORDER` in `core/config/settings.py`). `steer` is reserved for a later optional phase; Phases 4–6 ship nudge/replan/block.
 
-The ledger's default is `false` because it is the only sub-feature with a per-message model cost even when nothing is being verified.
+The dataclass default for every nested `enabled` is still `false` so an absent `verifier:` section stays off. The inheritance rule above is the upgrade hazard: an existing file that set only `verifier.enabled: true` plus `ledger.enabled: true` now also gets the tracker (and the judge if the tracker stays on). Opt out with `tracker.enabled: false` / `judge.enabled: false`.
+
+Omitted `ledger.model` / `judge.model` resolve through `effective_verifier_model` — the same `model.name` / `MODEL_NAME` / `gemini-2.5-flash` chain as `get_provider_config`. `judge.model` is reserved; today's worker is the deterministic `SignalJudge`.
 
 **Plumbing is a typed snapshot field, not an env map.** Mirror `subagents:`:
 
