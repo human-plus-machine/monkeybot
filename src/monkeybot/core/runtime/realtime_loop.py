@@ -491,7 +491,9 @@ async def run_realtime_turn(
             n_tool_calls=len(assistant_tool_calls),
         ),
     )
+    from monkeybot.core.verifier.binding import bind_verifier_session, reset_verifier_session
 
+    token = bind_verifier_session(None, ctx.model)
     try:
         # 1. Commit user message to history (skip empty audio-only placeholders).
         if user_text or any(not isinstance(b, Text) for b in blocks):
@@ -755,4 +757,5 @@ async def run_realtime_turn(
         yield Error(request_id=ctx.request_id, error=str(exc))
         raise
     finally:
+        reset_verifier_session(token)
         yield TurnComplete(request_id=ctx.request_id, usage=usage)

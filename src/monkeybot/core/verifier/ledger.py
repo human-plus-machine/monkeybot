@@ -40,6 +40,8 @@ class _Job:
     verbatim: str
     provenance: Provenance
     channel: Channel | None
+    model: str = ""
+    provider: object | None = None
 
 
 class GoalLedger:
@@ -88,6 +90,9 @@ class GoalLedger:
         """Enqueue a ledger write. Returns without waiting on the classifier."""
         if self._closed or not verbatim.strip():
             return
+        from monkeybot.core.verifier.binding import current_verifier_binding
+
+        binding = current_verifier_binding()
         queue = self._ensure_worker(thread_id)
         self._pending[thread_id] = self._pending.get(thread_id, 0) + 1
         self._touch_pending_view(thread_id)
@@ -97,6 +102,8 @@ class GoalLedger:
                 verbatim=verbatim.strip(),
                 provenance=provenance,
                 channel=channel,
+                model=binding.model,
+                provider=binding.provider,
             )
         )
 
@@ -182,6 +189,15 @@ class GoalLedger:
                     await self._refresh_view(thread_id)
 
     async def _handle_job(self, job: _Job) -> None:
+        from monkeybot.core.verifier.binding import bind_verifier_session, reset_verifier_session
+
+        token = bind_verifier_session(job.provider, job.model)
+        try:
+            await self._classify_job(job)
+        finally:
+            reset_verifier_session(token)
+
+    async def _classify_job(self, job: _Job) -> None:
         if job.provenance != Provenance.HUMAN:
             await self._persist_non_human(job)
             return
