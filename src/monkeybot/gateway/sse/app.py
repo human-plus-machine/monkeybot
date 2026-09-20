@@ -29,6 +29,7 @@ from monkeybot.core.config.settings import (
     ConfigError,
     SubagentConfig,
     auto_schema_enabled_from_config,
+    effective_verifier_model,
     get_provider_config,
     get_subagent_registry,
     normalize_model_provider,
@@ -323,9 +324,10 @@ class GatewayRuntime:
                 if store is None:
                     logger.warning("goal ledger skipped: backend has no durable ledger")
                 else:
+                    ledger_model = effective_verifier_model(cfg, cfg.verifier.ledger.model)
                     classifier = ProviderClassifier(
                         lambda: self.provider,
-                        model=cfg.verifier.ledger.model,
+                        model=ledger_model,
                     )
                     self.goal_ledger = GoalLedger(
                         store,
@@ -334,7 +336,7 @@ class GatewayRuntime:
                     )
                     logger.info(
                         "goal ledger enabled %s",
-                        kv(model=cfg.verifier.ledger.model),
+                        kv(model=ledger_model),
                     )
         if cfg.verifier.tracker.enabled:
             self.verdict_mailbox = VerdictMailbox()
@@ -349,7 +351,10 @@ class GatewayRuntime:
                 self.judge_worker = judge
                 logger.info(
                     "verifier judge enabled %s",
-                    kv(model=cfg.verifier.judge.model),
+                    kv(
+                        port="SignalJudge",
+                        model=effective_verifier_model(cfg, cfg.verifier.judge.model),
+                    ),
                 )
             self.progress_tracker = ProgressTracker(
                 self.verdict_mailbox,
@@ -359,6 +364,8 @@ class GatewayRuntime:
             )
             self.nudge_actuator = NudgeActuator(self.verdict_mailbox)
             logger.info("progress tracker enabled")
+        elif cfg.verifier.judge.enabled:
+            logger.info("verifier judge skipped: tracker is disabled")
         self._attach_verifier_inspector()
 
     def _attach_verifier_inspector(self) -> None:

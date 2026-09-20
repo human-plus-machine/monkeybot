@@ -253,6 +253,17 @@ scheduler:
   # Env override: MONKEYBOT_SCHEDULER_ENABLED (1 | true | yes | on).
   enabled: false
 
+# Background verifier (YAML-only). Off by default: ledger costs one model call
+# per human message. `enabled: true` turns on omitted ledger/tracker flags;
+# omitted judge.enabled turns on only when the tracker is on. Explicit
+# `enabled: false` still opts a nested section out. Omitted ledger.model
+# inherits model.name (same fallback as the agent). judge.model is reserved —
+# SignalJudge ignores it. Realtime loops ignore this block.
+# verifier:
+#   enabled: true
+#   escalation:
+#     max_severity: nudge
+
 # Optional JSON for model.provider: fake tests (env: MONKEYBOT_FAKE_PROVIDER_EVENTS)
 # fake_provider:
 #   events_json: '[[]]'
