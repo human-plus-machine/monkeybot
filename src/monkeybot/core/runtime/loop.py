@@ -41,6 +41,7 @@ from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.tools.inspector import ToolInspector
 from monkeybot.core.types.content_blocks import ContentBlock
+from monkeybot.core.verifier.binding import bind_verifier_session, reset_verifier_session
 
 from .context_budget import SUMMARY_TRIGGER_RATIO
 from .events import AgentEvent, Error, TurnComplete
@@ -100,8 +101,6 @@ async def run(
     mailbox = ctx.verdict_mailbox
     if mailbox is not None:
         mailbox.open_request(ctx.thread_id, ctx.request_id)
-    from monkeybot.core.verifier.binding import bind_verifier_session, reset_verifier_session
-
     token = bind_verifier_session(provider, ctx.model)
     logger.debug(
         "harness run start %s",

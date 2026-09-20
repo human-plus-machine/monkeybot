@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Protocol
 
+from monkeybot.core.llm.provider import Provider
 from monkeybot.core.persistence.goal_ledger import ResolvedIntent
 from monkeybot.core.runtime.events import VerifierVerdict
 
@@ -17,14 +18,14 @@ class EvidenceBundle:
     inner_turn: int
     signals: tuple[str, ...]
     model: str = ""
-    provider: object | None = None
+    provider: Provider | None = None
 
 
 class VerifierPort(Protocol):
     async def verify(
         self, intent: ResolvedIntent | None, evidence: EvidenceBundle
-    ) -> VerifierVerdict:
-        """Return a verdict. Callers fail open if this raises."""
+    ) -> VerifierVerdict | None:
+        """Return a verdict, or None to fail open without depositing."""
         ...
 
 

@@ -296,8 +296,15 @@ def test_session_binding_overrides_pinned_model_but_yaml_wins(
         token = bind_verifier_session(session_provider, "session-model")
         try:
             assert runtime._live_judge_model(cfg) == "explicit-judge"
+            assert runtime._live_judge_model(cfg, "session-model") == "explicit-judge"
             assert runtime.judge_worker is not None
-            assert runtime.judge_worker._port._current_provider() is session_provider
+            assert runtime.goal_ledger is not None
+            from monkeybot.core.verifier.binding import resolve_live_provider
+
+            assert resolve_live_provider(runtime.judge_worker._port._provider) is runtime.provider
+            assert (
+                resolve_live_provider(runtime.goal_ledger._classifier._provider) is session_provider
+            )
         finally:
             reset_verifier_session(token)
         yaml_path.write_text(_verifier_yaml(), encoding="utf-8")
@@ -306,10 +313,12 @@ def test_session_binding_overrides_pinned_model_but_yaml_wins(
         token = bind_verifier_session(session_provider, "session-model")
         try:
             assert runtime._live_judge_model(cfg) == "session-model"
+            assert runtime._live_judge_model(cfg, "session-model") == "session-model"
             assert runtime._live_ledger_model(cfg) == "session-model"
         finally:
             reset_verifier_session(token)
         assert runtime._live_judge_model(cfg) == "glm-5.3-flash"
+        assert runtime._live_judge_model(cfg, "") == "glm-5.3-flash"
     finally:
         if runtime.judge_worker is not None:
             runtime.judge_worker.close()

@@ -8,6 +8,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, replace
 
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
+from monkeybot.core.llm.provider import Provider
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.goal_ledger import (
     Channel,
@@ -25,6 +26,11 @@ from monkeybot.core.persistence.goal_ledger import (
     now_ms,
     resolve_intent,
 )
+from monkeybot.core.verifier.binding import (
+    bind_verifier_session,
+    current_verifier_binding,
+    reset_verifier_session,
+)
 from monkeybot.core.verifier.classify import ClassifierPort, fail_open_classification
 
 logger = logging.getLogger(__name__)
@@ -41,7 +47,7 @@ class _Job:
     provenance: Provenance
     channel: Channel | None
     model: str = ""
-    provider: object | None = None
+    provider: Provider | None = None
 
 
 class GoalLedger:
@@ -90,8 +96,6 @@ class GoalLedger:
         """Enqueue a ledger write. Returns without waiting on the classifier."""
         if self._closed or not verbatim.strip():
             return
-        from monkeybot.core.verifier.binding import current_verifier_binding
-
         binding = current_verifier_binding()
         queue = self._ensure_worker(thread_id)
         self._pending[thread_id] = self._pending.get(thread_id, 0) + 1
@@ -169,7 +173,7 @@ class GoalLedger:
             try:
                 if self._closed:
                     return
-                await self._handle_job(job)
+                await self._classify_job(job)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -188,33 +192,30 @@ class GoalLedger:
                 if not self._closed:
                     await self._refresh_view(thread_id)
 
-    async def _handle_job(self, job: _Job) -> None:
-        from monkeybot.core.verifier.binding import bind_verifier_session, reset_verifier_session
-
+    async def _classify_job(self, job: _Job) -> None:
         token = bind_verifier_session(job.provider, job.model)
         try:
-            await self._classify_job(job)
+            if job.provenance != Provenance.HUMAN:
+                await self._persist_non_human(job)
+                return
+            entries = await self._store.list_entries(job.thread_id)
+            open_entries = [
+                e for e in entries if e.provenance == Provenance.HUMAN and e.status == Status.ACTIVE
+            ]
+            try:
+                result = await self._classifier.classify(
+                    job.verbatim, open_entries, thread_id=job.thread_id
+                )
+            except Exception:
+                logger.warning(
+                    "goal_ledger classify raised %s",
+                    kv(thread_id=job.thread_id),
+                    exc_info=True,
+                )
+                result = fail_open_classification(open_entries)
+            await self._apply_classification(job, result, entries)
         finally:
             reset_verifier_session(token)
-
-    async def _classify_job(self, job: _Job) -> None:
-        if job.provenance != Provenance.HUMAN:
-            await self._persist_non_human(job)
-            return
-        entries = await self._store.list_entries(job.thread_id)
-        open_entries = [
-            e for e in entries if e.provenance == Provenance.HUMAN and e.status == Status.ACTIVE
-        ]
-        try:
-            result = await self._classifier.classify(job.verbatim, open_entries)
-        except Exception:
-            logger.warning(
-                "goal_ledger classify raised %s",
-                kv(thread_id=job.thread_id),
-                exc_info=True,
-            )
-            result = fail_open_classification(open_entries)
-        await self._apply_classification(job, result, entries)
 
     async def _persist_non_human(self, job: _Job) -> None:
         entry = GoalEntry(

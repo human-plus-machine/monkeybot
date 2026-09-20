@@ -14,6 +14,7 @@ from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.goal_ledger import ConstraintKind
 from monkeybot.core.runtime.events import VerifierVerdict
+from monkeybot.core.verifier.binding import current_verifier_binding
 from monkeybot.core.verifier.judge import JudgeWorker
 from monkeybot.core.verifier.ledger import GoalLedger
 from monkeybot.core.verifier.mailbox import VerdictMailbox
@@ -284,8 +285,6 @@ class ProgressTracker:
         if not signals:
             return
         if self._judge is not None:
-            from monkeybot.core.verifier.binding import current_verifier_binding
-
             binding = current_verifier_binding()
             self._judge.enqueue(
                 EvidenceBundle(

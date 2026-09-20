@@ -8,6 +8,8 @@ from monkeybot.core.verifier.binding import (
     bind_verifier_session,
     current_verifier_binding,
     reset_verifier_session,
+    resolve_live_model,
+    resolve_live_provider,
     resolve_session_verifier_model,
 )
 
@@ -38,6 +40,23 @@ def test_resolve_prefers_yaml_then_session_then_pinned() -> None:
     try:
         assert resolve_session_verifier_model(pinned, None) == "session-model"
         assert resolve_session_verifier_model(pinned, "explicit-judge") == "explicit-judge"
+        assert (
+            resolve_session_verifier_model(pinned, None, session_model="from-evidence")
+            == "from-evidence"
+        )
+        assert resolve_session_verifier_model(pinned, None, session_model="") == "glm-5.3-flash"
     finally:
         reset_verifier_session(token)
     assert resolve_session_verifier_model(pinned, None) == "glm-5.3-flash"
+
+
+def test_resolve_live_model_static_beats_session_snapshot() -> None:
+    assert resolve_live_model("static", "session-model") == "static"
+    assert resolve_live_model(lambda: "from-callable", "session-model") == "from-callable"
+    assert resolve_live_model(lambda session="": session or "pinned", "session-model") == (
+        "session-model"
+    )
+    assert resolve_live_model(lambda session="": session or "pinned", "") == "pinned"
+    assert resolve_live_provider(None) is None
+    provider = SimpleNamespace(name="p")
+    assert resolve_live_provider(lambda: provider) is provider
