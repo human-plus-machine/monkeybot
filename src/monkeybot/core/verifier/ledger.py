@@ -141,6 +141,26 @@ class GoalLedger:
             return
         await asyncio.wait_for(queue.join(), timeout=timeout_s)
 
+    async def wait_all_idle(self, *, timeout_s: float | None = None) -> None:
+        """Wait until every admitted job is persisted and the cache is refreshed.
+
+        Timeout scales with queued work so several serial 15s classifications
+        are not cut off by a single fixed deadline.
+        """
+        queues = tuple(self._queues.values())
+        if not queues:
+            return
+        pending = sum(self._pending.values())
+        limit = timeout_s if timeout_s is not None else max(1, pending or len(queues)) * 16.0
+        await asyncio.wait_for(
+            asyncio.gather(*(queue.join() for queue in queues)),
+            timeout=limit,
+        )
+
+    def hydrate_from(self, other: GoalLedger) -> None:
+        """Copy resolved views so a replacement ledger is readable immediately."""
+        self._cache = OrderedDict(other._cache)
+
     def close(self) -> None:
         self._closed = True
         for task in self._workers.values():
@@ -183,14 +203,16 @@ class GoalLedger:
                     exc_info=True,
                 )
             finally:
-                queue.task_done()
                 pending = self._pending.get(thread_id, 0) - 1
                 if pending <= 0:
                     self._pending.pop(thread_id, None)
                 else:
                     self._pending[thread_id] = pending
-                if not self._closed:
-                    await self._refresh_view(thread_id)
+                try:
+                    if not self._closed:
+                        await self._refresh_view(thread_id)
+                finally:
+                    queue.task_done()
 
     async def _classify_job(self, job: _Job) -> None:
         token = bind_verifier_session(job.provider, job.model)
