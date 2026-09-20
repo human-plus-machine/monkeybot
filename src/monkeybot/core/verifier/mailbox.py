@@ -97,7 +97,6 @@ class MailboxSnapshot:
     """Continuity state copied onto a replacement mailbox during reload."""
 
     ready: OrderedDict[ScopeKey, deque[VerifierVerdict]]
-    nudges: OrderedDict[str, tuple[str, str]]
     replans: OrderedDict[str, tuple[str, str]]
     last: OrderedDict[str, VerifierVerdict]
     current: OrderedDict[str, str]
@@ -127,7 +126,6 @@ class VerdictMailbox:
             ready=OrderedDict(
                 (key, deque(bucket, maxlen=_PER_SCOPE_MAX)) for key, bucket in self._ready.items()
             ),
-            nudges=OrderedDict(self._nudges),
             replans=OrderedDict(self._replans),
             last=OrderedDict(self._last),
             current=OrderedDict(self._current),
@@ -146,7 +144,6 @@ class VerdictMailbox:
         self._ready = OrderedDict(
             (key, deque(bucket, maxlen=_PER_SCOPE_MAX)) for key, bucket in snapshot.ready.items()
         )
-        self._nudges = OrderedDict(snapshot.nudges)
         self._replans = OrderedDict(snapshot.replans)
         self._last = OrderedDict(snapshot.last)
         self._current = OrderedDict(snapshot.current)
@@ -159,12 +156,11 @@ class VerdictMailbox:
             for key, episode in snapshot.episodes.items()
         )
         _cap(self._ready)
-        _cap(self._nudges)
         _cap(self._replans)
         _cap(self._last)
         _cap(self._current)
-        self._cap_idle_threads(self._active)
-        _cap(self._episodes)
+        self._cap_idle_threads(self._active, label="active")
+        self._cap_idle_threads(self._episodes, label="episodes")
         return len(self._active)
 
     @staticmethod

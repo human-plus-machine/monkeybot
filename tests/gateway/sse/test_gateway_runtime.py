@@ -355,7 +355,7 @@ async def test_staged_verifier_reload_closes_replaced_only_after_commit(
         lambda *a, **k: layout,
     )
     runtime = GatewayRuntime()
-    app = SimpleNamespace(state=SimpleNamespace(storage=_ledger_storage(), memory=None))
+    app = SimpleNamespace(state=SimpleNamespace(storage=_LedgerStorage(), memory=None))
     try:
         runtime.build_verifier(get_config_store().current(), storage=app.state.storage)
         live_ledger = runtime.goal_ledger
@@ -414,8 +414,10 @@ async def test_staged_verifier_reload_drains_replaced_ledger_before_close(
             self.started = asyncio.Event()
             self.release = asyncio.Event()
 
-        async def classify(self, verbatim: str, open_entries: object) -> Classification:
-            del verbatim, open_entries
+        async def classify(
+            self, verbatim: str, open_entries: object, *, thread_id: str = ""
+        ) -> Classification:
+            del verbatim, open_entries, thread_id
             self.started.set()
             await self.release.wait()
             return Classification(intent=Intent.NEW_GOAL, relates_to=None, constraints=())
@@ -433,7 +435,7 @@ async def test_staged_verifier_reload_drains_replaced_ledger_before_close(
         lambda *a, **k: layout,
     )
     runtime = GatewayRuntime()
-    app = SimpleNamespace(state=SimpleNamespace(storage=_ledger_storage(), memory=None))
+    app = SimpleNamespace(state=SimpleNamespace(storage=_LedgerStorage(), memory=None))
     store = InMemoryGoalLedgerStore()
     classifier = _SlowClassifier()
     old_ledger = GoalLedger(store, classifier)
@@ -514,7 +516,7 @@ async def test_staged_verifier_reload_rollback_leaves_live_intact(
         lambda *a, **k: layout,
     )
     runtime = GatewayRuntime()
-    app = SimpleNamespace(state=SimpleNamespace(storage=_ledger_storage(), memory=None))
+    app = SimpleNamespace(state=SimpleNamespace(storage=_LedgerStorage(), memory=None))
 
     def _failing_rebuild(
         self: RuntimeCls,
@@ -590,7 +592,7 @@ async def test_verifier_reload_times_out_while_turn_in_flight(
         lambda *a, **k: layout,
     )
     runtime = GatewayRuntime()
-    app = SimpleNamespace(state=SimpleNamespace(storage=_ledger_storage(), memory=None))
+    app = SimpleNamespace(state=SimpleNamespace(storage=_LedgerStorage(), memory=None))
     try:
         runtime.build_verifier(get_config_store().current(), storage=app.state.storage)
         live_ledger = runtime.goal_ledger
@@ -636,14 +638,14 @@ def test_close_verifier_stops_live_workers(
     apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
     runtime = GatewayRuntime()
     try:
-        runtime.build_verifier(get_config_store().current(), storage=_ledger_storage())  # type: ignore[arg-type]
+        runtime.build_verifier(get_config_store().current(), storage=_LedgerStorage())  # type: ignore[arg-type]
         live_ledger = runtime.goal_ledger
         live_judge = runtime.judge_worker
         assert live_ledger is not None and live_judge is not None
         runtime.close_verifier()
         assert live_ledger._closed is True
         assert live_judge._closed is True
-        runtime.build_verifier(get_config_store().current(), storage=_ledger_storage())  # type: ignore[arg-type]
+        runtime.build_verifier(get_config_store().current(), storage=_LedgerStorage())  # type: ignore[arg-type]
         assert runtime.goal_ledger is not live_ledger
         assert runtime.judge_worker is not live_judge
         assert runtime.goal_ledger is not None and runtime.goal_ledger._closed is False
@@ -682,7 +684,7 @@ async def test_memory_hook_reload_does_not_take_verifier_path(
         lambda *a, **k: layout,
     )
     runtime = GatewayRuntime()
-    app = SimpleNamespace(state=SimpleNamespace(storage=_ledger_storage(), memory=None))
+    app = SimpleNamespace(state=SimpleNamespace(storage=_LedgerStorage(), memory=None))
     try:
         runtime.build_verifier(get_config_store().current(), storage=app.state.storage)
         runtime.rebuild_memory_hooks(get_config_store().current(), app)  # type: ignore[arg-type]
@@ -760,7 +762,7 @@ async def test_staged_verifier_reload_keeps_sticky_nudge_and_drains_judge(
         lambda *a, **k: layout,
     )
     runtime = GatewayRuntime()
-    app = SimpleNamespace(state=SimpleNamespace(storage=_ledger_storage(), memory=None))
+    app = SimpleNamespace(state=SimpleNamespace(storage=_LedgerStorage(), memory=None))
     try:
         runtime.build_verifier(get_config_store().current(), storage=app.state.storage)
         mailbox = runtime.verdict_mailbox
