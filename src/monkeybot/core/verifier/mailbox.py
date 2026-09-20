@@ -8,9 +8,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from typing import Any, TypeVar
 
+from monkeybot.core.config.settings import VERIFIER_SEVERITY_RANK
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.runtime.events import VerifierVerdict
-from monkeybot.core.verifier.intervention import correction_text, ordered_signals
+from monkeybot.core.verifier.intervention import correction_text, ordered_signals, replan_text
+from monkeybot.core.verifier.severity import cap_severity
 
 logger = logging.getLogger(__name__)
 
@@ -341,6 +343,71 @@ class VerdictMailbox:
             for signal in ordered_signals(signals)
             if signal in episode.signals and signal in episode.epochs
         )
+
+    def arm_escalation(
+        self,
+        thread_id: str,
+        verdict: VerifierVerdict,
+        *,
+        max_severity: str = "nudge",
+    ) -> bool:
+        """Arm a sticky nudge or replan as soon as a verdict is deposited.
+
+        Does not wait for the turn loop. ``peek_nudge`` can see the result on
+        the next provider call. Fail-open. A later ``none`` must not swallow an
+        earlier ``replan`` / ``block`` for the same request.
+        """
+        capped = cap_severity(verdict.severity, max_severity)
+        if capped in ("none", "") or verdict.status == "on_track":
+            return False
+        if capped in ("replan", "steer", "block"):
+            latest = self.last(thread_id)
+            if (
+                latest is not None
+                and latest.request_id == verdict.request_id
+                and latest.verdict_id != verdict.verdict_id
+                and VERIFIER_SEVERITY_RANK.get(latest.severity, 0)
+                >= VERIFIER_SEVERITY_RANK.get(capped, 0)
+                and _newer_verdict(verdict, latest)
+            ):
+                logger.info(
+                    "verdict escalation skipped stale checkpoint %s",
+                    kv(
+                        thread_id=thread_id,
+                        request_id=verdict.request_id,
+                        verdict_id=verdict.verdict_id,
+                        latest_verdict_id=latest.verdict_id,
+                        latest_severity=latest.severity,
+                    ),
+                )
+                return False
+        try:
+            if capped == "nudge":
+                armed = self.activate_nudge(thread_id, verdict.request_id, verdict)
+                logger.info(
+                    "verifier nudge stash %s",
+                    kv(
+                        thread_id=thread_id,
+                        request_id=verdict.request_id,
+                        verdict_id=verdict.verdict_id,
+                        armed=armed,
+                    ),
+                )
+                return armed
+            if capped in ("replan", "steer"):
+                self.put_replan(
+                    thread_id,
+                    verdict.request_id,
+                    replan_text(verdict.triggering_signals),
+                )
+                return True
+        except Exception:
+            logger.warning(
+                "verdict escalation stash failed %s",
+                kv(thread_id=thread_id),
+                exc_info=True,
+            )
+        return False
 
     def activate_nudge(
         self,

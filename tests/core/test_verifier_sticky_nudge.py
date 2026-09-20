@@ -405,3 +405,62 @@ async def test_system_prompt_snapshot_matches_provider_verifier_block() -> None:
     assert "## Verifier" in prov.system_texts[0]
     assert trusted in prov.system_texts[0]
     assert snaps[0].text == prov.system_texts[0] or trusted in snaps[0].text
+
+
+def test_arm_on_deposit_is_peekable_before_drain() -> None:
+    mailbox = _mailbox()
+    mailbox.set_current_signals("t1", "r1", ["error_streak"])
+    verdict = _nudge("r1", "error_streak")
+    assert mailbox.put("t1", verdict) is True
+    assert mailbox.peek_nudge("t1", "r1") is None
+    assert mailbox.arm_escalation("t1", verdict, max_severity="nudge") is True
+    note = mailbox.peek_nudge("t1", "r1")
+    assert note is not None
+    assert SIGNAL_INSTRUCTIONS["error_streak"] in note
+
+
+@pytest.mark.asyncio
+async def test_deposit_arms_nudge_for_next_provider_call() -> None:
+    mailbox = _mailbox()
+    mailbox.set_current_signals("t1", "r1", ["error_streak"])
+    mgr = HookManager()
+    NudgeActuator(mailbox).register(mgr)
+
+    async def _on_post_tool(payload: HookPayload) -> None:
+        del payload
+        verdict = _nudge("r1", "error_streak")
+        mailbox.put("t1", verdict)
+        mailbox.arm_escalation("t1", verdict, max_severity="nudge")
+
+    mgr.register(HookEvent.POST_TOOL, _on_post_tool)
+    ctx = replace(loop_ctx(), verdict_mailbox=mailbox)
+    prov = FakeProvider(
+        [
+            [
+                ToolCall(call_id="c1", name="run_command", args={"command": "echo hi"}),
+                UsageEvent(input_tokens=1, output_tokens=1),
+                Done(),
+            ],
+            [TextDelta(text="ok"), UsageEvent(input_tokens=1, output_tokens=1), Done()],
+        ]
+    )
+    async for _ in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=3,
+        hook_manager=mgr,
+    ):
+        pass
+    assert len(prov.stream_messages) >= 2
+    first = " ".join(
+        b.text for msg in prov.stream_messages[0] for b in msg.content if isinstance(b, Text)
+    )
+    second = " ".join(
+        b.text for msg in prov.stream_messages[1] for b in msg.content if isinstance(b, Text)
+    )
+    assert SIGNAL_INSTRUCTIONS["error_streak"] not in first
+    assert SIGNAL_INSTRUCTIONS["error_streak"] in second
