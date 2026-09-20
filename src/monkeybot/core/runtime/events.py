@@ -432,6 +432,7 @@ class VerifierVerdict:
     rationale: str = ""
     correction: str | None = None
     triggering_signals: tuple[str, ...] = ()
+    triggering_signal_epochs: tuple[tuple[str, int], ...] = ()
     judge_tokens: int = 0
 
     def to_wire(self) -> dict[str, object]:
@@ -444,8 +445,12 @@ class VerifierVerdict:
             "rationale": self.rationale,
             "triggeringSignals": list(self.triggering_signals),
         }
+        if self.triggering_signal_epochs:
+            payload["triggeringSignalEpochs"] = dict(self.triggering_signal_epochs)
         if self.correction is not None:
             payload["correction"] = self.correction
+        if self.judge_tokens:
+            payload["judgeTokens"] = self.judge_tokens
         return payload
 
 
@@ -754,8 +759,12 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             "rationale": event.rationale,
             "triggering_signals": list(event.triggering_signals),
         }
+        if event.triggering_signal_epochs:
+            payload["triggering_signal_epochs"] = dict(event.triggering_signal_epochs)
         if event.correction is not None:
             payload["correction"] = event.correction
+        if event.judge_tokens:
+            payload["judge_tokens"] = event.judge_tokens
         return payload
     if isinstance(event, QueuedInputAccepted):
         return {**base, "queue": event.queue, "position": event.position}
@@ -1197,10 +1206,22 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
     if t == "VerifierVerdict":
         signals_raw = payload.get("triggering_signals") or []
         signals = tuple(str(s) for s in signals_raw) if isinstance(signals_raw, list) else ()
+        epochs_raw = payload.get("triggering_signal_epochs") or {}
+        signal_epochs = (
+            tuple(
+                (str(signal), int(epoch))
+                for signal, epoch in epochs_raw.items()
+                if isinstance(epoch, (int, float))
+            )
+            if isinstance(epochs_raw, dict)
+            else ()
+        )
         corr_raw = payload.get("correction")
         correction = corr_raw if isinstance(corr_raw, str) else None
         conf_raw = payload.get("confidence", 0.0)
         confidence = float(conf_raw) if isinstance(conf_raw, (int, float)) else 0.0
+        tokens_raw = payload.get("judge_tokens", 0)
+        judge_tokens = int(tokens_raw) if isinstance(tokens_raw, (int, float)) else 0
         return VerifierVerdict(
             request_id=rid,
             verdict_id=str(payload.get("verdict_id") or ""),
@@ -1211,6 +1232,8 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
             rationale=str(payload.get("rationale") or ""),
             correction=correction,
             triggering_signals=signals,
+            triggering_signal_epochs=signal_epochs,
+            judge_tokens=max(0, judge_tokens),
         )
     if t == "QueuedInputAccepted":
         q_raw = payload.get("queue", "follow_up")

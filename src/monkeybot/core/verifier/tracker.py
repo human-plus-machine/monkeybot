@@ -183,7 +183,7 @@ class ProgressTracker:
                 payload.usage.get("output_tokens") or 0
             )
             if self._judge is not None and call_tokens:
-                self._judge.note_agent_tokens(payload.request_id, call_tokens)
+                self._judge.note_agent_tokens(payload.thread_id, payload.request_id, call_tokens)
         text = (payload.assistant_text or "").strip()
         has_tools = bool(payload.tool_requests)
         if has_tools and not text:
@@ -285,12 +285,16 @@ class ProgressTracker:
             from monkeybot.core.verifier.binding import current_verifier_binding
 
             binding = current_verifier_binding()
+            signal_epochs = self._mailbox.signal_epochs(
+                payload.thread_id, payload.request_id, signals
+            )
             self._judge.enqueue(
                 EvidenceBundle(
                     thread_id=payload.thread_id,
                     request_id=payload.request_id,
                     inner_turn=inner,
                     signals=tuple(signals),
+                    signal_epochs=signal_epochs,
                     model=binding.model,
                     provider=binding.provider,
                 )
@@ -307,6 +311,9 @@ class ProgressTracker:
             confidence=confidence,
             rationale=", ".join(signals),
             triggering_signals=tuple(signals),
+            triggering_signal_epochs=self._mailbox.signal_epochs(
+                payload.thread_id, payload.request_id, signals
+            ),
         )
         self._mailbox.put(payload.thread_id, verdict)
         state.emitted_this_turn = True

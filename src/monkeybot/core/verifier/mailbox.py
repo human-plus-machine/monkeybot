@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
+from monkeybot.core.config.settings import VERIFIER_SEVERITY_RANK
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.runtime.events import VerifierVerdict
 from monkeybot.core.verifier.intervention import correction_text, ordered_signals
@@ -25,6 +26,27 @@ ScopeKey = tuple[str, str]
 def _cap(store: OrderedDict[Any, _T]) -> None:
     while len(store) > _THREAD_CAP:
         store.popitem(last=False)
+
+
+def _checkpoint_turn(verdict: VerifierVerdict) -> int:
+    raw = verdict.checkpoint_id.rsplit(":", 1)[-1]
+    try:
+        return int(raw)
+    except ValueError:
+        return 0
+
+
+def _severity_rank(verdict: VerifierVerdict) -> int:
+    return VERIFIER_SEVERITY_RANK.get(verdict.severity, 0)
+
+
+def _newer_verdict(current: VerifierVerdict, incoming: VerifierVerdict) -> bool:
+    """True when ``incoming`` should replace ``current`` for the same request."""
+    incoming_turn = _checkpoint_turn(incoming)
+    current_turn = _checkpoint_turn(current)
+    if incoming_turn != current_turn:
+        return incoming_turn > current_turn
+    return _severity_rank(incoming) >= _severity_rank(current)
 
 
 @dataclass
@@ -46,6 +68,26 @@ class _SignalEpisode:
     request_id: str
     signals: frozenset[str]
     epochs: dict[str, int]
+
+
+def _fence_signals(
+    episode: _SignalEpisode,
+    verdict: VerifierVerdict,
+    incoming: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Keep only signals still live in the episode the verdict was judged against.
+
+    A verdict carrying no epoch snapshot predates episode fencing, so it keeps
+    every triggering signal as long as one of them is still live.
+    """
+    verdict_epochs = dict(verdict.triggering_signal_epochs)
+    if not verdict_epochs:
+        return incoming if set(incoming) & episode.signals else ()
+    return ordered_signals(
+        signal
+        for signal in incoming
+        if signal in episode.signals and episode.epochs.get(signal) == verdict_epochs.get(signal)
+    )
 
 
 class VerdictMailbox:
@@ -82,6 +124,15 @@ class VerdictMailbox:
         self._current.move_to_end(thread_id)
         _cap(self._current)
 
+    def _is_stale(self, thread_id: str, verdict: VerifierVerdict) -> bool:
+        """True when a newer verdict for the same request already landed."""
+        current = self._last.get(thread_id)
+        return (
+            current is not None
+            and current.request_id == verdict.request_id
+            and not _newer_verdict(current, verdict)
+        )
+
     def put(self, thread_id: str, verdict: VerifierVerdict) -> bool:
         """Deposit a verdict. Requests that are not currently open are dropped."""
         if not self._accept(thread_id, verdict.request_id):
@@ -91,6 +142,18 @@ class VerdictMailbox:
                     thread_id=thread_id,
                     request_id=verdict.request_id,
                     verdict_id=verdict.verdict_id,
+                ),
+            )
+            return False
+        if self._is_stale(thread_id, verdict):
+            logger.info(
+                "verifier verdict dropped stale checkpoint %s",
+                kv(
+                    thread_id=thread_id,
+                    request_id=verdict.request_id,
+                    verdict_id=verdict.verdict_id,
+                    checkpoint_id=verdict.checkpoint_id,
+                    latest_checkpoint_id=self._last[thread_id].checkpoint_id,
                 ),
             )
             return False
@@ -110,6 +173,8 @@ class VerdictMailbox:
         return self._last.get(thread_id)
 
     def set_last(self, thread_id: str, verdict: VerifierVerdict) -> None:
+        if self._is_stale(thread_id, verdict):
+            return
         self._last[thread_id] = verdict
         self._last.move_to_end(thread_id)
         _cap(self._last)
@@ -220,7 +285,7 @@ class VerdictMailbox:
         incoming = ordered_signals(verdict.triggering_signals)
         episode = self._episode(thread_id, request_id)
         if episode is not None:
-            incoming = ordered_signals(signal for signal in incoming if signal in episode.signals)
+            incoming = _fence_signals(episode, verdict, incoming)
             if not incoming:
                 return False
         epochs = dict(self.signal_epochs(thread_id, request_id, incoming))

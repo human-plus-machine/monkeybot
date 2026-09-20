@@ -699,8 +699,17 @@ def test_mailbox_caps_per_thread_and_evicts_idle_threads() -> None:
     assert ready[0].verdict_id == "5"
 
     for i in range(_THREAD_CAP + 1):
-        mailbox.open_request(f"t{i}", "r")
-        mailbox.put(f"t{i}", _verdict(i))
+        mailbox.open_request(f"t{i}", f"r{i}")
+        mailbox.put(
+            f"t{i}",
+            VerifierVerdict(
+                request_id=f"r{i}",
+                verdict_id=str(i),
+                checkpoint_id=f"r{i}:1",
+                status="drifting",
+                severity="none",
+            ),
+        )
     assert mailbox.take_ready("t0") == []
     assert len(mailbox.take_ready(f"t{_THREAD_CAP}")) == 1
 

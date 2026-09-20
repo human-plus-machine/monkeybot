@@ -175,3 +175,69 @@ async def test_loop_clears_mailbox_on_error_finally() -> None:
     assert kinds.index(Error) < kinds.index(TurnComplete)
     assert mailbox.last("t1") is None
     assert mailbox.put("t1", _verdict("r1", "late")) is False
+
+
+def test_stale_verdict_does_not_activate_after_recovery() -> None:
+    mailbox = VerdictMailbox()
+    mailbox.open_request("t1", "r1")
+    mailbox.set_current_signals("t1", "r1", [])
+    verdict = VerifierVerdict(
+        request_id="r1",
+        verdict_id="v-stale",
+        checkpoint_id="r1:3",
+        status="stuck",
+        severity="nudge",
+        rationale="error_streak",
+        triggering_signals=("error_streak",),
+    )
+    assert mailbox.activate_nudge("t1", "r1", verdict) is False
+    assert mailbox.peek_nudge("t1", "r1") is None
+
+
+def test_stale_verdict_does_not_activate_for_new_signal_episode() -> None:
+    mailbox = VerdictMailbox()
+    mailbox.open_request("t1", "r1")
+    mailbox.set_current_signals("t1", "r1", ["error_streak"])
+    original_epochs = mailbox.signal_epochs("t1", "r1", ["error_streak"])
+    verdict = VerifierVerdict(
+        request_id="r1",
+        verdict_id="v-old-episode",
+        checkpoint_id="r1:3",
+        status="stuck",
+        severity="nudge",
+        rationale="error_streak",
+        triggering_signals=("error_streak",),
+        triggering_signal_epochs=original_epochs,
+    )
+
+    mailbox.set_current_signals("t1", "r1", [])
+    mailbox.set_current_signals("t1", "r1", ["error_streak"])
+
+    assert mailbox.signal_epochs("t1", "r1", ["error_streak"]) != original_epochs
+    assert mailbox.activate_nudge("t1", "r1", verdict) is False
+    assert mailbox.peek_nudge("t1", "r1") is None
+
+
+def test_out_of_order_verdict_deposit_drops_older_checkpoint() -> None:
+    mailbox = VerdictMailbox()
+    mailbox.open_request("t1", "r1")
+    newer = VerifierVerdict(
+        request_id="r1",
+        verdict_id="new",
+        checkpoint_id="r1:4",
+        status="on_track",
+        severity="none",
+    )
+    older = VerifierVerdict(
+        request_id="r1",
+        verdict_id="old",
+        checkpoint_id="r1:1",
+        status="stuck",
+        severity="nudge",
+        triggering_signals=("error_streak",),
+    )
+
+    assert mailbox.put("t1", newer) is True
+    assert mailbox.put("t1", older) is False
+    assert [verdict.verdict_id for verdict in mailbox.take_ready("t1", "r1")] == ["new"]
+    assert mailbox.last("t1") is newer

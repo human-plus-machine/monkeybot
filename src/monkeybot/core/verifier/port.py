@@ -16,6 +16,7 @@ class EvidenceBundle:
     request_id: str
     inner_turn: int
     signals: tuple[str, ...]
+    signal_epochs: tuple[tuple[str, int], ...] = ()
     model: str = ""
     provider: object | None = None
 
