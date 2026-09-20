@@ -97,6 +97,9 @@ async def run(
     trace_id_capture: list[str | None] = [None]
     blocks = _normalize_user_content(user_content)
     effective_max = _effective_max_turns(max_turns, ctx.config)
+    mailbox = ctx.verdict_mailbox
+    if mailbox is not None:
+        mailbox.open_request(ctx.thread_id, ctx.request_id)
     logger.debug(
         "harness run start %s",
         kv(

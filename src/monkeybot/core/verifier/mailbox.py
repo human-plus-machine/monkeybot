@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
+from monkeybot.core.config.settings import VERIFIER_SEVERITY_RANK
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.runtime.events import VerifierVerdict
 from monkeybot.core.verifier.intervention import correction_text, ordered_signals
@@ -25,6 +26,27 @@ ScopeKey = tuple[str, str]
 def _cap(store: OrderedDict[Any, _T]) -> None:
     while len(store) > _THREAD_CAP:
         store.popitem(last=False)
+
+
+def _checkpoint_turn(verdict: VerifierVerdict) -> int:
+    raw = verdict.checkpoint_id.rsplit(":", 1)[-1]
+    try:
+        return int(raw)
+    except ValueError:
+        return 0
+
+
+def _severity_rank(verdict: VerifierVerdict) -> int:
+    return VERIFIER_SEVERITY_RANK.get(verdict.severity, 0)
+
+
+def _newer_verdict(current: VerifierVerdict, incoming: VerifierVerdict) -> bool:
+    """True when ``incoming`` should replace ``current`` for the same request."""
+    incoming_turn = _checkpoint_turn(incoming)
+    current_turn = _checkpoint_turn(current)
+    if incoming_turn != current_turn:
+        return incoming_turn > current_turn
+    return _severity_rank(incoming) >= _severity_rank(current)
 
 
 @dataclass
@@ -48,16 +70,38 @@ class VerdictMailbox:
         self._pending: OrderedDict[ScopeKey, int] = OrderedDict()
         self._active: OrderedDict[str, ActiveNudge] = OrderedDict()
         self._current_signals: OrderedDict[str, tuple[str, frozenset[str]]] = OrderedDict()
-        self._closed: OrderedDict[ScopeKey, None] = OrderedDict()
+        self._current: OrderedDict[str, str] = OrderedDict()
+        self._last_closed: OrderedDict[str, str] = OrderedDict()
 
     @staticmethod
     def _scope(thread_id: str, request_id: str) -> ScopeKey:
         return (thread_id, request_id)
 
+    def _is_open(self, thread_id: str, request_id: str) -> bool:
+        return self._current.get(thread_id) == request_id
+
+    def _accept(self, thread_id: str, request_id: str) -> bool:
+        """Allow deposits for the open request; auto-open when the thread is idle.
+
+        A request that just ended cannot reopen itself. A different request may.
+        """
+        if self._is_open(thread_id, request_id):
+            return True
+        if self._current.get(thread_id) is not None:
+            return False
+        if self._last_closed.get(thread_id) == request_id:
+            return False
+        self.open_request(thread_id, request_id)
+        return True
+
+    def open_request(self, thread_id: str, request_id: str) -> None:
+        """Mark ``request_id`` as the only request that may deposit on this thread."""
+        self._current[thread_id] = request_id
+        self._current.move_to_end(thread_id)
+
     def put(self, thread_id: str, verdict: VerifierVerdict) -> bool:
-        """Deposit a verdict. Closed requests are dropped, never leaked to the next turn."""
-        key = self._scope(thread_id, verdict.request_id)
-        if key in self._closed:
+        """Deposit a verdict. Requests that are not currently open are dropped."""
+        if not self._accept(thread_id, verdict.request_id):
             logger.info(
                 "verifier verdict dropped closed request %s",
                 kv(
@@ -67,6 +111,7 @@ class VerdictMailbox:
                 ),
             )
             return False
+        key = self._scope(thread_id, verdict.request_id)
         bucket = self._ready.get(key)
         if bucket is None:
             bucket = deque(maxlen=_PER_SCOPE_MAX)
@@ -82,12 +127,21 @@ class VerdictMailbox:
         return self._last.get(thread_id)
 
     def set_last(self, thread_id: str, verdict: VerifierVerdict) -> None:
+        current = self._last.get(thread_id)
+        if (
+            current is not None
+            and current.request_id == verdict.request_id
+            and not _newer_verdict(current, verdict)
+        ):
+            return
         self._last[thread_id] = verdict
         self._last.move_to_end(thread_id)
         _cap(self._last)
 
     def mark_pending(self, thread_id: str, request_id: str = "") -> None:
         """A judge call is in flight; the turn tail may wait out its grace."""
+        if not self._accept(thread_id, request_id):
+            return
         key = self._scope(thread_id, request_id)
         self._pending[key] = self._pending.get(key, 0) + 1
         self._pending.move_to_end(key)
@@ -108,6 +162,8 @@ class VerdictMailbox:
 
     def set_current_signals(self, thread_id: str, request_id: str, signals: Iterable[str]) -> None:
         """Publish the tracker's live suspicion set; drop a recovered active nudge."""
+        if not self._accept(thread_id, request_id):
+            return
         sigs = frozenset(s for s in signals if s)
         self._current_signals[thread_id] = (request_id, sigs)
         self._current_signals.move_to_end(thread_id)
@@ -142,6 +198,8 @@ class VerdictMailbox:
         ``text`` is ignored; actuation always uses :func:`correction_text`.
         """
         del text
+        if not self._accept(thread_id, request_id):
+            return False
         incoming = ordered_signals(verdict.triggering_signals)
         current = self._current_signals.get(thread_id)
         if current is not None and current[0] != request_id:
@@ -165,7 +223,7 @@ class VerdictMailbox:
             triggering_signals=incoming,
         )
         self._active.move_to_end(thread_id)
-        _cap(self._active)
+        self._cap_idle_threads(self._active)
         return True
 
     def peek_nudge(self, thread_id: str, request_id: str) -> str | None:
@@ -199,12 +257,17 @@ class VerdictMailbox:
         replan = self._replans.get(thread_id)
         if replan is not None and replan[0] == request_id:
             self._replans.pop(thread_id, None)
-        self._closed[key] = None
-        self._closed.move_to_end(key)
-        _cap(self._closed)
+        if self._current.get(thread_id) == request_id:
+            self._current.pop(thread_id, None)
+        self._last_closed[thread_id] = request_id
+        self._last_closed.move_to_end(thread_id)
+        _cap(self._last_closed)
 
     def put_replan(self, thread_id: str, request_id: str, text: str) -> None:
+        if not self._accept(thread_id, request_id):
+            return
         self._put_note(self._replans, thread_id, request_id, text)
+        _cap(self._replans)
 
     def take_replan(self, thread_id: str, request_id: str) -> str | None:
         return self._take_note(self._replans, thread_id, request_id)
@@ -221,6 +284,13 @@ class VerdictMailbox:
                 ready.extend(bucket)
         return ready
 
+    def _cap_idle_threads(self, store: OrderedDict[str, Any]) -> None:
+        while len(store) > _THREAD_CAP:
+            victim = next((key for key in store if key not in self._current), None)
+            if victim is None:
+                break
+            store.pop(victim, None)
+
     @staticmethod
     def _put_note(
         store: OrderedDict[str, tuple[str, str]], thread_id: str, request_id: str, text: str
@@ -230,7 +300,6 @@ class VerdictMailbox:
             return
         store[thread_id] = (request_id, note)
         store.move_to_end(thread_id)
-        _cap(store)
 
     @staticmethod
     def _take_note(

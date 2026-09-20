@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
@@ -18,13 +19,14 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.runtime.events import VerifierVerdict
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.verifier.ledger import GoalLedger
-from monkeybot.core.verifier.mailbox import VerdictMailbox
+from monkeybot.core.verifier.mailbox import ScopeKey, VerdictMailbox
 from monkeybot.core.verifier.match import verdict_status
 from monkeybot.core.verifier.port import EvidenceBundle, VerifierPort
 
 logger = logging.getLogger(__name__)
 
 _QUEUE_CAP = 32
+_MAX_IN_FLIGHT = 8
 _STATE_CAP = 256
 
 
@@ -43,82 +45,125 @@ class JudgeWorker:
         self._port = port
         self._ledger_fn = ledger_fn
         self._config = config
-        self._queue: asyncio.Queue[EvidenceBundle] = asyncio.Queue(maxsize=_QUEUE_CAP)
-        self._task: asyncio.Task[None] | None = None
+        self._jobs: set[asyncio.Task[None]] = set()
+        self._sema: asyncio.Semaphore | None = None
         self._closed = False
-        self._verdicts_this_request: OrderedDict[str, int] = OrderedDict()
-        self._last_turn: OrderedDict[str, int] = OrderedDict()
-        self._spend: OrderedDict[str, int] = OrderedDict()
-        self._agent_spend: OrderedDict[str, int] = OrderedDict()
-
-    def start(self) -> None:
-        if self._task is None:
-            self._task = asyncio.create_task(self._run(), name="verifier-judge")
+        self._verdicts_this_request: OrderedDict[ScopeKey, int] = OrderedDict()
+        self._last_turn: OrderedDict[ScopeKey, int] = OrderedDict()
+        self._spend: OrderedDict[ScopeKey, int] = OrderedDict()
+        self._agent_spend: OrderedDict[ScopeKey, int] = OrderedDict()
 
     def close(self) -> None:
         self._closed = True
-        task = self._task
-        self._task = None
-        if task is not None:
+        jobs = list(self._jobs)
+        self._jobs.clear()
+        for task in jobs:
             task.cancel()
 
-    def note_agent_tokens(self, request_id: str, tokens: int) -> None:
-        self._bump(self._agent_spend, request_id, tokens)
+    def note_agent_tokens(self, thread_id: str, request_id: str, tokens: int) -> None:
+        self._bump(self._agent_spend, (thread_id, request_id), tokens)
 
     def enqueue(self, evidence: EvidenceBundle) -> None:
         if self._closed:
             return
-        self.start()
         request_id = evidence.request_id
         thread_id = evidence.thread_id
-        if self._verdicts_this_request.get(request_id, 0) >= self._config.max_verdicts_per_message:
+        key = (thread_id, request_id)
+        if self._verdicts_this_request.get(key, 0) >= self._config.max_verdicts_per_message:
             logger.info(
                 "judge skip rate_limit %s",
-                kv(thread_id=thread_id, reason="max_verdicts_per_message"),
+                kv(thread_id=thread_id, request_id=request_id, reason="max_verdicts_per_message"),
             )
             return
-        last = self._last_turn.get(request_id, 0)
+        last = self._last_turn.get(key, 0)
         if last > 0 and evidence.inner_turn - last < self._config.min_turns_between_verdicts:
             logger.info(
                 "judge skip rate_limit %s",
-                kv(thread_id=thread_id, reason="min_turns_between_verdicts"),
+                kv(
+                    thread_id=thread_id,
+                    request_id=request_id,
+                    reason="min_turns_between_verdicts",
+                ),
             )
             return
-        agent = self._agent_spend.get(request_id, 0)
-        spend = self._spend.get(request_id, 0)
+        agent = self._agent_spend.get(key, 0)
+        spend = self._spend.get(key, 0)
         if agent > 0 and spend / agent > self._config.max_spend_ratio:
             logger.warning(
                 "judge skip spend_ratio %s",
-                kv(request_id=request_id, spend=spend, agent=agent),
+                kv(thread_id=thread_id, request_id=request_id, spend=spend, agent=agent),
             )
             return
-        try:
-            self._queue.put_nowait(evidence)
-        except asyncio.QueueFull:
-            logger.warning("judge queue full %s", kv(thread_id=thread_id))
+        if len(self._jobs) >= _QUEUE_CAP:
+            logger.warning(
+                "judge queue full %s",
+                kv(
+                    thread_id=thread_id,
+                    request_id=request_id,
+                    queue_depth=len(self._jobs),
+                ),
+            )
             return
         # Count the attempt now, not when the call returns: a slow port would
         # otherwise let every in-flight turn past both rate limits.
-        self._bump(self._verdicts_this_request, request_id, 1)
-        self._store(self._last_turn, request_id, evidence.inner_turn)
+        self._bump(self._verdicts_this_request, key, 1)
+        self._store(self._last_turn, key, evidence.inner_turn)
         self._mailbox.mark_pending(thread_id, request_id)
+        queued_at = time.monotonic()
+        task = asyncio.create_task(self._run_one(evidence, queued_at), name="verifier-judge")
+        self._jobs.add(task)
+        task.add_done_callback(self._jobs.discard)
+        logger.info(
+            "judge enqueue %s",
+            kv(
+                thread_id=thread_id,
+                request_id=request_id,
+                queue_depth=len(self._jobs),
+                inner_turn=evidence.inner_turn,
+            ),
+        )
 
-    async def _run(self) -> None:
-        while True:
-            evidence = await self._queue.get()
-            try:
-                await self._handle(evidence)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
+    def _semaphore(self) -> asyncio.Semaphore:
+        if self._sema is None:
+            self._sema = asyncio.Semaphore(_MAX_IN_FLIGHT)
+        return self._sema
+
+    async def _run_one(self, evidence: EvidenceBundle, queued_at: float) -> None:
+        acquired = False
+        try:
+            if self._closed:
                 self._refund(evidence)
-                logger.warning(
-                    "judge handle failed %s",
-                    kv(thread_id=evidence.thread_id, request_id=evidence.request_id),
-                    exc_info=True,
-                )
-            finally:
-                self._mailbox.clear_pending(evidence.thread_id, evidence.request_id)
+                return
+            await self._semaphore().acquire()
+            acquired = True
+            wait_ms = int((time.monotonic() - queued_at) * 1000)
+            logger.info(
+                "judge start %s",
+                kv(
+                    thread_id=evidence.thread_id,
+                    request_id=evidence.request_id,
+                    queue_wait_ms=wait_ms,
+                    queue_depth=len(self._jobs),
+                ),
+            )
+            if self._closed:
+                self._refund(evidence)
+                return
+            await self._handle(evidence)
+        except asyncio.CancelledError:
+            self._refund(evidence)
+            raise
+        except Exception:
+            self._refund(evidence)
+            logger.warning(
+                "judge handle failed %s",
+                kv(thread_id=evidence.thread_id, request_id=evidence.request_id),
+                exc_info=True,
+            )
+        finally:
+            if acquired:
+                self._semaphore().release()
+            self._mailbox.clear_pending(evidence.thread_id, evidence.request_id)
 
     async def _handle(self, evidence: EvidenceBundle) -> None:
         from monkeybot.core.verifier.binding import bind_verifier_session, reset_verifier_session
@@ -150,34 +195,37 @@ class JudgeWorker:
             )
             return
         self._mailbox.put(evidence.thread_id, verdict)
-        self._bump(self._spend, evidence.request_id, max(0, verdict.judge_tokens))
-        agent = self._agent_spend.get(evidence.request_id, 0)
+        key = (evidence.thread_id, evidence.request_id)
+        self._bump(self._spend, key, max(0, verdict.judge_tokens))
+        agent = self._agent_spend.get(key, 0)
         logger.info(
             "judge spend %s",
             kv(
+                thread_id=evidence.thread_id,
                 request_id=evidence.request_id,
-                judge_tokens=self._spend[evidence.request_id],
+                judge_tokens=self._spend[key],
                 agent_tokens=agent,
             ),
         )
 
     def _refund(self, evidence: EvidenceBundle) -> None:
         """Give back the verdict budget charged at enqueue when no verdict landed."""
-        charged = self._verdicts_this_request.get(evidence.request_id, 0)
+        key = (evidence.thread_id, evidence.request_id)
+        charged = self._verdicts_this_request.get(key, 0)
         if charged > 0:
-            self._store(self._verdicts_this_request, evidence.request_id, charged - 1)
-        last = self._last_turn.get(evidence.request_id)
+            self._store(self._verdicts_this_request, key, charged - 1)
+        last = self._last_turn.get(key)
         if last == evidence.inner_turn:
-            self._last_turn.pop(evidence.request_id, None)
+            self._last_turn.pop(key, None)
 
     @staticmethod
-    def _store(store: OrderedDict[str, int], key: str, value: int) -> None:
+    def _store(store: OrderedDict[ScopeKey, int], key: ScopeKey, value: int) -> None:
         store[key] = value
         store.move_to_end(key)
         while len(store) > _STATE_CAP:
             store.popitem(last=False)
 
-    def _bump(self, store: OrderedDict[str, int], key: str, delta: int) -> None:
+    def _bump(self, store: OrderedDict[ScopeKey, int], key: ScopeKey, delta: int) -> None:
         self._store(store, key, store.get(key, 0) + delta)
 
 
@@ -322,24 +370,42 @@ class ProviderJudge:
         ]
         try:
             text, tokens = await asyncio.wait_for(
-                _collect_judge_text(provider, messages, model),
+                _collect_judge_text(provider, messages, model, evidence),
                 timeout=self._timeout_s,
             )
         except TimeoutError:
             logger.warning(
                 "verifier judge timed out %s",
-                kv(model=model, timeout_s=self._timeout_s),
+                kv(
+                    thread_id=evidence.thread_id,
+                    request_id=evidence.request_id,
+                    model=model,
+                    timeout_s=self._timeout_s,
+                ),
             )
             raise
         parsed = parse_judge_verdict(text)
         if parsed is None:
             logger.warning(
                 "verifier judge unparseable %s",
-                kv(model=model, chars=len(text)),
+                kv(
+                    thread_id=evidence.thread_id,
+                    request_id=evidence.request_id,
+                    model=model,
+                    chars=len(text),
+                ),
             )
             raise RuntimeError("verifier judge returned unparseable verdict")
         if tokens <= 0:
-            logger.info("verifier judge missing usage %s", kv(model=model, chars=len(text)))
+            logger.info(
+                "verifier judge missing usage %s",
+                kv(
+                    thread_id=evidence.thread_id,
+                    request_id=evidence.request_id,
+                    model=model,
+                    chars=len(text),
+                ),
+            )
         from monkeybot.core.verifier.intervention import correction_text
 
         correction = correction_text(evidence.signals) if parsed["severity"] != "none" else None
@@ -361,17 +427,68 @@ async def _collect_judge_text(
     provider: Provider,
     messages: list[Message],
     model: str,
+    evidence: EvidenceBundle,
 ) -> tuple[str, int]:
+    from monkeybot.core.context import TurnContext
+    from monkeybot.observability.spans import set_llm_io, set_llm_usage, span_llm
+
+    prompt = "\n".join(
+        "".join(b.text for b in message.content if isinstance(b, Text)) for message in messages
+    )
+    ctx = TurnContext(
+        thread_id=evidence.thread_id,
+        request_id=evidence.request_id,
+        agent_md="",
+        memory_index=[],
+        skills=[],
+        tools=[],
+        user_id=None,
+        parent_run_id=None,
+        model=model,
+    )
+    started = time.monotonic()
     text = ""
-    tokens = 0
-    async with aclosing(cast(Any, provider.stream(messages, [], model=model))) as stream:
-        async for ev in stream:
-            if isinstance(ev, TextDelta):
-                text += ev.text
-            elif isinstance(ev, UsageEvent):
-                tokens += max(0, ev.input_tokens) + max(0, ev.output_tokens)
-            elif isinstance(ev, Done):
-                break
+    input_tokens = 0
+    output_tokens = 0
+    try:
+        async with span_llm(ctx=ctx, model=model):
+            async with aclosing(cast(Any, provider.stream(messages, [], model=model))) as stream:
+                async for ev in stream:
+                    if isinstance(ev, TextDelta):
+                        text += ev.text
+                    elif isinstance(ev, UsageEvent):
+                        input_tokens += max(0, ev.input_tokens)
+                        output_tokens += max(0, ev.output_tokens)
+                    elif isinstance(ev, Done):
+                        break
+            set_llm_io(prompt=prompt, completion=text)
+            if input_tokens or output_tokens:
+                set_llm_usage(input_tokens=input_tokens, output_tokens=output_tokens)
+    except Exception:
+        logger.warning(
+            "verifier judge stream failed %s",
+            kv(
+                thread_id=evidence.thread_id,
+                request_id=evidence.request_id,
+                model=model,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            ),
+            exc_info=True,
+        )
+        raise
+    tokens = input_tokens + output_tokens
+    logger.info(
+        "verifier judge stream %s",
+        kv(
+            thread_id=evidence.thread_id,
+            request_id=evidence.request_id,
+            model=model,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            chars=len(text),
+        ),
+    )
     return text, tokens
 
 

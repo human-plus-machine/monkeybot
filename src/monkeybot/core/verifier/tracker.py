@@ -153,7 +153,7 @@ class ProgressTracker:
                 payload.usage.get("output_tokens") or 0
             )
             if self._judge is not None and call_tokens:
-                self._judge.note_agent_tokens(payload.request_id, call_tokens)
+                self._judge.note_agent_tokens(payload.thread_id, payload.request_id, call_tokens)
         text = (payload.assistant_text or "").strip()
         has_tools = bool(payload.tool_requests)
         if has_tools and not text:

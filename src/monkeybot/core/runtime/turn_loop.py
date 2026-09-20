@@ -328,7 +328,6 @@ async def _drain_verdicts(
         )
         if capped != requested or trusted != verdict.correction:
             verdict = dataclasses.replace(verdict, severity=capped, correction=trusted)
-        mailbox.set_last(ctx.thread_id, verdict)
         if history is not None:
             try:
                 await persist_message(

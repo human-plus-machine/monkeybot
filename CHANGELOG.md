@@ -22,6 +22,11 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - Injected verifier/replan text is a trusted signal template; judge free-form `correction` is telemetry only.
 - Classifier/judge inherit the originating session provider and model (YAML overrides still win).
 - Staged verifier reload no longer closes live ledger/judge workers before commit; rollback closes only newly staged resources.
+- Drain no longer rewrites mailbox `last`; a newer block cannot be clobbered by an older drained verdict.
+- Judge rate limits and spend counters are keyed by `(thread_id, request_id)` so two chats cannot share a client `request_id` budget.
+- JudgeWorker runs up to 8 in-flight jobs instead of a serial queue, so one slow thread cannot drop another thread's tail-grace verdict.
+- Verifier slice reload waits for in-flight turns and pins ledger/mailbox under the reload lock used by `start_turn`.
+- Inspector deny text is the trusted signal template, not judge `correction`.
 
 ## [cli v0.7.0] - 2026-09-18
 

@@ -48,7 +48,7 @@ class VerifierInspector:
                 return Decision(kind="allow")
             if _is_read_only(call.name, ctx.tools):
                 return Decision(kind="allow")
-            message = last.correction or correction_text(last.triggering_signals)
+            message = correction_text(last.triggering_signals)
             logger.info(
                 "verifier inspector deny %s",
                 kv(

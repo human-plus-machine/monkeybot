@@ -1006,8 +1006,10 @@ def _scoped_verdict(verdict_id: str, request_id: str) -> VerifierVerdict:
 
 def test_ready_and_pending_are_request_scoped() -> None:
     mailbox = VerdictMailbox()
+    mailbox.open_request("t1", "r1")
     mailbox.mark_pending("t1", "r1")
     mailbox.put("t1", _scoped_verdict("v1", "r1"))
+    mailbox.open_request("t1", "r2")
     mailbox.put("t1", _scoped_verdict("v2", "r2"))
     assert mailbox.pending("t1", "r1") is True
     assert mailbox.pending("t1", "r2") is False
@@ -1029,10 +1031,12 @@ async def test_take_ready_collects_all_ready_verdicts_for_the_request() -> None:
     from monkeybot.core.runtime.turn_loop import _take_ready
 
     mailbox = VerdictMailbox()
+    mailbox.open_request("t1", "r1")
     mailbox.mark_pending("t1", "r1")
     mailbox.mark_pending("t1", "r1")
     mailbox.put("t1", _scoped_verdict("v1", "r1"))
     mailbox.put("t1", _scoped_verdict("v2", "r1"))
+    mailbox.open_request("t1", "r2")
     mailbox.put("t1", _scoped_verdict("other", "r2"))
     mailbox.clear_pending("t1", "r1")
     mailbox.clear_pending("t1", "r1")
@@ -1059,3 +1063,88 @@ async def test_tail_grace_exits_when_request_pending_reaches_zero() -> None:
     started = time.monotonic()
     assert await _take_ready(mailbox, "t1", "r1", grace_s=2.0) == []
     assert time.monotonic() - started < 0.4
+
+
+def test_set_last_keeps_newer_checkpoint() -> None:
+    mailbox = VerdictMailbox()
+    older = VerifierVerdict(
+        request_id="r1",
+        verdict_id="old",
+        checkpoint_id="r1:1",
+        status="drifting",
+        severity="nudge",
+        triggering_signals=("error_streak",),
+    )
+    newer = VerifierVerdict(
+        request_id="r1",
+        verdict_id="new",
+        checkpoint_id="r1:2",
+        status="stuck",
+        severity="block",
+        triggering_signals=("constraint_touch",),
+    )
+    mailbox.put("t1", older)
+    mailbox.put("t1", newer)
+    assert mailbox.last("t1") is newer
+    mailbox.set_last("t1", older)
+    assert mailbox.last("t1") is newer
+
+
+@pytest.mark.asyncio
+async def test_drain_does_not_rewrite_newer_last() -> None:
+    from monkeybot.core.runtime.turn_loop import _drain_verdicts
+
+    mailbox = VerdictMailbox()
+    older = VerifierVerdict(
+        request_id="r1",
+        verdict_id="old",
+        checkpoint_id="r1:1",
+        status="drifting",
+        severity="nudge",
+        triggering_signals=("error_streak",),
+    )
+    newer = VerifierVerdict(
+        request_id="r1",
+        verdict_id="new",
+        checkpoint_id="r1:2",
+        status="stuck",
+        severity="block",
+        triggering_signals=("constraint_touch",),
+    )
+    mailbox.put("t1", older)
+    mailbox.put("t1", newer)
+    ctx = replace(loop_ctx(), verdict_mailbox=mailbox)
+    drained = [evt async for evt in _drain_verdicts(ctx)]
+    assert [v.verdict_id for v in drained] == ["old", "new"]
+    assert mailbox.last("t1") is newer
+    assert mailbox.last("t1").severity == "block"
+
+
+def test_idle_thread_cap_does_not_drop_live_nudge() -> None:
+    from monkeybot.core.verifier.mailbox import _THREAD_CAP
+
+    mailbox = VerdictMailbox()
+    live = VerifierVerdict(
+        request_id="r1",
+        verdict_id="live",
+        checkpoint_id="r1:1",
+        status="drifting",
+        severity="nudge",
+        triggering_signals=("error_streak",),
+    )
+    mailbox.open_request("live", "r1")
+    assert mailbox.activate_nudge("live", "r1", live) is True
+    idle = VerifierVerdict(
+        request_id="r",
+        verdict_id="idle",
+        checkpoint_id="r:1",
+        status="drifting",
+        severity="nudge",
+        triggering_signals=("error_streak",),
+    )
+    for i in range(_THREAD_CAP + 5):
+        thread = f"idle{i}"
+        mailbox.put(thread, idle)
+        mailbox.activate_nudge(thread, "r", idle)
+        mailbox.clear_request(thread, "r")
+    assert mailbox.peek_nudge("live", "r1") is not None
