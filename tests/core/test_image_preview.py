@@ -136,3 +136,34 @@ def test_resolve_caches_preview_per_attachment(
     resolve_messages_for_provider([message], attachment_store=store, session_id="s1")
     resolve_messages_for_provider([message], attachment_store=store, session_id="s1")
     assert calls == 1
+
+
+def test_resolve_inlines_plain_text_attachments(tmp_path: Path) -> None:
+    store = FilesystemAttachmentStore(tmp_path)
+    stored = store.save(
+        "s1",
+        data=b"please summarize this essay",
+        mime_type="text/plain",
+        filename="message.txt",
+    )
+    msgs = resolve_messages_for_provider(
+        [
+            Message(
+                role="user",
+                content=[
+                    Text(text="too long to send inline"),
+                    AttachmentRef(
+                        attachment_id=stored.attachment_id,
+                        mime_type="text/plain",
+                        metadata={"filename": "message.txt"},
+                    ),
+                ],
+            )
+        ],
+        attachment_store=store,
+        session_id="s1",
+    )
+    texts = [b.text for b in msgs[0].content if isinstance(b, Text)]
+    assert texts[0] == "too long to send inline"
+    assert "[Attached file: message.txt]" in texts[1]
+    assert "please summarize this essay" in texts[1]

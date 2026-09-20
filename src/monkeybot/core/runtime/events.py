@@ -444,13 +444,11 @@ class VerifierVerdict:
             "confidence": self.confidence,
             "rationale": self.rationale,
             "triggeringSignals": list(self.triggering_signals),
+            "triggeringSignalEpochs": dict(self.triggering_signal_epochs),
+            "judgeTokens": self.judge_tokens,
         }
-        if self.triggering_signal_epochs:
-            payload["triggeringSignalEpochs"] = dict(self.triggering_signal_epochs)
         if self.correction is not None:
             payload["correction"] = self.correction
-        if self.judge_tokens:
-            payload["judgeTokens"] = self.judge_tokens
         return payload
 
 
@@ -758,13 +756,11 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             "confidence": event.confidence,
             "rationale": event.rationale,
             "triggering_signals": list(event.triggering_signals),
+            "triggering_signal_epochs": dict(event.triggering_signal_epochs),
+            "judge_tokens": event.judge_tokens,
         }
-        if event.triggering_signal_epochs:
-            payload["triggering_signal_epochs"] = dict(event.triggering_signal_epochs)
         if event.correction is not None:
             payload["correction"] = event.correction
-        if event.judge_tokens:
-            payload["judge_tokens"] = event.judge_tokens
         return payload
     if isinstance(event, QueuedInputAccepted):
         return {**base, "queue": event.queue, "position": event.position}

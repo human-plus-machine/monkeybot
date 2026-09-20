@@ -6,6 +6,15 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `verifier.enabled: true` turns on omitted nested `ledger` / `tracker` flags. Omitted `judge.enabled` turns on only when the tracker is on. Explicit `enabled: false` still opts a nested section out.
+- Omitted `verifier.ledger.model` / `verifier.judge.model` inherit the agent model (`model.name` / `MODEL_NAME`, then `gemini-2.5-flash`). `judge.model` is reserved; the current worker is the deterministic `SignalJudge`.
+
+### Notes
+
+- Existing configs that set only `verifier.enabled: true` (or `enabled: true` plus `ledger.enabled: true`) now also get the tracker, and the judge if the tracker stays on. Opt out with `tracker.enabled: false` / `judge.enabled: false`.
+
 ## [browser v0.7.2] - 2026-09-13
 
 #### Fixed

@@ -49,6 +49,10 @@ _OLLAMA_MODES: dict[str, Literal["auto", "cloud", "local"]] = {
     "ollama-local": "local",
 }
 
+# Same fallback ``get_provider_config`` uses when ``model.name`` / ``MODEL_NAME``
+# are omitted. Keep verifier inheritance on this path so the two never drift.
+_DEFAULT_MODEL_NAME = "gemini-2.5-flash"
+
 
 def normalize_model_provider(provider: str) -> str:
     """Map config aliases (e.g. ``gemini``, ``vertex-claude``) to canonical provider ids."""
@@ -145,12 +149,18 @@ class VerifierJudgeConfig:
     """``verifier.judge`` — async LLM verdicts off the critical path."""
 
     enabled: bool = False
+    # Reserved for a provider-backed judge. ``SignalJudge`` ignores this today.
     model: str | None = None
     max_verdicts_per_message: int = 3
     min_turns_between_verdicts: int = 2
     max_spend_ratio: float = 0.25
-    # Default outlasts the 15s classifier/judge timeout so an in-flight call can land.
-    tail_grace_s: float = 16.0
+    # Ship at 0: the tail drain commits ready verdicts and never blocks. Raise
+    # only after measuring how often in-flight ``done`` verdicts miss TurnComplete.
+    tail_grace_s: float = 0.0
+    # Max jobs waiting to start. Running jobs use ``max_in_flight``, so a
+    # saturated semaphore does not consume this backlog budget.
+    queue_cap: int = 32
+    max_in_flight: int = 8
 
 
 @dataclass(frozen=True)
@@ -194,6 +204,16 @@ def _resolve_gcp_project_id(config: RuntimeConfig | None = None) -> str:
     )
 
 
+def _agent_model_name(cfg: RuntimeConfig | None, model_name: str | None = None) -> str:
+    """Pinned ``model.name`` / ``MODEL_NAME``, else ``_DEFAULT_MODEL_NAME``."""
+    if model_name and model_name.strip():
+        return model_name.strip()
+    from monkeybot.core.config.snapshot import env_value_or_current
+
+    name = env_value_or_current(cfg, "MODEL_NAME")
+    return name.strip() if name.strip() else _DEFAULT_MODEL_NAME
+
+
 def get_provider_config(
     provider: str | None = None,
     model_name: str | None = None,
@@ -214,9 +234,7 @@ def get_provider_config(
             "MODEL_PROVIDER=fake is for gateway/tests only; inject ScriptedFakeProvider directly "
             "or use the gateway fake provider path."
         )
-    resolved_model = str(
-        model_name or env_value_or_current(config, "MODEL_NAME") or "gemini-2.5-flash"
-    )
+    resolved_model = _agent_model_name(config, model_name)
     sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens, config=config)
     thinking_budget = (
         thinking_budget
@@ -551,14 +569,16 @@ def _verifier_optional_str(raw: Any, label: str) -> str | None:
     return raw.strip()
 
 
-def effective_verifier_model(cfg: Any | None, override: str | None) -> str:
-    """Resolve ledger/judge model: explicit override, else pinned ``model.name``."""
+def effective_verifier_model(cfg: RuntimeConfig | None, override: str | None) -> str:
+    """Resolve ledger/judge model: explicit override, else the agent's model id.
+
+    Uses the same fallback as :func:`get_provider_config` so an omitted
+    ``model.name`` still resolves to ``gemini-2.5-flash`` instead of ``""``.
+    Does not construct a Provider — ``provider: fake`` snapshots still resolve.
+    """
     if override and override.strip():
         return override.strip()
-    if cfg is None:
-        return ""
-    name = getattr(getattr(cfg, "model", None), "name", None)
-    return name.strip() if isinstance(name, str) else ""
+    return _agent_model_name(cfg)
 
 
 def _verifier_nested(section: dict[str, Any], key: str) -> dict[str, Any]:
@@ -576,9 +596,10 @@ def verifier_config_from_section(section: dict[str, Any]) -> VerifierConfig:
     Shared by :func:`get_verifier_config` and the ``RuntimeConfig`` snapshot
     builder so the two never validate the section differently.
 
-    When ``verifier.enabled`` is true, omitted nested ``ledger`` / ``tracker`` /
-    ``judge`` ``enabled`` flags default on. Explicit ``enabled: false`` still
-    opts a nested section out.
+    When ``verifier.enabled`` is true, omitted nested ``ledger`` / ``tracker``
+    ``enabled`` flags default on. Omitted ``judge.enabled`` defaults on only
+    when the tracker is on. Explicit ``enabled: false`` still opts a nested
+    section out.
     """
     if not section:
         return _DEFAULT_VERIFIER_CONFIG
@@ -601,14 +622,23 @@ def verifier_config_from_section(section: dict[str, Any]) -> VerifierConfig:
         )
 
     parent_on = _verifier_bool(section.get("enabled"), "verifier.enabled", defaults.enabled)
-    nested_enabled_default = parent_on
+    tracker_enabled = _verifier_bool(
+        tracker_raw.get("enabled"),
+        "verifier.tracker.enabled",
+        parent_on,
+    )
+    judge_enabled = _verifier_bool(
+        judge_raw.get("enabled"),
+        "verifier.judge.enabled",
+        parent_on and tracker_enabled,
+    )
     return VerifierConfig(
         enabled=parent_on,
         ledger=VerifierLedgerConfig(
             enabled=_verifier_bool(
                 ledger_raw.get("enabled"),
                 "verifier.ledger.enabled",
-                nested_enabled_default,
+                parent_on,
             ),
             model=_verifier_optional_str(ledger_raw.get("model"), "verifier.ledger.model"),
             max_entries_per_thread=_verifier_int(
@@ -619,11 +649,7 @@ def verifier_config_from_section(section: dict[str, Any]) -> VerifierConfig:
             ),
         ),
         tracker=VerifierTrackerConfig(
-            enabled=_verifier_bool(
-                tracker_raw.get("enabled"),
-                "verifier.tracker.enabled",
-                nested_enabled_default,
-            ),
+            enabled=tracker_enabled,
             suspicion_threshold=_verifier_int(
                 tracker_raw.get("suspicion_threshold"),
                 "verifier.tracker.suspicion_threshold",
@@ -638,11 +664,7 @@ def verifier_config_from_section(section: dict[str, Any]) -> VerifierConfig:
             ),
         ),
         judge=VerifierJudgeConfig(
-            enabled=_verifier_bool(
-                judge_raw.get("enabled"),
-                "verifier.judge.enabled",
-                nested_enabled_default,
-            ),
+            enabled=judge_enabled,
             model=_verifier_optional_str(judge_raw.get("model"), "verifier.judge.model"),
             max_verdicts_per_message=_verifier_int(
                 judge_raw.get("max_verdicts_per_message"),
@@ -667,6 +689,18 @@ def verifier_config_from_section(section: dict[str, Any]) -> VerifierConfig:
                 "verifier.judge.tail_grace_s",
                 defaults.judge.tail_grace_s,
                 min_value=0.0,
+            ),
+            queue_cap=_verifier_int(
+                judge_raw.get("queue_cap"),
+                "verifier.judge.queue_cap",
+                defaults.judge.queue_cap,
+                min_value=1,
+            ),
+            max_in_flight=_verifier_int(
+                judge_raw.get("max_in_flight"),
+                "verifier.judge.max_in_flight",
+                defaults.judge.max_in_flight,
+                min_value=1,
             ),
         ),
         escalation=VerifierEscalationConfig(max_severity=severity),

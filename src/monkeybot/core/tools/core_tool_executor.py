@@ -1367,7 +1367,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 ".pdf": "application/pdf",
             }
             mime = ext_map.get(fp.suffix.lower())
-        if mime is None or mime not in ALLOWED_MIME_TYPES:
+        if mime is None or mime == "text/plain" or mime not in ALLOWED_MIME_TYPES:
             return ToolExecutionResult.err(
                 "load_file supports images (png/jpeg/gif/webp) and PDF only; "
                 f"got {mime or 'unknown'}. For text files use read_file."

@@ -8,7 +8,6 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
-from monkeybot.core.config.settings import VERIFIER_SEVERITY_RANK
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.runtime.events import VerifierVerdict
 from monkeybot.core.verifier.intervention import correction_text, ordered_signals
@@ -19,7 +18,6 @@ _T = TypeVar("_T")
 
 _THREAD_CAP = 256
 _PER_SCOPE_MAX = 16
-_PER_THREAD_MAX = _PER_SCOPE_MAX
 ScopeKey = tuple[str, str]
 
 
@@ -28,25 +26,29 @@ def _cap(store: OrderedDict[Any, _T]) -> None:
         store.popitem(last=False)
 
 
-def _checkpoint_turn(verdict: VerifierVerdict) -> int:
-    raw = verdict.checkpoint_id.rsplit(":", 1)[-1]
+def _checkpoint_turn(verdict: VerifierVerdict) -> int | None:
+    """Parse the trailing turn from ``request_id:turn``. Unknown ids are None, not 0."""
+    raw = (verdict.checkpoint_id or "").rsplit(":", 1)[-1]
+    if not raw:
+        return None
     try:
         return int(raw)
     except ValueError:
-        return 0
-
-
-def _severity_rank(verdict: VerifierVerdict) -> int:
-    return VERIFIER_SEVERITY_RANK.get(verdict.severity, 0)
+        return None
 
 
 def _newer_verdict(current: VerifierVerdict, incoming: VerifierVerdict) -> bool:
     """True when ``incoming`` should replace ``current`` for the same request."""
     incoming_turn = _checkpoint_turn(incoming)
     current_turn = _checkpoint_turn(current)
+    if incoming_turn is None:
+        return False
+    if current_turn is None:
+        return True
     if incoming_turn != current_turn:
         return incoming_turn > current_turn
-    return _severity_rank(incoming) >= _severity_rank(current)
+    # Same turn: later arrival wins so an on_track recovery can replace a nudge.
+    return True
 
 
 @dataclass
@@ -78,11 +80,11 @@ def _fence_signals(
     """Keep only signals still live in the episode the verdict was judged against.
 
     A verdict carrying no epoch snapshot predates episode fencing, so it keeps
-    every triggering signal as long as one of them is still live.
+    only the triggering signals that are still live — never recovered ones.
     """
     verdict_epochs = dict(verdict.triggering_signal_epochs)
     if not verdict_epochs:
-        return incoming if set(incoming) & episode.signals else ()
+        return ordered_signals(signal for signal in incoming if signal in episode.signals)
     return ordered_signals(
         signal
         for signal in incoming
@@ -99,7 +101,6 @@ class VerdictMailbox:
 
     def __init__(self) -> None:
         self._ready: OrderedDict[ScopeKey, deque[VerifierVerdict]] = OrderedDict()
-        self._nudges: OrderedDict[str, tuple[str, str]] = OrderedDict()
         self._replans: OrderedDict[str, tuple[str, str]] = OrderedDict()
         self._last: OrderedDict[str, VerifierVerdict] = OrderedDict()
         self._pending: OrderedDict[ScopeKey, int] = OrderedDict()
@@ -117,6 +118,13 @@ class VerdictMailbox:
     def _accept(self, thread_id: str, request_id: str) -> bool:
         """Allow deposits only for the open request. Never auto-open."""
         return bool(request_id) and self._is_open(thread_id, request_id)
+
+    def _drop_closed(self, thread_id: str, request_id: str, kind: str, **extra: object) -> None:
+        logger.info(
+            "verifier %s dropped closed request %s",
+            kind,
+            kv(thread_id=thread_id, request_id=request_id, **extra),
+        )
 
     def open_request(self, thread_id: str, request_id: str) -> None:
         """Mark ``request_id`` as the only request that may deposit on this thread."""
@@ -136,13 +144,11 @@ class VerdictMailbox:
     def put(self, thread_id: str, verdict: VerifierVerdict) -> bool:
         """Deposit a verdict. Requests that are not currently open are dropped."""
         if not self._accept(thread_id, verdict.request_id):
-            logger.info(
-                "verifier verdict dropped closed request %s",
-                kv(
-                    thread_id=thread_id,
-                    request_id=verdict.request_id,
-                    verdict_id=verdict.verdict_id,
-                ),
+            self._drop_closed(
+                thread_id,
+                verdict.request_id,
+                "verdict",
+                verdict_id=verdict.verdict_id,
             )
             return False
         if self._is_stale(thread_id, verdict):
@@ -173,8 +179,7 @@ class VerdictMailbox:
         return self._last.get(thread_id)
 
     def set_last(self, thread_id: str, verdict: VerifierVerdict) -> None:
-        if self._is_stale(thread_id, verdict):
-            return
+        """Record ``verdict`` as the latest for ``thread_id``. ``put`` already fenced stale."""
         self._last[thread_id] = verdict
         self._last.move_to_end(thread_id)
         _cap(self._last)
@@ -182,6 +187,7 @@ class VerdictMailbox:
     def mark_pending(self, thread_id: str, request_id: str = "") -> None:
         """A judge call is in flight; the turn tail may wait out its grace."""
         if not self._accept(thread_id, request_id):
+            self._drop_closed(thread_id, request_id, "pending")
             return
         key = self._scope(thread_id, request_id)
         self._pending[key] = self._pending.get(key, 0) + 1
@@ -210,6 +216,7 @@ class VerdictMailbox:
     def set_current_signals(self, thread_id: str, request_id: str, signals: Iterable[str]) -> None:
         """Publish the tracker's latched suspicion set; prune recovered active signals."""
         if not self._accept(thread_id, request_id):
+            self._drop_closed(thread_id, request_id, "nudge")
             return
         sigs = frozenset(s for s in signals if s)
         episode = self._episode(thread_id, request_id)
@@ -220,7 +227,8 @@ class VerdictMailbox:
             episode.epochs[signal] = episode.epochs.get(signal, 0) + 1
         episode.signals = sigs
         self._episodes.move_to_end(thread_id)
-        _cap(self._episodes)
+        self._cap_idle_threads(self._episodes, label="episodes")
+        self._cap_idle_threads(self._active, label="active")
         active = self._active.get(thread_id)
         if active is None or active.request_id != request_id:
             return
@@ -246,6 +254,19 @@ class VerdictMailbox:
             return
         if kept == active.triggering_signals:
             return
+        dropped = ordered_signals(
+            signal for signal in active.triggering_signals if signal not in kept
+        )
+        logger.info(
+            "verifier nudge pruned %s",
+            kv(
+                thread_id=thread_id,
+                request_id=request_id,
+                verdict_id=active.verdict_id,
+                kept=",".join(kept),
+                dropped=",".join(dropped),
+            ),
+        )
         active.triggering_signals = kept
         active.signal_epochs = {
             signal: episode.epochs[signal] for signal in kept if signal in episode.epochs
@@ -271,15 +292,13 @@ class VerdictMailbox:
         thread_id: str,
         request_id: str,
         verdict: VerifierVerdict,
-        text: str | None = None,
     ) -> bool:
         """Arm a sticky nudge when the verdict's signals are still live (or unpublished).
 
         Overlapping verdicts union their triggering signals and regenerate the
         trusted template. Recovered signals are pruned by :meth:`set_current_signals`.
-        ``text`` is ignored; actuation always uses :func:`correction_text`.
+        Actuation always uses :func:`correction_text`.
         """
-        del text
         if not self._accept(thread_id, request_id):
             return False
         incoming = ordered_signals(verdict.triggering_signals)
@@ -308,7 +327,7 @@ class VerdictMailbox:
             signal_epochs=epochs,
         )
         self._active.move_to_end(thread_id)
-        self._cap_idle_threads(self._active)
+        self._cap_idle_threads(self._active, label="active")
         return True
 
     def peek_nudge(self, thread_id: str, request_id: str) -> str | None:
@@ -316,20 +335,18 @@ class VerdictMailbox:
         active = self._active.get(thread_id)
         if active is None or active.request_id != request_id:
             return None
-        active.injections += 1
         return active.text
 
-    def put_nudge(self, thread_id: str, request_id: str, text: str) -> None:
-        if not self._accept(thread_id, request_id):
+    def note_nudge_injection(self, thread_id: str, request_id: str) -> None:
+        """Count a provider injection only after the actuator actually appended it."""
+        active = self._active.get(thread_id)
+        if active is None or active.request_id != request_id:
             return
-        self._put_note(self._nudges, thread_id, request_id, text)
-        _cap(self._nudges)
-
-    def take_nudge(self, thread_id: str, request_id: str) -> str | None:
-        return self._take_note(self._nudges, thread_id, request_id)
+        active.injections += 1
 
     def put_replan(self, thread_id: str, request_id: str, text: str) -> None:
         if not self._accept(thread_id, request_id):
+            self._drop_closed(thread_id, request_id, "replan")
             return
         self._put_note(self._replans, thread_id, request_id, text)
         _cap(self._replans)
@@ -371,21 +388,22 @@ class VerdictMailbox:
             self._active.pop(thread_id, None)
         if self._episode(thread_id, request_id) is not None:
             self._episodes.pop(thread_id, None)
-        nudge = self._nudges.get(thread_id)
-        if nudge is not None and nudge[0] == request_id:
-            self._nudges.pop(thread_id, None)
         replan = self._replans.get(thread_id)
         if replan is not None and replan[0] == request_id:
             self._replans.pop(thread_id, None)
         if self._current.get(thread_id) == request_id:
             self._current.pop(thread_id, None)
 
-    def _cap_idle_threads(self, store: OrderedDict[str, Any]) -> None:
+    def _cap_idle_threads(self, store: OrderedDict[str, Any], *, label: str) -> None:
         while len(store) > _THREAD_CAP:
             victim = next((key for key in store if key not in self._current), None)
             if victim is None:
                 break
             store.pop(victim, None)
+            logger.warning(
+                "verifier mailbox evicted idle thread %s",
+                kv(thread_id=victim, store=label),
+            )
 
     @staticmethod
     def _put_note(

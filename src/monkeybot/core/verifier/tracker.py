@@ -14,6 +14,7 @@ from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.goal_ledger import ConstraintKind
 from monkeybot.core.runtime.events import VerifierVerdict
+from monkeybot.core.verifier.binding import current_verifier_binding
 from monkeybot.core.verifier.judge import JudgeWorker
 from monkeybot.core.verifier.ledger import GoalLedger
 from monkeybot.core.verifier.mailbox import VerdictMailbox
@@ -154,6 +155,8 @@ class ProgressTracker:
             writing_churn = name in WRITE_TOOLS and bool(set(paths) & state.churn_paths)
             if not writing_churn:
                 state.latched.discard("rewrite_churn")
+                for path in state.churn_paths:
+                    state.write_counts.pop(path, None)
                 state.churn_paths.clear()
         ledger = self._ledger_signals(payload.thread_id, name, args)
         fired.extend(ledger)
@@ -282,19 +285,16 @@ class ProgressTracker:
         if not signals:
             return
         if self._judge is not None:
-            from monkeybot.core.verifier.binding import current_verifier_binding
-
             binding = current_verifier_binding()
-            signal_epochs = self._mailbox.signal_epochs(
-                payload.thread_id, payload.request_id, signals
-            )
             self._judge.enqueue(
                 EvidenceBundle(
                     thread_id=payload.thread_id,
                     request_id=payload.request_id,
                     inner_turn=inner,
                     signals=tuple(signals),
-                    signal_epochs=signal_epochs,
+                    signal_epochs=self._mailbox.signal_epochs(
+                        payload.thread_id, payload.request_id, signals
+                    ),
                     model=binding.model,
                     provider=binding.provider,
                 )

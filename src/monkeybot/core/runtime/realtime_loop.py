@@ -27,7 +27,7 @@ from monkeybot.core.context import (
     refresh_tools_after_mcp_change,
 )
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
-from monkeybot.core.llm.provider import Message, ToolCall
+from monkeybot.core.llm.provider import Message, Provider, ToolCall
 from monkeybot.core.llm.realtime_provider import RealtimeToolCall
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.memory.ingest import persist_message
@@ -59,6 +59,7 @@ from monkeybot.core.types.content_blocks import (
     ToolRequest,
     ToolResponse,
 )
+from monkeybot.core.verifier.binding import bind_verifier_session, reset_verifier_session
 
 from .loop_ports import ToolExecutorPort
 from .tool_batch import (
@@ -458,6 +459,7 @@ async def run_realtime_turn(
     tool_results_out: list[ContentBlock] | None = None,
     inject_texts_out: list[str] | None = None,
     pending_bus: PendingResponseBusPort | None = None,
+    provider: Provider | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Process a finalized realtime user utterance + assistant response.
 
@@ -470,6 +472,10 @@ async def run_realtime_turn(
     The caller is responsible for injecting the collected tool results back into the
     live realtime session via ``RealtimeSession.send_tool_results()`` /
     ``send_context()`` when the session is idle.
+
+    ``provider`` is the gateway text Provider used by verifier classifier/judge jobs.
+    The Live vendor session is still owned by the gateway; this argument is not used
+    to generate assistant text.
 
     Truncation (``Done.truncated``) is text-loop only — Gemini Live does not expose an
     output length-limit signal. Realtime still rejects all-``parse_error`` batches.
@@ -491,9 +497,7 @@ async def run_realtime_turn(
             n_tool_calls=len(assistant_tool_calls),
         ),
     )
-    from monkeybot.core.verifier.binding import bind_verifier_session, reset_verifier_session
-
-    token = bind_verifier_session(None, ctx.model)
+    token = bind_verifier_session(provider, ctx.model)
     try:
         # 1. Commit user message to history (skip empty audio-only placeholders).
         if user_text or any(not isinstance(b, Text) for b in blocks):

@@ -347,8 +347,8 @@ class GatewayRuntime:
                 judge = JudgeWorker(
                     self.verdict_mailbox,
                     ProviderJudge(
-                        lambda: current_verifier_binding().provider or self.provider,
-                        model=lambda: self._live_judge_model(cfg),
+                        lambda: self.provider,
+                        model=lambda session="": self._live_judge_model(cfg, session),
                     ),
                     ledger_fn=lambda: self.goal_ledger,
                     config=cfg.verifier.judge,
@@ -356,7 +356,10 @@ class GatewayRuntime:
                 self.judge_worker = judge
                 logger.info(
                     "verifier judge enabled %s",
-                    kv(model=self._live_judge_model(cfg) or "(inherit)"),
+                    kv(
+                        port="ProviderJudge",
+                        model=self._live_judge_model(cfg) or "(inherit)",
+                    ),
                 )
             self.progress_tracker = ProgressTracker(
                 self.verdict_mailbox,
@@ -366,6 +369,8 @@ class GatewayRuntime:
             )
             self.nudge_actuator = NudgeActuator(self.verdict_mailbox)
             logger.info("progress tracker enabled")
+        elif cfg.verifier.judge.enabled:
+            logger.info("verifier judge skipped: tracker is disabled")
         self._attach_verifier_inspector()
 
     @staticmethod
@@ -374,9 +379,11 @@ class GatewayRuntime:
         return resolve_session_verifier_model(current, current.verifier.ledger.model)
 
     @staticmethod
-    def _live_judge_model(fallback: RuntimeConfig) -> str:
+    def _live_judge_model(fallback: RuntimeConfig, session_model: str | None = None) -> str:
         current = get_config_store().current_or_none() or fallback
-        return resolve_session_verifier_model(current, current.verifier.judge.model)
+        return resolve_session_verifier_model(
+            current, current.verifier.judge.model, session_model=session_model
+        )
 
     def _attach_verifier_inspector(self) -> None:
         """Keep ``VerifierInspector`` in the chain iff a mailbox exists."""

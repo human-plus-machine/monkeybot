@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 
 import pytest
 
@@ -171,6 +172,46 @@ def test_second_unread_write_emits_write_without_read() -> None:
     assert len(verdicts) == 1
     assert "write_without_read" in verdicts[0].triggering_signals
     assert verdicts[0].severity == "none"
+
+
+def test_fresh_signal_evidence_includes_epochs() -> None:
+    class _RecordingJudge:
+        def __init__(self) -> None:
+            self.bundles: list = []
+
+        def enqueue(self, evidence: object) -> None:
+            self.bundles.append(evidence)
+
+        def note_agent_tokens(self, thread_id: str, request_id: str, tokens: int) -> None:
+            del thread_id, request_id, tokens
+
+    mailbox = _mailbox()
+    judge: Any = _RecordingJudge()
+    tracker = ProgressTracker(
+        mailbox,
+        ledger_fn=lambda: None,
+        config=VerifierTrackerConfig(enabled=True, min_turn_before_verdict=1),
+        judge=judge,
+    )
+    tracker._observe_tool(
+        _payload(
+            event=HookEvent.POST_TOOL,
+            tool_name="read_file",
+            tool_args={"path": "a.md"},
+            inner_turn=3,
+        )
+    )
+    tracker._observe_tool(
+        _payload(
+            event=HookEvent.POST_TOOL,
+            tool_name="write_file",
+            tool_args={"path": "b.md"},
+            inner_turn=3,
+        )
+    )
+    assert len(judge.bundles) == 1
+    epochs = dict(judge.bundles[0].signal_epochs)
+    assert epochs.get("write_without_read", 0) >= 1
 
 
 def test_min_turn_suppresses_non_ledger_signals() -> None:
@@ -678,7 +719,7 @@ async def test_run_yields_queued_verdict_before_error() -> None:
 
 
 def test_mailbox_caps_per_thread_and_evicts_idle_threads() -> None:
-    from monkeybot.core.verifier.mailbox import _PER_THREAD_MAX, _THREAD_CAP
+    from monkeybot.core.verifier.mailbox import _PER_SCOPE_MAX, _THREAD_CAP
 
     mailbox = VerdictMailbox()
 
@@ -692,10 +733,10 @@ def test_mailbox_caps_per_thread_and_evicts_idle_threads() -> None:
         )
 
     mailbox.open_request("t1", "r")
-    for i in range(_PER_THREAD_MAX + 5):
+    for i in range(_PER_SCOPE_MAX + 5):
         mailbox.put("t1", _verdict(i))
     ready = mailbox.take_ready("t1")
-    assert len(ready) == _PER_THREAD_MAX
+    assert len(ready) == _PER_SCOPE_MAX
     assert ready[0].verdict_id == "5"
 
     for i in range(_THREAD_CAP + 1):
@@ -718,16 +759,13 @@ def test_mailbox_nudge_overwrites_and_last_caps_after_drain() -> None:
     from monkeybot.core.verifier.mailbox import _THREAD_CAP
 
     mailbox = _mailbox()
-    mailbox.put_nudge("t1", "r1", "first")
-    mailbox.put_nudge("t1", "r1", "second")
-    assert mailbox.take_nudge("t1", "r1") == "second"
-    assert mailbox.take_nudge("t1", "r1") is None
+    mailbox.put_replan("t1", "r1", "first")
+    mailbox.put_replan("t1", "r1", "second")
+    assert mailbox.take_replan("t1", "r1") == "second"
+    assert mailbox.take_replan("t1", "r1") is None
 
     # A note is scoped to the request that produced it: a later, unrelated
     # request must not pick up a leftover from a finished one.
-    mailbox.put_nudge("t1", "r1", "stale")
-    assert mailbox.take_nudge("t1", "r2") is None
-    assert mailbox.take_nudge("t1", "r1") is None
     mailbox.put_replan("t1", "r1", "stale")
     assert mailbox.take_replan("t1", "r2") is None
 

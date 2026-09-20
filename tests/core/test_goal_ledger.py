@@ -57,8 +57,10 @@ class ScriptedClassifier:
         self,
         verbatim: str,
         open_entries: Sequence[GoalEntry],
+        *,
+        thread_id: str = "",
     ) -> Classification:
-        del open_entries
+        del open_entries, thread_id
         self.calls.append(verbatim)
         if self._delay_s > 0:
             await asyncio.sleep(self._delay_s)
