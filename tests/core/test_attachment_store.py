@@ -41,3 +41,17 @@ def test_read_returns_contained_attachment(tmp_path: Path) -> None:
     assert data == b"hello"
     assert mime == "image/png"
     assert filename == "dot.png"
+
+
+def test_save_accepts_plain_text(tmp_path: Path) -> None:
+    store = FilesystemAttachmentStore(tmp_path)
+    stored = store.save(
+        "session-1",
+        data=b"hello from a long message",
+        mime_type="text/plain",
+        filename="message.txt",
+    )
+    data, mime, filename = store.read("session-1", stored.attachment_id)
+    assert data == b"hello from a long message"
+    assert mime == "text/plain"
+    assert filename == "message.txt"
