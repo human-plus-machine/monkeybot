@@ -402,6 +402,7 @@ async def _handle_assistant_boundary(
                 inject_texts_out=inject_texts,
                 pending_bus=state,
                 transcript_writer=state.transcript_writer,
+                provider=getattr(live, "provider", None),
             ):
                 if state.transcript_writer is not None:
                     await state.transcript_writer.write_event(event)

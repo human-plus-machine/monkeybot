@@ -6,11 +6,13 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Callable, Sequence
+import time
+from collections.abc import Sequence
 from contextlib import aclosing
 from typing import Any, Protocol, cast
 
-from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta
+from monkeybot.core.context import TurnContext
+from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta, UsageEvent
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.goal_ledger import (
     Classification,
@@ -20,6 +22,13 @@ from monkeybot.core.persistence.goal_ledger import (
     Intent,
 )
 from monkeybot.core.types.content_blocks import Text
+from monkeybot.core.verifier.binding import (
+    ModelRef,
+    ProviderRef,
+    resolve_live_model,
+    resolve_live_provider,
+)
+from monkeybot.observability.spans import set_llm_io, set_llm_usage, span_llm
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +62,8 @@ class ClassifierPort(Protocol):
         self,
         verbatim: str,
         open_entries: Sequence[GoalEntry],
+        *,
+        thread_id: str = "",
     ) -> Classification: ...
 
 
@@ -124,29 +135,29 @@ class ProviderClassifier:
 
     def __init__(
         self,
-        provider: Provider | Callable[[], Provider | None] | None,
+        provider: ProviderRef,
         *,
-        model: str,
+        model: ModelRef,
         timeout_s: float = _CLASSIFIER_TIMEOUT_S,
     ) -> None:
         self._provider = provider
         self._model = model
         self._timeout_s = timeout_s
 
-    def _current_provider(self) -> Provider | None:
-        provider = self._provider
-        if callable(provider):
-            return provider()
-        return provider
-
     async def classify(
         self,
         verbatim: str,
         open_entries: Sequence[GoalEntry],
+        *,
+        thread_id: str = "",
     ) -> Classification:
-        provider = self._current_provider()
-        if provider is None:
-            logger.warning("classifier skipped: no provider")
+        provider = resolve_live_provider(self._provider)
+        model = resolve_live_model(self._model)
+        if provider is None or not model:
+            logger.warning(
+                "classifier skipped: no provider or model %s",
+                kv(has_provider=provider is not None, model=model or "", thread_id=thread_id),
+            )
             return fail_open_classification(open_entries)
         open_blob = _open_entries_blob(open_entries)
         messages = [
@@ -159,20 +170,28 @@ class ProviderClassifier:
             ),
         ]
         try:
-            text = await asyncio.wait_for(
-                _collect_classifier_text(provider, messages, self._model),
+            text, _tokens = await asyncio.wait_for(
+                collect_verifier_stream(
+                    provider,
+                    messages,
+                    model,
+                    thread_id=thread_id,
+                    request_id=thread_id,
+                    log_event="goal_ledger classifier stream",
+                    log=logger,
+                ),
                 timeout=self._timeout_s,
             )
         except TimeoutError:
             logger.warning(
                 "goal_ledger classifier timed out %s",
-                kv(model=self._model, timeout_s=self._timeout_s),
+                kv(model=model, timeout_s=self._timeout_s, thread_id=thread_id),
             )
             return fail_open_classification(open_entries)
         except Exception:
             logger.warning(
                 "goal_ledger classifier failed %s",
-                kv(model=self._model),
+                kv(model=model, thread_id=thread_id),
                 exc_info=True,
             )
             return fail_open_classification(open_entries)
@@ -180,25 +199,68 @@ class ProviderClassifier:
         if parsed is None:
             logger.warning(
                 "goal_ledger classifier unparseable %s",
-                kv(model=self._model, chars=len(text)),
+                kv(model=model, chars=len(text), thread_id=thread_id),
             )
             return fail_open_classification(open_entries)
         return parsed
 
 
-async def _collect_classifier_text(
+async def collect_verifier_stream(
     provider: Provider,
     messages: list[Message],
     model: str,
-) -> str:
+    *,
+    thread_id: str,
+    request_id: str,
+    log_event: str,
+    log: logging.Logger,
+) -> tuple[str, int]:
+    prompt = "\n".join(
+        "".join(b.text for b in message.content if isinstance(b, Text)) for message in messages
+    )
+    ctx = TurnContext(
+        thread_id=thread_id,
+        request_id=request_id,
+        agent_md="",
+        memory_index=[],
+        skills=[],
+        tools=[],
+        user_id=None,
+        parent_run_id=None,
+        model=model,
+    )
+    started = time.monotonic()
     text = ""
-    async with aclosing(cast(Any, provider.stream(messages, [], model=model))) as stream:
-        async for ev in stream:
-            if isinstance(ev, TextDelta):
-                text += ev.text
-            elif isinstance(ev, Done):
-                break
-    return text
+    input_tokens = 0
+    output_tokens = 0
+    async with span_llm(ctx=ctx, model=model):
+        async with aclosing(cast(Any, provider.stream(messages, [], model=model))) as stream:
+            async for ev in stream:
+                if isinstance(ev, TextDelta):
+                    text += ev.text
+                elif isinstance(ev, UsageEvent):
+                    input_tokens += max(0, ev.input_tokens)
+                    output_tokens += max(0, ev.output_tokens)
+                elif isinstance(ev, Done):
+                    break
+        set_llm_io(prompt=prompt, completion=text)
+        if input_tokens or output_tokens:
+            set_llm_usage(input_tokens=input_tokens, output_tokens=output_tokens)
+    tokens = input_tokens + output_tokens
+    log.info(
+        "%s %s",
+        log_event,
+        kv(
+            thread_id=thread_id,
+            request_id=request_id,
+            model=model,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            chars=len(text),
+        ),
+    )
+    return text, tokens
 
 
 def _open_entries_blob(open_entries: Sequence[GoalEntry]) -> str:
