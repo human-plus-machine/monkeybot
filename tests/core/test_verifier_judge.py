@@ -13,6 +13,12 @@ from monkeybot.core.verifier.mailbox import VerdictMailbox
 from monkeybot.core.verifier.port import EvidenceBundle
 
 
+def _mailbox(thread_id: str = "t1", request_id: str = "r1") -> VerdictMailbox:
+    mailbox = VerdictMailbox()
+    mailbox.open_request(thread_id, request_id)
+    return mailbox
+
+
 def _evidence(request_id: str, inner_turn: int, thread_id: str = "t1") -> EvidenceBundle:
     return EvidenceBundle(
         thread_id=thread_id,
@@ -55,7 +61,7 @@ class _CountingPort:
 
 @pytest.mark.asyncio
 async def test_spend_ratio_compares_judge_tokens_to_agent_tokens() -> None:
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     port = _TokenPort(tokens=100)
     worker = JudgeWorker(
         mailbox,
@@ -76,7 +82,7 @@ async def test_spend_ratio_compares_judge_tokens_to_agent_tokens() -> None:
 
 @pytest.mark.asyncio
 async def test_min_turns_is_per_request_not_thread() -> None:
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     port = _CountingPort()
     worker = JudgeWorker(
         mailbox,
@@ -87,6 +93,7 @@ async def test_min_turns_is_per_request_not_thread() -> None:
     worker.enqueue(_evidence("r1", 5))
     await asyncio.sleep(0.05)
     assert len(mailbox.take_ready("t1")) == 1
+    mailbox.open_request("t1", "r2")
     worker.enqueue(_evidence("r2", 1))
     await asyncio.sleep(0.05)
     assert len(mailbox.take_ready("t1")) == 1
@@ -96,7 +103,7 @@ async def test_min_turns_is_per_request_not_thread() -> None:
 
 @pytest.mark.asyncio
 async def test_handle_error_does_not_kill_worker() -> None:
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     calls = {"n": 0}
 
     def ledger_fn() -> None:
@@ -142,7 +149,7 @@ class _SlowPort:
 @pytest.mark.asyncio
 async def test_rate_limit_holds_while_a_judge_call_is_in_flight() -> None:
     """A slow port must not let every in-flight turn past max_verdicts_per_message."""
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     port = _SlowPort(delay_s=0.2)
     worker = JudgeWorker(
         mailbox,
@@ -162,7 +169,7 @@ async def test_rate_limit_holds_while_a_judge_call_is_in_flight() -> None:
 
 @pytest.mark.asyncio
 async def test_pending_is_marked_while_in_flight_and_cleared_after() -> None:
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     worker = JudgeWorker(
         mailbox,
         _SlowPort(delay_s=0.1),
@@ -187,7 +194,7 @@ async def test_failed_judge_call_refunds_the_verdict_budget() -> None:
             type(self).calls += 1
             raise RuntimeError("judge down")
 
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     port = _BoomPort()
     worker = JudgeWorker(
         mailbox,
@@ -208,7 +215,7 @@ async def test_failed_judge_call_refunds_the_verdict_budget() -> None:
 
 @pytest.mark.asyncio
 async def test_close_cancels_worker_task() -> None:
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     worker = JudgeWorker(
         mailbox,
         _CountingPort(),
@@ -228,7 +235,7 @@ async def test_close_cancels_worker_task() -> None:
 
 
 def test_judge_state_dicts_are_capped() -> None:
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     worker = JudgeWorker(
         mailbox,
         _CountingPort(),

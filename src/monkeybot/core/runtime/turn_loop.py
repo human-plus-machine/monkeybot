@@ -254,22 +254,28 @@ async def _drain_steers(
 async def _take_ready(
     mailbox: VerdictMailbox, thread_id: str, request_id: str, *, grace_s: float
 ) -> list[VerifierVerdict]:
-    """Pop ready verdicts, waiting out ``grace_s`` only while a judge call is in flight."""
-    ready = mailbox.take_ready(thread_id)
-    if ready or grace_s <= 0 or not mailbox.pending(thread_id):
-        return ready
+    """Pop ready verdicts for this request.
+
+    Waits out ``grace_s`` only while a request-specific judge call is still in
+    flight. Fast failures (pending drops to zero) return immediately instead of
+    paying the full deadline.
+    """
+    collected = mailbox.take_ready(thread_id, request_id)
+    if grace_s <= 0 or not mailbox.pending(thread_id, request_id):
+        collected.extend(mailbox.take_ready(thread_id, request_id))
+        return collected
     loop = asyncio.get_running_loop()
     deadline = loop.time() + grace_s
-    while loop.time() < deadline:
+    while mailbox.pending(thread_id, request_id) and loop.time() < deadline:
         await asyncio.sleep(min(0.05, max(0.0, deadline - loop.time())))
-        ready = mailbox.take_ready(thread_id)
-        if ready:
-            return ready
-    logger.info(
-        "verdict tail stale %s",
-        kv(thread_id=thread_id, request_id=request_id),
-    )
-    return []
+        collected.extend(mailbox.take_ready(thread_id, request_id))
+    collected.extend(mailbox.take_ready(thread_id, request_id))
+    if mailbox.pending(thread_id, request_id):
+        logger.info(
+            "verdict tail stale %s",
+            kv(thread_id=thread_id, request_id=request_id),
+        )
+    return collected
 
 
 async def _drain_verdicts(

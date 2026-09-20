@@ -97,6 +97,9 @@ async def run(
     trace_id_capture: list[str | None] = [None]
     blocks = _normalize_user_content(user_content)
     effective_max = _effective_max_turns(max_turns, ctx.config)
+    mailbox = ctx.verdict_mailbox
+    if mailbox is not None:
+        mailbox.open_request(ctx.thread_id, ctx.request_id)
     logger.debug(
         "harness run start %s",
         kv(
@@ -147,8 +150,14 @@ async def run(
         terminal_error = str(exc)
     finally:
         await _drain_hook_settlement(hook_manager)
-        async for verdict_evt in _drain_verdicts(ctx, history):
+        grace_s = 0.0
+        if ctx.config is not None:
+            grace_s = ctx.config.verifier.judge.tail_grace_s
+        async for verdict_evt in _drain_verdicts(ctx, history, grace_s=grace_s):
             yield verdict_evt
+        mailbox = ctx.verdict_mailbox
+        if mailbox is not None:
+            mailbox.clear_request(ctx.thread_id, ctx.request_id)
         if terminal_error is not None:
             yield Error(request_id=ctx.request_id, error=terminal_error)
         usage.duration_ms = int((time.monotonic() - t0) * 1000)

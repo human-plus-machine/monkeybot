@@ -95,7 +95,7 @@ class JudgeWorker:
         # otherwise let every in-flight turn past both rate limits.
         self._bump(self._verdicts_this_request, request_id, 1)
         self._store(self._last_turn, request_id, evidence.inner_turn)
-        self._mailbox.mark_pending(thread_id)
+        self._mailbox.mark_pending(thread_id, request_id)
 
     async def _run(self) -> None:
         while True:
@@ -112,7 +112,7 @@ class JudgeWorker:
                     exc_info=True,
                 )
             finally:
-                self._mailbox.clear_pending(evidence.thread_id)
+                self._mailbox.clear_pending(evidence.thread_id, evidence.request_id)
 
     async def _handle(self, evidence: EvidenceBundle) -> None:
         ledger = self._ledger_fn()
