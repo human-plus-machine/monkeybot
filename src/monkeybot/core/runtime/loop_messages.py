@@ -40,9 +40,7 @@ def _normalize_user_content(user_content: str | list[ContentBlock]) -> list[Cont
 
 
 def _user_text_from_content(blocks: Sequence[ContentBlock]) -> str:
-    return " ".join(
-        b.text.strip() for b in blocks if isinstance(b, Text) and b.text.strip()
-    )
+    return " ".join(b.text.strip() for b in blocks if isinstance(b, Text) and b.text.strip())
 
 
 def _blocks_to_sse_summary(blocks: Sequence[ContentBlock]) -> str:
@@ -71,9 +69,7 @@ def _admit_system_context(
     attachment_catalog: SessionAttachmentCatalog | None = None,
 ) -> EpochAdmit:
     """Compose stable/volatile tails and reconcile against the current context epoch."""
-    catalog = (
-        attachment_catalog.list_records() if attachment_catalog is not None else None
-    )
+    catalog = attachment_catalog.list_records() if attachment_catalog is not None else None
     stable = compose_stable_baseline(ctx, attachment_catalog=catalog)
     volatile_parts = compose_volatile_tail_parts(ctx, chat_messages=chat_messages)
     volatile = "".join(volatile_parts.values())
@@ -230,15 +226,20 @@ def _summary_line_for_message(m: Message, *, window_tokens: int | None = None) -
     return f"{m.role}: {joined}"
 
 
-def _system_prompt_snapshot_text(
-    system: Message, mid_conversation_update: str = ""
-) -> str:
+def _system_prompt_snapshot_text(system: Message, mid_conversation_update: str = "") -> str:
     """Plain string for :class:`SystemPromptSnapshot` (composed prompt + mid-epoch update)."""
     body = "".join(b.text for b in system.content if isinstance(b, Text))
     update = mid_conversation_update.strip()
     if not update:
         return body
     return f"{body}\n\n{update}"
+
+
+def _snapshot_system_message(provider_messages: Sequence[Message], fallback: Message) -> Message:
+    """Prefer the post-hook leading system message actually sent to the provider."""
+    if provider_messages and provider_messages[0].role == "system":
+        return provider_messages[0]
+    return fallback
 
 
 def _is_resume_turn(resolved_messages: Sequence[Message]) -> bool:

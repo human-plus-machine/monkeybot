@@ -31,6 +31,7 @@ TODO_LIST_HEADING = "\n\n## Todo list\n"
 INVOKED_SKILL_HEADING = "\n\n## Invoked skill\n"
 CURRENT_REQUEST_HEADING = "\n\n## Current request\n"
 RUNTIME_NOTES_HEADING = "\n\n## Runtime notes\n"
+VERIFIER_HEADING = "\n\n## Verifier\n"
 SYSTEM_CONTEXT_UPDATE_HEADING = "\n\n## System context update\n"
 
 #: Every heading that starts the volatile (non-cacheable) tail of a prompt.
@@ -43,6 +44,7 @@ VOLATILE_SECTION_HEADINGS = (
     INVOKED_SKILL_HEADING,
     CURRENT_REQUEST_HEADING,
     RUNTIME_NOTES_HEADING,
+    VERIFIER_HEADING,
     SYSTEM_CONTEXT_UPDATE_HEADING,
 )
 

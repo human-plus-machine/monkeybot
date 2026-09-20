@@ -44,6 +44,9 @@ class _ThreadTrack:
     emitted_this_turn: bool = False
     seen_tool: bool = False
     seen_provider: bool = False
+    latched: set[str] = field(default_factory=set)
+    unread_writes: set[str] = field(default_factory=set)
+    churn_paths: set[str] = field(default_factory=set)
 
 
 class ProgressTracker:
@@ -111,6 +114,7 @@ class ProgressTracker:
 
     def _observe_tool(self, payload: HookPayload) -> None:
         state = self._state(payload.thread_id)
+        state.inner_turn = payload.inner_turn or state.inner_turn
         warm = state.seen_tool
         name = payload.tool_name or ""
         args = payload.tool_args
@@ -124,18 +128,49 @@ class ProgressTracker:
             state.error_streak += 1
         else:
             state.error_streak = 0
-        signals: list[str] = []
+        fired: list[str] = []
         if warm and state.error_streak >= self._config.suspicion_threshold:
-            signals.append("error_streak")
+            fired.append("error_streak")
+            state.latched.add("error_streak")
+        elif state.error_streak == 0:
+            state.latched.discard("error_streak")
         if warm and name in WRITE_TOOLS:
             unread = [p for p in paths if p not in state.files_read]
             if unread:
-                signals.append("write_without_read")
-            if any(state.write_counts.get(p, 0) >= self._config.suspicion_threshold for p in paths):
-                signals.append("rewrite_churn")
-        signals.extend(self._ledger_signals(payload.thread_id, name, args))
+                fired.append("write_without_read")
+                state.latched.add("write_without_read")
+                state.unread_writes.update(unread)
+            churned = [
+                p for p in paths if state.write_counts.get(p, 0) >= self._config.suspicion_threshold
+            ]
+            if churned:
+                fired.append("rewrite_churn")
+                state.latched.add("rewrite_churn")
+                state.churn_paths.update(churned)
+        if state.unread_writes and state.unread_writes <= state.files_read:
+            state.latched.discard("write_without_read")
+            state.unread_writes.clear()
+        if state.churn_paths and state.churn_paths <= state.files_read:
+            writing_churn = name in WRITE_TOOLS and bool(set(paths) & state.churn_paths)
+            if not writing_churn:
+                state.latched.discard("rewrite_churn")
+                state.churn_paths.clear()
+        ledger = self._ledger_signals(payload.thread_id, name, args)
+        fired.extend(ledger)
+        state.latched.update(ledger)
         state.seen_tool = True
-        self._maybe_emit(payload, state, signals)
+        self._publish_signals(payload, list(state.latched))
+        self._maybe_emit(payload, state, fired)
+
+    def _publish_signals(self, payload: HookPayload, signals: list[str]) -> None:
+        try:
+            self._mailbox.set_current_signals(payload.thread_id, payload.request_id, signals)
+        except Exception:
+            logger.warning(
+                "progress_tracker signal publish failed %s",
+                kv(thread_id=payload.thread_id),
+                exc_info=True,
+            )
 
     def _observe_provider(self, payload: HookPayload) -> None:
         state = self._state(payload.thread_id)
@@ -181,6 +216,11 @@ class ProgressTracker:
     def _observe_turn_end(self, payload: HookPayload) -> None:
         signals = self._ledger_signals(payload.thread_id, "", None, turn_end=True)
         state = self._state(payload.thread_id)
+        if signals:
+            state.latched.update(signals)
+        elif "done_unmet" in state.latched:
+            state.latched.discard("done_unmet")
+        self._publish_signals(payload, list(state.latched))
         self._maybe_emit(payload, state, signals)
 
     def _ledger_signals(
