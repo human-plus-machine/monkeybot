@@ -676,7 +676,7 @@ async def test_run_yields_queued_verdict_before_error() -> None:
 
 
 def test_mailbox_caps_per_thread_and_evicts_idle_threads() -> None:
-    from monkeybot.core.verifier.mailbox import _PER_THREAD_MAX, _THREAD_CAP
+    from monkeybot.core.verifier.mailbox import _PER_SCOPE_MAX, _THREAD_CAP
 
     mailbox = VerdictMailbox()
 
@@ -690,10 +690,10 @@ def test_mailbox_caps_per_thread_and_evicts_idle_threads() -> None:
         )
 
     mailbox.open_request("t1", "r")
-    for i in range(_PER_THREAD_MAX + 5):
+    for i in range(_PER_SCOPE_MAX + 5):
         mailbox.put("t1", _verdict(i))
     ready = mailbox.take_ready("t1")
-    assert len(ready) == _PER_THREAD_MAX
+    assert len(ready) == _PER_SCOPE_MAX
     assert ready[0].verdict_id == "5"
 
     for i in range(_THREAD_CAP + 1):

@@ -262,14 +262,12 @@ async def _take_ready(
     """
     collected = mailbox.take_ready(thread_id, request_id)
     if grace_s <= 0 or not mailbox.pending(thread_id, request_id):
-        collected.extend(mailbox.take_ready(thread_id, request_id))
         return collected
     loop = asyncio.get_running_loop()
     deadline = loop.time() + grace_s
     while mailbox.pending(thread_id, request_id) and loop.time() < deadline:
         await asyncio.sleep(min(0.05, max(0.0, deadline - loop.time())))
         collected.extend(mailbox.take_ready(thread_id, request_id))
-    collected.extend(mailbox.take_ready(thread_id, request_id))
     if mailbox.pending(thread_id, request_id):
         logger.info(
             "verdict tail stale %s",

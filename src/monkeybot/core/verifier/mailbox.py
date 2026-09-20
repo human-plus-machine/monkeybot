@@ -15,7 +15,6 @@ _T = TypeVar("_T")
 
 _THREAD_CAP = 256
 _PER_SCOPE_MAX = 16
-_PER_THREAD_MAX = _PER_SCOPE_MAX
 ScopeKey = tuple[str, str]
 
 
@@ -50,6 +49,15 @@ class VerdictMailbox:
         """Allow deposits only for the open request. Never auto-open."""
         return bool(request_id) and self._is_open(thread_id, request_id)
 
+    def _drop_closed(
+        self, thread_id: str, request_id: str, kind: str, **extra: object
+    ) -> None:
+        logger.info(
+            "verifier %s dropped closed request %s",
+            kind,
+            kv(thread_id=thread_id, request_id=request_id, **extra),
+        )
+
     def open_request(self, thread_id: str, request_id: str) -> None:
         """Mark ``request_id`` as the only request that may deposit on this thread."""
         self._current[thread_id] = request_id
@@ -59,13 +67,11 @@ class VerdictMailbox:
     def put(self, thread_id: str, verdict: VerifierVerdict) -> bool:
         """Deposit a verdict. Requests that are not currently open are dropped."""
         if not self._accept(thread_id, verdict.request_id):
-            logger.info(
-                "verifier verdict dropped closed request %s",
-                kv(
-                    thread_id=thread_id,
-                    request_id=verdict.request_id,
-                    verdict_id=verdict.verdict_id,
-                ),
+            self._drop_closed(
+                thread_id,
+                verdict.request_id,
+                "verdict",
+                verdict_id=verdict.verdict_id,
             )
             return False
         key = self._scope(thread_id, verdict.request_id)
@@ -91,6 +97,7 @@ class VerdictMailbox:
     def mark_pending(self, thread_id: str, request_id: str = "") -> None:
         """A judge call is in flight; the turn tail may wait out its grace."""
         if not self._accept(thread_id, request_id):
+            self._drop_closed(thread_id, request_id, "pending")
             return
         key = self._scope(thread_id, request_id)
         self._pending[key] = self._pending.get(key, 0) + 1
@@ -112,6 +119,7 @@ class VerdictMailbox:
 
     def put_nudge(self, thread_id: str, request_id: str, text: str) -> None:
         if not self._accept(thread_id, request_id):
+            self._drop_closed(thread_id, request_id, "nudge")
             return
         self._put_note(self._nudges, thread_id, request_id, text)
         _cap(self._nudges)
@@ -121,6 +129,7 @@ class VerdictMailbox:
 
     def put_replan(self, thread_id: str, request_id: str, text: str) -> None:
         if not self._accept(thread_id, request_id):
+            self._drop_closed(thread_id, request_id, "replan")
             return
         self._put_note(self._replans, thread_id, request_id, text)
         _cap(self._replans)
