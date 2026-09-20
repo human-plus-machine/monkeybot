@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 
 import pytest
 
@@ -29,6 +30,12 @@ from monkeybot.core.verifier.tracker import ProgressTracker
 from tests.core.test_goal_ledger import ScriptedClassifier
 from tests.core.test_loop import AllowInspector, FakeHistory, FakeProvider, RecordingExecutor
 from tests.core.test_loop import _ctx as loop_ctx
+
+
+def _mailbox(thread_id: str = "t1", request_id: str = "r1") -> VerdictMailbox:
+    mailbox = VerdictMailbox()
+    mailbox.open_request(thread_id, request_id)
+    return mailbox
 
 
 def _ctx() -> TurnContext:
@@ -121,7 +128,7 @@ def test_tool_name_and_command_regex_and_free_text() -> None:
 
 
 def test_cold_state_first_write_is_not_write_without_read() -> None:
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     tracker = ProgressTracker(
         mailbox,
         ledger_fn=lambda: None,
@@ -139,7 +146,7 @@ def test_cold_state_first_write_is_not_write_without_read() -> None:
 
 
 def test_second_unread_write_emits_write_without_read() -> None:
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     tracker = ProgressTracker(
         mailbox,
         ledger_fn=lambda: None,
@@ -167,8 +174,48 @@ def test_second_unread_write_emits_write_without_read() -> None:
     assert verdicts[0].severity == "none"
 
 
+def test_fresh_signal_evidence_includes_epochs() -> None:
+    class _RecordingJudge:
+        def __init__(self) -> None:
+            self.bundles: list = []
+
+        def enqueue(self, evidence: object) -> None:
+            self.bundles.append(evidence)
+
+        def note_agent_tokens(self, thread_id: str, request_id: str, tokens: int) -> None:
+            del thread_id, request_id, tokens
+
+    mailbox = _mailbox()
+    judge: Any = _RecordingJudge()
+    tracker = ProgressTracker(
+        mailbox,
+        ledger_fn=lambda: None,
+        config=VerifierTrackerConfig(enabled=True, min_turn_before_verdict=1),
+        judge=judge,
+    )
+    tracker._observe_tool(
+        _payload(
+            event=HookEvent.POST_TOOL,
+            tool_name="read_file",
+            tool_args={"path": "a.md"},
+            inner_turn=3,
+        )
+    )
+    tracker._observe_tool(
+        _payload(
+            event=HookEvent.POST_TOOL,
+            tool_name="write_file",
+            tool_args={"path": "b.md"},
+            inner_turn=3,
+        )
+    )
+    assert len(judge.bundles) == 1
+    epochs = dict(judge.bundles[0].signal_epochs)
+    assert epochs.get("write_without_read", 0) >= 1
+
+
 def test_min_turn_suppresses_non_ledger_signals() -> None:
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     tracker = ProgressTracker(
         mailbox,
         ledger_fn=lambda: None,
@@ -194,7 +241,7 @@ def test_min_turn_suppresses_non_ledger_signals() -> None:
 
 
 def test_error_streak_emits_after_three() -> None:
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     tracker = ProgressTracker(
         mailbox,
         ledger_fn=lambda: None,
@@ -215,7 +262,7 @@ def test_error_streak_emits_after_three() -> None:
 
 
 def test_budget_burn_and_no_progress_are_logged_not_emitted() -> None:
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     tracker = ProgressTracker(
         mailbox,
         ledger_fn=lambda: None,
@@ -236,7 +283,7 @@ def test_budget_burn_and_no_progress_are_logged_not_emitted() -> None:
 
 @pytest.mark.asyncio
 async def test_free_text_never_fires_constraint_touch() -> None:
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     store = InMemoryGoalLedgerStore()
     ledger = GoalLedger(
         store,
@@ -277,7 +324,7 @@ async def test_free_text_never_fires_constraint_touch() -> None:
 
 @pytest.mark.asyncio
 async def test_path_constraint_touch_from_ledger() -> None:
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     store = InMemoryGoalLedgerStore()
     ledger = GoalLedger(
         store,
@@ -325,7 +372,7 @@ async def test_path_constraint_touch_from_ledger() -> None:
 async def test_run_yields_queued_verifier_verdict_before_turn_complete() -> None:
     from monkeybot.core.llm.provider import Done, TextDelta, UsageEvent
 
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     mailbox.put(
         "t1",
         VerifierVerdict(
@@ -371,12 +418,12 @@ async def test_tail_grace_is_skipped_when_no_judge_call_is_pending() -> None:
 
     from monkeybot.core.runtime.turn_loop import _take_ready
 
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     started = time.monotonic()
     assert await _take_ready(mailbox, "t1", "r1", grace_s=1.0) == []
     assert time.monotonic() - started < 0.2
 
-    mailbox.mark_pending("t1")
+    mailbox.mark_pending("t1", "r1")
     started = time.monotonic()
     assert await _take_ready(mailbox, "t1", "r1", grace_s=0.2) == []
     assert time.monotonic() - started >= 0.2
@@ -398,7 +445,7 @@ async def test_nudge_reaches_next_system_message_once() -> None:
     from monkeybot.core.types.content_blocks import Text
     from monkeybot.core.verifier.actuator import NudgeActuator
 
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     mailbox.put(
         "t1",
         VerifierVerdict(
@@ -439,10 +486,11 @@ async def test_nudge_reaches_next_system_message_once() -> None:
         events.append(event)
     assert any(isinstance(e, VerifierVerdict) for e in events)
     assert len(prov.stream_messages) >= 2
-    second = " ".join(
-        b.text for msg in prov.stream_messages[1] for b in msg.content if isinstance(b, Text)
-    )
-    assert "leave the migrations alone" in second
+    for msgs in prov.stream_messages:
+        joined = " ".join(b.text for msg in msgs for b in msg.content if isinstance(b, Text))
+        assert "Stay inside the user's stated constraints" in joined
+        assert "## Verifier" in joined
+        assert "leave the migrations alone" not in joined
 
 
 @pytest.mark.asyncio
@@ -458,7 +506,7 @@ async def test_replan_empties_tools_for_exactly_one_turn() -> None:
             escalation=VerifierEscalationConfig(max_severity="replan"),
         )
 
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     mailbox.put(
         "t1",
         VerifierVerdict(
@@ -500,8 +548,9 @@ async def test_replan_empties_tools_for_exactly_one_turn() -> None:
     first = " ".join(
         b.text for msg in prov.stream_messages[0] for b in msg.content if isinstance(b, Text)
     )
-    assert "leave the migrations alone" in first
+    assert "Stay inside the user's stated constraints" in first
     assert "Do not call tools this turn" in first
+    assert "leave the migrations alone" not in first
 
 
 @pytest.mark.asyncio
@@ -519,7 +568,7 @@ async def test_replan_from_a_finished_request_does_not_leak_into_the_next() -> N
             escalation=VerifierEscalationConfig(max_severity="replan"),
         )
 
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     mailbox.put_replan(
         "t1",
         "r1",
@@ -570,7 +619,7 @@ async def test_block_denies_mutating_tool_and_allows_read_only() -> None:
             escalation=VerifierEscalationConfig(max_severity="block"),
         )
 
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     mailbox.put(
         "t1",
         VerifierVerdict(
@@ -638,7 +687,7 @@ async def test_run_yields_queued_verdict_before_error() -> None:
             raise RuntimeError("boom")
             yield  # pragma: no cover
 
-    mailbox = VerdictMailbox()
+    mailbox = _mailbox()
     mailbox.put(
         "t1",
         VerifierVerdict(
@@ -670,7 +719,7 @@ async def test_run_yields_queued_verdict_before_error() -> None:
 
 
 def test_mailbox_caps_per_thread_and_evicts_idle_threads() -> None:
-    from monkeybot.core.verifier.mailbox import _PER_THREAD_MAX, _THREAD_CAP
+    from monkeybot.core.verifier.mailbox import _PER_SCOPE_MAX, _THREAD_CAP
 
     mailbox = VerdictMailbox()
 
@@ -683,14 +732,25 @@ def test_mailbox_caps_per_thread_and_evicts_idle_threads() -> None:
             severity="none",
         )
 
-    for i in range(_PER_THREAD_MAX + 5):
+    mailbox.open_request("t1", "r")
+    for i in range(_PER_SCOPE_MAX + 5):
         mailbox.put("t1", _verdict(i))
     ready = mailbox.take_ready("t1")
-    assert len(ready) == _PER_THREAD_MAX
+    assert len(ready) == _PER_SCOPE_MAX
     assert ready[0].verdict_id == "5"
 
     for i in range(_THREAD_CAP + 1):
-        mailbox.put(f"t{i}", _verdict(i))
+        mailbox.open_request(f"t{i}", f"r{i}")
+        mailbox.put(
+            f"t{i}",
+            VerifierVerdict(
+                request_id=f"r{i}",
+                verdict_id=str(i),
+                checkpoint_id=f"r{i}:1",
+                status="drifting",
+                severity="none",
+            ),
+        )
     assert mailbox.take_ready("t0") == []
     assert len(mailbox.take_ready(f"t{_THREAD_CAP}")) == 1
 
@@ -698,17 +758,14 @@ def test_mailbox_caps_per_thread_and_evicts_idle_threads() -> None:
 def test_mailbox_nudge_overwrites_and_last_caps_after_drain() -> None:
     from monkeybot.core.verifier.mailbox import _THREAD_CAP
 
-    mailbox = VerdictMailbox()
-    mailbox.put_nudge("t1", "r1", "first")
-    mailbox.put_nudge("t1", "r1", "second")
-    assert mailbox.take_nudge("t1", "r1") == "second"
-    assert mailbox.take_nudge("t1", "r1") is None
+    mailbox = _mailbox()
+    mailbox.put_replan("t1", "r1", "first")
+    mailbox.put_replan("t1", "r1", "second")
+    assert mailbox.take_replan("t1", "r1") == "second"
+    assert mailbox.take_replan("t1", "r1") is None
 
     # A note is scoped to the request that produced it: a later, unrelated
     # request must not pick up a leftover from a finished one.
-    mailbox.put_nudge("t1", "r1", "stale")
-    assert mailbox.take_nudge("t1", "r2") is None
-    assert mailbox.take_nudge("t1", "r1") is None
     mailbox.put_replan("t1", "r1", "stale")
     assert mailbox.take_replan("t1", "r2") is None
 
@@ -722,6 +779,7 @@ def test_mailbox_nudge_overwrites_and_last_caps_after_drain() -> None:
         )
 
     for i in range(_THREAD_CAP + 1):
+        mailbox.open_request(f"t{i}", "r")
         mailbox.put(f"t{i}", _verdict(i))
         mailbox.take_ready(f"t{i}")
     assert mailbox.last("t0") is None

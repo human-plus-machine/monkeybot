@@ -31,6 +31,7 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.interfaces import LLMError
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.providers.request_budget import trim_message_media_for_byte_budget
 from monkeybot.providers.sampling import resolve_model_sampling
 
 THOUGHT_SIGNATURE_KEY = "thoughtSignature"
@@ -581,6 +582,12 @@ class GeminiProvider:
                 "google-genai is required for GeminiProvider. Install with: uv sync (monkeybot dependencies)."
             ) from exc
 
+        messages = trim_message_media_for_byte_budget(
+            messages,
+            tools,
+            provider=self.name,
+            raise_if_oversized=False,
+        )
         system_instruction, rest = _split_system_and_rest(messages)
         contents = _messages_to_contents(rest)
         # Developer API CountTokensConfig rejects system_instruction/tools/gen_cfg; fold system into contents.
@@ -668,6 +675,7 @@ class GeminiProvider:
             tools=tools,
         )
 
+        messages = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
         system_instruction, rest = _split_system_and_rest(messages)
         contents = _messages_to_contents(rest)
 

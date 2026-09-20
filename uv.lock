@@ -2346,7 +2346,7 @@ wheels = [
 
 [[package]]
 name = "monkeybot"
-version = "3.4.0"
+version = "3.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -2355,6 +2355,7 @@ dependencies = [
     { name = "httpx" },
     { name = "mcp" },
     { name = "numpy" },
+    { name = "pillow" },
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "python-ulid" },
@@ -2473,7 +2474,7 @@ web-search = [
 dev = [
     { name = "anthropic", extra = ["bedrock", "vertex"] },
     { name = "asgi-lifespan" },
-    { name = "monkeybot", extra = ["knowledge-ast", "knowledge-media", "memory"] },
+    { name = "monkeybot", extra = ["knowledge-ast", "knowledge-media", "memory", "postgres"] },
     { name = "monkeybot-cli" },
     { name = "mypy" },
     { name = "opentelemetry-api" },
@@ -2531,6 +2532,7 @@ requires-dist = [
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'observability'", specifier = ">=1.28" },
     { name = "opentelemetry-instrumentation-fastapi", marker = "extra == 'observability'", specifier = ">=0.62b1" },
     { name = "opentelemetry-sdk", marker = "extra == 'observability'", specifier = ">=1.28" },
+    { name = "pillow", specifier = ">=10.0.0" },
     { name = "pyaudio", marker = "extra == 'cli-realtime'", specifier = ">=0.2.11" },
     { name = "pydantic", specifier = ">=2.10.0" },
     { name = "pynput", marker = "extra == 'cli-realtime'", specifier = ">=1.7.6" },
@@ -2563,6 +2565,7 @@ dev = [
     { name = "monkeybot", extras = ["knowledge-ast"] },
     { name = "monkeybot", extras = ["knowledge-media"] },
     { name = "monkeybot", extras = ["memory"] },
+    { name = "monkeybot", extras = ["postgres"] },
     { name = "monkeybot-cli", editable = "cli" },
     { name = "mypy", specifier = ">=1.13.0" },
     { name = "opentelemetry-api", specifier = ">=1.28" },
@@ -2581,7 +2584,7 @@ dev = [
 
 [[package]]
 name = "monkeybot-browser-mcp"
-version = "0.7.1"
+version = "0.7.2"
 source = { editable = "integrations/browser-mcp" }
 dependencies = [
     { name = "browser-harness" },
@@ -2607,7 +2610,7 @@ dev = [{ name = "pytest", specifier = ">=8.0.0" }]
 
 [[package]]
 name = "monkeybot-cli"
-version = "0.6.0"
+version = "0.7.0"
 source = { editable = "cli" }
 dependencies = [
     { name = "httpx" },

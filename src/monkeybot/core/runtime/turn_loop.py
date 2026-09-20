@@ -54,6 +54,7 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.core.verifier.intervention import correction_text
 from monkeybot.core.verifier.mailbox import VerdictMailbox
 from monkeybot.core.verifier.severity import cap_severity
 from monkeybot.providers._utils import note_anthropic_token_estimate_observation
@@ -103,6 +104,7 @@ from .loop_messages import (
     _load_agent_chat_history,
     _messages_for_provider,
     _provider_messages_prompt_summary,
+    _snapshot_system_message,
     _system_message_from_text,
     _system_prompt_snapshot_text,
     _user_text_from_content,
@@ -210,6 +212,16 @@ async def _run_inner(
                 )
 
 
+def _verdict_grace_s(ctx: TurnContext) -> float:
+    """Seconds a drain may wait on an in-flight judge. Production ships at 0."""
+    if ctx.config is None:
+        return 0.0
+    try:
+        return max(0.0, float(ctx.config.verifier.judge.tail_grace_s))
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+
+
 async def _drain_steers(
     *,
     input_admission: InputAdmission | None,
@@ -242,7 +254,11 @@ async def _drain_steers(
                     provenance=item.provenance,
                 ),
             )
-            yield UserSteered(request_id=ctx.request_id, text=preview)
+            yield UserSteered(
+                request_id=ctx.request_id,
+                text=preview,
+                queued_request_id=item.queued_request_id or "",
+            )
     async for verdict_evt in _drain_verdicts(ctx, history):
         yield verdict_evt
 
@@ -250,22 +266,26 @@ async def _drain_steers(
 async def _take_ready(
     mailbox: VerdictMailbox, thread_id: str, request_id: str, *, grace_s: float
 ) -> list[VerifierVerdict]:
-    """Pop ready verdicts, waiting out ``grace_s`` only while a judge call is in flight."""
-    ready = mailbox.take_ready(thread_id)
-    if ready or grace_s <= 0 or not mailbox.pending(thread_id):
-        return ready
+    """Pop ready verdicts for this request.
+
+    Waits out ``grace_s`` only while a request-specific judge call is still in
+    flight. Fast failures (pending drops to zero) return immediately instead of
+    paying the full deadline.
+    """
+    collected = mailbox.take_ready(thread_id, request_id)
+    if grace_s <= 0 or not mailbox.pending(thread_id, request_id):
+        return collected
     loop = asyncio.get_running_loop()
     deadline = loop.time() + grace_s
-    while loop.time() < deadline:
+    while mailbox.pending(thread_id, request_id) and loop.time() < deadline:
         await asyncio.sleep(min(0.05, max(0.0, deadline - loop.time())))
-        ready = mailbox.take_ready(thread_id)
-        if ready:
-            return ready
-    logger.info(
-        "verdict tail stale %s",
-        kv(thread_id=thread_id, request_id=request_id),
-    )
-    return []
+        collected.extend(mailbox.take_ready(thread_id, request_id))
+    if mailbox.pending(thread_id, request_id):
+        logger.info(
+            "verdict tail stale %s",
+            kv(thread_id=thread_id, request_id=request_id),
+        )
+    return collected
 
 
 async def _drain_verdicts(
@@ -311,6 +331,13 @@ async def _drain_verdicts(
                 ),
             )
             verdict = dataclasses.replace(verdict, severity=capped)
+        trusted = (
+            None
+            if capped in ("none", "") or verdict.status == "on_track"
+            else correction_text(verdict.triggering_signals)
+        )
+        if trusted != verdict.correction:
+            verdict = dataclasses.replace(verdict, correction=trusted)
         if history is not None:
             try:
                 await persist_message(
@@ -343,22 +370,8 @@ async def _drain_verdicts(
 def _stash_escalation(
     mailbox: VerdictMailbox, thread_id: str, capped: str, verdict: VerifierVerdict
 ) -> None:
-    """Queue one-shot nudge/replan for the next inner turn of the verdict's own
-    request. Request-scoped like ``block``: a note whose request has already
-    finished is dropped rather than applied to the next user message. Fail-open.
-    """
-    text = verdict.correction or f"[Verifier] {verdict.rationale}"
-    try:
-        if capped == "nudge":
-            mailbox.put_nudge(thread_id, verdict.request_id, text)
-        elif capped in ("replan", "steer"):
-            mailbox.put_replan(
-                thread_id,
-                verdict.request_id,
-                f"{text}\nDo not call tools this turn. Restate the plan.",
-            )
-    except Exception:
-        logger.warning("verdict escalation stash failed %s", kv(thread_id=thread_id), exc_info=True)
+    """Arm a sticky nudge or one-shot replan for this verdict's own request."""
+    mailbox.arm_escalation(thread_id, verdict, max_severity=capped)
 
 
 def _arm_replan_from_mailbox(state: _TurnState) -> None:
@@ -853,7 +866,10 @@ async def _apply_pressure_and_before_provider(
     yield SystemPromptSnapshot(
         request_id=state.ctx.request_id,
         inner_turn=state.turn_index,
-        text=_system_prompt_snapshot_text(system_msg, admit.mid_conversation_update),
+        text=_system_prompt_snapshot_text(
+            _snapshot_system_message(state.provider_messages, system_msg),
+            admit.mid_conversation_update,
+        ),
     )
 
 
@@ -1648,10 +1664,12 @@ async def _run_inner_core(
             if state.action == "return":
                 # Cancel/error mid-stream skips _handle_empty_or_final_text —
                 # persist any text already shown to the user before exiting.
+                # Break (do not return) so freeze_attachments_in_history still runs.
+                state.needs_followup_after_tools = False
                 await _persist_partial_assistant_on_abort(
                     state, history=history, last_assistant=last_assistant
                 )
-                return
+                break
             state.action = None
 
             if cancelled is not None and cancelled.is_set():
@@ -1691,7 +1709,7 @@ async def _run_inner_core(
                 ):
                     yield evt
                 if state.action == "return":
-                    return
+                    break
 
         finally:
             set_turn_prompt_tokens(usage.estimated_prompt_tokens)
@@ -1713,10 +1731,9 @@ async def _run_inner_core(
     # below (freeze) so the assistant row is durable and not overwritten.
     await _await_history_write(state.assistant_write_task)
 
-    grace_s = 0.0
-    if state.ctx.config is not None:
-        grace_s = state.ctx.config.verifier.judge.tail_grace_s
-    async for verdict_evt in _drain_verdicts(state.ctx, history, grace_s=grace_s):
+    async for verdict_evt in _drain_verdicts(
+        state.ctx, history, grace_s=_verdict_grace_s(state.ctx)
+    ):
         yield verdict_evt
 
     descriptor_events = await freeze_attachments_in_history(

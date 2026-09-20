@@ -78,6 +78,21 @@ async def test_post_attachment_returns_201(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_post_html_attachment_returns_201(client: AsyncClient) -> None:
+    sid = await _create_session(client)
+    html = b"<!doctype html><h1>Preview heading</h1>"
+    res = await client.post(
+        f"/sessions/{sid}/attachments",
+        files={"file": ("page.html", html, "text/html")},
+    )
+    assert res.status_code == 201
+    body = res.json()
+    assert body["mime_type"] == "text/html"
+    assert body["filename"] == "page.html"
+    assert body["size_bytes"] == len(html)
+
+
+@pytest.mark.asyncio
 async def test_reply_with_attachment_ref_normalizes_content(
     client: AsyncClient,
     loop_port: _CaptureLoopPort,
@@ -175,3 +190,16 @@ async def test_reply_attachment_only_allowed(
         isinstance(b, AttachmentRef) and b.attachment_id == att_id
         for b in loop_port.last_user_content
     )
+
+
+@pytest.mark.asyncio
+async def test_post_attachment_accepts_plain_text(client: AsyncClient) -> None:
+    sid = await _create_session(client)
+    res = await client.post(
+        f"/sessions/{sid}/attachments",
+        files={"file": ("message.txt", b"hello from a long message", "text/plain")},
+    )
+    assert res.status_code == 201
+    body = res.json()
+    assert body["mime_type"] == "text/plain"
+    assert body["filename"] == "message.txt"

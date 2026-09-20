@@ -141,6 +141,24 @@ class ImageBlock:
 
 
 @dataclass(frozen=True)
+class FileBlock:
+    """SSE payload for a non-image document (PDF) loaded from disk.
+
+    Clients should load from ``path``. ``data`` is accepted on decode for
+    older payloads but is never serialized — PDFs are not downscaled the
+    way ``ImageBlock`` previews are.
+    """
+
+    kind: Literal["FileBlock"] = "FileBlock"
+    request_id: str = ""
+    file_id: str = ""
+    mime_type: str = ""
+    data: str = ""
+    path: str = ""
+    filename: str = ""
+
+
+@dataclass(frozen=True)
 class ThinkingBlockDelta:
     kind: Literal["ThinkingBlockDelta"] = "ThinkingBlockDelta"
     request_id: str = ""
@@ -243,16 +261,28 @@ class AttachmentDescriptorEvent:
 
 @dataclass(frozen=True)
 class UserSteered:
-    """User text injected mid-turn at a safe loop boundary (steer queue)."""
+    """User text injected mid-turn at a safe loop boundary (steer queue).
+
+    ``request_id`` is the in-flight turn that received the injection.
+    ``queued_request_id`` is the original follow-up id when this steer was
+    promoted from the FIFO; empty for ``POST /steer``.
+    """
 
     kind: Literal["UserSteered"] = "UserSteered"
     request_id: str = ""
     text: str = ""
+    queued_request_id: str = ""
 
 
 @dataclass(frozen=True)
 class QueuedInputAccepted:
-    """Steer or follow-up prompt accepted into a session admission queue."""
+    """Steer or follow-up prompt accepted into a session admission queue.
+
+    For ``queue="steer"``, ``request_id`` is the in-flight turn — the same id
+    ``POST /steer`` publishes, not the follow-up id. Promoted follow-ups
+    correlate via ``UserSteered.queued_request_id``. For ``queue="follow_up"``,
+    ``request_id`` is the follow-up's own id.
+    """
 
     kind: Literal["QueuedInputAccepted"] = "QueuedInputAccepted"
     request_id: str = ""
@@ -402,6 +432,7 @@ class VerifierVerdict:
     rationale: str = ""
     correction: str | None = None
     triggering_signals: tuple[str, ...] = ()
+    triggering_signal_epochs: tuple[tuple[str, int], ...] = ()
     judge_tokens: int = 0
 
     def to_wire(self) -> dict[str, object]:
@@ -413,6 +444,8 @@ class VerifierVerdict:
             "confidence": self.confidence,
             "rationale": self.rationale,
             "triggeringSignals": list(self.triggering_signals),
+            "triggeringSignalEpochs": dict(self.triggering_signal_epochs),
+            "judgeTokens": self.judge_tokens,
         }
         if self.correction is not None:
             payload["correction"] = self.correction
@@ -431,6 +464,7 @@ AgentEvent: TypeAlias = (
     | ContextUsage
     | SystemPromptSnapshot
     | ImageBlock
+    | FileBlock
     | ThinkingBlockDelta
     | ThinkingBlockComplete
     | RedactedThinkingBlock
@@ -570,6 +604,11 @@ def _usage_from_obj(raw: object | None) -> UsageTotals:
     )
 
 
+def _str_payload(payload: dict[str, Any], key: str, *, default: str = "") -> str:
+    raw = payload.get(key, default)
+    return raw if isinstance(raw, str) else default
+
+
 def _context_token_fields(payload: dict[str, Any]) -> tuple[int, int]:
     """Parse ``estimated_tokens`` / ``context_window_tokens`` from a wire payload."""
     et_raw = payload.get("estimated_tokens", 0)
@@ -635,6 +674,15 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
         else:
             out["data"] = event.data
         return out
+    if isinstance(event, FileBlock):
+        file_out: dict[str, object] = {**base, "mime_type": event.mime_type}
+        if event.file_id:
+            file_out["file_id"] = event.file_id
+        if event.filename:
+            file_out["filename"] = event.filename
+        if event.path:
+            file_out["path"] = event.path
+        return file_out
     if isinstance(event, ThinkingBlockDelta):
         return {**base, "text": event.text, "signature": event.signature}
     if isinstance(event, ThinkingBlockComplete):
@@ -694,7 +742,10 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             "search_queries": list(event.search_queries),
         }
     if isinstance(event, UserSteered):
-        return {**base, "text": event.text}
+        steered: dict[str, object] = {**base, "text": event.text}
+        if event.queued_request_id:
+            steered["queued_request_id"] = event.queued_request_id
+        return steered
     if isinstance(event, VerifierVerdict):
         payload: dict[str, object] = {
             **base,
@@ -705,6 +756,8 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             "confidence": event.confidence,
             "rationale": event.rationale,
             "triggering_signals": list(event.triggering_signals),
+            "triggering_signal_epochs": dict(event.triggering_signal_epochs),
+            "judge_tokens": event.judge_tokens,
         }
         if event.correction is not None:
             payload["correction"] = event.correction
@@ -819,6 +872,7 @@ def event_to_json(event: AgentEvent) -> str:
         event,
         (
             ImageBlock,
+            FileBlock,
             ThinkingBlockDelta,
             ThinkingBlockComplete,
             RedactedThinkingBlock,
@@ -976,21 +1030,25 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         text_raw = payload.get("text", "")
         text = text_raw if isinstance(text_raw, str) else ""
         return SystemPromptSnapshot(request_id=rid, inner_turn=inner_turn, text=text)
-    if t == "ImageBlock":
-        mt = payload.get("mime_type", "")
-        data = payload.get("data", "")
-        img_raw = payload.get("image_id", "")
-        path_raw = payload.get("path", "")
-        mime_type = mt if isinstance(mt, str) else ""
-        data_s = data if isinstance(data, str) else ""
-        image_id = img_raw if isinstance(img_raw, str) else ""
-        path = path_raw.strip() if isinstance(path_raw, str) else ""
-        return ImageBlock(
+    if t in ("ImageBlock", "FileBlock"):
+        path = _str_payload(payload, "path").strip()
+        mime_type = _str_payload(payload, "mime_type")
+        data = _str_payload(payload, "data")
+        if t == "ImageBlock":
+            return ImageBlock(
+                request_id=rid,
+                image_id=_str_payload(payload, "image_id"),
+                mime_type=mime_type,
+                data=data,
+                path=path,
+            )
+        return FileBlock(
             request_id=rid,
-            image_id=image_id,
+            file_id=_str_payload(payload, "file_id"),
             mime_type=mime_type,
-            data=data_s,
+            data=data,
             path=path,
+            filename=_str_payload(payload, "filename").strip(),
         )
     if t == "ThinkingBlockDelta":
         text_raw = payload.get("text", "")
@@ -1138,14 +1196,28 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
     if t == "UserSteered":
         text_raw = payload.get("text", "")
         text = text_raw if isinstance(text_raw, str) else ""
-        return UserSteered(request_id=rid, text=text)
+        qid_raw = payload.get("queued_request_id", "")
+        queued_request_id = qid_raw if isinstance(qid_raw, str) else ""
+        return UserSteered(request_id=rid, text=text, queued_request_id=queued_request_id)
     if t == "VerifierVerdict":
         signals_raw = payload.get("triggering_signals") or []
         signals = tuple(str(s) for s in signals_raw) if isinstance(signals_raw, list) else ()
+        epochs_raw = payload.get("triggering_signal_epochs") or {}
+        signal_epochs = (
+            tuple(
+                (str(signal), int(epoch))
+                for signal, epoch in epochs_raw.items()
+                if isinstance(epoch, (int, float))
+            )
+            if isinstance(epochs_raw, dict)
+            else ()
+        )
         corr_raw = payload.get("correction")
         correction = corr_raw if isinstance(corr_raw, str) else None
         conf_raw = payload.get("confidence", 0.0)
         confidence = float(conf_raw) if isinstance(conf_raw, (int, float)) else 0.0
+        tokens_raw = payload.get("judge_tokens", 0)
+        judge_tokens = int(tokens_raw) if isinstance(tokens_raw, (int, float)) else 0
         return VerifierVerdict(
             request_id=rid,
             verdict_id=str(payload.get("verdict_id") or ""),
@@ -1156,6 +1228,8 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
             rationale=str(payload.get("rationale") or ""),
             correction=correction,
             triggering_signals=signals,
+            triggering_signal_epochs=signal_epochs,
+            judge_tokens=max(0, judge_tokens),
         )
     if t == "QueuedInputAccepted":
         q_raw = payload.get("queue", "follow_up")
@@ -1204,7 +1278,9 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         )
     if t == "CredentialEgressBlocked":
         sk_raw = payload.get("scan_kind", "secret")
-        scan_kind = cast(Literal["secret", "canary"], sk_raw if sk_raw in ("secret", "canary") else "secret")
+        scan_kind = cast(
+            Literal["secret", "canary"], sk_raw if sk_raw in ("secret", "canary") else "secret"
+        )
         origin_raw = payload.get("origin")
         origin = origin_raw if isinstance(origin_raw, str) and origin_raw else None
         return CredentialEgressBlockedEvent(request_id=rid, scan_kind=scan_kind, origin=origin)

@@ -121,6 +121,7 @@ class ModelConfig:
     context_window: str | None = None
     summarization_model: str | None = None
     max_turns: str | None = None
+    max_request_bytes: str | None = None
     cache_retention: str | None = None
     vertex_project_id: str | None = None
     vertex_location: str | None = None
@@ -869,6 +870,7 @@ def _model_from_env(env: Mapping[str, str]) -> ModelConfig:
         context_window=env.get("MODEL_CONTEXT_WINDOW"),
         summarization_model=env.get("CONTEXT_SUMMARIZATION_MODEL"),
         max_turns=env.get("MAX_TURNS"),
+        max_request_bytes=env.get("MODEL_MAX_REQUEST_BYTES"),
         cache_retention=env.get("MODEL_CACHE_RETENTION"),
         vertex_project_id=env.get("VERTEX_AI_PROJECT_ID"),
         vertex_location=env.get("VERTEX_AI_LOCATION"),

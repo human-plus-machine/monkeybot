@@ -17,6 +17,7 @@ from monkeybot.core.runtime.events import (
     CredentialEgressBlockedEvent,
     Error,
     EventDecodeError,
+    FileBlock,
     FrontendToolRequestEvent,
     GroundingEvent,
     ImageBlock,
@@ -288,6 +289,47 @@ def test_sse_image_block_roundtrip_without_image_id() -> None:
     assert event_from_json(event_to_json(ev)) == ev
 
 
+def test_sse_file_block_roundtrip() -> None:
+    ev = FileBlock(
+        request_id="r",
+        file_id="c1:0",
+        mime_type="application/pdf",
+        path="generated-media/Aadhaar_on_white.pdf",
+        filename="Aadhaar_on_white.pdf",
+    )
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_sse_file_block_path_omits_data_on_wire() -> None:
+    ev = FileBlock(
+        request_id="r",
+        file_id="c1:0",
+        mime_type="application/pdf",
+        data="should-not-appear",
+        path="./generated-media/doc.pdf",
+        filename="doc.pdf",
+    )
+    d = json.loads(event_to_json(ev))
+    assert d["type"] == "FileBlock"
+    assert d["path"] == "./generated-media/doc.pdf"
+    assert d["filename"] == "doc.pdf"
+    assert "data" not in d
+    assert event_from_json(event_to_json(ev)).path == "./generated-media/doc.pdf"
+
+
+def test_sse_file_block_never_serializes_data() -> None:
+    ev = FileBlock(
+        request_id="r",
+        file_id="c1:0",
+        mime_type="application/pdf",
+        data="A" * 8_000,
+        filename="doc.pdf",
+    )
+    d = json.loads(event_to_json(ev))
+    assert "data" not in d
+    assert d["filename"] == "doc.pdf"
+
+
 @pytest.mark.parametrize("signature", (None, "sig"))
 def test_sse_thinking_block_delta_roundtrip(signature: str | None) -> None:
     ev = ThinkingBlockDelta(request_id="r", text="t", signature=signature)
@@ -368,6 +410,11 @@ def test_config_reloaded_roundtrip() -> None:
 
 def test_agent_event_roundtrip_user_steered() -> None:
     ev = UserSteered(request_id="r1", text="nudge")
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_agent_event_roundtrip_user_steered_queued_request_id() -> None:
+    ev = UserSteered(request_id="r1", text="nudge", queued_request_id="q-1")
     assert event_from_json(event_to_json(ev)) == ev
 
 
@@ -653,6 +700,7 @@ def test_is_subagent_forwardable_denylist() -> None:
         ),
         Thinking(request_id="r"),
         ImageBlock(request_id="r", mime_type="image/png", data="abc"),
+        FileBlock(request_id="r", mime_type="application/pdf", path="doc.pdf"),
         SubagentStarted(
             request_id="p",
             parent_call_id="c",

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import time
 import uuid
@@ -89,8 +88,6 @@ class AttachmentStore(Protocol):
 
     def read(self, session_id: str, attachment_id: str) -> tuple[bytes, str, str]: ...
 
-    def read_base64(self, session_id: str, attachment_id: str) -> tuple[str, str, str]: ...
-
 
 class FilesystemAttachmentStore:
     def __init__(self, workspace_root: Path) -> None:
@@ -173,10 +170,6 @@ class FilesystemAttachmentStore:
         mime = str(meta.get("mime_type", "application/octet-stream"))
         filename = str(meta.get("filename", attachment_id))
         return path.read_bytes(), mime, filename
-
-    def read_base64(self, session_id: str, attachment_id: str) -> tuple[str, str, str]:
-        data, mime, filename = self.read(session_id, attachment_id)
-        return base64.b64encode(data).decode("ascii"), mime, filename
 
     def _read_meta(self, path: Path) -> dict[str, object]:
         meta_path = path.with_suffix(path.suffix + ".json")

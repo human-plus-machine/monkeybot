@@ -2,7 +2,7 @@
 
 from dataclasses import replace
 
-from monkeybot.core.context import SkillRef, TurnContext
+from monkeybot.core.context import GOAL_TOOL_NAMES, SkillRef, TurnContext
 from monkeybot.core.context.slash_skills import apply_invoked_skill, resolve_invoked_skill
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.prompts.prompt import compose_system_prompt, compose_volatile_tail_parts
@@ -27,7 +27,8 @@ def _ctx(*, skills: list[SkillRef] | None = None, invoked: SkillRef | None = Non
 
 BROWSER = SkillRef(name="browser", description="Control a browser")
 IMAGE = SkillRef(name="image-generator", description="Generate images")
-SKILLS = [BROWSER, IMAGE]
+GOAL = SkillRef(name="goal", description="Create a durable goal")
+SKILLS = [BROWSER, IMAGE, GOAL]
 
 
 def test_resolve_matches_installed_skill_only() -> None:
@@ -35,6 +36,7 @@ def test_resolve_matches_installed_skill_only() -> None:
     assert resolve_invoked_skill("/Browser now", SKILLS) is BROWSER
     assert resolve_invoked_skill("please /browser now", SKILLS) is BROWSER
     assert resolve_invoked_skill("/loop now", SKILLS) is None
+    assert resolve_invoked_skill("/goal ship the report", SKILLS) is GOAL
     assert resolve_invoked_skill("/not-a-skill", SKILLS) is None
     assert resolve_invoked_skill("browser please", SKILLS) is None
 
@@ -46,6 +48,13 @@ def test_apply_invoked_skill_is_turn_scoped() -> None:
     assert ctx.invoked_skill is None
     unchanged = apply_invoked_skill(ctx, "/missing do it")
     assert unchanged is ctx
+
+
+def test_goal_invocation_progressively_advertises_goal_tools() -> None:
+    ctx = replace(_ctx(skills=SKILLS), scheduled_loops_available=True)
+    assert GOAL_TOOL_NAMES.isdisjoint({tool.name for tool in ctx.tools})
+    next_ctx = apply_invoked_skill(ctx, "/goal ship the report")
+    assert GOAL_TOOL_NAMES.issubset({tool.name for tool in next_ctx.tools})
 
 
 def test_prompt_includes_invoked_skill_and_keeps_user_text() -> None:

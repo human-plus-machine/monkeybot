@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "monkeybot"
-version = "3.4.0"
+version = "3.5.0"
 description = "monkeybot agent harness — FastAPI SSE gateway, owned loop, SQLite, and MCP."
 requires-python = ">=3.11"
 readme = "README.md"
@@ -23,6 +23,7 @@ dependencies = [
     # <2.5: newer numpy stub files use PEP 695 `type` statements that mypy
     # cannot parse while this project's [tool.mypy] targets python_version 3.11.
     "numpy>=1.26.0,<2.5",
+    "pillow>=10.0.0",
 ]
 
 [project.optional-dependencies]
@@ -98,6 +99,8 @@ dev = [
     "monkeybot[knowledge-media]",
     # MemPalace is an optional extra; tests still exercise the adapter.
     "monkeybot[memory]",
+    # Native goal persistence tests hit a real Postgres via asyncpg.
+    "monkeybot[postgres]",
 ]
 
 [tool.uv]

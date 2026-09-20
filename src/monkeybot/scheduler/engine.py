@@ -76,7 +76,9 @@ def scheduler_settings() -> SchedulerSettings:
     stale_claim_ms = _env_int("MONKEYBOT_SCHEDULER_STALE_CLAIM_MS", 600_000)
     heartbeat_raw = os.environ.get("MONKEYBOT_SCHEDULER_CLAIM_HEARTBEAT_S", "").strip()
     if heartbeat_raw:
-        heartbeat_s = _env_float("MONKEYBOT_SCHEDULER_CLAIM_HEARTBEAT_S", _DEFAULT_HEARTBEAT_INTERVAL_S)
+        heartbeat_s = _env_float(
+            "MONKEYBOT_SCHEDULER_CLAIM_HEARTBEAT_S", _DEFAULT_HEARTBEAT_INTERVAL_S
+        )
     else:
         heartbeat_s = min(_DEFAULT_HEARTBEAT_INTERVAL_S, max(5.0, stale_claim_ms / 4000.0))
     return SchedulerSettings(
@@ -264,12 +266,15 @@ async def _execute_claimed_tick(
             return
 
         error = result.error if result.status is TickInvokeStatus.ERROR else None
-        await store.complete_tick(row.loop_id, worker_id=worker_id, error=error)
+        completed = await store.complete_tick(row.loop_id, worker_id=worker_id, error=error)
         if error:
             logger.warning(
-                "scheduler tick failed loop_id=%s session_id=%s error=%s",
+                "scheduler tick failed loop_id=%s session_id=%s "
+                "consecutive_errors=%s status=%s error=%s",
                 row.loop_id,
                 row.session_id,
+                completed.consecutive_error_count if completed is not None else "unknown",
+                completed.status if completed is not None else "unknown",
                 error,
             )
         else:
@@ -281,7 +286,15 @@ async def _execute_claimed_tick(
             )
     except Exception as exc:
         logger.exception("scheduler tick exception loop_id=%s", row.loop_id)
-        await store.complete_tick(row.loop_id, worker_id=worker_id, error=str(exc))
+        completed = await store.complete_tick(row.loop_id, worker_id=worker_id, error=str(exc))
+        if completed is not None and completed.status == "failed":
+            logger.error(
+                "scheduler goal stopped after persistent failures "
+                "loop_id=%s session_id=%s consecutive_errors=%d",
+                row.loop_id,
+                row.session_id,
+                completed.consecutive_error_count,
+            )
     finally:
         heartbeat_stop.set()
         heartbeat_task.cancel()
@@ -320,7 +333,9 @@ def start_scheduler_background(
             poll_interval_s=(
                 poll_interval_s if poll_interval_s is not None else settings.poll_interval_s
             ),
-            stale_claim_ms=stale_claim_ms if stale_claim_ms is not None else settings.stale_claim_ms,
+            stale_claim_ms=stale_claim_ms
+            if stale_claim_ms is not None
+            else settings.stale_claim_ms,
             max_concurrency=(
                 max_concurrency if max_concurrency is not None else settings.max_concurrency
             ),

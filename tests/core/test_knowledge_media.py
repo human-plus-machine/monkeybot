@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import io
+import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 
-from monkeybot.core.knowledge.captions import path_caption, resolve_image_caption
+from monkeybot.core.knowledge.captions import (
+    default_vision_caption,
+    path_caption,
+    resolve_image_caption,
+)
 from monkeybot.core.knowledge.config import resolve_knowledge_settings
 from monkeybot.core.knowledge.extractors import (
     extract_docx_text,
@@ -47,9 +53,7 @@ def _pdf_bytes(text: str | None = "Hello World") -> bytes:
     return buf.getvalue()
 
 
-def _docx_bytes(
-    paragraphs: list[str], tables: list[list[list[str]]] | None = None
-) -> bytes:
+def _docx_bytes(paragraphs: list[str], tables: list[list[list[str]]] | None = None) -> bytes:
     from docx import Document
 
     doc = Document()
@@ -165,6 +169,41 @@ def test_path_caption() -> None:
     assert path_caption("public/images/auth-hero.png") == (
         "Image: public/images/auth-hero.png (auth-hero)"
     )
+
+
+@pytest.mark.asyncio
+async def test_default_vision_caption_sends_bounded_preview(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from monkeybot.core.knowledge import captions
+
+    image = tmp_path / "hero.png"
+    image.write_bytes(_MIN_PNG)
+    captured: dict[str, object] = {}
+
+    async def _create(**kwargs: object) -> object:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="a hero image"))]
+        )
+
+    fake_openai = ModuleType("openai")
+    fake_openai.AsyncOpenAI = lambda **_kwargs: SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=_create))
+    )
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    monkeypatch.setattr(
+        captions,
+        "make_provider_preview",
+        lambda _raw, _mime: (b"preview", "image/jpeg"),
+    )
+
+    result = await default_vision_caption(image, model="vision", api_key="key")
+    assert result == "a hero image"
+    messages = captured["messages"]
+    data_url = messages[0]["content"][1]["image_url"]["url"]  # type: ignore[index]
+    assert data_url == "data:image/jpeg;base64,cHJldmlldw=="
 
 
 @pytest.mark.asyncio

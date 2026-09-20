@@ -88,7 +88,7 @@ class ComputerOpenTool:
                 return _err("validation", "path is required", "Pass a path string.")
             reveal = bool(args.get("reveal", False))
             app = args.get("app")
-            resolved = safety.resolve_user_path(raw_path, must_exist=True)
+            resolved = safety.resolve_user_path(raw_path, must_exist=True, allow_workspace=True)
             if isinstance(app, str) and app.strip():
                 safety.open_path_with_app(resolved, app)
                 return _ok(path=str(resolved), opened_with=app)
@@ -326,12 +326,13 @@ class ComputerMoveTool:
     tool_def = ToolDef(
         "computer_move",
         (
-            "Move or rename a file or folder on the user's Mac. Not a way to "
-            "read a file into the agent's workspace — if you need to read "
-            "something outside the workspace with read_file/glob/grep, ask for "
-            "folder access there instead of moving the file with this tool; "
-            "moving a file to route around the workspace boundary is a policy "
-            "violation, not a workaround."
+            "Move or rename a file or folder on the user's Mac. A source inside "
+            "the agent workspace is copied, not moved, so generated files stay "
+            "in the Files panel. Not a way to read a file into the agent's "
+            "workspace — if you need to read something outside the workspace "
+            "with read_file/glob/grep, ask for folder access there instead of "
+            "moving the file with this tool; moving a file to route around the "
+            "workspace boundary is a policy violation, not a workaround."
         ),
         {
             "type": "object",
@@ -358,9 +359,12 @@ class ComputerMoveTool:
                 return _err("validation", "path is required", "Pass the item to move.")
             if not isinstance(raw_dest, str):
                 return _err("validation", "destination is required", "Pass a destination path.")
-            src = safety.resolve_user_path(raw_path, must_exist=True)
+            src = safety.resolve_user_path(raw_path, must_exist=True, allow_workspace=True)
             dest = safety.resolve_user_path(raw_dest, must_exist=False)
             overwrite = bool(args.get("overwrite", False))
+            exporting = safety.is_workspace_path(src)
+            if exporting:
+                safety.check_workspace_document(src, allow_dir=False)
 
             if dest.is_dir():
                 dest = dest / src.name
@@ -387,6 +391,9 @@ class ComputerMoveTool:
                 # like a top-level home folder.
                 safety.trash_path(dest)
 
+            if exporting:
+                shutil.copy2(str(src), str(dest))
+                return _ok(path=str(src), destination=str(dest), copied=True)
             shutil.move(str(src), str(dest))
             return _ok(path=str(src), destination=str(dest))
 

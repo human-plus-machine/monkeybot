@@ -249,6 +249,33 @@ async def test_read_file_and_write_file(tmp_path: Path) -> None:
     assert e2 is None and r2 is not None and "abc" in r2
 
 
+@pytest.mark.parametrize(
+    ("filename", "payload", "expected"),
+    [
+        ("late-invalid.txt", (b"x" * 9_000) + b"\xff\xfe", "\ufffd"),
+        ("latin-1.txt", "café résumé".encode("latin-1"), "caf\ufffd"),
+        ("pdf-fixture.txt", b"%PDF- this is plain text\n", "%PDF-"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_read_file_keeps_legacy_replacement_decoding(
+    tmp_path: Path,
+    filename: str,
+    payload: bytes,
+    expected: str,
+) -> None:
+    (tmp_path / filename).write_bytes(payload)
+    result, error = unwrap_tool_execution_result(
+        await _make_executor(tmp_path).execute(
+            call=ToolCall(call_id="rf-text", name="read_file", args={"path": filename}),
+            ctx=_ctx(),
+        )
+    )
+    assert error is None
+    assert result is not None
+    assert expected in result
+
+
 @pytest.mark.asyncio
 async def test_read_file_with_turn_path_grant_reads_in_place(tmp_path: Path) -> None:
     """End-to-end regression test for the reported bug: given a folder grant
@@ -3197,6 +3224,53 @@ async def test_load_file_from_path_returns_image_block(tmp_path: Path) -> None:
     assert img.mime_type == "image/png"
     assert img.metadata is not None
     assert "attachment_id" in img.metadata
+
+
+@pytest.mark.asyncio
+async def test_load_file_sends_preview_but_keeps_original_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import base64
+    import os
+
+    from PIL import Image as PILImage
+
+    from monkeybot.core.attachments.store import FilesystemAttachmentStore
+    from monkeybot.core.types.content_blocks import Image
+
+    monkeypatch.setenv("ATTACHMENT_PREVIEW_MAX_DIM", "64")
+    monkeypatch.setenv("ATTACHMENT_PREVIEW_MAX_BYTES", "20000")
+    img_dir = tmp_path / "generated-media" / "images"
+    img_dir.mkdir(parents=True)
+    noisy = PILImage.frombytes("RGB", (400, 400), os.urandom(400 * 400 * 3))
+    raw_path = img_dir / "noisy.png"
+    noisy.save(raw_path, format="PNG")
+    original = raw_path.read_bytes()
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    store = FilesystemAttachmentStore(tmp_path)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        attachment_store=store,
+    )
+    result = await ex.execute(
+        call=ToolCall(
+            call_id="lf-prev",
+            name="load_file",
+            args={"path": "./generated-media/images/noisy.png"},
+        ),
+        ctx=_ctx(),
+    )
+    assert result.error is None
+    img = next(b for b in result.blocks if isinstance(b, Image))
+    preview = base64.b64decode(img.data)
+    assert len(preview) < len(original)
+    att_id = str(img.metadata["attachment_id"])  # type: ignore[index]
+    stored, _mime, _name = store.read("t", att_id)
+    assert stored == original
 
 
 @pytest.mark.asyncio

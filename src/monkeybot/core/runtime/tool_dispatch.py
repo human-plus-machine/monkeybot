@@ -36,12 +36,13 @@ from monkeybot.core.runtime.context_budget import ContextBudgeter
 from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector
 from monkeybot.core.tools.permission import remember_always_approval, resource_for_call
 from monkeybot.core.tools.types import ToolExecutionResult
-from monkeybot.core.types.content_blocks import ContentBlock, Image, Text, ToolResponse
+from monkeybot.core.types.content_blocks import ContentBlock, File, Image, Text, ToolResponse
 
 from .doom_loop import _doom_loop_exempt_names, _DoomLoopTracker
 from .events import (
     AgentEvent,
     Error,
+    FileBlock,
     ImageBlock,
     ToolCallResult,
     ToolCallStarted,
@@ -137,32 +138,50 @@ def _tool_outcome(
     return event, response
 
 
-def _image_events(
+def _media_events(
     request_id: str,
     call_id: str,
     result: ToolExecutionResult,
-) -> list[ImageBlock]:
-    """SSE image payloads for tool results that include ``Image`` content blocks."""
+) -> list[ImageBlock | FileBlock]:
+    """SSE image/document payloads for tool results with Image or File blocks."""
     if result.error is not None:
         return []
-    events: list[ImageBlock] = []
+    events: list[ImageBlock | FileBlock] = []
     for idx, b in enumerate(result.blocks):
-        if not isinstance(b, Image):
+        if not isinstance(b, (Image, File)):
             continue
         meta = b.metadata or {}
         path_raw = meta.get("path")
         path = path_raw.strip() if isinstance(path_raw, str) else ""
-        if not path and not b.data:
+        block_id = f"{call_id}:{idx}" if call_id else f"{request_id}:{idx}"
+        if isinstance(b, Image):
+            if not path and not b.data:
+                continue
+            events.append(
+                ImageBlock(
+                    request_id=request_id,
+                    image_id=block_id,
+                    mime_type=b.mime_type,
+                    # Keep pixels only when there is no durable path (SSE omits data if path set).
+                    data="" if path else b.data,
+                    path=path,
+                )
+            )
             continue
-        image_id = f"{call_id}:{idx}" if call_id else f"{request_id}:{idx}"
+        # FileBlock is path-only. PDFs are not downscaled the way ImageBlock
+        # previews are, so never put raw document bytes on the SSE wire.
+        if not path:
+            continue
+        name_raw = meta.get("filename")
+        filename = name_raw.strip() if isinstance(name_raw, str) else ""
         events.append(
-            ImageBlock(
+            FileBlock(
                 request_id=request_id,
-                image_id=image_id,
+                file_id=block_id,
                 mime_type=b.mime_type,
-                # Keep pixels only when there is no durable path (SSE omits data if path set).
-                data="" if path else b.data,
+                data="",
                 path=path,
+                filename=filename,
             )
         )
     return events
@@ -663,8 +682,8 @@ async def _execute_serial_chunk(
 
     event, response = finish_tool(call, tool_result)
     yield event
-    for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
-        yield img_evt
+    for media_evt in _media_events(ctx.request_id, call.call_id, tool_result):
+        yield media_evt
     chunk_responses.append(response)
     mcp_mutated, loops_mutated = _note_registry_mutation(
         call,
@@ -755,8 +774,8 @@ async def _execute_parallel_chunk(
 
         event, response = finish_tool(call, tool_result)
         yield event
-        for img_evt in _image_events(ctx.request_id, call.call_id, tool_result):
-            yield img_evt
+        for media_evt in _media_events(ctx.request_id, call.call_id, tool_result):
+            yield media_evt
         chunk_responses.append(response)
         mcp_mutated, loops_mutated = _note_registry_mutation(
             call,

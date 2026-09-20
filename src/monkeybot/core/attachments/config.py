@@ -11,6 +11,8 @@ ALLOWED_MIME_TYPES: frozenset[str] = frozenset(
         "image/gif",
         "image/webp",
         "application/pdf",
+        "text/html",
+        "text/plain",
     }
 )
 
@@ -38,6 +40,14 @@ def max_image_bytes() -> int:
 
 def max_pdf_bytes() -> int:
     return _env_int("ATTACHMENT_MAX_PDF_BYTES", 50 * 1024 * 1024)
+
+
+def preview_max_dim() -> int:
+    return max(64, _env_int("ATTACHMENT_PREVIEW_MAX_DIM", 1200))
+
+
+def preview_max_bytes() -> int:
+    return max(8_192, _env_int("ATTACHMENT_PREVIEW_MAX_BYTES", 500_000))
 
 
 def max_attachments_per_session() -> int:

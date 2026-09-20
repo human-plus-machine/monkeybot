@@ -41,6 +41,7 @@ from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.tools.inspector import ToolInspector
 from monkeybot.core.types.content_blocks import ContentBlock
+from monkeybot.core.verifier.binding import bind_verifier_session, reset_verifier_session
 
 from .context_budget import SUMMARY_TRIGGER_RATIO
 from .events import AgentEvent, Error, TurnComplete
@@ -49,7 +50,7 @@ from .loop_hooks import _drain_hook_settlement
 from .loop_messages import _normalize_user_content
 from .loop_ports import ToolExecutorPort
 from .loop_usage import _effective_max_turns, _usage_to_totals
-from .turn_loop import _drain_verdicts, _run_inner
+from .turn_loop import _drain_verdicts, _run_inner, _verdict_grace_s
 
 __all__ = [
     "SUMMARY_TRIGGER_RATIO",
@@ -97,6 +98,10 @@ async def run(
     trace_id_capture: list[str | None] = [None]
     blocks = _normalize_user_content(user_content)
     effective_max = _effective_max_turns(max_turns, ctx.config)
+    mailbox = ctx.verdict_mailbox
+    if mailbox is not None:
+        mailbox.open_request(ctx.thread_id, ctx.request_id)
+    token = bind_verifier_session(provider, ctx.model)
     logger.debug(
         "harness run start %s",
         kv(
@@ -146,24 +151,30 @@ async def run(
         )
         terminal_error = str(exc)
     finally:
-        await _drain_hook_settlement(hook_manager)
-        async for verdict_evt in _drain_verdicts(ctx, history):
-            yield verdict_evt
-        if terminal_error is not None:
-            yield Error(request_id=ctx.request_id, error=terminal_error)
-        usage.duration_ms = int((time.monotonic() - t0) * 1000)
-        logger.debug(
-            "harness run end %s",
-            kv(
+        try:
+            await _drain_hook_settlement(hook_manager)
+            async for verdict_evt in _drain_verdicts(ctx, history, grace_s=_verdict_grace_s(ctx)):
+                yield verdict_evt
+            mailbox = ctx.verdict_mailbox
+            if mailbox is not None:
+                mailbox.clear_request(ctx.thread_id, ctx.request_id)
+            if terminal_error is not None:
+                yield Error(request_id=ctx.request_id, error=terminal_error)
+            usage.duration_ms = int((time.monotonic() - t0) * 1000)
+            logger.debug(
+                "harness run end %s",
+                kv(
+                    request_id=ctx.request_id,
+                    thread_id=ctx.thread_id,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    duration_ms=usage.duration_ms,
+                ),
+            )
+            yield TurnComplete(
                 request_id=ctx.request_id,
-                thread_id=ctx.thread_id,
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
-                duration_ms=usage.duration_ms,
-            ),
-        )
-        yield TurnComplete(
-            request_id=ctx.request_id,
-            usage=_usage_to_totals(usage),
-            trace_id=trace_id_capture[0],
-        )
+                usage=_usage_to_totals(usage),
+                trace_id=trace_id_capture[0],
+            )
+        finally:
+            reset_verifier_session(token)

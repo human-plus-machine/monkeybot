@@ -64,6 +64,7 @@ This block is injected by the host every turn. Prefer the **active JSON tool lis
 ### MCP
 {catalog_mcp_line}- MCP errors are plain text (not structured JSON). HTTP 4xx/5xx, "not found", "unauthorized", "forbidden", or similar means the tool **did not return usable data** — state what failed; do not fabricate content.
 - Call `enable_loops` before scheduled-loop tools appear.
+- `/goal` uses `create_goal` / `update_goal`. Recurring "every …" work uses `/loop`.
 
 ### Skills
 - Installed skill names are listed under `## Skills` in this prompt. When a task matches one, use `list_skills` to get the skills root, then `read_file` that skill's `SKILL.md` before following it."""

@@ -6,6 +6,40 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [core v3.5.0] - 2026-09-20
+
+### Added
+
+- Native durable goals beside scheduled loops (`create_goal` / `update_goal`, plus `/goals` pause/resume/stop). Continuations are scheduled automatically until the goal completes or is stopped.
+- `FileBlock` SSE for generated documents (path/filename/mime — clients load from disk). Workspace open/export stays inside the workspace and still denies nested credential directories.
+- HTML (`text/html`) uploads for Files preview, and `text/plain` attachments inlined at resolve.
+- Promote a queued follow-up into the live turn (`POST /sessions/{id}/queue/{request_id}/steer`) or drop it (`DELETE`) so it never drains.
+- Verifier: request-scoped mailbox, sticky nudge until the tracker recovers, nudge armed on judge deposit, concurrent session-bound `ProviderJudge` jobs with scoped budgets and fencing, and staged reload so live workers stay intact.
+
+### Changed
+
+- `verifier.enabled: true` turns on omitted nested `ledger` / `tracker` flags. Omitted `judge.enabled` turns on only when the tracker is on. Explicit `enabled: false` still opts a nested section out.
+- Omitted `verifier.ledger.model` / `verifier.judge.model` inherit the agent model (`model.name` / `MODEL_NAME`, then `gemini-2.5-flash`). The live judge worker is session-bound `ProviderJudge`.
+
+### Fixed
+
+- Provider requests that exceed the multimodal byte budget drop media rather than sending an oversized body; remaining oversize fails closed. In-flight media is frozen on abort.
+- Promoted follow-ups no longer vanish if the turn ends before they inject — they restore to the front of the follow-up queue.
+
+### Notes
+
+- Existing configs that set only `verifier.enabled: true` (or `enabled: true` plus `ledger.enabled: true`) now also get the tracker, and the judge if the tracker stays on. Opt out with `tracker.enabled: false` / `judge.enabled: false`.
+
+## [cli v0.7.0] - 2026-09-20
+
+### Added
+
+- New agents install a packaged `skills/goal/SKILL.md` for explicit `/goal` invocations. `monkeybot refresh` adds it when missing.
+
+### Changed
+
+- Example YAML documents verifier nested enable-flag inheritance and optional model inherit.
+
 ## [browser v0.7.2] - 2026-09-13
 
 #### Fixed

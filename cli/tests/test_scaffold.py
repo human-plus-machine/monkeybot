@@ -34,6 +34,7 @@ def test_run_new_creates_bundle(tmp_path: Path) -> None:
     assert not (tmp_path / "skills" / "browser").exists()
     assert not (tmp_path / "skills" / "image-generator").exists()
     assert not (tmp_path / "skills" / "loop").exists()
+    assert (tmp_path / "skills" / "goal" / "SKILL.md").is_file()
     assert (tmp_path / "workspace" / ".gitkeep").is_file()
     assert (tmp_path / "workspace" / "browser" / "playbooks").is_dir()
     assert (tmp_path / "workspace" / "generated-media" / "images").is_dir()
@@ -153,6 +154,8 @@ def test_run_refresh_adds_template_commands_and_keeps_extras(tmp_path: Path) -> 
     doc = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
     doc.pop("memory", None)
     yaml_path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+    goal_skill = tmp_path / "skills" / "goal" / "SKILL.md"
+    goal_skill.unlink()
 
     report = run_refresh(dest=tmp_path)
     text = allow.read_text(encoding="utf-8")
@@ -166,6 +169,7 @@ def test_run_refresh_adds_template_commands_and_keeps_extras(tmp_path: Path) -> 
     refreshed_yaml = yaml_path.read_text(encoding="utf-8")
     assert "enabled: true" in refreshed_yaml
     assert "custom persona" not in refreshed_yaml
+    assert goal_skill.is_file()
     joined = "\n".join(report)
     assert "command_allowlist.yaml: updated" in joined
     assert "monkeybot.yaml: updated" in joined
@@ -174,7 +178,10 @@ def test_run_refresh_adds_template_commands_and_keeps_extras(tmp_path: Path) -> 
 def test_run_refresh_skips_custom_permissions_and_model(tmp_path: Path) -> None:
     run_new(dest=tmp_path, force=False, provider="nvidia", model="keep-me")
     perms = tmp_path / "monkeybot_config" / "permissions.yaml"
-    perms.write_text("default: deny\nrules:\n  - tool: '*'\n    pattern: '*'\n    effect: deny\n", encoding="utf-8")
+    perms.write_text(
+        "default: deny\nrules:\n  - tool: '*'\n    pattern: '*'\n    effect: deny\n",
+        encoding="utf-8",
+    )
     yaml_path = tmp_path / "monkeybot_config" / "monkeybot.yaml"
     before = yaml_path.read_text(encoding="utf-8")
 

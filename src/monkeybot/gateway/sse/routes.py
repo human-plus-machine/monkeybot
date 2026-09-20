@@ -34,10 +34,15 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.usage_buckets import coerce_granularity, validate_hour_bucket_window
 from monkeybot.core.runtime.context_budget import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.events import QueuedInputAccepted, event_to_json
-from monkeybot.core.runtime.input_admission import AdmissionQueueFullError, FollowUpItem
+from monkeybot.core.runtime.input_admission import (
+    AdmissionQueueFullError,
+    FollowUpItem,
+    FollowUpNotFoundError,
+)
 from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
 from monkeybot.core.types.content_blocks import ContentBlock
 
+from .goal_routes import build_goals_router
 from .loop_port import LoopPort, UsagePort
 from .models import (
     AdmissionAcceptedResponse,
@@ -182,6 +187,11 @@ def _schedule_turn(
                 await storage.session_turns().release(session_id, request_id)
             if bus.current_request_id == request_id:
                 bus.current_request_id = None
+            # Steers drain only at the top of each inner turn. A promote during
+            # the final inner turn would otherwise sit in `_steer` until a later
+            # turn (or vanish on cancel). Put those items back on the follow-up
+            # FIFO so they still start their own turn.
+            bus.admission.restore_promoted_steers()
             await _drain_follow_up(
                 bus=bus,
                 loop_ref=loop_ref,
@@ -221,6 +231,9 @@ async def _drain_follow_up(
     item = bus.admission.pop_follow_up()
     if item is None:
         return
+    # Between pop and the lock acquire below, DELETE can mark this id dropped.
+    # finish_follow_up_drain / requeue_follow_up_front honor that so we do not
+    # start a turn after returning 204.
     if storage is not None:
         acquired = await storage.session_turns().try_acquire(session_id, item.request_id)
         if not acquired:
@@ -238,6 +251,7 @@ async def _drain_follow_up(
                         give_up_ms=give_up_ms,
                     ),
                 )
+                bus.admission.finish_follow_up_drain(item.request_id)
                 # Continue with the next queued item (if any).
                 await _drain_follow_up(
                     bus=bus,
@@ -255,13 +269,21 @@ async def _drain_follow_up(
                     retry_s=_follow_up_lock_retry_s(),
                 ),
             )
-            bus.admission.requeue_follow_up_front(
+            requeued = bus.admission.requeue_follow_up_front(
                 FollowUpItem(
                     request_id=item.request_id,
                     content=item.content,
                     first_lock_fail_at_ms=first_fail,
                 )
             )
+            if not requeued:
+                await _drain_follow_up(
+                    bus=bus,
+                    loop_ref=loop_ref,
+                    storage=storage,
+                    session_id=session_id,
+                )
+                return
             _schedule_follow_up_retry(
                 bus=bus,
                 loop_ref=loop_ref,
@@ -269,6 +291,16 @@ async def _drain_follow_up(
                 session_id=session_id,
             )
             return
+    if not bus.admission.finish_follow_up_drain(item.request_id):
+        if storage is not None:
+            await storage.session_turns().release(session_id, item.request_id)
+        await _drain_follow_up(
+            bus=bus,
+            loop_ref=loop_ref,
+            storage=storage,
+            session_id=session_id,
+        )
+        return
     bus.cancel_follow_up_retry()
     bus.current_request_id = item.request_id
     logger.info(
@@ -768,6 +800,106 @@ def create_app(
         )
 
     @api.post(
+        "/sessions/{session_id}/queue/{request_id}/steer",
+        response_model=AdmissionAcceptedResponse,
+        status_code=202,
+    )
+    async def post_promote_queue_to_steer(
+        session_id: str,
+        request_id: str,
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> AdmissionAcceptedResponse:
+        """Promote a queued follow-up into the in-flight turn's steer queue.
+
+        Only meaningful while a turn is live. Idle sessions drain follow-ups
+        automatically; promoting then returns 409 ``SESSION_IDLE``.
+        """
+        bus = _require_bus(reg_dep, session_id)
+        current_request_id = bus.current_request_id
+        if current_request_id is None:
+            raise APIError(
+                409,
+                "SESSION_IDLE",
+                "Session is idle; queued follow-ups drain automatically",
+                uuid.uuid4().hex,
+            )
+        try:
+            position = bus.admission.promote_follow_up(request_id)
+        except FollowUpNotFoundError as exc:
+            raise APIError(
+                409,
+                "FOLLOW_UP_NOT_FOUND",
+                str(exc),
+                uuid.uuid4().hex,
+            ) from exc
+        except AdmissionQueueFullError as exc:
+            logger.warning(
+                "steer queue full on promote %s",
+                kv(session_id=session_id, request_id=request_id, max_size=exc.max_size),
+            )
+            raise APIError(
+                429,
+                "STEER_QUEUE_FULL",
+                str(exc),
+                uuid.uuid4().hex,
+            ) from exc
+        except ValueError as exc:
+            raise APIError(
+                400,
+                "BAD_REQUEST",
+                str(exc),
+                uuid.uuid4().hex,
+            ) from exc
+        logger.info(
+            "follow-up promoted %s",
+            kv(
+                session_id=session_id,
+                request_id=request_id,
+                current_request_id=current_request_id,
+                position=position,
+            ),
+        )
+        return await _publish_admission_accepted(
+            bus,
+            request_id=current_request_id,
+            queue="steer",
+            position=position,
+        )
+
+    @api.delete(
+        "/sessions/{session_id}/queue/{request_id}",
+        status_code=204,
+    )
+    async def delete_queued_follow_up(
+        session_id: str,
+        request_id: str,
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> Response:
+        """Drop a queued follow-up so it will not drain or promote."""
+        bus = _require_bus(reg_dep, session_id)
+        try:
+            bus.admission.drop_follow_up(request_id)
+        except FollowUpNotFoundError as exc:
+            raise APIError(
+                409,
+                "FOLLOW_UP_NOT_FOUND",
+                str(exc),
+                uuid.uuid4().hex,
+            ) from exc
+        except ValueError as exc:
+            raise APIError(
+                400,
+                "BAD_REQUEST",
+                str(exc),
+                uuid.uuid4().hex,
+            ) from exc
+        logger.info(
+            "follow-up dropped %s",
+            kv(session_id=session_id, request_id=request_id),
+        )
+        return Response(status_code=204)
+
+    @api.post(
         "/sessions/{session_id}/attachments",
         status_code=201,
         response_model=AttachmentUploadResponse,
@@ -1194,6 +1326,7 @@ def create_app(
 
     app.include_router(api)
     app.include_router(build_scheduler_router(loop_port=loop, registry=reg))
+    app.include_router(build_goals_router())
     app.include_router(build_admin_router())
 
     @app.get("/health", response_model=HealthResponse)

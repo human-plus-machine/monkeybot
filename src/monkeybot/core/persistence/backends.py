@@ -8,6 +8,7 @@ Postgres implementation code loads until the factory is actually called.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from urllib.parse import parse_qs, unquote, urlparse
@@ -140,6 +141,16 @@ class ScheduledLoopStore(Protocol):
     async def get(self, loop_id: str) -> ScheduledLoopRow | None: ...
 
     async def list_all(self) -> list[ScheduledLoopRow]: ...
+
+    async def list_kind(self, kind: str) -> list[ScheduledLoopRow]: ...
+
+    async def find_open(
+        self,
+        *,
+        session_id: str,
+        kind: str,
+        statuses: Collection[str],
+    ) -> ScheduledLoopRow | None: ...
 
     async def list_due(self, now_ms: int) -> list[ScheduledLoopRow]: ...
 
