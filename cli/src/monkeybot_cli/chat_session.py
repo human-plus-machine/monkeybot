@@ -16,6 +16,7 @@ from typing import Any, Literal
 import httpx
 from monkeybot.core.runtime.events import (
     ActionRequiredEvent,
+    AskUserRequestEvent,
     AssistantDelta,
     ContextSummarized,
     ContextSummarizing,
@@ -41,7 +42,12 @@ HitlReaderFn = Callable[["HitlRequest"], Any]  # async (HitlRequest) -> HitlAnsw
 
 HitlKind = Literal["confirm", "elicit", "frontend_unsupported"]
 
-_HITL_TYPES = (ToolConfirmationRequestEvent, ActionRequiredEvent, FrontendToolRequestEvent)
+_HITL_TYPES = (
+    ToolConfirmationRequestEvent,
+    AskUserRequestEvent,
+    ActionRequiredEvent,
+    FrontendToolRequestEvent,
+)
 
 _RECONNECT_INITIAL_DELAY = 0.5
 _RECONNECT_MAX_DELAY = 15.0
@@ -717,6 +723,9 @@ class ChatSessionController:
         if isinstance(evt, ToolConfirmationRequestEvent):
             await self._handle_tool_confirm(evt)
             return
+        if isinstance(evt, AskUserRequestEvent):
+            await self._handle_ask_user(evt)
+            return
         if isinstance(evt, ActionRequiredEvent):
             await self._handle_elicit(evt)
 
@@ -752,6 +761,32 @@ class ChatSessionController:
         )
         if answer.cancelled or not ok:
             self._turn_abort.set()
+
+    async def _handle_ask_user(self, evt: AskUserRequestEvent) -> None:
+        assert self.session_id is not None
+        choices = "\n".join(f"- {choice}" for choice in evt.choices)
+        prompt = evt.question or "The agent asked a question."
+        if choices:
+            prompt = f"{prompt}\n{choices}"
+        answer = await self._await_hitl(
+            HitlRequest(
+                kind="elicit",
+                prompt=prompt,
+                tool_call_id=evt.tool_call_id,
+                tool_name="ask_user",
+            )
+        )
+        text = "" if answer.cancelled else answer.text.strip()
+        if not text:
+            self.abort_turn()
+            return
+        ok = await self._post_hitl(
+            f"{self.base}/sessions/{self.session_id}/ask-user/{evt.tool_call_id}",
+            {"answer": text},
+            label="Ask user",
+        )
+        if not ok:
+            self.abort_turn()
 
     async def _handle_elicit(self, evt: ActionRequiredEvent) -> None:
         assert self.session_id is not None

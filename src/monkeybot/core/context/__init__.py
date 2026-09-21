@@ -692,6 +692,32 @@ def _core_tool_defs(
     }
     tools: list[ToolDef] = [
         ToolDef(
+            "ask_user",
+            (
+                "Ask the user a question and wait for their answer. Call this when you "
+                "need a decision before you can continue. Pass choices when a short list "
+                "of answers would help. Call it once, then wait. Do not invent the answer."
+            ),
+            {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "The question to show the user.",
+                    },
+                    "choices": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 6,
+                        "items": {"type": "string", "minLength": 1},
+                        "description": "Optional distinct answers the user can pick.",
+                    },
+                },
+                "required": ["question"],
+            },
+        ),
+        ToolDef(
             "run_command",
             (
                 "Run an allowlisted shell command with optional timeout. Confined "

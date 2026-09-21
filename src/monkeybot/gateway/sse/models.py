@@ -144,6 +144,12 @@ class ToolConfirmationPOST(BaseModel):
     """When true with approved, remember this tool+resource for the rest of the session."""
 
 
+class AskUserPOST(BaseModel):
+    """POST /sessions/{id}/ask-user/{tool_call_id} body."""
+
+    answer: str
+
+
 class ElicitationPOST(BaseModel):
     """POST /sessions/{id}/elicitations/{id} body."""
 
