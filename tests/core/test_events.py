@@ -10,6 +10,7 @@ import pytest
 from monkeybot.core.runtime.events import (
     ActionRequiredEvent,
     AgentEvent,
+    AskUserRequestEvent,
     AssistantDelta,
     AssistantTextEnded,
     AssistantTextStarted,
@@ -354,6 +355,16 @@ def test_sse_tool_confirmation_request_event_roundtrip(prompt: str | None) -> No
         tool_name="run_command",
         arguments={"x": 1},
         prompt=prompt,
+    )
+    assert event_from_json(event_to_json(ev)) == ev
+
+
+def test_sse_ask_user_request_event_roundtrip() -> None:
+    ev = AskUserRequestEvent(
+        request_id="r",
+        tool_call_id="tc",
+        question="Which date?",
+        choices=("Friday", "Monday"),
     )
     assert event_from_json(event_to_json(ev)) == ev
 

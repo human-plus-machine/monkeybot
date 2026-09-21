@@ -48,6 +48,7 @@ from .models import (
     AdmissionAcceptedResponse,
     AgentUsageResponse,
     APIError,
+    AskUserPOST,
     AttachmentUploadResponse,
     CancelRequest,
     CreateSessionRequest,
@@ -1057,6 +1058,44 @@ def create_app(
         if body.always:
             payload["always"] = True
         if not bus.resolve_pending(tool_call_id, payload):
+            raise APIError(
+                409,
+                "STALE_PENDING_RESPONSE",
+                "This pending response was already resolved, cancelled, or timed out",
+                rid,
+            )
+        return {"ok": True}
+
+    @api.post("/sessions/{session_id}/ask-user/{tool_call_id}", status_code=202)
+    async def post_ask_user(
+        session_id: str,
+        tool_call_id: str,
+        body: AskUserPOST,
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> dict[str, bool]:
+        rid = uuid.uuid4().hex
+        answer = body.answer.strip()
+        if not answer:
+            raise APIError(400, "EMPTY_ANSWER", "ask_user requires a non-empty answer", rid)
+        bus = reg_dep.get(session_id)
+        if bus is None:
+            raise APIError(404, "SESSION_NOT_FOUND", "Unknown session", rid)
+        state = bus.is_pending_or_terminal(tool_call_id)
+        if state == "unknown":
+            raise APIError(
+                404,
+                "PENDING_UNKNOWN",
+                "Pending response id is not registered for this session",
+                rid,
+            )
+        if state == "terminated":
+            raise APIError(
+                409,
+                "STALE_PENDING_RESPONSE",
+                "This pending response was already resolved, cancelled, or timed out",
+                rid,
+            )
+        if not bus.resolve_pending(tool_call_id, {"answer": answer}):
             raise APIError(
                 409,
                 "STALE_PENDING_RESPONSE",

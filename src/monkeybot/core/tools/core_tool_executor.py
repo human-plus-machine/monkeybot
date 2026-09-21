@@ -96,6 +96,7 @@ from monkeybot.core.subprocess_groups import (
     process_group_id,
     stop_subagent_process,
 )
+from monkeybot.core.tools.ask_user import await_ask_user_answer, parse_ask_user_args
 from monkeybot.core.tools.fs_isolation import JailRoots, memory_hidden_paths
 from monkeybot.core.tools.grant_store import PATH_GRANT_TOOLS, GrantStoreCache
 from monkeybot.core.tools.inspector import parse_run_command
@@ -159,6 +160,7 @@ _CORE_TOOL_NAMES = frozenset(
         "stop_loop",
         "create_goal",
         "update_goal",
+        "ask_user",
     }
 )
 
@@ -1173,6 +1175,8 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = await self._tool_create_goal(args, ctx)
             elif name == "update_goal":
                 result_text, err_text = await self._tool_update_goal(args, ctx)
+            elif name == "ask_user":
+                result_text, err_text = await self._tool_ask_user(args, call, ctx)
             elif name in self._extra_tools:
                 try:
                     raw = await self._extra_tools[name].execute(args)
@@ -2508,3 +2512,26 @@ class CoreToolExecutor(ToolExecutorPort):
             ),
             None,
         )
+
+    async def _tool_ask_user(
+        self, args: dict[str, Any], call: ToolCall, ctx: TurnContext
+    ) -> tuple[str | None, str | None]:
+        parsed = parse_ask_user_args(args)
+        if isinstance(parsed, str):
+            return (None, parsed)
+        question, choices = parsed
+        bus = ctx.sse_bus
+        if bus is None:
+            return (None, "ask_user is only available in an interactive chat")
+        answer = await await_ask_user_answer(
+            bus,
+            call_id=call.call_id,
+            request_id=ctx.request_id,
+            question=question,
+            choices=choices,
+        )
+        if answer is None:
+            return (None, "ask_user is only available in an interactive chat")
+        if not answer:
+            return (None, "ask_user received an empty answer")
+        return (_j({"answer": answer}), None)
