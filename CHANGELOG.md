@@ -6,17 +6,17 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Core
-
-#### Added
-
-- `ask_user` asks the user a question, with an optional list of two to six choices, and waits for the posted answer before the tool returns.
-
 ### CLI
 
 #### Added
 
 - `monkeybot chat` prompts for an `ask_user` question and posts the reply to the gateway.
+
+## [core v3.6.0] - 2026-09-21
+
+#### Added
+
+- `ask_user` asks the user a question, with an optional list of two to six choices, and waits for the posted answer before the tool returns.
 
 ## [core v3.5.0] - 2026-09-20
 
