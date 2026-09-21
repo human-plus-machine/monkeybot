@@ -191,6 +191,15 @@ class ToolConfirmationRequestEvent:
 
 
 @dataclass(frozen=True)
+class AskUserRequestEvent:
+    kind: Literal["AskUserRequest"] = "AskUserRequest"
+    request_id: str = ""
+    tool_call_id: str = ""
+    question: str = ""
+    choices: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class ActionRequiredEvent:
     kind: Literal["ActionRequiredEvent"] = "ActionRequiredEvent"
     request_id: str = ""
@@ -469,6 +478,7 @@ AgentEvent: TypeAlias = (
     | ThinkingBlockComplete
     | RedactedThinkingBlock
     | ToolConfirmationRequestEvent
+    | AskUserRequestEvent
     | ActionRequiredEvent
     | FrontendToolRequestEvent
     | SystemNotificationEvent
@@ -697,6 +707,13 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
             "arguments": dict(event.arguments),
             "prompt": event.prompt,
         }
+    if isinstance(event, AskUserRequestEvent):
+        return {
+            **base,
+            "tool_call_id": event.tool_call_id,
+            "question": event.question,
+            "choices": list(event.choices),
+        }
     if isinstance(event, ActionRequiredEvent):
         return {
             **base,
@@ -877,6 +894,7 @@ def event_to_json(event: AgentEvent) -> str:
             ThinkingBlockComplete,
             RedactedThinkingBlock,
             ToolConfirmationRequestEvent,
+            AskUserRequestEvent,
             ActionRequiredEvent,
             FrontendToolRequestEvent,
             SystemNotificationEvent,
@@ -1096,6 +1114,20 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
             tool_name=tool_name,
             arguments=arguments,
             prompt=prompt,
+        )
+    if t == "AskUserRequest":
+        call_raw = payload.get("tool_call_id", "")
+        question_raw = payload.get("question", "")
+        choices_raw = payload.get("choices", [])
+        if not isinstance(call_raw, str) or not isinstance(question_raw, str):
+            raise EventDecodeError("AskUserRequest fields must be strings")
+        if not isinstance(choices_raw, list) or any(not isinstance(item, str) for item in choices_raw):
+            raise EventDecodeError("AskUserRequest choices must be a list of strings")
+        return AskUserRequestEvent(
+            request_id=rid,
+            tool_call_id=call_raw,
+            question=question_raw,
+            choices=tuple(choices_raw),
         )
     if t == "ActionRequiredEvent":
         at_raw = payload.get("action_type", "elicitation")
