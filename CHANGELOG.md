@@ -6,6 +6,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Core
+
 ### Fixed
 
 - `run_command`'s macOS jail can launch onefile binaries that live under the home directory. Bundled `yt-dlp` needs to read its own executable and create a SysV semaphore; both were denied, so `/watch-video` died before any download.
