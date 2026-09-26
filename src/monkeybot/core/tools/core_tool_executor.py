@@ -97,7 +97,12 @@ from monkeybot.core.subprocess_groups import (
     stop_subagent_process,
 )
 from monkeybot.core.tools.ask_user import await_ask_user_answer, parse_ask_user_args
-from monkeybot.core.tools.fs_isolation import JailRoots, memory_hidden_paths
+from monkeybot.core.tools.fs_isolation import (
+    JailRoots,
+    local_whisper_model_dirs,
+    memory_hidden_paths,
+    readable_bin_dirs_under_deny,
+)
 from monkeybot.core.tools.grant_store import PATH_GRANT_TOOLS, GrantStoreCache
 from monkeybot.core.tools.inspector import parse_run_command
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
@@ -1924,8 +1929,11 @@ class CoreToolExecutor(ToolExecutorPort):
         a sibling of the workspace, not under it), OS temp dirs (read+write,
         many toolchains stage there), skills and the interpreter's own
         install prefix (read-only — the interpreter can live under $HOME for
-        a bundled desktop app), and any folder the user has granted read
-        access to, durably or for this turn (read-only).
+        a bundled desktop app), PATH ``bin`` directories that sit inside the
+        denied home (read-only — onefile tools such as bundled ``yt-dlp``
+        have to read their own executable), an installed on-device Whisper
+        model directory (read-only), and any folder the user has
+        granted read access to, durably or for this turn (read-only).
         """
         read_write: list[Path] = [self._workspace.repo_root]
         if self._artifacts_path is not None:
@@ -1958,6 +1966,8 @@ class CoreToolExecutor(ToolExecutorPort):
         deny: list[Path] = []
         with contextlib.suppress(RuntimeError):
             deny.append(Path.home())
+        read_only.extend(readable_bin_dirs_under_deny(deny))
+        read_only.extend(local_whisper_model_dirs(deny=deny))
 
         return JailRoots(
             read_write=tuple(dict.fromkeys(p.resolve() for p in read_write)),

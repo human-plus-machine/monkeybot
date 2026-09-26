@@ -6,6 +6,11 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `run_command`'s macOS jail can launch onefile binaries that live under the home directory. Bundled `yt-dlp` needs to read its own executable and create a SysV semaphore; both were denied, so `/watch-video` died before any download.
+- `run_command` can read an installed on-device Whisper model under the home directory, so `/watch-video` can transcribe with it.
+
 ## [cli v0.8.0] - 2026-09-21
 
 #### Added
