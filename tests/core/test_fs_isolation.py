@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -18,7 +21,9 @@ from monkeybot.core.tools.fs_isolation import (
     isolation_failed,
     isolation_support,
     jailed_argv,
+    local_whisper_model_dirs,
     memory_hidden_paths,
+    readable_bin_dirs_under_deny,
     reset_isolation_support_cache,
 )
 
@@ -254,6 +259,67 @@ class TestJailRoots:
         assert not JailRoots(always_deny=(Path("/ws/palace"),)).is_empty()
 
 
+class TestReadableBinDirs:
+    def test_only_bin_dirs_strictly_inside_a_deny_root(self, tmp_path: Path):
+        home = tmp_path / "home"
+        tools = home / "app" / "vendor" / "tools" / "bin"
+        local_bin = home / ".local" / "bin"
+        documents = home / "Documents"
+        outside = tmp_path / "opt" / "homebrew" / "bin"
+        for path in (tools, local_bin, documents, outside):
+            path.mkdir(parents=True)
+
+        found = readable_bin_dirs_under_deny(
+            (home,),
+            path_env=os.pathsep.join(
+                [str(tools), str(documents), str(home), str(outside), str(local_bin), ""]
+            ),
+        )
+
+        assert tools.resolve() in found
+        assert local_bin.resolve() in found
+        assert documents.resolve() not in found
+        assert home.resolve() not in found
+        assert outside.resolve() not in found
+
+    def test_skips_paths_that_would_break_the_seatbelt_profile(self, tmp_path: Path):
+        home = tmp_path / "home"
+        bad = home / 'bin"(allow default)' / "bin"
+        bad.mkdir(parents=True)
+
+        found = readable_bin_dirs_under_deny((home,), path_env=str(bad))
+        assert found == ()
+
+
+class TestLocalWhisperModelDirs:
+    def test_grants_the_model_directory_only_when_weights_exist(self, tmp_path: Path):
+        home = tmp_path / "monkeybot"
+        model_dir = home / "models" / "whisper"
+        model_dir.mkdir(parents=True)
+        assert local_whisper_model_dirs(home=home, env={}) == ()
+
+        empty = model_dir / "ggml-empty.bin"
+        empty.write_bytes(b"")
+        assert local_whisper_model_dirs(home=home, env={}) == ()
+
+        weights = model_dir / "ggml-custom.bin"
+        weights.write_bytes(b"weights")
+        assert local_whisper_model_dirs(home=home, env={}) == (model_dir.resolve(),)
+
+    def test_explicit_model_path_grants_its_parent(self, tmp_path: Path):
+        model = tmp_path / "custom" / "ggml.bin"
+        model.parent.mkdir()
+        model.write_bytes(b"weights")
+        empty_home = tmp_path / "empty-home"
+        empty_home.mkdir()
+
+        found = local_whisper_model_dirs(
+            home=empty_home,
+            env={"WHISPER_MODEL": str(model), "MONKEYBOT_HOME": str(empty_home)},
+        )
+        assert found == (model.parent.resolve(),)
+
+
 class TestJailedArgv:
     def test_empty_roots_is_a_passthrough(self):
         support = IsolationSupport("namespace", "test")
@@ -283,6 +349,7 @@ class TestJailedArgv:
         assert '(require-not (subpath "/Users/x"))' in profile
         assert '(allow file-read* file-write* (subpath "/Users/x/agent/workspace"))' in profile
         assert '(allow file-read* (subpath "/Users/x/agent/skills"))' in profile
+        assert "(allow ipc-sysv-sem)" in profile
         assert args[-2:] == ["/bin/bash", "-c"] or args[-3:] == ["/bin/bash", "-c", "true"]
 
     def test_sandbox_exec_profile_allows_gitconfig_by_name(self, monkeypatch):
@@ -583,6 +650,34 @@ class TestMacJailBootstrap:
         other = self._run(roots, ["/bin/cat", "in.txt"], cwd=workspace)
         assert other.returncode == 0
         assert "workspace-content" in other.stdout
+
+    def test_pyinstaller_binary_under_home_can_start(self, tmp_path: Path):
+        """Onefile binaries under $HOME must be readable and may call semctl.
+
+        Bundled yt-dlp fails closed without both: file-read of its own
+        executable, and ipc-sysv-sem. Skip when this host has no yt-dlp.
+        """
+        yt_dlp = shutil.which("yt-dlp")
+        if yt_dlp is None:
+            pytest.skip("yt-dlp is not on PATH")
+        home = Path.home()
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        shared = [Path(tempfile.gettempdir())]
+        for extra in ("/tmp", "/private/tmp"):
+            if os.path.isdir(extra):
+                shared.append(Path(extra))
+        roots = JailRoots(
+            deny=(home,),
+            read_write=(workspace,),
+            read_only=readable_bin_dirs_under_deny((home,)),
+            shared_write=tuple(shared),
+        )
+
+        proc = self._run(roots, [yt_dlp, "--version"], cwd=workspace)
+
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip()
 
 
 @pytest.mark.skipif(
