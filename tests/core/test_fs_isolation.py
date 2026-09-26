@@ -307,7 +307,7 @@ class TestLocalWhisperModelDirs:
         assert local_whisper_model_dirs(home=home, env={}) == (model_dir.resolve(),)
 
     def test_explicit_model_path_grants_its_parent(self, tmp_path: Path):
-        model = tmp_path / "custom" / "ggml.bin"
+        model = tmp_path / "custom" / "ggml-custom.bin"
         model.parent.mkdir()
         model.write_bytes(b"weights")
         empty_home = tmp_path / "empty-home"
@@ -318,6 +318,39 @@ class TestLocalWhisperModelDirs:
             env={"WHISPER_MODEL": str(model), "MONKEYBOT_HOME": str(empty_home)},
         )
         assert found == (model.parent.resolve(),)
+
+    def test_explicit_model_must_be_named_like_ggml_weights(self, tmp_path: Path):
+        model = tmp_path / "custom" / "notes.bin"
+        model.parent.mkdir()
+        model.write_bytes(b"weights")
+        empty_home = tmp_path / "empty-home"
+        empty_home.mkdir()
+
+        found = local_whisper_model_dirs(
+            home=empty_home,
+            env={"WHISPER_MODEL": str(model), "MONKEYBOT_HOME": str(empty_home)},
+        )
+        assert found == ()
+
+    def test_explicit_model_cannot_expose_a_deny_root(self, tmp_path: Path):
+        home = tmp_path / "home"
+        home.mkdir()
+        model = home / "ggml-base.bin"
+        model.write_bytes(b"weights")
+        empty_home = tmp_path / "empty-home"
+        empty_home.mkdir()
+        env = {"WHISPER_MODEL": str(model), "MONKEYBOT_HOME": str(empty_home)}
+
+        assert local_whisper_model_dirs(home=empty_home, env=env, deny=(home,)) == ()
+        assert local_whisper_model_dirs(home=empty_home, env=env, deny=(home / "sub",)) == ()
+
+        nested = home / "models" / "ggml-base.bin"
+        nested.parent.mkdir()
+        nested.write_bytes(b"weights")
+        env["WHISPER_MODEL"] = str(nested)
+        assert local_whisper_model_dirs(home=empty_home, env=env, deny=(home,)) == (
+            nested.parent.resolve(),
+        )
 
 
 class TestJailedArgv:
@@ -655,12 +688,13 @@ class TestMacJailBootstrap:
         """Onefile binaries under $HOME must be readable and may call semctl.
 
         Bundled yt-dlp fails closed without both: file-read of its own
-        executable, and ipc-sysv-sem. Skip when this host has no yt-dlp.
+        executable, and ipc-sysv-sem. Skip unless the yt-dlp on PATH lives
+        under $HOME; a system install elsewhere would not exercise either.
         """
-        yt_dlp = shutil.which("yt-dlp")
-        if yt_dlp is None:
-            pytest.skip("yt-dlp is not on PATH")
         home = Path.home()
+        yt_dlp = shutil.which("yt-dlp")
+        if yt_dlp is None or not Path(yt_dlp).resolve().is_relative_to(home.resolve()):
+            pytest.skip("needs a yt-dlp binary under $HOME on PATH")
         workspace = tmp_path / "workspace"
         workspace.mkdir()
         shared = [Path(tempfile.gettempdir())]

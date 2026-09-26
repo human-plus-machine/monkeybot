@@ -1967,7 +1967,7 @@ class CoreToolExecutor(ToolExecutorPort):
         with contextlib.suppress(RuntimeError):
             deny.append(Path.home())
         read_only.extend(readable_bin_dirs_under_deny(deny))
-        read_only.extend(local_whisper_model_dirs())
+        read_only.extend(local_whisper_model_dirs(deny=deny))
 
         return JailRoots(
             read_write=tuple(dict.fromkeys(p.resolve() for p in read_write)),

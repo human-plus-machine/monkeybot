@@ -431,6 +431,16 @@ def _is_strict_child(path: Path, root: Path) -> bool:
     return path != root
 
 
+def _resolved_deny_roots(deny: Sequence[Path]) -> list[Path]:
+    roots: list[Path] = []
+    for root in deny:
+        try:
+            roots.append(Path(root).expanduser().resolve())
+        except (OSError, RuntimeError):
+            continue
+    return roots
+
+
 def readable_bin_dirs_under_deny(
     deny: Sequence[Path],
     *,
@@ -448,12 +458,7 @@ def readable_bin_dirs_under_deny(
     """
     if path_env is None:
         path_env = os.environ.get("PATH", "")
-    deny_roots: list[Path] = []
-    for root in deny:
-        try:
-            deny_roots.append(Path(root).expanduser().resolve())
-        except (OSError, RuntimeError):
-            continue
+    deny_roots = _resolved_deny_roots(deny)
     if not deny_roots:
         return ()
     found: list[Path] = []
@@ -500,15 +505,19 @@ def local_whisper_model_dirs(
     *,
     home: Path | None = None,
     env: Mapping[str, str] | None = None,
+    deny: Sequence[Path] = (),
 ) -> tuple[Path, ...]:
     """Directories holding an installed on-device Whisper ggml model.
 
     ``run_command`` denies file-read under the home directory, and
     ``whisper-cli`` has to open the weights. Only the model file's parent
-    is granted, and only when a weights file is actually there — an
-    uninstalled model adds nothing.
+    is granted, and only when a ``ggml-*.bin`` weights file is actually
+    there — an uninstalled model adds nothing. A directory that is, or
+    contains, a ``deny`` root is never granted, so ``WHISPER_MODEL=~/ggml-x.bin``
+    cannot reopen the whole home directory.
     """
     values = os.environ if env is None else env
+    deny_roots = _resolved_deny_roots(deny)
     found: list[Path] = []
     seen: set[Path] = set()
 
@@ -526,6 +535,9 @@ def local_whisper_model_dirs(
                 resolved,
             )
             return
+        if any(root.is_relative_to(resolved) for root in deny_roots):
+            logger.debug("skipping whisper model dir that would expose a deny root: %s", resolved)
+            return
         if resolved in seen:
             return
         seen.add(resolved)
@@ -534,7 +546,7 @@ def local_whisper_model_dirs(
     explicit = (values.get("WHISPER_MODEL") or "").strip()
     if explicit:
         model = Path(explicit).expanduser()
-        if _nonempty_file(model):
+        if model.match("ggml-*.bin") and _nonempty_file(model):
             _add(model.parent)
 
     raw_home = (values.get("MONKEYBOT_HOME") or "").strip()
