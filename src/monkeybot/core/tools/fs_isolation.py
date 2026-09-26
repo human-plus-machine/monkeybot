@@ -27,8 +27,10 @@ profile instead: read is allowed everywhere except a set of ``deny`` roots
 (the user's home directory, primarily), read+write is granted on top for a
 small set of ``read_write`` roots (the workspace, artifacts, memory palace,
 OS temp dirs), and read-only for ``read_only`` roots (skills, the interpreter
-prefix, granted folders) even when those happen to sit inside a denied root —
-which is the common case for a desktop app whose workspace and bundled
+prefix, granted folders, ``bin`` directories already on ``PATH``, and an
+installed on-device Whisper model directory) even
+when those happen to sit inside a denied root — which is the common case
+for a desktop app whose workspace and bundled
 Python both live under the user's home directory. Validated empirically
 against real `python3`, `git`, `uv`, and `bash` invocations under
 `sandbox-exec` on macOS; the Linux mount-namespace path follows the same
@@ -46,7 +48,7 @@ import os
 import subprocess
 import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -421,6 +423,150 @@ def _resolved_strs(paths: Sequence[Path]) -> list[str]:
     return [str(Path(p).expanduser().resolve()) for p in paths]
 
 
+def _is_strict_child(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return path != root
+
+
+def _resolved_deny_roots(deny: Sequence[Path]) -> list[Path]:
+    roots: list[Path] = []
+    for root in deny:
+        try:
+            roots.append(Path(root).expanduser().resolve())
+        except (OSError, RuntimeError):
+            continue
+    return roots
+
+
+def readable_bin_dirs_under_deny(
+    deny: Sequence[Path],
+    *,
+    path_env: str | None = None,
+) -> tuple[Path, ...]:
+    """PATH ``bin`` directories that sit strictly inside a denied root.
+
+    Onefile bootloaders exec, then ``open()`` their own file to read the
+    embedded archive. ``process-exec`` is allowed, but file-read under the
+    denied home directory is not, so that open fails ("Could not load
+    PyInstaller's embedded PKG archive") unless the binary's directory is an
+    explicit read-only root. Only directories whose final component is
+    ``bin`` qualify, and a PATH entry of the deny root itself is ignored so
+    ``$HOME`` on PATH cannot reopen the whole tree.
+    """
+    if path_env is None:
+        path_env = os.environ.get("PATH", "")
+    deny_roots = _resolved_deny_roots(deny)
+    if not deny_roots:
+        return ()
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for part in path_env.split(os.pathsep):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            path = Path(part).expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if path.name != "bin" or not path.is_dir():
+            continue
+        if _SEATBELT_PATH_METACHARS.intersection(str(path)):
+            logger.debug("skipping PATH bin dir with seatbelt metacharacters: %s", path)
+            continue
+        if not any(_is_strict_child(path, root) for root in deny_roots):
+            continue
+        if path in seen:
+            continue
+        seen.add(path)
+        found.append(path)
+    return tuple(found)
+
+
+def _nonempty_file(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError as exc:
+        logger.debug("skipping whisper model file %s: %s", path, exc)
+        return False
+
+
+def _whisper_weights_present(model_dir: Path) -> bool:
+    try:
+        return any(_nonempty_file(path) for path in model_dir.glob("ggml-*.bin"))
+    except OSError as exc:
+        logger.debug("skipping whisper model dir %s: %s", model_dir, exc)
+        return False
+
+
+def local_whisper_model_dirs(
+    *,
+    home: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    deny: Sequence[Path] = (),
+) -> tuple[Path, ...]:
+    """Directories holding an installed on-device Whisper ggml model.
+
+    ``run_command`` denies file-read under the home directory, and
+    ``whisper-cli`` has to open the weights. Only the model file's parent
+    is granted, and only when a ``ggml-*.bin`` weights file is actually
+    there — an uninstalled model adds nothing. A directory that is, or
+    contains, a ``deny`` root is never granted, so ``WHISPER_MODEL=~/ggml-x.bin``
+    cannot reopen the whole home directory.
+    """
+    values = os.environ if env is None else env
+    deny_roots = _resolved_deny_roots(deny)
+    found: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add(path: Path) -> None:
+        try:
+            resolved = path.expanduser().resolve()
+        except (OSError, RuntimeError) as exc:
+            logger.debug("skipping whisper model path %s: %s", path, exc)
+            return
+        if not resolved.is_dir():
+            return
+        if _SEATBELT_PATH_METACHARS.intersection(str(resolved)):
+            logger.debug(
+                "skipping whisper model dir with seatbelt metacharacters: %s",
+                resolved,
+            )
+            return
+        if any(root.is_relative_to(resolved) for root in deny_roots):
+            logger.debug("skipping whisper model dir that would expose a deny root: %s", resolved)
+            return
+        if resolved in seen:
+            return
+        seen.add(resolved)
+        found.append(resolved)
+
+    explicit = (values.get("WHISPER_MODEL") or "").strip()
+    if explicit:
+        model = Path(explicit).expanduser()
+        if model.match("ggml-*.bin") and _nonempty_file(model):
+            _add(model.parent)
+
+    raw_home = (values.get("MONKEYBOT_HOME") or "").strip()
+    if raw_home:
+        base = Path(raw_home).expanduser()
+    elif home is not None:
+        base = home
+    else:
+        try:
+            base = Path.home() / ".monkeybot"
+        except RuntimeError as exc:
+            logger.debug("whisper model dir lookup skipped: %s", exc)
+            base = None
+    if base is not None:
+        model_dir = base / "models" / "whisper"
+        if _whisper_weights_present(model_dir):
+            _add(model_dir)
+    return tuple(found)
+
+
 def _seatbelt_jail_profile(roots: JailRoots) -> str:
     deny = _resolved_strs(roots.deny)
     read_write = _resolved_strs(roots.read_write)
@@ -439,6 +585,10 @@ def _seatbelt_jail_profile(roots: JailRoots) -> str:
         "(allow sysctl-read)",
         "(allow file-read-metadata)",
         "(allow ipc-posix-shm)",
+        # PyInstaller onefile bootloaders (bundled yt-dlp) call semctl while
+        # unpacking. process-exec alone is not enough; without this the
+        # binary dies with "Failed to initialize sync semaphore".
+        "(allow ipc-sysv-sem)",
     ]
     if deny:
         lines.append(f'(allow file-read* (require-all (subpath "/") {deny_excludes}))')
