@@ -5,19 +5,19 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-from browser_mcp import dom_indexing, server, tabs, backend
+from browser_mcp import backend, chat_context, dom_indexing, server, tabs
 
 
 def setup_function() -> None:
-    backend._bh = None
-    backend._bound_cdp = None
+    chat_context.shared().bh = None
+    chat_context.shared().bound_cdp = None
     dom_indexing.clear_registered_targets()
     tabs.reset_registry()
 
 
 def teardown_function() -> None:
-    backend._bh = None
-    backend._bound_cdp = None
+    chat_context.shared().bh = None
+    chat_context.shared().bound_cdp = None
     dom_indexing.clear_registered_targets()
     tabs.reset_registry()
 

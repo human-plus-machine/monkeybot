@@ -23,6 +23,7 @@ from browser_mcp.tabs import TabRegistry
 logger = logging.getLogger(__name__)
 
 IDLE_SECONDS = 15 * 60
+_SWEEP_INTERVAL_SECONDS = 30
 _NAME_SAFE = re.compile(r"[^A-Za-z0-9_-]+")
 
 current_context: contextvars.ContextVar[ChatContext | None] = contextvars.ContextVar(
@@ -44,6 +45,9 @@ class ChatContext:
     bh: tuple[Any, Any] | None = None
     bound_cdp: str | None = None
     announced: bool = False
+    announce_unsupported: bool = False
+    # True after an idle sweep stopped the daemon but kept this context's tabs.
+    daemon_released: bool = False
     last_used: float = field(default_factory=time.monotonic)
 
 
@@ -54,16 +58,35 @@ _guard = threading.Lock()
 # these out so a new chat does not start a daemon that shutdown then kills.
 _stopping_daemons: set[str] = set()
 _router_installed = False
+_sweeper_started = False
+
+# Captured at import, before tests replace ``sys.modules['browser_harness']``.
+# ``browser_harness.ipc`` does not exist; the IPC module is ``_ipc``.
+_harness_helpers: Any = None
+_harness_ipc: Any = None
+_harness_import_error: BaseException | None = None
+try:
+    import browser_harness.helpers as _imported_helpers
+    from browser_harness import _ipc as _imported_ipc
+
+    _harness_helpers = _imported_helpers
+    _harness_ipc = _imported_ipc
+except Exception as exc:  # pragma: no cover - dependency is required
+    _harness_import_error = exc
 
 
 def shared() -> ChatContext:
     """The single context for local Chrome and AgentCore."""
     global _shared
-    if _shared is None:
-        _shared = ChatContext(
-            key="shared", isolated=False, daemon_name=None, thread_id=None
-        )
-    return _shared
+    current = _shared
+    if current is not None:
+        return current
+    with _guard:
+        if _shared is None:
+            _shared = ChatContext(
+                key="shared", isolated=False, daemon_name=None, thread_id=None
+            )
+        return _shared
 
 
 def active() -> ChatContext:
@@ -116,9 +139,10 @@ def context_for_call(thread_id: str | None) -> ChatContext:
 
     In-app chats are isolated by ``(MONKEYBOT_RUN_ID, thread_id)``. A call
     with no thread id, and local Chrome or AgentCore, stay on one shared
-    context.
+    context. Idle daemon cleanup runs on a background thread so this lookup
+    does not block the caller on ``restart_daemon``.
     """
-    _sweep_idle()
+    _ensure_idle_sweeper()
     tid = (thread_id or "").strip()
     if tid and _in_app_isolated():
         run_id = (os.environ.get("MONKEYBOT_RUN_ID") or "").strip()
@@ -138,6 +162,7 @@ def context_for_call(thread_id: str | None) -> ChatContext:
                         _isolated[key] = ctx
                     ctx.thread_id = tid or None
                     ctx.last_used = time.monotonic()
+                    ctx.daemon_released = False
                     return ctx
             time.sleep(0.05)
     ctx = shared()
@@ -158,23 +183,27 @@ def clear_announced() -> None:
         ctx.announced = False
 
 
-def _shutdown_context(ctx: ChatContext) -> None:
-    """Clear one chat and stop its daemon. Must not be called with ``_guard`` held.
+def clear_unsupported() -> None:
+    """The app may have gained ``setChatScope`` after a bridge restart."""
+    shared().announce_unsupported = False
+    with _guard:
+        contexts = list(_isolated.values())
+    for ctx in contexts:
+        ctx.announce_unsupported = False
 
-    ``restart_daemon`` can block for many seconds. Holding the creation lock
-    across that would stall every other chat's tool call.
+
+def _stop_named_daemon(ctx: ChatContext) -> None:
+    """Stop ``ctx``'s daemon without holding ``_guard`` across the blocking call.
+
+    The context stays in ``_isolated`` for idle release and ``drop``, so the
+    check below ignores ``ctx`` itself. ``stop_all_isolated`` removes contexts
+    first, which is what makes this actually signal the process.
     """
-    if current_context.get() is ctx:
-        deactivate()
-    ctx.bh = None
-    ctx.bound_cdp = None
-    ctx.announced = False
-    ctx.registry.reset()
     name = ctx.daemon_name
     if not name:
         return
     with _guard:
-        if any(other.daemon_name == name for other in _isolated.values()):
+        if any(other is not ctx and other.daemon_name == name for other in _isolated.values()):
             return
         _stopping_daemons.add(name)
     try:
@@ -184,13 +213,33 @@ def _shutdown_context(ctx: ChatContext) -> None:
             _stopping_daemons.discard(name)
 
 
+def _release_daemon(ctx: ChatContext, *, reset_tabs: bool) -> None:
+    """Stop the daemon. Keep the context object so its lock stays the chat's lock.
+
+    Idle release keeps tab aliases: the Chromium tabs are still in Spaces, and
+    the next call starts a fresh daemon against the same ``chat=`` URL.
+    ``browser_stop`` passes ``reset_tabs=True`` because it already closed them.
+    """
+    ctx.bh = None
+    ctx.bound_cdp = None
+    ctx.announced = False
+    if reset_tabs:
+        ctx.registry.reset()
+        ctx.daemon_released = False
+    else:
+        ctx.daemon_released = True
+    _stop_named_daemon(ctx)
+
+
 def drop(ctx: ChatContext) -> None:
-    """Forget one chat and stop its daemon. Shared context is not dropped."""
+    """Stop one chat's daemon without replacing its context.
+
+    The caller often still holds ``ctx.lock``. Removing the context here would
+    make the next call build a new lock and run beside this one.
+    """
     if not ctx.isolated:
         return
-    with _guard:
-        _isolated.pop(ctx.key, None)
-    _shutdown_context(ctx)
+    _release_daemon(ctx, reset_tabs=True)
 
 
 def discard_isolated() -> None:
@@ -206,7 +255,7 @@ def stop_all_isolated() -> None:
         contexts = list(_isolated.values())
         _isolated.clear()
     for ctx in contexts:
-        _shutdown_context(ctx)
+        _release_daemon(ctx, reset_tabs=True)
 
 
 def _stop_daemon(ctx: ChatContext) -> None:
@@ -224,33 +273,65 @@ def _stop_daemon(ctx: ChatContext) -> None:
 
 def _sweep_idle(now: float | None = None) -> None:
     moment = time.monotonic() if now is None else now
-    stale: list[ChatContext] = []
+    stale: list[tuple[ChatContext, float]] = []
     with _guard:
         for ctx in list(_isolated.values()):
+            if ctx.daemon_released and ctx.bh is None:
+                continue
             if moment - ctx.last_used < IDLE_SECONDS:
                 continue
             # RLock has no locked(). A non-blocking acquire means nobody is inside.
             if not ctx.lock.acquire(blocking=False):
                 continue
             ctx.lock.release()
-            _isolated.pop(ctx.key, None)
-            stale.append(ctx)
-    for ctx in stale:
+            stale.append((ctx, ctx.last_used))
+    for ctx, seen_used in stale:
+        with _guard:
+            # A call landed after the snapshot and refreshed ``last_used``.
+            if ctx.last_used != seen_used or moment - ctx.last_used < IDLE_SECONDS:
+                continue
+            if not ctx.lock.acquire(blocking=False):
+                continue
+            ctx.lock.release()
         logger.info("browser-mcp: stopping idle chat daemon %s", ctx.daemon_name)
-        _shutdown_context(ctx)
+        _release_daemon(ctx, reset_tabs=False)
+
+
+def _idle_loop() -> None:
+    while True:
+        time.sleep(_SWEEP_INTERVAL_SECONDS)
+        try:
+            _sweep_idle()
+        except Exception:
+            logger.warning("browser-mcp: idle sweep failed", exc_info=True)
+
+
+def _ensure_idle_sweeper() -> None:
+    """Start the idle sweep once. It must not run on a tool-call thread."""
+    global _sweeper_started
+    with _guard:
+        if _sweeper_started:
+            return
+        _sweeper_started = True
+    threading.Thread(target=_idle_loop, name="browser-mcp-idle-sweep", daemon=True).start()
 
 
 def install_send_router() -> None:
-    """Send harness IPC to the daemon bound on this thread, not the global name."""
+    """Send harness IPC through ``browser_harness._ipc`` to this thread's daemon.
+
+    ``helpers._send`` otherwise always connects to ``helpers.NAME``. A missing
+    ``browser_harness._ipc`` is a hard failure: swallowing it leaves every chat
+    on the default daemon while per-chat daemons sit unused.
+    """
     global _router_installed
     if _router_installed:
         return
-    try:
-        import browser_harness.helpers as helpers
-        import browser_harness.ipc as ipc
-    except Exception:
-        logger.debug("browser-harness not importable; daemon routing not installed", exc_info=True)
-        return
+    if _harness_helpers is None or _harness_ipc is None:
+        raise RuntimeError(
+            "browser-mcp: per-chat daemon routing requires browser_harness._ipc"
+        ) from _harness_import_error
+    helpers = _harness_helpers
+    ipc = _harness_ipc
     if getattr(helpers, "_monkeybot_send_routed", False):
         _router_installed = True
         return

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import threading
 import time
 
 import pytest
-from browser_mcp import chat_context, in_app_cdp, tabs
+from browser_mcp import app, chat_context, chat_scope, in_app_cdp, tab_ops, tabs
 from browser_mcp.tabs import TabLimitError
 
 
@@ -131,3 +132,180 @@ def test_run_headers_include_chat_when_context_is_bound(
         assert in_app_cdp._run_headers()["X-Monkeybot-Run"] == "run-9"
     finally:
         chat_context.leave(tokens)
+
+
+def test_send_router_targets_the_chat_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
+    import browser_harness.helpers as helpers
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(in_app_cdp, "_env_set_from_in_app_file", True)
+    monkeypatch.setenv("MONKEYBOT_RUN_ID", "route-run")
+    monkeypatch.setattr(chat_context, "_router_installed", False)
+    monkeypatch.setattr(helpers, "_monkeybot_send_routed", False, raising=False)
+
+    def connect(name: str, timeout: float = 5.0):
+        seen["name"] = name
+        return type("Conn", (), {"close": lambda self: None})(), "tok"
+
+    def request(connection: object, token: object, req: object):
+        seen["req"] = req
+        return {"result": {}}
+
+    monkeypatch.setattr(chat_context._harness_ipc, "connect", connect)
+    monkeypatch.setattr(chat_context._harness_ipc, "request", request)
+    chat_context.install_send_router()
+    ctx = chat_context.context_for_call("route-chat")
+    tokens = chat_context.enter(ctx)
+    try:
+        helpers._send({"method": "Target.getTargets"})
+    finally:
+        chat_context.leave(tokens)
+    assert seen["name"] == ctx.daemon_name
+    assert seen["name"] != helpers.NAME
+
+
+def test_context_lookup_is_not_on_the_tool_hot_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(chat_context, "_sweep_idle", lambda now=None: calls.append("sweep"))
+    chat_context.context_for_call(None)
+    assert calls == []
+
+
+def test_reset_clears_only_the_active_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(in_app_cdp, "_env_set_from_in_app_file", True)
+    monkeypatch.delenv("MONKEYBOT_RUN_ID", raising=False)
+    first = chat_context.context_for_call("reset-a")
+    second = chat_context.context_for_call("reset-b")
+    first.announced = True
+    second.announced = True
+    tokens = chat_context.enter(first)
+    try:
+        chat_scope.reset()
+    finally:
+        chat_context.leave(tokens)
+    assert first.announced is False
+    assert second.announced is True
+
+
+def test_unsupported_latch_does_not_cross_chats(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(in_app_cdp, "_env_set_from_in_app_file", True)
+    monkeypatch.delenv("MONKEYBOT_RUN_ID", raising=False)
+    chat_a = chat_context.context_for_call("unsup-a")
+    chat_b = chat_context.context_for_call("unsup-b")
+    calls: list[str] = []
+
+    class Bad:
+        def cdp(self, method: str, **kwargs: object) -> None:
+            raise RuntimeError("unknown method")
+
+    class Good:
+        def cdp(self, method: str, **kwargs: object) -> None:
+            calls.append(method)
+
+    tokens = chat_context.enter(chat_a)
+    try:
+        chat_scope.announce(Bad(), "unsup-a")
+    finally:
+        chat_context.leave(tokens)
+    tokens = chat_context.enter(chat_b)
+    try:
+        chat_scope.announce(Good(), "unsup-b")
+    finally:
+        chat_context.leave(tokens)
+    assert calls == ["Monkeybot.setChatScope"]
+
+
+def test_idle_sweep_stops_daemon_and_keeps_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(in_app_cdp, "_env_set_from_in_app_file", True)
+    monkeypatch.setenv("MONKEYBOT_RUN_ID", "idle-run")
+    stopped: list[str] = []
+    monkeypatch.setattr(chat_context, "_stop_daemon", lambda ctx: stopped.append(ctx.daemon_name or ""))
+    ctx = chat_context.context_for_call("idle-chat")
+    ctx.registry.ensure("target-kept", url="https://kept.example")
+    ctx.bh = ("helpers", "admin")
+    ctx.last_used = time.monotonic() - (chat_context.IDLE_SECONDS + 5)
+    chat_context._sweep_idle()
+    again = chat_context.context_for_call("idle-chat")
+    assert again is ctx
+    assert again.registry.get("target-kept") is not None
+    assert again.bh is None
+    assert stopped == [ctx.daemon_name]
+
+
+def test_drop_keeps_the_in_flight_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(in_app_cdp, "_env_set_from_in_app_file", True)
+    monkeypatch.delenv("MONKEYBOT_RUN_ID", raising=False)
+    monkeypatch.setattr(chat_context, "_stop_daemon", lambda ctx: None)
+    ctx = chat_context.context_for_call("lock-chat")
+    entered = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        tokens = chat_context.enter(ctx)
+        try:
+            with ctx.lock:
+                chat_context.drop(ctx)
+                entered.set()
+                release.wait(timeout=2)
+        finally:
+            chat_context.leave(tokens)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    assert entered.wait(timeout=2)
+    other = chat_context.context_for_call("lock-chat")
+    acquired = other.lock.acquire(blocking=False)
+    if acquired:
+        other.lock.release()
+    release.set()
+    thread.join(timeout=2)
+    assert other is ctx
+    assert acquired is False
+
+
+def test_app_tab_limit_uses_code_and_scope() -> None:
+    assert tab_ops._is_app_tab_limit(RuntimeError("{'code': -32010, 'message': 'too many live tabs'}"))
+    assert tab_ops._is_app_tab_limit(RuntimeError("{'code': -32000, 'message': 'Tab limit reached (12)'}"))
+    assert not tab_ops._is_app_tab_limit(RuntimeError("the user wrote tab limit reached in the page text"))
+    reg = tabs.TabRegistry()
+    reg.ensure("only-one")
+    payload = tab_ops._app_tab_limit_payload(reg)
+    assert payload["scope"] == "app"
+    assert "limit" not in payload
+    assert reg.cap_error_payload()["scope"] == "chat"
+
+
+def test_registered_tools_run_async() -> None:
+    from browser_mcp.server import mcp
+
+    tools = mcp._tool_manager.list_tools()
+    assert tools
+    assert all(tool.is_async and inspect.iscoroutinefunction(tool.fn) for tool in tools)
+
+
+def test_async_entry_looks_up_context_off_the_event_loop() -> None:
+    import anyio
+
+    seen: dict[str, int] = {}
+    original = chat_context.context_for_call
+
+    def wrapped(thread_id: str | None):
+        seen["lookup"] = threading.get_ident()
+        return original(None)
+
+    @app._public_tool
+    def probe() -> str:
+        return "ok"
+
+    async def main() -> None:
+        seen["loop"] = threading.get_ident()
+        chat_context.context_for_call = wrapped  # type: ignore[method-assign]
+        try:
+            await probe._async_entry()
+        finally:
+            chat_context.context_for_call = original  # type: ignore[method-assign]
+
+    anyio.run(main)
+    assert seen["lookup"] != seen["loop"]

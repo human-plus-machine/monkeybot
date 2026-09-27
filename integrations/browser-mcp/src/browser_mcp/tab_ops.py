@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from browser_mcp import actions, dom_indexing, tabs
@@ -66,9 +67,40 @@ def _for_action(helpers: Any, tab: str | None) -> tabs.TabHandle:
     return handle
 
 
+# Spaces cdp-bridge uses this JSON-RPC code when the app-wide live-tab cap
+# refuses Target.createTarget. browser-harness stringifies the error object,
+# so the code survives as text. -32000 is the generic bridge error.
+APP_TAB_LIMIT_CODE = -32010
+_CDP_ERROR_CODE_RE = re.compile(r"""['"]code['"]\s*:\s*(-?\d+)""")
+_LEGACY_APP_TAB_LIMIT_RE = re.compile(r"tab limit reached \(\d+\)", re.IGNORECASE)
+_APP_TAB_LIMIT_ACTION = (
+    "The Spaces app is at its live-tab cap across chats, which is separate "
+    "from this chat's tab cap. Tell the user the app cannot open another tab "
+    "and ask which open tab to close. Do not assume it is one of this chat's tabs."
+)
+
+
 def _is_app_tab_limit(exc: BaseException) -> bool:
-    """Spaces refuses a new tab once the app-wide live-tab cap is hit."""
-    return "tab limit reached" in str(exc).lower()
+    """Spaces refuses a new tab once the app-wide live-tab cap is hit.
+
+    Prefer the stable JSON-RPC code. The legacy message is ``Tab limit reached (N)``
+    from older apps; a loose substring would match page text and review notes.
+    """
+    text = str(exc)
+    match = _CDP_ERROR_CODE_RE.search(text)
+    if match is not None and int(match.group(1)) == APP_TAB_LIMIT_CODE:
+        return True
+    return _LEGACY_APP_TAB_LIMIT_RE.search(text) is not None
+
+
+def _app_tab_limit_payload(reg: tabs.TabRegistry | None = None) -> dict[str, Any]:
+    """Same error name as the per-chat cap, with scope so the limit is not '10'."""
+    registry = reg if reg is not None else tabs.registry()
+    payload = registry.cap_error_payload()
+    payload["scope"] = "app"
+    payload.pop("limit", None)
+    payload["action_required"] = _APP_TAB_LIMIT_ACTION
+    return payload
 
 
 def _close_target(helpers: Any, target_id: str) -> None:
@@ -114,14 +146,14 @@ def _create_blank_target(helpers: Any, *, focus: bool, url: str = "about:blank")
             result = helpers.cdp("Target.createTarget", url="about:blank")
         except Exception as exc:
             if _is_app_tab_limit(exc):
-                raise tabs.TabLimitError(tabs.registry().cap_error_payload()) from exc
+                raise tabs.TabLimitError(_app_tab_limit_payload()) from exc
             if tabs.is_single_tab_error(exc):
                 raise tabs.SingleTabBackendError() from exc
             try:
                 result = helpers.cdp("Target.createTarget", url="about:blank")
             except Exception as inner:
                 if _is_app_tab_limit(inner):
-                    raise tabs.TabLimitError(tabs.registry().cap_error_payload()) from inner
+                    raise tabs.TabLimitError(_app_tab_limit_payload()) from inner
                 if tabs.is_single_tab_error(inner):
                     raise tabs.SingleTabBackendError() from inner
                 raise
@@ -138,7 +170,7 @@ def _create_blank_target(helpers: Any, *, focus: bool, url: str = "about:blank")
             helpers.new_tab(url)
         except Exception as exc:
             if _is_app_tab_limit(exc):
-                raise tabs.TabLimitError(tabs.registry().cap_error_payload()) from exc
+                raise tabs.TabLimitError(_app_tab_limit_payload()) from exc
             if tabs.is_single_tab_error(exc):
                 raise tabs.SingleTabBackendError() from exc
             raise

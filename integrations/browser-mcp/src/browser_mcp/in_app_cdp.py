@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 from typing import NoReturn
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -21,6 +22,8 @@ _IN_APP_CDP_URL_FILE = Path.home() / ".monkeybot" / "runtime" / "in-app-cdp-url"
 # (as opposed to an operator-supplied env var). Lets us clear that self-set value when the
 # file goes away, instead of falling back to a port we wrote from a now-stale file read.
 _env_set_from_in_app_file = False
+# Serializes BU_CDP_* writes. Re-entrant because ``_apply`` calls ``_bind``.
+_env_lock = threading.RLock()
 
 # Matches monkeyapp BROWSER_TARGET_ID ('monkeybot'). The Spaces upgrade handler
 # accepts any /devtools/browser/* path, so this only has to stay in sync for the
@@ -183,6 +186,11 @@ def _redact_cdp_token(message: str) -> str:
 
 
 def _bind_in_app_endpoint(url: str, token: str | None) -> str:
+    with _env_lock:
+        return _bind_in_app_endpoint_locked(url, token)
+
+
+def _bind_in_app_endpoint_locked(url: str, token: str | None) -> str:
     global _env_set_from_in_app_file
     endpoint = _in_app_ws_url(url, token)
     prev = os.environ.get("BU_CDP_WS")
@@ -190,7 +198,7 @@ def _bind_in_app_endpoint(url: str, token: str | None) -> str:
     os.environ.pop("BU_CDP_URL", None)
     _env_set_from_in_app_file = True
     if prev != endpoint:
-        chat_scope.reset()
+        chat_scope.reset(every_chat=True)
     return endpoint
 
 
@@ -231,6 +239,10 @@ def _reraise_public_harness_error(exc: BaseException) -> NoReturn:
 def _apply_in_app_cdp_url() -> str | None:
     """Ensure BU_CDP_URL/WS points at Monkeyapp's bridge when one is published.
 
+    The body runs under ``_env_lock``. Callers on the same thread must not
+    already hold it; ``daemon_cdp_endpoint`` calls this only after the outer
+    ``browser_harness`` apply has returned.
+
     Prefers the in-app runtime file over process env: mcp.json often bakes a
     concrete ``http://127.0.0.1:PORT`` from a previous launch, and that port is
     dead after restart (WinError 10061 / connection refused). The file is
@@ -245,6 +257,11 @@ def _apply_in_app_cdp_url() -> str | None:
 
     Returns the explicit CDP endpoint in use (file or env), or None.
     """
+    with _env_lock:
+        return _apply_in_app_cdp_url_locked()
+
+
+def _apply_in_app_cdp_url_locked() -> str | None:
     global _env_set_from_in_app_file
 
     file_url = _read_in_app_cdp_file()

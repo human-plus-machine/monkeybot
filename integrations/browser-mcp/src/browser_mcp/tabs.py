@@ -520,6 +520,7 @@ class TabRegistry:
         return {
             "ok": False,
             "error": "tab_limit_reached",
+            "scope": "chat",
             "limit": max_tabs(),
             "tabs": [self._public_entry(s) for s in self.sorted_tabs() if s.agent_controlled],
             "action_required": _TAB_LIMIT_ACTION,

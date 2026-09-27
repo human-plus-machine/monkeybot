@@ -75,6 +75,9 @@ mcp = FastMCP(
         "browser_read_tabs. At most 10 agent-controlled tabs; if you hit the cap, "
         "relay the returned tab list to the user, ask which to close, then "
         "browser_close_tab and retry — never close a tab without their confirmation. "
+        "If the error's scope is \"app\", Spaces refused the tab because the window "
+        "is at its live-tab cap across chats; say that, and do not pretend the cap "
+        "is this chat's 10 tabs. "
         "Close tabs you opened when done. Do not expect a background SPA to finish "
         "loading while unfocused."
     ),
@@ -106,10 +109,11 @@ def _public_tool(fn: Callable[_P, str]) -> Callable[_P, str]:
     covers the call sites someone remembered, so every tool goes through here.
 
     The object FastMCP calls is ``_async_entry`` (see ``server``): the thread
-    id is read on the event loop, then the tool runs in a worker under that
-    chat's lock. Direct calls stay synchronous so tests can invoke tools
-    without an event loop. Two chats therefore run at the same time; one
-    chat's calls stay ordered.
+    id is read on the event loop, then context lookup and the tool body run
+    in a worker under that chat's lock. Context lookup can wait out a daemon
+    shutdown, so it must not run on the loop. Direct calls stay synchronous
+    so tests can invoke tools without an event loop. Two chats therefore run
+    at the same time; one chat's calls stay ordered.
     """
 
     @functools.wraps(fn)
@@ -120,9 +124,9 @@ def _public_tool(fn: Callable[_P, str]) -> Callable[_P, str]:
     @functools.wraps(fn)
     async def async_entry(*args: _P.args, **kwargs: _P.kwargs) -> str:
         thread_id = chat_scope.current_thread_id()
-        ctx = chat_context.context_for_call(thread_id)
 
         def run() -> str:
+            ctx = chat_context.context_for_call(thread_id)
             return _run_tool(ctx, fn, args, kwargs)
 
         return await anyio.to_thread.run_sync(run)

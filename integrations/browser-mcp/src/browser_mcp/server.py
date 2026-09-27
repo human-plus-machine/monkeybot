@@ -35,8 +35,10 @@ def _use_per_chat_async_tools() -> None:
     """FastMCP must await tools so one chat's browser call cannot block another's.
 
     The exported functions stay synchronous for direct test calls. The
-    registered tool is the async entry, which resolves the chat on the event
-    loop and runs the body on a worker thread.
+    registered tool is the async entry, which reads the thread id on the
+    event loop and resolves the chat on a worker thread. ``Tool.run`` awaits
+    only when ``is_async`` is set; both the function and that flag have to move
+    together.
     """
     for tool in mcp._tool_manager.list_tools():
         entry = getattr(tool.fn, "_async_entry", None)

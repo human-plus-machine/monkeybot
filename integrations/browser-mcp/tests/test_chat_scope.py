@@ -9,22 +9,22 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from browser_mcp import app, backend, chat_scope, in_app_cdp, tabs
+from browser_mcp import app, backend, chat_context, chat_scope, in_app_cdp, tabs
 from mcp.types import RequestParams
 
 
 @pytest.fixture(autouse=True)
 def _reset_chat_scope_state() -> None:
-    original_bh = backend._bh
-    original_bound = backend._bound_cdp
+    original_bh = chat_context.shared().bh
+    original_bound = chat_context.shared().bound_cdp
     original_flag = in_app_cdp._env_set_from_in_app_file
     chat_scope.reset()
     tabs.reset_registry()
     yield
     chat_scope.reset()
     tabs.reset_registry()
-    backend._bh = original_bh
-    backend._bound_cdp = original_bound
+    chat_context.shared().bh = original_bh
+    chat_context.shared().bound_cdp = original_bound
     in_app_cdp._env_set_from_in_app_file = original_flag
 
 
@@ -39,8 +39,8 @@ def _install_in_app_harness(
     cdp_file.write_text("http://127.0.0.1:9333", encoding="utf-8")
     monkeypatch.setattr(in_app_cdp, "_IN_APP_CDP_URL_FILE", cdp_file)
     in_app_cdp._env_set_from_in_app_file = False
-    backend._bh = None
-    backend._bound_cdp = None
+    chat_context.shared().bh = None
+    chat_context.shared().bound_cdp = None
 
     admin = MagicMock()
     helpers = MagicMock()
@@ -185,8 +185,8 @@ def test_reset_re_enables_after_unsupported() -> None:
 
 def test_public_tool_skips_announce_when_not_in_app() -> None:
     helpers = MagicMock()
-    backend._bh = (helpers, MagicMock())
-    backend._bound_cdp = "http://127.0.0.1:9222"
+    chat_context.shared().bh = (helpers, MagicMock())
+    chat_context.shared().bound_cdp = "http://127.0.0.1:9222"
     in_app_cdp._env_set_from_in_app_file = False
 
     @app._public_tool
@@ -199,8 +199,8 @@ def test_public_tool_skips_announce_when_not_in_app() -> None:
 
 def test_public_tool_skips_announce_for_agentcore() -> None:
     helpers = MagicMock()
-    backend._bh = (helpers, MagicMock())
-    backend._bound_cdp = "agentcore"
+    chat_context.shared().bh = (helpers, MagicMock())
+    chat_context.shared().bound_cdp = "agentcore"
     in_app_cdp._env_set_from_in_app_file = False
 
     @app._public_tool

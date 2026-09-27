@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import os
-
 import inspect
 import json
 import logging
+import os
 import sys
 from io import BytesIO
 from pathlib import Path
@@ -16,23 +15,23 @@ from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request
 
 import pytest
-from browser_mcp import server, backend, in_app_cdp, login
+from browser_mcp import backend, chat_context, in_app_cdp, login, server
 
 
 @pytest.fixture(autouse=True)
 def _reset_bh_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    original_bh = backend._bh
-    original_bound = backend._bound_cdp
+    original_bh = chat_context.shared().bh
+    original_bound = chat_context.shared().bound_cdp
     original_env_flag = in_app_cdp._env_set_from_in_app_file
-    backend._bh = None
-    backend._bound_cdp = None
+    chat_context.shared().bh = None
+    chat_context.shared().bound_cdp = None
     in_app_cdp._env_set_from_in_app_file = False
     monkeypatch.delenv("BU_CDP_URL", raising=False)
     monkeypatch.delenv("BU_CDP_WS", raising=False)
     monkeypatch.setattr(in_app_cdp, "_IN_APP_CDP_URL_FILE", tmp_path / "in-app-cdp-url")
     yield
-    backend._bh = original_bh
-    backend._bound_cdp = original_bound
+    chat_context.shared().bh = original_bh
+    chat_context.shared().bound_cdp = original_bound
     in_app_cdp._env_set_from_in_app_file = original_env_flag
 
 
@@ -366,7 +365,7 @@ def test_browser_harness_bounces_alive_daemon_when_cdp_set(
     assert result == (helpers, admin)
     admin.restart_daemon.assert_called_once()
     admin.ensure_daemon.assert_called_once()
-    assert backend._bound_cdp == "http://127.0.0.1:9333"
+    assert chat_context.shared().bound_cdp == "http://127.0.0.1:9333"
     assert "daemon_browser_kind" not in [c[0] for c in admin.method_calls]
 
 
@@ -376,8 +375,8 @@ def test_browser_harness_does_not_bounce_when_already_bound(
     monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9333")
     helpers = MagicMock()
     admin = MagicMock()
-    backend._bh = (helpers, admin)
-    backend._bound_cdp = "http://127.0.0.1:9333"
+    chat_context.shared().bh = (helpers, admin)
+    chat_context.shared().bound_cdp = "http://127.0.0.1:9333"
 
     result = backend.browser_harness()
 
@@ -398,7 +397,7 @@ def test_browser_harness_no_bounce_without_cdp_when_daemon_alive(
     assert result == (helpers, admin)
     admin.restart_daemon.assert_not_called()
     admin.ensure_daemon.assert_called_once()
-    assert backend._bound_cdp is None
+    assert chat_context.shared().bound_cdp is None
 
 
 def test_browser_harness_rebounds_when_cdp_changes(
@@ -406,8 +405,8 @@ def test_browser_harness_rebounds_when_cdp_changes(
 ) -> None:
     admin, helpers = _install_fake_harness(monkeypatch)
     admin.daemon_alive.return_value = True
-    backend._bh = (helpers, admin)
-    backend._bound_cdp = "http://127.0.0.1:9222"
+    chat_context.shared().bh = (helpers, admin)
+    chat_context.shared().bound_cdp = "http://127.0.0.1:9222"
     monkeypatch.setenv("BU_CDP_URL", "http://127.0.0.1:9333")
 
     result = backend.browser_harness()
@@ -415,7 +414,7 @@ def test_browser_harness_rebounds_when_cdp_changes(
     assert result == (helpers, admin)
     admin.restart_daemon.assert_called_once()
     admin.ensure_daemon.assert_called_once()
-    assert backend._bound_cdp == "http://127.0.0.1:9333"
+    assert chat_context.shared().bound_cdp == "http://127.0.0.1:9333"
 
 
 def test_redact_cdp_token_strips_query_value() -> None:
@@ -450,7 +449,7 @@ def test_tool_redacts_token_in_restart_daemon_error(
     monkeypatch.setenv("BU_CDP_WS", "ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret")
     admin, _helpers = _install_fake_harness(monkeypatch)
     admin.daemon_alive.return_value = True
-    backend._bound_cdp = "http://127.0.0.1:9222"
+    chat_context.shared().bound_cdp = "http://127.0.0.1:9222"
     admin.restart_daemon.side_effect = RuntimeError(
         "connecting to ws://127.0.0.1:9333/devtools/browser/monkeybot?token=secret"
     )
@@ -819,7 +818,7 @@ def test_sealed_login_refuses_when_agentcore_is_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _publish_loopback_bridge(tmp_path, monkeypatch)
-    backend._bound_cdp = "agentcore"
+    chat_context.shared().bound_cdp = "agentcore"
 
     def fail_open(*args: object, **kwargs: object) -> None:
         raise AssertionError("must not POST login while AgentCore is bound")
@@ -1191,7 +1190,7 @@ def test_sealed_passkey_refuses_when_agentcore_is_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _publish_loopback_bridge(tmp_path, monkeypatch)
-    backend._bound_cdp = "agentcore"
+    chat_context.shared().bound_cdp = "agentcore"
 
     def fail_open(*args: object, **kwargs: object) -> None:
         raise AssertionError("must not POST passkey while AgentCore is bound")

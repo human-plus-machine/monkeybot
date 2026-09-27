@@ -1,17 +1,14 @@
 """Browser backend binding: in-app CDP, local harness daemon, or AgentCore.
 
 In-app chats each own a :class:`browser_mcp.chat_context.ChatContext` (daemon,
-tab registry, lock). ``_bh`` / ``_bound_cdp`` on this module are the shared
-context, so existing callers and tests that assign them still see local
-Chrome and AgentCore state.
+tab registry, lock). Local Chrome and AgentCore use
+:func:`browser_mcp.chat_context.shared`.
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
-import sys
-import types
 from typing import Any
 
 from browser_mcp import agentcore, chat_context, chat_scope, dom_indexing, in_app_cdp, perf
@@ -211,9 +208,6 @@ def browser_harness() -> tuple[Any, Any]:
         return wrapped
 
     bh = _ensure_harness_daemon(ctx, endpoint)
-    if in_app_cdp._env_set_from_in_app_file and not ctx.announced:
-        # A fresh daemon is a new WebSocket. Announce once for older apps.
-        ctx.announced = False
     _announce_in_app(bh[0], ctx)
     return _with_perf_helpers(bh)
 
@@ -261,30 +255,3 @@ def stop_all_backends_best_effort() -> None:
     chat_context.stop_all_isolated()
     chat_context.deactivate()
     stop_active_backend_best_effort()
-
-
-class _BackendModule(types.ModuleType):
-    """``backend._bh`` / ``_bound_cdp`` read and write the shared context.
-
-    Per-chat state lives on the active :class:`ChatContext`. Assignments from
-    tests and older callers keep meaning "the one non-isolated backend".
-    """
-
-    @property
-    def _bh(self) -> tuple[Any, Any] | None:  # type: ignore[override]
-        return chat_context.shared().bh
-
-    @_bh.setter
-    def _bh(self, value: tuple[Any, Any] | None) -> None:
-        chat_context.shared().bh = value
-
-    @property
-    def _bound_cdp(self) -> str | None:  # type: ignore[override]
-        return chat_context.shared().bound_cdp
-
-    @_bound_cdp.setter
-    def _bound_cdp(self, value: str | None) -> None:
-        chat_context.shared().bound_cdp = value
-
-
-sys.modules[__name__].__class__ = _BackendModule

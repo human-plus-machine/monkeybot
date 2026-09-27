@@ -17,20 +17,24 @@ logger = logging.getLogger(__name__)
 _JSONRPC_METHOD_NOT_FOUND = -32601
 _CDP_ERROR_CODE_RE = re.compile(r"""['"]code['"]\s*:\s*(-?\d+)""")
 
-_unsupported: bool = False
 
-
-def reset() -> None:
+def reset(*, every_chat: bool = False) -> None:
     """Clear the unsupported latch after a daemon (re)bind.
 
-    Does not drop tab registries. Each chat owns its own registry, so a
-    rebind must not throw away another chat's aliases.
+    Does not drop tab registries. Each chat owns its own registry and its own
+    latch, so one chat rebinding must not force every other chat to announce
+    again. ``every_chat`` is for a bridge URL change, which invalidates every
+    daemon connection.
     """
-    global _unsupported
-    _unsupported = False
     from browser_mcp import chat_context
 
-    chat_context.clear_announced()
+    if every_chat:
+        chat_context.clear_announced()
+        chat_context.clear_unsupported()
+        return
+    ctx = chat_context.active()
+    ctx.announced = False
+    ctx.announce_unsupported = False
 
 
 def current_thread_id() -> str | None:
@@ -96,20 +100,24 @@ def announce(helpers: object, thread_id: str | None) -> None:
     Kept for apps that do not read ``chat=`` on the WebSocket URL. Tabs are
     not dropped here: each chat has its own registry, and the caller decides
     when a connection has already announced (once per daemon bind).
+    The unsupported latch lives on the active chat so one connection cannot
+    silence another.
     """
-    global _unsupported
-    if _unsupported:
+    from browser_mcp import chat_context
+
+    ctx = chat_context.active()
+    if ctx.announce_unsupported:
         return
     cdp = getattr(helpers, "cdp", None)
     if not callable(cdp):
-        _unsupported = True
+        ctx.announce_unsupported = True
         logger.warning("browser-mcp: helpers have no cdp(); disabling setChatScope")
         return
     try:
         cdp("Monkeybot.setChatScope", chatKey=thread_id)
     except Exception as exc:
         if _looks_like_unknown_method(exc):
-            _unsupported = True
+            ctx.announce_unsupported = True
             logger.warning(
                 "browser-mcp: Monkeybot.setChatScope unsupported; disabling for this connection"
             )

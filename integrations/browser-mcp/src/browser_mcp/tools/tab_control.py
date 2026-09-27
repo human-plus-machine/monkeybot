@@ -71,7 +71,8 @@ def browser_open_tab(
     """Open a URL in a new tab. Defaults to the background (does not steal focus).
 
     alias must match [a-z][a-z0-9_-]{0,23}. At most 10 agent-controlled tabs;
-    on the cap this returns tab_limit_reached and does not open or close anything.
+    on the cap this returns tab_limit_reached with scope "chat". An app-wide
+    refusal returns the same error with scope "app" and does not open or close anything.
     When focus=True, returns a full observation by default.
     """
     helpers, _ = backend.browser_harness()

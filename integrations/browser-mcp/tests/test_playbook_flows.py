@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from browser_mcp import actions, dom_indexing, playbooks, server, tabs, backend
+from browser_mcp import actions, backend, chat_context, dom_indexing, playbooks, server, tabs
 
 _SIGNUP = """```playbook
 name: signup
@@ -27,15 +27,15 @@ def _isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("BROWSER_MCP_PLAYBOOKS_DIR", str(root))
     monkeypatch.setenv("BROWSER_MCP_QUIET_MS", "1")
     monkeypatch.setenv("BROWSER_MCP_SETTLE_MS", "200")
-    original = backend._bh
-    original_bound = backend._bound_cdp
-    backend._bh = None
-    backend._bound_cdp = None
+    original = chat_context.shared().bh
+    original_bound = chat_context.shared().bound_cdp
+    chat_context.shared().bh = None
+    chat_context.shared().bound_cdp = None
     dom_indexing.clear_registered_targets()
     tabs.reset_registry()
     yield root
-    backend._bh = original
-    backend._bound_cdp = original_bound
+    chat_context.shared().bh = original
+    chat_context.shared().bound_cdp = original_bound
     dom_indexing.clear_registered_targets()
     tabs.reset_registry()
 

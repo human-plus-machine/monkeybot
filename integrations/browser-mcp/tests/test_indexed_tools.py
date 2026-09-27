@@ -12,20 +12,20 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from browser_mcp import dom_indexing, server, tabs, backend, playbooks
+from browser_mcp import backend, chat_context, dom_indexing, playbooks, server, tabs
 
 
 @pytest.fixture(autouse=True)
 def _reset_bh_state():
-    original = backend._bh
-    original_bound = backend._bound_cdp
-    backend._bh = None
-    backend._bound_cdp = None
+    original = chat_context.shared().bh
+    original_bound = chat_context.shared().bound_cdp
+    chat_context.shared().bh = None
+    chat_context.shared().bound_cdp = None
     dom_indexing.clear_registered_targets()
     tabs.reset_registry()
     yield
-    backend._bh = original
-    backend._bound_cdp = original_bound
+    chat_context.shared().bh = original
+    chat_context.shared().bound_cdp = original_bound
     dom_indexing.clear_registered_targets()
     tabs.reset_registry()
 
