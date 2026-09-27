@@ -6,6 +6,13 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [browser v0.8.0] - 2026-09-27
+
+### Added
+
+- Each Spaces chat gets its own browser daemon, tab registry, and lock, so simultaneous chats no longer restart each other or drop tab aliases. Local Chrome and AgentCore stay on one shared browser. An idle daemon stops after 15 minutes and keeps that chat's tab aliases for the next call.
+- The per-chat tab cap is 10. When Spaces refuses a tab because the app-wide live-tab cap is full, the tool returns `tab_limit_reached` with `"scope": "app"` instead of this chat's limit.
+
 ## [core v3.6.1] - 2026-09-26
 
 ### Fixed

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 from typing import NoReturn
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -21,6 +22,8 @@ _IN_APP_CDP_URL_FILE = Path.home() / ".monkeybot" / "runtime" / "in-app-cdp-url"
 # (as opposed to an operator-supplied env var). Lets us clear that self-set value when the
 # file goes away, instead of falling back to a port we wrote from a now-stale file read.
 _env_set_from_in_app_file = False
+# Serializes BU_CDP_* writes. Re-entrant because ``_apply`` calls ``_bind``.
+_env_lock = threading.RLock()
 
 # Matches monkeyapp BROWSER_TARGET_ID ('monkeybot'). The Spaces upgrade handler
 # accepts any /devtools/browser/* path, so this only has to stay in sync for the
@@ -104,23 +107,56 @@ def _run_label() -> str:
     return value.strip() if value and value.strip() else "Chat"
 
 
+def _active_thread_id() -> str | None:
+    """Thread id of the chat bound on this thread, if the in-app bridge is in use."""
+    from browser_mcp import chat_context
+
+    ctx = chat_context.current_context.get()
+    if ctx is None or not ctx.thread_id:
+        return None
+    return ctx.thread_id
+
+
 def _run_headers() -> dict[str, str]:
-    """Headers identifying this run to the in-app bridge's /json/login endpoint."""
+    """Headers identifying this run and chat to the in-app bridge's login endpoints."""
+    headers: dict[str, str] = {}
     run_id = _run_id()
-    if not run_id:
-        return {}
-    return {"X-Monkeybot-Run": run_id, "X-Monkeybot-Run-Label": _run_label()}
+    if run_id:
+        headers["X-Monkeybot-Run"] = run_id
+        headers["X-Monkeybot-Run-Label"] = _run_label()
+    thread_id = _active_thread_id()
+    if thread_id:
+        headers["X-Monkeybot-Chat"] = thread_id
+    return headers
 
 
-def _with_run_param(url: str, run_id: str | None) -> str:
-    if not run_id:
+def _with_query_param(url: str, name: str, value: str | None) -> str:
+    if not value:
         return url
     parsed = urlparse(url)
     pairs = [
-        (key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key != "run"
+        (key, item)
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+        if key != name
     ]
-    pairs.append(("run", run_id))
+    pairs.append((name, value))
     return urlunparse(parsed._replace(query=urlencode(pairs)))
+
+
+def _with_run_param(url: str, run_id: str | None) -> str:
+    return _with_query_param(url, "run", run_id)
+
+
+def daemon_cdp_endpoint(thread_id: str | None) -> str | None:
+    """CDP URL for one chat's daemon.
+
+    The process-wide env stays free of ``chat=`` so two chats cannot overwrite
+    each other's endpoint. The daemon receives this URL in its own env.
+    """
+    base = _apply_in_app_cdp_url()
+    if not base or not _env_set_from_in_app_file:
+        return base
+    return _with_query_param(base, "chat", thread_id)
 
 
 def _in_app_ws_url(url: str, token: str | None) -> str:
@@ -150,6 +186,11 @@ def _redact_cdp_token(message: str) -> str:
 
 
 def _bind_in_app_endpoint(url: str, token: str | None) -> str:
+    with _env_lock:
+        return _bind_in_app_endpoint_locked(url, token)
+
+
+def _bind_in_app_endpoint_locked(url: str, token: str | None) -> str:
     global _env_set_from_in_app_file
     endpoint = _in_app_ws_url(url, token)
     prev = os.environ.get("BU_CDP_WS")
@@ -157,7 +198,7 @@ def _bind_in_app_endpoint(url: str, token: str | None) -> str:
     os.environ.pop("BU_CDP_URL", None)
     _env_set_from_in_app_file = True
     if prev != endpoint:
-        chat_scope.reset()
+        chat_scope.reset(every_chat=True)
     return endpoint
 
 
@@ -198,6 +239,10 @@ def _reraise_public_harness_error(exc: BaseException) -> NoReturn:
 def _apply_in_app_cdp_url() -> str | None:
     """Ensure BU_CDP_URL/WS points at Monkeyapp's bridge when one is published.
 
+    The body runs under ``_env_lock``. Callers on the same thread must not
+    already hold it; ``daemon_cdp_endpoint`` calls this only after the outer
+    ``browser_harness`` apply has returned.
+
     Prefers the in-app runtime file over process env: mcp.json often bakes a
     concrete ``http://127.0.0.1:PORT`` from a previous launch, and that port is
     dead after restart (WinError 10061 / connection refused). The file is
@@ -212,6 +257,11 @@ def _apply_in_app_cdp_url() -> str | None:
 
     Returns the explicit CDP endpoint in use (file or env), or None.
     """
+    with _env_lock:
+        return _apply_in_app_cdp_url_locked()
+
+
+def _apply_in_app_cdp_url_locked() -> str | None:
     global _env_set_from_in_app_file
 
     file_url = _read_in_app_cdp_file()

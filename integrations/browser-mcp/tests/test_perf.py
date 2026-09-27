@@ -10,23 +10,23 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-from browser_mcp import dom_indexing, perf, server, backend
+from browser_mcp import backend, chat_context, dom_indexing, perf, server
 
 
 @pytest.fixture(autouse=True)
 def _reset_perf_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    original_bh = backend._bh
-    original_bound = backend._bound_cdp
-    backend._bh = None
-    backend._bound_cdp = None
+    original_bh = chat_context.shared().bh
+    original_bound = chat_context.shared().bound_cdp
+    chat_context.shared().bh = None
+    chat_context.shared().bound_cdp = None
     monkeypatch.delenv("BROWSER_MCP_PERF", raising=False)
     monkeypatch.delenv("BROWSER_MCP_PERF_LOG", raising=False)
     monkeypatch.delenv("BROWSER_BACKEND", raising=False)
     monkeypatch.delenv("BU_CDP_URL", raising=False)
     monkeypatch.delenv("BU_CDP_WS", raising=False)
     yield
-    backend._bh = original_bh
-    backend._bound_cdp = original_bound
+    chat_context.shared().bh = original_bh
+    chat_context.shared().bound_cdp = original_bound
 
 
 def _patch_harness(helpers: MagicMock):
@@ -211,7 +211,7 @@ def test_browser_harness_wraps_helpers_when_enabled(monkeypatch: pytest.MonkeyPa
     assert perf.unwrap(wrapped) is helpers
     assert got_admin is admin
     # Cached binding stays unwrapped so identity tests without perf stay green.
-    assert backend._bh == (helpers, admin)
+    assert chat_context.shared().bh == (helpers, admin)
 
 
 def test_log_write_failure_does_not_fail_the_tool(

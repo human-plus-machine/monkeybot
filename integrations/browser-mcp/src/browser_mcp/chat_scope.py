@@ -17,16 +17,24 @@ logger = logging.getLogger(__name__)
 _JSONRPC_METHOD_NOT_FOUND = -32601
 _CDP_ERROR_CODE_RE = re.compile(r"""['"]code['"]\s*:\s*(-?\d+)""")
 
-_UNSET: object = object()
-_last_chat: object = _UNSET
-_unsupported: bool = False
 
+def reset(*, every_chat: bool = False) -> None:
+    """Clear the unsupported latch after a daemon (re)bind.
 
-def reset() -> None:
-    """Clear last-chat / unsupported flags after a daemon (re)bind."""
-    global _last_chat, _unsupported
-    _last_chat = _UNSET
-    _unsupported = False
+    Does not drop tab registries. Each chat owns its own registry and its own
+    latch, so one chat rebinding must not force every other chat to announce
+    again. ``every_chat`` is for a bridge URL change, which invalidates every
+    daemon connection.
+    """
+    from browser_mcp import chat_context
+
+    if every_chat:
+        chat_context.clear_announced()
+        chat_context.clear_unsupported()
+        return
+    ctx = chat_context.active()
+    ctx.announced = False
+    ctx.announce_unsupported = False
 
 
 def current_thread_id() -> str | None:
@@ -61,18 +69,6 @@ def _thread_id_from_meta(meta: object) -> str | None:
     return text or None
 
 
-def _forget_other_chat_tabs() -> None:
-    """Drop this process's tab registry: those targets belong to the chat we left.
-
-    Spaces owns the previous chat's tabs and keeps them in that chat's panel.
-    Forgetting ``opened_by_agent`` here is intentional: ``browser_stop`` in the
-    new chat must not close the previous chat's tabs.
-    """
-    from browser_mcp import tabs
-
-    tabs.reset_registry()
-
-
 def _cdp_error_code(exc: BaseException) -> int | None:
     """Best-effort CDP/JSON-RPC error code from a harness ``RuntimeError``."""
     payload = exc.args[0] if exc.args else None
@@ -101,37 +97,27 @@ def announce_current(helpers: object) -> None:
 def announce(helpers: object, thread_id: str | None) -> None:
     """Send ``Monkeybot.setChatScope`` for this request. Never raises.
 
-    CDP is sent on every call (idempotent) so a reconnected WebSocket still gets
-    ``chatKey``. The tab registry is dropped only when the non-None thread id
-    changes. ``_last_chat`` is updated even when the app does not support the
-    method, so a chat switch still drops tabs owned by the previous chat.
+    Kept for apps that do not read ``chat=`` on the WebSocket URL. Tabs are
+    not dropped here: each chat has its own registry, and the caller decides
+    when a connection has already announced (once per daemon bind).
+    The unsupported latch lives on the active chat so one connection cannot
+    silence another.
     """
-    global _last_chat, _unsupported
-    previous = _last_chat
-    switched = (
-        thread_id is not None and previous is not _UNSET and previous != thread_id
-    )
-    if thread_id is not None:
-        _last_chat = thread_id
-    if switched:
-        _forget_other_chat_tabs()
-        logger.info(
-            "browser-mcp: chat scope changed %s -> %s; dropping tabs",
-            previous,
-            thread_id,
-        )
-    if _unsupported:
+    from browser_mcp import chat_context
+
+    ctx = chat_context.active()
+    if ctx.announce_unsupported:
         return
     cdp = getattr(helpers, "cdp", None)
     if not callable(cdp):
-        _unsupported = True
+        ctx.announce_unsupported = True
         logger.warning("browser-mcp: helpers have no cdp(); disabling setChatScope")
         return
     try:
         cdp("Monkeybot.setChatScope", chatKey=thread_id)
     except Exception as exc:
         if _looks_like_unknown_method(exc):
-            _unsupported = True
+            ctx.announce_unsupported = True
             logger.warning(
                 "browser-mcp: Monkeybot.setChatScope unsupported; disabling for this connection"
             )

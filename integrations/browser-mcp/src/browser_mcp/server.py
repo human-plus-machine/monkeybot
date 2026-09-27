@@ -31,6 +31,26 @@ def tool_surface() -> dict[str, object]:
     }
 
 
+def _use_per_chat_async_tools() -> None:
+    """FastMCP must await tools so one chat's browser call cannot block another's.
+
+    The exported functions stay synchronous for direct test calls. The
+    registered tool is the async entry, which reads the thread id on the
+    event loop and resolves the chat on a worker thread. ``Tool.run`` awaits
+    only when ``is_async`` is set; both the function and that flag have to move
+    together.
+    """
+    for tool in mcp._tool_manager.list_tools():
+        entry = getattr(tool.fn, "_async_entry", None)
+        if entry is None:
+            continue
+        tool.fn = entry
+        tool.is_async = True
+
+
+_use_per_chat_async_tools()
+
+
 def _stop_daemon_for_shutdown() -> None:
     """Best-effort backend stop on process exit (SIGTERM/SIGINT/atexit).
 
@@ -44,7 +64,7 @@ def _stop_daemon_for_shutdown() -> None:
     ``backend.stop_active_backend_best_effort``'s docstring). Idempotent.
     """
     try:
-        backend.stop_active_backend_best_effort()
+        backend.stop_all_backends_best_effort()
     except Exception as exc:
         logger.warning(
             "browser-mcp shutdown: failed to stop browser backend: %s",

@@ -191,9 +191,14 @@ synchronization layer.
 
 ## In-app bridge extensions
 
-When the Spaces in-app browser is bound, each tool call may announce which chat
-it is acting for so new tabs stay attached to that chat. AgentCore and Browser
-Use Cloud backends never send this.
+When the Spaces in-app browser is bound, each chat gets its own harness daemon
+and tab list (10 agent tabs). The daemon's CDP URL carries `run` and `chat`,
+and the first bind also announces the chat for older apps. AgentCore and
+Browser Use Cloud backends never send this and stay on one shared browser.
+An idle chat's daemon stops after 15 minutes; its tab aliases stay so the next
+call can reattach. If Spaces refuses a tab because the app-wide live-tab cap
+is full, the tool returns `tab_limit_reached` with `"scope": "app"` (CDP error
+code `-32010`) instead of this chat's limit of 10.
 
 ### MCP request meta
 
@@ -208,7 +213,7 @@ server then announces `chatKey` as `null`.
 
 ### `Monkeybot.setChatScope`
 
-On every in-app tool call, after the harness binds and before other CDP
+Once per daemon connection, after the harness binds and before other CDP
 commands, the backend sends:
 
 ```json

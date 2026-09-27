@@ -92,10 +92,10 @@ def cdp_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
     monkeypatch.setenv("BROWSER_MCP_PERF", "1")
     monkeypatch.setenv("BROWSER_MCP_PERF_LOG", str(log))
     monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(tmp_path / "workspace"))
-    from browser_mcp import backend, dom_indexing, server
+    from browser_mcp import backend, chat_context, dom_indexing
 
-    backend._bh = None
-    backend._bound_cdp = None
+    chat_context.shared().bh = None
+    chat_context.shared().bound_cdp = None
     dom_indexing.clear_registered_targets()
     try:
         yield url
@@ -104,8 +104,8 @@ def cdp_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> str:
             backend.teardown_bound_backend()
         except Exception:
             pass
-        backend._bh = None
-        backend._bound_cdp = None
+        chat_context.shared().bh = None
+        chat_context.shared().bound_cdp = None
         dom_indexing.clear_registered_targets()
         browser.close()
         playwright.stop()

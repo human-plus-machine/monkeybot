@@ -8,20 +8,20 @@ import time
 from unittest.mock import MagicMock, patch
 
 import pytest
-from browser_mcp import dom_indexing, server, tabs, backend, tab_ops
+from browser_mcp import backend, chat_context, dom_indexing, server, tab_ops, tabs
 from browser_mcp.tabs import TabRegistry, TabState, UnknownTabError, runtime_value
 
 
 @pytest.fixture(autouse=True)
 def _reset() -> None:
-    original = backend._bh
-    original_bound = backend._bound_cdp
-    backend._bh = None
-    backend._bound_cdp = None
+    original = chat_context.shared().bh
+    original_bound = chat_context.shared().bound_cdp
+    chat_context.shared().bh = None
+    chat_context.shared().bound_cdp = None
     dom_indexing.clear_registered_targets()
     yield
-    backend._bh = original
-    backend._bound_cdp = original_bound
+    chat_context.shared().bh = original
+    chat_context.shared().bound_cdp = original_bound
     dom_indexing.clear_registered_targets()
 
 
@@ -217,8 +217,8 @@ def test_browser_stop_closes_agent_opened_tabs_at_cap(
     rows = [_tab(f"id{i}", f"https://ex.test/{i}") for i in range(5)]
     helpers = _helpers(tabs_list=rows, focused="id0")
     helpers.close_tab = MagicMock()
-    backend._bh = (helpers, MagicMock())
-    backend._bound_cdp = "http://127.0.0.1:9222"
+    chat_context.shared().bh = (helpers, MagicMock())
+    chat_context.shared().bound_cdp = "http://127.0.0.1:9222"
     reg = tabs.registry()
     reg.refresh(helpers)
     for state in reg.tabs():
