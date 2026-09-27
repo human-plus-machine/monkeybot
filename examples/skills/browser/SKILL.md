@@ -67,7 +67,7 @@ Text-only models should never rely on screenshots for page understanding — use
 
 Tabs have short aliases (`t1`, `t2`, …) or a name you pass to `browser_open_tab(alias=...)`. **Reads never move focus** (`browser_get_elements(tab=...)`, `browser_page_info`, `browser_js`, `browser_wait_for`, `browser_read_tabs`, `browser_extract`). **Actions do** (click, input, select, fill, fill_form, click_text, act, screenshot, …) because headed Chrome throttles timers and pauses painting in background tabs.
 
-Open a second tab to compare pages, keep a form while reading docs, or fan out with `browser_read_tabs`. At most five agent-controlled tabs (`BROWSER_MCP_MAX_TABS`). If you hit the cap, relay the returned list (aliases, titles, last-used) to the user, ask which to close, then `browser_close_tab` and retry — never close a tab without their confirmation. Close tabs you opened when done. Do not expect a background SPA to finish loading while unfocused. `browser_login` still targets the tab the **user** has focused, not `tab=`.
+Open a second tab to compare pages, keep a form while reading docs, or fan out with `browser_read_tabs`. At most 10 agent-controlled tabs (`BROWSER_MCP_MAX_TABS`). If you hit the cap, relay the returned list (aliases, titles, last-used) to the user, ask which to close, then `browser_close_tab` and retry — never close a tab without their confirmation. If the error scope is `app`, the Spaces window is full across chats; do not describe that as this chat's 10-tab cap. Close tabs you opened when done. Do not expect a background SPA to finish loading while unfocused. `browser_login` still targets the tab the **user** has focused, not `tab=`.
 
 ## After learning something non-obvious
 

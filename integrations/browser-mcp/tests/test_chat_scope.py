@@ -9,22 +9,22 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from browser_mcp import app, backend, chat_scope, in_app_cdp, tabs
+from browser_mcp import app, backend, chat_context, chat_scope, in_app_cdp, tabs
 from mcp.types import RequestParams
 
 
 @pytest.fixture(autouse=True)
 def _reset_chat_scope_state() -> None:
-    original_bh = backend._bh
-    original_bound = backend._bound_cdp
+    original_bh = chat_context.shared().bh
+    original_bound = chat_context.shared().bound_cdp
     original_flag = in_app_cdp._env_set_from_in_app_file
     chat_scope.reset()
     tabs.reset_registry()
     yield
     chat_scope.reset()
     tabs.reset_registry()
-    backend._bh = original_bh
-    backend._bound_cdp = original_bound
+    chat_context.shared().bh = original_bh
+    chat_context.shared().bound_cdp = original_bound
     in_app_cdp._env_set_from_in_app_file = original_flag
 
 
@@ -39,8 +39,8 @@ def _install_in_app_harness(
     cdp_file.write_text("http://127.0.0.1:9333", encoding="utf-8")
     monkeypatch.setattr(in_app_cdp, "_IN_APP_CDP_URL_FILE", cdp_file)
     in_app_cdp._env_set_from_in_app_file = False
-    backend._bh = None
-    backend._bound_cdp = None
+    chat_context.shared().bh = None
+    chat_context.shared().bound_cdp = None
 
     admin = MagicMock()
     helpers = MagicMock()
@@ -73,7 +73,7 @@ def test_current_thread_id_outside_request_is_none(monkeypatch: pytest.MonkeyPat
     assert chat_scope.current_thread_id() is None
 
 
-def test_announce_sends_once_per_distinct_value() -> None:
+def test_announce_sends_on_each_call_without_dropping_tabs() -> None:
     helpers = MagicMock()
     chat_scope.announce(helpers, "t-a")
     tabs.registry().ensure("target-a", url="https://a.example")
@@ -84,7 +84,7 @@ def test_announce_sends_once_per_distinct_value() -> None:
     chat_scope.announce(helpers, "t-b")
     assert helpers.cdp.call_count == 3
     helpers.cdp.assert_called_with("Monkeybot.setChatScope", chatKey="t-b")
-    assert tabs.registry().get("target-a") is None
+    assert tabs.registry().get("target-a") is not None
 
     chat_scope.announce(helpers, None)
     helpers.cdp.assert_called_with("Monkeybot.setChatScope", chatKey=None)
@@ -128,14 +128,14 @@ def test_announce_transport_error_does_not_latch_and_retries() -> None:
     helpers.cdp.assert_called_once_with("Monkeybot.setChatScope", chatKey="t-a")
 
 
-def test_announce_drops_previous_chat_tabs_on_switch() -> None:
+def test_announce_keeps_tabs_when_chat_switches() -> None:
     helpers = MagicMock()
     chat_scope.announce(helpers, "t-a")
     tabs.registry().ensure("target-a", url="https://a.example")
     assert tabs.registry().get("target-a") is not None
 
     chat_scope.announce(helpers, "t-b")
-    assert tabs.registry().get("target-a") is None
+    assert tabs.registry().get("target-a") is not None
 
 
 def test_announce_keeps_tabs_when_chat_is_unchanged() -> None:
@@ -155,14 +155,14 @@ def test_announce_keeps_tabs_across_none_then_same_chat() -> None:
     assert tabs.registry().get("target-a") is not None
 
 
-def test_announce_drops_tabs_on_switch_even_when_unsupported() -> None:
+def test_announce_keeps_tabs_on_switch_even_when_unsupported() -> None:
     helpers = MagicMock()
     helpers.cdp.side_effect = RuntimeError("unknown method")
     chat_scope.announce(helpers, "t-a")
     tabs.registry().ensure("target-a", url="https://a.example")
 
     chat_scope.announce(helpers, "t-b")
-    assert tabs.registry().get("target-a") is None
+    assert tabs.registry().get("target-a") is not None
 
 
 def test_announce_never_raises_without_cdp() -> None:
@@ -185,8 +185,8 @@ def test_reset_re_enables_after_unsupported() -> None:
 
 def test_public_tool_skips_announce_when_not_in_app() -> None:
     helpers = MagicMock()
-    backend._bh = (helpers, MagicMock())
-    backend._bound_cdp = "http://127.0.0.1:9222"
+    chat_context.shared().bh = (helpers, MagicMock())
+    chat_context.shared().bound_cdp = "http://127.0.0.1:9222"
     in_app_cdp._env_set_from_in_app_file = False
 
     @app._public_tool
@@ -199,8 +199,8 @@ def test_public_tool_skips_announce_when_not_in_app() -> None:
 
 def test_public_tool_skips_announce_for_agentcore() -> None:
     helpers = MagicMock()
-    backend._bh = (helpers, MagicMock())
-    backend._bound_cdp = "agentcore"
+    chat_context.shared().bh = (helpers, MagicMock())
+    chat_context.shared().bound_cdp = "agentcore"
     in_app_cdp._env_set_from_in_app_file = False
 
     @app._public_tool
@@ -211,24 +211,41 @@ def test_public_tool_skips_announce_for_agentcore() -> None:
     helpers.cdp.assert_not_called()
 
 
-def test_public_tool_via_browser_harness_drops_tabs_on_chat_switch(
+def test_public_tool_keeps_each_chat_registry(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    from browser_mcp import chat_context
+
     _install_in_app_harness(monkeypatch, tmp_path)
-    thread_ids = iter(["chat-a", "chat-a", "chat-b"])
-    monkeypatch.setattr(chat_scope, "current_thread_id", lambda: next(thread_ids))
+    monkeypatch.delenv("MONKEYBOT_RUN_ID", raising=False)
+    seen: list[str] = []
+
+    def thread_id() -> str:
+        return seen[-1]
+
+    monkeypatch.setattr(chat_scope, "current_thread_id", thread_id)
 
     @app._public_tool
     def browse() -> str:
         backend.browser_harness()
+        tabs.registry().ensure(f"target-{seen[-1]}", url="https://example.test")
         return "ok"
 
+    seen.append("chat-a")
     assert browse() == "ok"
-    tabs.registry().ensure("target-a", url="https://a.example")
+    seen.append("chat-a")
     assert browse() == "ok"
-    assert tabs.registry().get("target-a") is not None
+    seen.append("chat-b")
     assert browse() == "ok"
-    assert tabs.registry().get("target-a") is None
+
+    chat_a = chat_context.context_for_call("chat-a")
+    chat_b = chat_context.context_for_call("chat-b")
+    assert chat_a is not chat_b
+    assert chat_a.daemon_name != chat_b.daemon_name
+    assert chat_a.registry.get("target-chat-a") is not None
+    assert chat_a.registry.get("target-chat-b") is None
+    assert chat_b.registry.get("target-chat-b") is not None
+    assert chat_b.registry.get("target-chat-a") is None
 
 
 def test_public_tool_continues_when_announce_fails(
@@ -257,7 +274,7 @@ def test_in_app_bind_resets_and_announces(
 
     helpers.cdp.reset_mock()
     backend.browser_harness()
-    helpers.cdp.assert_called_once_with("Monkeybot.setChatScope", chatKey="sess-bind")
+    helpers.cdp.assert_not_called()
 
 
 def test_in_app_endpoint_change_resets_unsupported(
