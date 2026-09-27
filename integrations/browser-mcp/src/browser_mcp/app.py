@@ -4,18 +4,17 @@ from __future__ import annotations
 
 import functools
 import inspect
-import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, ParamSpec
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 
-from browser_mcp import backend, in_app_cdp, perf, results, tab_ops, tabs
+from browser_mcp import backend, chat_context, chat_scope, in_app_cdp, perf, results, tab_ops, tabs
 from browser_mcp.observe import resolve_action_observe
 
 _P = ParamSpec("_P")
-_TOOL_LOCK = threading.RLock()
 
 mcp = FastMCP(
     "browser",
@@ -73,13 +72,29 @@ mcp = FastMCP(
         "Actions (click, input, select, fill, click_text, act, screenshot, …) focus the tab first "
         "because background tabs throttle timers and pause painting. Open a second "
         "tab to compare pages, keep a form while reading docs, or fan out with "
-        "browser_read_tabs. At most five agent-controlled tabs; if you hit the cap, "
+        "browser_read_tabs. At most 10 agent-controlled tabs; if you hit the cap, "
         "relay the returned tab list to the user, ask which to close, then "
         "browser_close_tab and retry — never close a tab without their confirmation. "
         "Close tabs you opened when done. Do not expect a background SPA to finish "
         "loading while unfocused."
     ),
 )
+
+
+def _run_tool(ctx: chat_context.ChatContext, fn: Callable[_P, str], args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+    """Run one tool against ``ctx`` only. Other chats keep their own lock and daemon."""
+    tokens = chat_context.enter(ctx)
+    try:
+        with ctx.lock, perf.timed_tool(fn.__name__) as rec:
+            try:
+                result = fn(*args, **kwargs)
+                rec.observe(result)
+                return result
+            except Exception as exc:
+                rec.fail()
+                in_app_cdp._reraise_public_harness_error(exc)
+    finally:
+        chat_context.leave(tokens)
 
 
 def _public_tool(fn: Callable[_P, str]) -> Callable[_P, str]:
@@ -89,23 +104,34 @@ def _public_tool(fn: Callable[_P, str]) -> Callable[_P, str]:
     endpoint it connects to, and FastMCP turns any raised exception into
     agent-visible ``ToolError`` text. Redacting inside individual helpers only
     covers the call sites someone remembered, so every tool goes through here.
+
+    The object FastMCP calls is ``_async_entry`` (see ``server``): the thread
+    id is read on the event loop, then the tool runs in a worker under that
+    chat's lock. Direct calls stay synchronous so tests can invoke tools
+    without an event loop. Two chats therefore run at the same time; one
+    chat's calls stay ordered.
     """
 
     @functools.wraps(fn)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> str:
-        with _TOOL_LOCK, perf.timed_tool(fn.__name__) as rec:
-            try:
-                result = fn(*args, **kwargs)
-                rec.observe(result)
-                return result
-            except Exception as exc:
-                rec.fail()
-                in_app_cdp._reraise_public_harness_error(exc)
+        ctx = chat_context.context_for_call(chat_scope.current_thread_id())
+        return _run_tool(ctx, fn, args, kwargs)
+
+    @functools.wraps(fn)
+    async def async_entry(*args: _P.args, **kwargs: _P.kwargs) -> str:
+        thread_id = chat_scope.current_thread_id()
+        ctx = chat_context.context_for_call(thread_id)
+
+        def run() -> str:
+            return _run_tool(ctx, fn, args, kwargs)
+
+        return await anyio.to_thread.run_sync(run)
 
     # FastMCP copies fn.__doc__ as-is (not inspect.getdoc), so without this the
     # model sees the 4-space body indent from the source. @mcp.tool() wraps
     # this function, so the cleaned docstring is what list_tools returns.
     wrapper.__doc__ = inspect.getdoc(fn)
+    wrapper._async_entry = async_entry  # type: ignore[attr-defined]
     return wrapper
 
 

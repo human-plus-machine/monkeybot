@@ -82,11 +82,11 @@ class SingleTabBackendError(RuntimeError):
 
 
 def max_tabs() -> int:
-    raw = (os.environ.get("BROWSER_MCP_MAX_TABS") or "5").strip()
+    raw = (os.environ.get("BROWSER_MCP_MAX_TABS") or "10").strip()
     try:
         n = int(raw)
     except ValueError:
-        n = 5
+        n = 10
     return max(1, n)
 
 
@@ -605,15 +605,15 @@ class TabRegistry:
         return state
 
 
-_registry = TabRegistry()
-
-
 def registry() -> TabRegistry:
-    return _registry
+    """Tab registry for the chat bound on this thread, else the shared one."""
+    from browser_mcp import chat_context
+
+    return chat_context.active_registry()
 
 
 def reset_registry() -> None:
-    _registry.reset()
+    registry().reset()
 
 
 def as_handle(target: Any) -> TabHandle:

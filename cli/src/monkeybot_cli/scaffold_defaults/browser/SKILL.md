@@ -34,7 +34,7 @@ only. Pass `expected_origin` so a login cannot land on the wrong site, and check
 the returned `origin` before reporting success.
 
 Tabs use aliases (`t1`, `t2`, …). Reads (`get_elements`, `page_info`, `js`,
-`read_tabs`) never move focus; actions do. At most five agent-controlled tabs —
+`read_tabs`) never move focus; actions do. At most 10 agent-controlled tabs —
 if you hit the cap, ask the user which to close, then `browser_close_tab`. Close
 tabs you opened. `browser_login` still targets the tab the user has focused.
 

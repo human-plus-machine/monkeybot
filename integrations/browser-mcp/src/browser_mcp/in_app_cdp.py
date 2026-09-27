@@ -104,23 +104,56 @@ def _run_label() -> str:
     return value.strip() if value and value.strip() else "Chat"
 
 
+def _active_thread_id() -> str | None:
+    """Thread id of the chat bound on this thread, if the in-app bridge is in use."""
+    from browser_mcp import chat_context
+
+    ctx = chat_context.current_context.get()
+    if ctx is None or not ctx.thread_id:
+        return None
+    return ctx.thread_id
+
+
 def _run_headers() -> dict[str, str]:
-    """Headers identifying this run to the in-app bridge's /json/login endpoint."""
+    """Headers identifying this run and chat to the in-app bridge's login endpoints."""
+    headers: dict[str, str] = {}
     run_id = _run_id()
-    if not run_id:
-        return {}
-    return {"X-Monkeybot-Run": run_id, "X-Monkeybot-Run-Label": _run_label()}
+    if run_id:
+        headers["X-Monkeybot-Run"] = run_id
+        headers["X-Monkeybot-Run-Label"] = _run_label()
+    thread_id = _active_thread_id()
+    if thread_id:
+        headers["X-Monkeybot-Chat"] = thread_id
+    return headers
 
 
-def _with_run_param(url: str, run_id: str | None) -> str:
-    if not run_id:
+def _with_query_param(url: str, name: str, value: str | None) -> str:
+    if not value:
         return url
     parsed = urlparse(url)
     pairs = [
-        (key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key != "run"
+        (key, item)
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+        if key != name
     ]
-    pairs.append(("run", run_id))
+    pairs.append((name, value))
     return urlunparse(parsed._replace(query=urlencode(pairs)))
+
+
+def _with_run_param(url: str, run_id: str | None) -> str:
+    return _with_query_param(url, "run", run_id)
+
+
+def daemon_cdp_endpoint(thread_id: str | None) -> str | None:
+    """CDP URL for one chat's daemon.
+
+    The process-wide env stays free of ``chat=`` so two chats cannot overwrite
+    each other's endpoint. The daemon receives this URL in its own env.
+    """
+    base = _apply_in_app_cdp_url()
+    if not base or not _env_set_from_in_app_file:
+        return base
+    return _with_query_param(base, "chat", thread_id)
 
 
 def _in_app_ws_url(url: str, token: str | None) -> str:

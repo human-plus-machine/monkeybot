@@ -66,6 +66,11 @@ def _for_action(helpers: Any, tab: str | None) -> tabs.TabHandle:
     return handle
 
 
+def _is_app_tab_limit(exc: BaseException) -> bool:
+    """Spaces refuses a new tab once the app-wide live-tab cap is hit."""
+    return "tab limit reached" in str(exc).lower()
+
+
 def _close_target(helpers: Any, target_id: str) -> None:
     if callable(getattr(helpers, "close_tab", None)):
         helpers.close_tab(target_id)
@@ -108,11 +113,15 @@ def _create_blank_target(helpers: Any, *, focus: bool, url: str = "about:blank")
         except TypeError:
             result = helpers.cdp("Target.createTarget", url="about:blank")
         except Exception as exc:
+            if _is_app_tab_limit(exc):
+                raise tabs.TabLimitError(tabs.registry().cap_error_payload()) from exc
             if tabs.is_single_tab_error(exc):
                 raise tabs.SingleTabBackendError() from exc
             try:
                 result = helpers.cdp("Target.createTarget", url="about:blank")
             except Exception as inner:
+                if _is_app_tab_limit(inner):
+                    raise tabs.TabLimitError(tabs.registry().cap_error_payload()) from inner
                 if tabs.is_single_tab_error(inner):
                     raise tabs.SingleTabBackendError() from inner
                 raise
@@ -128,6 +137,8 @@ def _create_blank_target(helpers: Any, *, focus: bool, url: str = "about:blank")
         except TypeError:
             helpers.new_tab(url)
         except Exception as exc:
+            if _is_app_tab_limit(exc):
+                raise tabs.TabLimitError(tabs.registry().cap_error_payload()) from exc
             if tabs.is_single_tab_error(exc):
                 raise tabs.SingleTabBackendError() from exc
             raise
@@ -149,6 +160,8 @@ def _open_tab(
         return reg.cap_error_payload()
     try:
         already_at_url = _create_blank_target(helpers, focus=focus, url=url)
+    except tabs.TabLimitError as exc:
+        return exc.payload
     except tabs.SingleTabBackendError as exc:
         return {"ok": False, "error": str(exc)}
     state = reg.remember_created(helpers, opened_by_agent=opened_by_agent, alias=alias)

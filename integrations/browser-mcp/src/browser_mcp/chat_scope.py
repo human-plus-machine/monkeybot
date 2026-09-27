@@ -17,16 +17,20 @@ logger = logging.getLogger(__name__)
 _JSONRPC_METHOD_NOT_FOUND = -32601
 _CDP_ERROR_CODE_RE = re.compile(r"""['"]code['"]\s*:\s*(-?\d+)""")
 
-_UNSET: object = object()
-_last_chat: object = _UNSET
 _unsupported: bool = False
 
 
 def reset() -> None:
-    """Clear last-chat / unsupported flags after a daemon (re)bind."""
-    global _last_chat, _unsupported
-    _last_chat = _UNSET
+    """Clear the unsupported latch after a daemon (re)bind.
+
+    Does not drop tab registries. Each chat owns its own registry, so a
+    rebind must not throw away another chat's aliases.
+    """
+    global _unsupported
     _unsupported = False
+    from browser_mcp import chat_context
+
+    chat_context.clear_announced()
 
 
 def current_thread_id() -> str | None:
@@ -61,18 +65,6 @@ def _thread_id_from_meta(meta: object) -> str | None:
     return text or None
 
 
-def _forget_other_chat_tabs() -> None:
-    """Drop this process's tab registry: those targets belong to the chat we left.
-
-    Spaces owns the previous chat's tabs and keeps them in that chat's panel.
-    Forgetting ``opened_by_agent`` here is intentional: ``browser_stop`` in the
-    new chat must not close the previous chat's tabs.
-    """
-    from browser_mcp import tabs
-
-    tabs.reset_registry()
-
-
 def _cdp_error_code(exc: BaseException) -> int | None:
     """Best-effort CDP/JSON-RPC error code from a harness ``RuntimeError``."""
     payload = exc.args[0] if exc.args else None
@@ -101,25 +93,11 @@ def announce_current(helpers: object) -> None:
 def announce(helpers: object, thread_id: str | None) -> None:
     """Send ``Monkeybot.setChatScope`` for this request. Never raises.
 
-    CDP is sent on every call (idempotent) so a reconnected WebSocket still gets
-    ``chatKey``. The tab registry is dropped only when the non-None thread id
-    changes. ``_last_chat`` is updated even when the app does not support the
-    method, so a chat switch still drops tabs owned by the previous chat.
+    Kept for apps that do not read ``chat=`` on the WebSocket URL. Tabs are
+    not dropped here: each chat has its own registry, and the caller decides
+    when a connection has already announced (once per daemon bind).
     """
-    global _last_chat, _unsupported
-    previous = _last_chat
-    switched = (
-        thread_id is not None and previous is not _UNSET and previous != thread_id
-    )
-    if thread_id is not None:
-        _last_chat = thread_id
-    if switched:
-        _forget_other_chat_tabs()
-        logger.info(
-            "browser-mcp: chat scope changed %s -> %s; dropping tabs",
-            previous,
-            thread_id,
-        )
+    global _unsupported
     if _unsupported:
         return
     cdp = getattr(helpers, "cdp", None)

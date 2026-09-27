@@ -9,7 +9,7 @@ import urllib.request
 from typing import Any
 from urllib.parse import urlparse
 
-from browser_mcp import backend, in_app_cdp
+from browser_mcp import chat_context, in_app_cdp
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +145,7 @@ def _loopback_open(req: urllib.request.Request, timeout: float = _LOGIN_TIMEOUT_
 
 
 def _sealed_login(username: str | None, expected_origin: str | None) -> dict[str, Any]:
-    if backend._bound_cdp == "agentcore":
+    if chat_context.active().bound_cdp == "agentcore":
         return {"ok": False, "loggedIn": False, "error": "in-app browser is not available"}
     http, token = _in_app_http_and_token()
     if not http:
@@ -200,7 +200,7 @@ def _sealed_passkey(expected_origin: str | None) -> dict[str, Any]:
     the bridge makes for this have not been exercised against a real
     Electron instance. See docs/credential-broker.md before relying on it.
     """
-    if backend._bound_cdp == "agentcore":
+    if chat_context.active().bound_cdp == "agentcore":
         return {"ok": False, "loggedIn": False, "error": "in-app browser is not available"}
     http, token = _in_app_http_and_token()
     if not http:
