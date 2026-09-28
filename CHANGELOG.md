@@ -6,6 +6,12 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [browser v0.8.1] - 2026-09-28
+
+### Fixed
+
+- The per-chat browser IPC router honors browser-harness 0.1.13's response timeout, so browser tools can drive the page again.
+
 ## [browser v0.8.0] - 2026-09-27
 
 ### Added
