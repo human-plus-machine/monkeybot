@@ -164,6 +164,64 @@ def test_send_router_targets_the_chat_daemon(monkeypatch: pytest.MonkeyPatch) ->
     assert seen["name"] != helpers.NAME
 
 
+def test_send_router_applies_response_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """browser-harness 0.1.13 cdp() always passes response_timeout."""
+    import browser_harness.helpers as helpers
+
+    seen: dict[str, object] = {}
+    monkeypatch.setattr(chat_context, "_router_installed", False)
+    monkeypatch.setattr(helpers, "_monkeybot_send_routed", False, raising=False)
+
+    class Conn:
+        def settimeout(self, value: float) -> None:
+            seen["timeout"] = value
+
+        def close(self) -> None:
+            seen["closed"] = True
+
+    def connect(name: str, timeout: float = 5.0):
+        seen["name"] = name
+        return Conn(), "tok"
+
+    def request(connection: object, token: object, req: object):
+        seen["req"] = req
+        return {"result": {}}
+
+    monkeypatch.setattr(chat_context._harness_ipc, "connect", connect)
+    monkeypatch.setattr(chat_context._harness_ipc, "request", request)
+    chat_context.install_send_router()
+    helpers._send({"method": "Page.captureScreenshot"}, response_timeout=60)
+    assert seen["timeout"] == 60
+    assert seen["req"] == {"method": "Page.captureScreenshot"}
+    assert seen["closed"] is True
+
+
+def test_send_router_reports_ipc_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    import browser_harness.helpers as helpers
+
+    monkeypatch.setattr(chat_context, "_router_installed", False)
+    monkeypatch.setattr(helpers, "_monkeybot_send_routed", False, raising=False)
+
+    class Conn:
+        def settimeout(self, value: float) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    def connect(name: str, timeout: float = 5.0):
+        return Conn(), "tok"
+
+    def request(connection: object, token: object, req: object):
+        raise TimeoutError()
+
+    monkeypatch.setattr(chat_context._harness_ipc, "connect", connect)
+    monkeypatch.setattr(chat_context._harness_ipc, "request", request)
+    chat_context.install_send_router()
+    with pytest.raises(TimeoutError, match=r"Page.navigate timed out after 12s"):
+        helpers._send({"method": "Page.navigate"}, response_timeout=12)
+
+
 def test_context_lookup_is_not_on_the_tool_hot_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

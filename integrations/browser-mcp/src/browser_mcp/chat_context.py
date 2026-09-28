@@ -336,11 +336,34 @@ def install_send_router() -> None:
         _router_installed = True
         return
 
-    def _send(req: object) -> dict[str, Any]:
+    # browser-harness 0.1.13+ passes response_timeout from cdp(). Older
+    # releases call _send(req) only. The default matches the harness when
+    # that constant exists, otherwise the historical 5s socket timeout.
+    connect_timeout = float(getattr(helpers, "IPC_CONNECT_TIMEOUT_SECONDS", 5.0))
+    default_response_timeout = float(
+        getattr(helpers, "DEFAULT_IPC_RESPONSE_TIMEOUT_SECONDS", connect_timeout)
+    )
+    timeout_error = getattr(helpers, "_IPCResponseTimeout", TimeoutError)
+
+    def _send(
+        req: object,
+        response_timeout: float = default_response_timeout,
+    ) -> dict[str, Any]:
         name = current_daemon.get() or helpers.NAME
-        connection, token = ipc.connect(name, timeout=5.0)
+        connection, token = ipc.connect(name, timeout=connect_timeout)
         try:
-            response = ipc.request(connection, token, req)
+            set_timeout = getattr(connection, "settimeout", None)
+            if callable(set_timeout):
+                set_timeout(response_timeout)
+            try:
+                response = ipc.request(connection, token, req)
+            except TimeoutError as exc:
+                label = "request"
+                if isinstance(req, dict):
+                    label = req.get("method") or req.get("meta") or label
+                raise timeout_error(
+                    f"{label} timed out after {float(response_timeout):g}s waiting for the daemon"
+                ) from exc
         finally:
             connection.close()
         if "error" in response:
