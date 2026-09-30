@@ -26,6 +26,7 @@ Configuration (all via env vars or monkeybot.yaml sandbox.*):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -38,6 +39,21 @@ from pathlib import Path
 from typing import Any
 
 from monkeybot.core.config.snapshot import RuntimeConfig, env_value_or_current
+from monkeybot.core.tools.background_jobs import (
+    DEFAULT_AWAIT_MAX_WAIT_SECONDS,
+    DEFAULT_AWAIT_WAIT_SECONDS,
+    DEFAULT_MAX_BACKGROUND_JOBS,
+    DEFAULT_MAX_JOB_SECONDS,
+    DEFAULT_RENEW_INTERVAL_SECONDS,
+    BackgroundJob,
+    JobRegistry,
+    JobStatus,
+    allocate_background_job,
+    append_log,
+    clamp_job_timeout,
+    read_log_from,
+    timeout_failure_message,
+)
 from monkeybot.core.tools.terminal import (
     ALLOWED_COMMANDS,
     ALLOWED_PATHS,
@@ -51,6 +67,26 @@ from monkeybot.core.tools.terminal import (
 
 logger = logging.getLogger(__name__)
 _ABSOLUTE_PATH_FRAGMENT = re.compile(r"(?<![\w.-])/(?:[^\s'\"`;()]+)")
+
+# SDK contract checked against OpenSandbox ``Commands`` (opensandbox 1.x):
+# ``commands.run(..., RunCommandOpts(background=True))`` returns ``Execution.id``;
+# ``get_command_status``, ``get_background_command_logs(cursor=)``, and
+# ``interrupt`` poll and stop it; ``sandbox.renew(timedelta)`` extends lifetime.
+# Live execd v1.0.22 on dev-internal is not reachable from this repo. If those
+# endpoints are missing, status refresh marks the job ``lost`` and returns the
+# server error instead of holding the turn open.
+# ``max_sandbox_timeout_seconds`` may still cap ``renew()``; that is a server
+# setting, not something this process can prove. Renew failures are logged and
+# the job continues until the worker is reaped or the local ceiling fires.
+
+
+def _int_at_least(raw: str, default: int, min_: int) -> int:
+    """Parse ``raw`` as an int, falling back to ``default`` when invalid or below ``min_``."""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= min_ else default
 
 
 @dataclass
@@ -68,6 +104,11 @@ class SandboxConfig:
     ttl_seconds: int
     use_server_proxy: bool = True
     shared_filesystem: bool = True
+    max_background_jobs: int = DEFAULT_MAX_BACKGROUND_JOBS
+    max_job_seconds: int = DEFAULT_MAX_JOB_SECONDS
+    renew_interval_seconds: int = DEFAULT_RENEW_INTERVAL_SECONDS
+    await_default_wait_seconds: int = DEFAULT_AWAIT_WAIT_SECONDS
+    await_max_wait_seconds: int = DEFAULT_AWAIT_MAX_WAIT_SECONDS
 
     @classmethod
     def from_env(cls, config: RuntimeConfig | None = None) -> SandboxConfig:
@@ -84,6 +125,41 @@ class SandboxConfig:
             env_value_or_current(config, "SANDBOX_SHARED_FILESYSTEM", "true").strip().lower()
         )
         shared_filesystem = shared_raw not in ("0", "false", "no", "off")
+        max_jobs = _int_at_least(
+            env_value_or_current(
+                config, "SANDBOX_MAX_BACKGROUND_JOBS", str(DEFAULT_MAX_BACKGROUND_JOBS)
+            ),
+            DEFAULT_MAX_BACKGROUND_JOBS,
+            1,
+        )
+        max_job_seconds = _int_at_least(
+            env_value_or_current(config, "SANDBOX_MAX_JOB_SECONDS", str(DEFAULT_MAX_JOB_SECONDS)),
+            DEFAULT_MAX_JOB_SECONDS,
+            1,
+        )
+        renew_interval = _int_at_least(
+            env_value_or_current(
+                config, "SANDBOX_RENEW_INTERVAL_SECONDS", str(DEFAULT_RENEW_INTERVAL_SECONDS)
+            ),
+            DEFAULT_RENEW_INTERVAL_SECONDS,
+            0,
+        )
+        await_default = _int_at_least(
+            env_value_or_current(
+                config, "SANDBOX_AWAIT_DEFAULT_WAIT_SECONDS", str(DEFAULT_AWAIT_WAIT_SECONDS)
+            ),
+            DEFAULT_AWAIT_WAIT_SECONDS,
+            1,
+        )
+        await_max = _int_at_least(
+            env_value_or_current(
+                config, "SANDBOX_AWAIT_MAX_WAIT_SECONDS", str(DEFAULT_AWAIT_MAX_WAIT_SECONDS)
+            ),
+            DEFAULT_AWAIT_MAX_WAIT_SECONDS,
+            1,
+        )
+        if await_default > await_max:
+            await_default = await_max
         return cls(
             enabled=env_value_or_current(config, "SANDBOX_ENABLED", "false").lower() == "true",
             server_url=env_value_or_current(config, "SANDBOX_SERVER_URL", "http://localhost:8080"),
@@ -92,6 +168,11 @@ class SandboxConfig:
             ttl_seconds=ttl,
             use_server_proxy=use_server_proxy,
             shared_filesystem=shared_filesystem,
+            max_background_jobs=max_jobs,
+            max_job_seconds=max_job_seconds,
+            renew_interval_seconds=renew_interval,
+            await_default_wait_seconds=await_default,
+            await_max_wait_seconds=await_max,
         )
 
 
@@ -128,6 +209,10 @@ class SandboxExecutor:
             Path(artifacts_path).resolve() if artifacts_path is not None else None
         )
         self._sandbox: Any = None
+        self._jobs = JobRegistry(max_jobs=max(1, config.max_background_jobs))
+        self._lock = asyncio.Lock()
+        self._renew_task: asyncio.Task[None] | None = None
+        self._timeout_tasks: dict[str, asyncio.Task[None]] = {}
         self._allowed_commands: tuple[str, ...] = (
             tuple(allowed_commands) if allowed_commands is not None else tuple(ALLOWED_COMMANDS)
         )
@@ -348,32 +433,7 @@ class SandboxExecutor:
         command raises SecurityError without ever touching the OpenSandbox
         server.
         """
-        if command not in self._allowed_commands and command not in (extra_allowed_commands or ()):
-            raise SecurityError(f"Command '{command}' not allowed")
-        if command == "mempalace":
-            validate_mempalace_subcommand(args)
-
-        # CoreToolExecutor always passes cwd=workspace root. Compute-only already
-        # forces working_directory=/tmp, so the default harness cwd must not trip
-        # the mounted-path guard. Nested paths under workspace are still rejected.
-        check_cwd = cwd
-        if (
-            not self._config.shared_filesystem
-            and cwd is not None
-            and Path(cwd).resolve() == self._workspace_root
-        ):
-            check_cwd = None
-
-        if not self._config.shared_filesystem and self._remote_requests_mounted_path(
-            args, check_cwd
-        ):
-            raise SecurityError(
-                "remote sandbox is compute-only and cannot access workspace or skills files"
-            )
-        # Runs after the compute-only check above so that check's more specific
-        # "compute-only" message wins for that case; this is the general
-        # allowlist screen otherwise (see allowed_path_prefixes docstring).
-        self._validate_paths(args, command=command, cwd=cwd)
+        self._screen_command(command, args, cwd=cwd, extra_allowed_commands=extra_allowed_commands)
 
         await self._ensure_sandbox()
 
@@ -406,14 +466,159 @@ class SandboxExecutor:
             exit_code=execution.exit_code if execution.exit_code is not None else 0,
         )
 
-    async def aclose(self) -> None:
-        """Destroy the sandbox container.
+    def running_jobs(self) -> list[BackgroundJob]:
+        return self._jobs.running()
 
-        Safe to call multiple times (idempotent). Exceptions from kill() are
-        swallowed so the gateway finally block always completes cleanly.
+    def has_job(self, job_id: str) -> bool:
+        return job_id in self._jobs
+
+    def _log_job(
+        self,
+        job: BackgroundJob,
+        message: str,
+        *,
+        failed: bool = False,
+        exc_info: bool = False,
+    ) -> None:
+        log = logger.warning if failed else logger.info
+        log(
+            message,
+            extra={
+                "job_id": job.job_id,
+                "remote_id": job.remote_id,
+                "status": job.status.value,
+                "exit_code": job.exit_code,
+            },
+            exc_info=exc_info,
+        )
+
+    async def _run_remote_background(
+        self,
+        job: BackgroundJob,
+        full_cmd: str,
+        workdir: str,
+        effective: int,
+    ) -> Any:
+        logger.info("Sandbox background execute: %s", full_cmd)
+        try:
+            from opensandbox.models.execd import RunCommandOpts
+
+            return await self._sandbox.commands.run(
+                full_cmd,
+                opts=RunCommandOpts(
+                    background=True,
+                    timeout=timedelta(seconds=effective),
+                    working_directory=workdir,
+                ),
+            )
+        except Exception:
+            job.status = JobStatus.LOST
+            job.error = "failed to start background command"
+            self._log_job(
+                job,
+                "sandbox background command failed to start",
+                failed=True,
+                exc_info=True,
+            )
+            raise
+
+    async def start_background(
+        self,
+        command: str,
+        args: list[str],
+        *,
+        timeout: int = 60,
+        cwd: Path | str | None = None,
+        extra_allowed_commands: Sequence[str] | None = None,
+        log_dir: Path | None = None,
+    ) -> BackgroundJob:
+        """Start a detached sandbox command. Same allowlist as ``execute``."""
+        effective, hit_ceiling = clamp_job_timeout(timeout, ceiling=self._config.max_job_seconds)
+        self._screen_command(command, args, cwd=cwd, extra_allowed_commands=extra_allowed_commands)
+        await self._ensure_sandbox()
+        job = allocate_background_job(
+            self._jobs,
+            command,
+            args,
+            effective=effective,
+            hit_ceiling=hit_ceiling,
+            log_dir=log_dir,
+        )
+        full_cmd = " ".join([command] + [shlex.quote(a) for a in args])
+        workdir = (
+            str(Path(cwd).resolve())
+            if cwd is not None and self._config.shared_filesystem
+            else "/tmp"
+        )
+        execution = await self._run_remote_background(job, full_cmd, workdir, effective)
+        remote_id = getattr(execution, "id", None)
+        if not remote_id:
+            job.status = JobStatus.LOST
+            job.error = "sandbox background command returned no execution id"
+            self._log_job(job, "sandbox background job lost", failed=True)
+            raise OSError(job.error)
+        job.remote_id = str(remote_id)
+        self._capture_execution_logs(job, execution)
+        finished = (
+            execution.exit_code is not None or getattr(execution, "complete", None) is not None
+        )
+        if finished:
+            job.status = JobStatus.EXITED
+            job.exit_code = execution.exit_code if execution.exit_code is not None else 0
+            self._log_job(job, "sandbox background job exited")
+            return job
+        self._ensure_renew_loop()
+        self._timeout_tasks[job.job_id] = asyncio.create_task(
+            self._enforce_timeout(job.job_id),
+            name=f"sandbox-job-timeout-{job.job_id}",
+        )
+        self._log_job(job, "sandbox background job started")
+        return job
+
+    async def get_status(self, job_id: str) -> BackgroundJob:
+        async with self._lock:
+            job = self._jobs.get(job_id)
+            await self._refresh_unlocked(job)
+            return job
+
+    async def read_output(self, job_id: str, cursor: int) -> tuple[str, int]:
+        job = self._jobs.get(job_id)
+        return read_log_from(job.log_path, cursor, final=job.status is not JobStatus.RUNNING)
+
+    async def kill(self, job_id: str) -> BackgroundJob:
+        job = self._jobs.get(job_id)
+        async with self._lock:
+            if job.status is JobStatus.RUNNING:
+                await self._stop_remote(job, reason="killed")
+        return job
+
+    async def aclose(self) -> list[BackgroundJob]:
+        """Interrupt remaining jobs, then destroy the sandbox.
+
+        Safe to call multiple times. Exceptions from kill() are swallowed so
+        the gateway finally block always completes. Returns jobs that were
+        still running (now killed or lost).
         """
+        self._cancel_renew()
+        killed: list[BackgroundJob] = []
+        for job in list(self._jobs.running()):
+            try:
+                killed.append(await self.kill(job.job_id))
+            except Exception:
+                logger.warning(
+                    "failed to interrupt background job during aclose",
+                    extra={"job_id": job.job_id},
+                    exc_info=True,
+                )
+                if job.status is JobStatus.RUNNING:
+                    job.status = JobStatus.LOST
+                    job.error = job.error or "lost during shutdown"
+                killed.append(job)
+        for task in list(self._timeout_tasks.values()):
+            task.cancel()
+        self._timeout_tasks.clear()
         if self._sandbox is None:
-            return
+            return killed
         sandbox = self._sandbox
         self._sandbox = None
         try:
@@ -421,3 +626,177 @@ class SandboxExecutor:
             logger.info("Sandbox destroyed")
         except Exception:
             logger.warning("Failed to destroy sandbox", exc_info=True)
+        return killed
+
+    def _screen_command(
+        self,
+        command: str,
+        args: list[str],
+        *,
+        cwd: Path | str | None,
+        extra_allowed_commands: Sequence[str] | None,
+    ) -> None:
+        """Allowlist and path checks. Raises before the sandbox is contacted."""
+        if command not in self._allowed_commands and command not in (extra_allowed_commands or ()):
+            raise SecurityError(f"Command '{command}' not allowed")
+        if command == "mempalace":
+            validate_mempalace_subcommand(args)
+        # CoreToolExecutor always passes cwd=workspace root. Compute-only already
+        # forces working_directory=/tmp, so the default harness cwd must not trip
+        # the mounted-path guard. Nested paths under workspace are still rejected.
+        check_cwd = cwd
+        if (
+            not self._config.shared_filesystem
+            and cwd is not None
+            and Path(cwd).resolve() == self._workspace_root
+        ):
+            check_cwd = None
+        if not self._config.shared_filesystem and self._remote_requests_mounted_path(
+            args, check_cwd
+        ):
+            raise SecurityError(
+                "remote sandbox is compute-only and cannot access workspace or skills files"
+            )
+        self._validate_paths(args, command=command, cwd=cwd)
+
+    def _capture_execution_logs(self, job: BackgroundJob, execution: Any) -> None:
+        logs = getattr(execution, "logs", None)
+        if logs is None:
+            return
+        stdout = "".join(getattr(entry, "text", str(entry)) for entry in (logs.stdout or []))
+        stderr = "".join(getattr(entry, "text", str(entry)) for entry in (logs.stderr or []))
+        if stdout:
+            append_log(job.log_path, stdout if stdout.endswith("\n") else stdout + "\n")
+        if stderr:
+            append_log(job.log_path, stderr if stderr.endswith("\n") else stderr + "\n")
+
+    async def _refresh_unlocked(self, job: BackgroundJob) -> None:
+        if job.status is not JobStatus.RUNNING or not job.remote_id or self._sandbox is None:
+            return
+        try:
+            status = await self._sandbox.commands.get_command_status(job.remote_id)
+        except Exception as exc:
+            self._log_job(job, "sandbox command status failed", failed=True, exc_info=True)
+            # Status is unknown, so stop the remote process rather than leave it
+            # running unseen; ``_stop_remote`` marks the job lost if that fails too.
+            await self._stop_remote(job, reason=str(exc) or "sandbox command status failed")
+            return
+        await self._pull_remote_logs(job)
+        running = getattr(status, "running", None)
+        exit_code = getattr(status, "exit_code", None)
+        if running:
+            return
+        self._cancel_timeout(job.job_id)
+        if exit_code is None and not getattr(status, "error", None):
+            job.status = JobStatus.LOST
+            job.error = "sandbox command ended without an exit code"
+            self._log_job(job, "sandbox background job lost", failed=True)
+            return
+        job.exit_code = exit_code if exit_code is not None else 0
+        job.status = JobStatus.EXITED
+        error = getattr(status, "error", None)
+        if error and job.exit_code != 0:
+            job.error = str(error)
+        self._log_job(job, "sandbox background job exited")
+
+    async def _pull_remote_logs(self, job: BackgroundJob) -> None:
+        if self._sandbox is None or not job.remote_id:
+            return
+        try:
+            logs = await self._sandbox.commands.get_background_command_logs(
+                job.remote_id, cursor=job.remote_cursor
+            )
+        except Exception:
+            logger.warning(
+                "sandbox background log read failed",
+                extra={"job_id": job.job_id, "remote_id": job.remote_id},
+                exc_info=True,
+            )
+            return
+        content = getattr(logs, "content", "") or ""
+        if content:
+            append_log(job.log_path, content if content.endswith("\n") else content + "\n")
+        cursor = getattr(logs, "cursor", None)
+        if cursor is not None:
+            job.remote_cursor = int(cursor)
+
+    async def _stop_remote(self, job: BackgroundJob, *, reason: str) -> None:
+        self._cancel_timeout(job.job_id)
+        if job.status is not JobStatus.RUNNING:
+            return
+        if self._sandbox is not None and job.remote_id:
+            try:
+                await self._sandbox.commands.interrupt(job.remote_id)
+            except Exception:
+                job.status = JobStatus.LOST
+                job.error = reason
+                self._log_job(job, "sandbox interrupt failed", failed=True, exc_info=True)
+                return
+        job.status = JobStatus.KILLED
+        job.error = reason
+        if job.exit_code is None:
+            job.exit_code = -1
+        append_log(job.log_path, f"\n[{reason}]\n")
+        self._log_job(job, "sandbox background job killed")
+
+    async def _enforce_timeout(self, job_id: str) -> None:
+        job = self._jobs.get(job_id)
+        try:
+            await asyncio.sleep(job.timeout_seconds)
+        except asyncio.CancelledError:
+            return
+        async with self._lock:
+            if job.status is JobStatus.RUNNING:
+                await self._stop_remote(
+                    job,
+                    reason=timeout_failure_message(
+                        timeout_seconds=job.timeout_seconds,
+                        hit_ceiling=job.hit_ceiling,
+                    ),
+                )
+
+    def _cancel_timeout(self, job_id: str) -> None:
+        task = self._timeout_tasks.pop(job_id, None)
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+
+    def _ensure_renew_loop(self) -> None:
+        if self._renew_task is not None and not self._renew_task.done():
+            return
+        self._renew_task = asyncio.create_task(self._renew_while_jobs(), name="sandbox-renew")
+
+    def _cancel_renew(self) -> None:
+        task = self._renew_task
+        self._renew_task = None
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _renew_while_jobs(self) -> None:
+        """Extend the worker while any background job is still running.
+
+        Renews once immediately, then every ``renew_interval_seconds``. An
+        interval of 0 renews once and returns (useful when the server rejects
+        further renews). Failures are logged; the local job ceiling still applies.
+        """
+        try:
+            await self._renew_once()
+            interval = self._config.renew_interval_seconds
+            while interval > 0 and self.running_jobs() and self._sandbox is not None:
+                await asyncio.sleep(interval)
+                if not self.running_jobs() or self._sandbox is None:
+                    return
+                await self._renew_once()
+        except asyncio.CancelledError:
+            return
+
+    async def _renew_once(self) -> None:
+        if self._sandbox is None:
+            return
+        try:
+            await self._sandbox.renew(timedelta(seconds=self._config.ttl_seconds))
+            logger.info(
+                "sandbox renewed while background jobs run",
+                extra={"ttl_seconds": self._config.ttl_seconds},
+            )
+        except Exception:
+            logger.warning("sandbox renew failed while background jobs run", exc_info=True)

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 _TOOL_KIND: dict[str, str] = {
     "run_command": "Shell",
+    "await_command": "Shell",
+    "kill_command": "Shell",
     "execute": "Shell",
     "shell": "Shell",
     "bash": "Shell",

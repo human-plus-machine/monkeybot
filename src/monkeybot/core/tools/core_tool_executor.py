@@ -97,6 +97,12 @@ from monkeybot.core.subprocess_groups import (
     stop_subagent_process,
 )
 from monkeybot.core.tools.ask_user import await_ask_user_answer, parse_ask_user_args
+from monkeybot.core.tools.background_jobs import (
+    JobCapExceededError,
+    JobNotFoundError,
+    poll_background_job,
+)
+from monkeybot.core.tools.command_executor import BackgroundCommandExecutor
 from monkeybot.core.tools.fs_isolation import (
     JailRoots,
     local_whisper_model_dirs,
@@ -150,6 +156,8 @@ _CORE_TOOL_NAMES = frozenset(
         "list_skills",
         "task",
         "run_command",
+        "await_command",
+        "kill_command",
         "enable_mcp",
         "disable_mcp",
         "enable_loops",
@@ -1006,6 +1014,9 @@ class CoreToolExecutor(ToolExecutorPort):
             paths = tuple(dict.fromkeys((*paths, skills, f"{skills}/")))
         self._run_cmd_allowed_commands = cmds
         self._run_cmd_allowed_paths = paths
+        _job_cfg = SandboxConfig.from_env(self._config)
+        self._await_default_wait = _job_cfg.await_default_wait_seconds
+        self._await_max_wait = _job_cfg.await_max_wait_seconds
         if terminal is not None:
             self._terminal = (
                 terminal.restricted(
@@ -1017,7 +1028,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 else terminal
             )
         else:
-            _scfg = SandboxConfig.from_env(self._config)
+            _scfg = _job_cfg
             if _scfg.enabled:
                 self._terminal = SandboxExecutor(
                     _scfg,
@@ -1032,7 +1043,14 @@ class CoreToolExecutor(ToolExecutorPort):
                     allowed_commands=cmds,
                     allowed_path_prefixes=paths,
                     hidden_paths=hidden_paths,
+                    max_background_jobs=_job_cfg.max_background_jobs,
+                    max_job_seconds=_job_cfg.max_job_seconds,
                 )
+        if isinstance(self._terminal, TerminalExecutor):
+            self._terminal.configure_background_limits(
+                max_jobs=_job_cfg.max_background_jobs,
+                max_job_seconds=_job_cfg.max_job_seconds,
+            )
         if isinstance(self._terminal, SandboxExecutor):
             # The palace is deliberately not mounted into the sandbox, so
             # authorized memory reads need a host terminal regardless of
@@ -1041,6 +1059,8 @@ class CoreToolExecutor(ToolExecutorPort):
                 allowed_commands=cmds,
                 allowed_path_prefixes=paths,
                 hidden_paths=hidden_paths,
+                max_background_jobs=_job_cfg.max_background_jobs,
+                max_job_seconds=_job_cfg.max_job_seconds,
             )
         self._grants_cache = GrantStoreCache(grants_path) if grants_path is not None else None
         self._extra_tools: dict[str, Any] = {ct.tool_def.name: ct for ct in (extra_tools or [])}
@@ -1093,11 +1113,40 @@ class CoreToolExecutor(ToolExecutorPort):
             {},
         )
 
-    async def aclose(self) -> None:
-        """Release resources held by the terminal executors for this session."""
-        await self._terminal.aclose()
-        if self._host_terminal is not None:
-            await self._host_terminal.aclose()
+    def running_background_jobs(self) -> list[Any]:
+        """Jobs still running on the shell executor or the host memory executor."""
+        jobs: list[Any] = []
+        for executor in (self._terminal, self._host_terminal):
+            running = getattr(executor, "running_jobs", None)
+            if running is None:
+                continue
+            jobs.extend(running())
+        return jobs
+
+    def _executor_for_job(self, job_id: str) -> BackgroundCommandExecutor:
+        for executor in (self._terminal, self._host_terminal):
+            if executor is None:
+                continue
+            has_job = getattr(executor, "has_job", None)
+            if has_job is not None and has_job(job_id):
+                return executor
+        return self._terminal
+
+    async def aclose(self) -> list[Any]:
+        """Release shell executors. Returns background jobs killed at turn end."""
+        killed: list[Any] = []
+        for executor in (self._terminal, self._host_terminal):
+            if executor is None:
+                continue
+            result = await executor.aclose()
+            if isinstance(result, list):
+                killed.extend(result)
+        if killed:
+            logger.warning(
+                "killed background jobs at turn end %s",
+                kv(jobs=[getattr(job, "job_id", "") for job in killed]),
+            )
+        return killed
 
     async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
         name = call.name
@@ -1150,6 +1199,10 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = await self._tool_task(call, ctx)
             elif name == "run_command":
                 result_text, err_text = await self._tool_run_command(args, call=call, ctx=ctx)
+            elif name == "await_command":
+                result_text, err_text = await self._tool_await_command(args)
+            elif name == "kill_command":
+                result_text, err_text = await self._tool_kill_command(args)
             elif name == "enable_mcp":
                 result_text, err_text = await self._tool_enable_mcp(args)
             elif name == "disable_mcp":
@@ -1992,6 +2045,17 @@ class CoreToolExecutor(ToolExecutorPort):
         except WorkspaceError as exc:
             return None, _workspace_error_envelope(exc)
         timeout = _coerce_int(args.get("timeout"), 60) or 60
+        background = args.get("background", False)
+        if not isinstance(background, bool):
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "background must be a boolean",
+                    "Pass background as true or false (a JSON boolean, not a string).",
+                    {"background": background},
+                ),
+            )
         if cmd == "mempalace" and self._memory is None:
             return (
                 None,
@@ -2026,6 +2090,14 @@ class CoreToolExecutor(ToolExecutorPort):
                     "MEMPALACE_PALACE_PATH": str(self._memory.palace_path),
                     "MEMPALACE_BACKEND": self._memory.backend,
                 }
+            if background:
+                return await self._start_background_command(
+                    executor,
+                    cmd,
+                    argv,
+                    thread_id=ctx.thread_id,
+                    execute_kwargs=execute_kwargs,
+                )
             result = await executor.execute(
                 cmd,
                 argv,
@@ -2033,6 +2105,16 @@ class CoreToolExecutor(ToolExecutorPort):
             )
         except SecurityError as exc:
             return None, self._run_command_security_envelope(exc)
+        except JobCapExceededError as exc:
+            return (
+                None,
+                _built_in_tool_error(
+                    "runtime",
+                    str(exc),
+                    "Await or kill a running background job, then start another.",
+                    {"max_jobs": exc.max_jobs},
+                ),
+            )
         except CommandTimeoutError as exc:
             spill_path = write_run_command_timeout_spill(
                 workspace_root=self._workspace.repo_root,
@@ -2081,6 +2163,145 @@ class CoreToolExecutor(ToolExecutorPort):
                     "stdout": result.stdout,
                     "stderr": result.stderr,
                     "exit_code": result.exit_code,
+                }
+            ),
+            None,
+        )
+
+    async def _start_background_command(
+        self,
+        executor: Any,
+        cmd: str,
+        argv: list[str],
+        *,
+        thread_id: str,
+        execute_kwargs: dict[str, Any],
+    ) -> tuple[str | None, str | None]:
+        start = getattr(executor, "start_background", None)
+        if start is None:
+            return (
+                None,
+                _built_in_tool_error(
+                    "runtime",
+                    "Background commands are not supported by this shell executor.",
+                    "Run the command in the foreground (omit background) with a suitable timeout.",
+                    {"tool": "run_command", "command": cmd},
+                ),
+            )
+        job = await start(
+            cmd,
+            argv,
+            log_dir=self._background_log_dir(thread_id),
+            **execute_kwargs,
+        )
+        return (
+            _j(
+                {
+                    "ok": True,
+                    "background": True,
+                    "job_id": job.job_id,
+                    "log_path": self._display_log_path(job.log_path),
+                    "status": job.status.value,
+                }
+            ),
+            None,
+        )
+
+    def _background_log_dir(self, thread_id: str) -> Path | None:
+        from monkeybot.core.tools.spill_inventory import _spill_dir_for_thread
+
+        found = _spill_dir_for_thread(self._workspace.repo_root, thread_id)
+        if found is None:
+            return None
+        _rel, out_dir = found
+        log_dir = out_dir / "jobs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        return log_dir
+
+    def _display_log_path(self, path: Path) -> str:
+        root = self._workspace.repo_root.resolve()
+        try:
+            return path.resolve().relative_to(root).as_posix()
+        except ValueError:
+            return str(path)
+
+    async def _tool_await_command(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        job_id = _str_arg(args, "job_id")
+        if not job_id:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "await_command requires job_id",
+                    "Pass the job_id returned by run_command with background true.",
+                    {},
+                ),
+            )
+        requested = _coerce_int(args.get("wait_seconds"), self._await_default_wait)
+        wait_seconds = self._await_default_wait if requested is None else requested
+        if wait_seconds < 0:
+            wait_seconds = 0
+        wait_seconds = min(wait_seconds, self._await_max_wait)
+        cursor = _coerce_int(args.get("cursor"), 0) or 0
+        if cursor < 0:
+            cursor = 0
+        executor = self._executor_for_job(job_id)
+        try:
+            payload = await poll_background_job(
+                executor,
+                job_id,
+                wait_seconds=wait_seconds,
+                cursor=cursor,
+            )
+        except JobNotFoundError:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    f"unknown background job {job_id!r}",
+                    "Use a job_id returned by run_command with background true in this turn.",
+                    {"job_id": job_id},
+                ),
+            )
+        log_path = payload.get("log_path")
+        if isinstance(log_path, str) and log_path:
+            payload["log_path"] = self._display_log_path(Path(log_path))
+        return _j(payload), None
+
+    async def _tool_kill_command(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        job_id = _str_arg(args, "job_id")
+        if not job_id:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "kill_command requires job_id",
+                    "Pass the job_id returned by run_command with background true.",
+                    {},
+                ),
+            )
+        executor = self._executor_for_job(job_id)
+        try:
+            job = await executor.kill(job_id)
+        except JobNotFoundError:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    f"unknown background job {job_id!r}",
+                    "Use a job_id returned by run_command with background true in this turn.",
+                    {"job_id": job_id},
+                ),
+            )
+        return (
+            _j(
+                {
+                    "ok": job.status.value in {"killed", "exited"},
+                    "job_id": job.job_id,
+                    "status": job.status.value,
+                    "exit_code": job.exit_code,
+                    "log_path": self._display_log_path(job.log_path),
+                    "error": job.error,
                 }
             ),
             None,

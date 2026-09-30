@@ -86,6 +86,18 @@ def test_doom_loop_tracker_exempts_polling_tools() -> None:
     assert tracker.take_error() is not None
 
 
+def test_await_command_polling_is_doom_loop_exempt() -> None:
+    """Repeated await_command on a running job must not trip the guard."""
+    tracker = _DoomLoopTracker(
+        threshold=3,
+        exempt_names=frozenset({"await_command"}),
+    )
+    args = {"job_id": "job1", "wait_seconds": 300, "cursor": 0}
+    for _ in range(6):
+        tracker.record("await_command", args)
+    assert tracker.triggered is False
+
+
 def test_doom_loop_exempt_names_from_tool_defs() -> None:
     from monkeybot.core.runtime.doom_loop import _doom_loop_exempt_names
 

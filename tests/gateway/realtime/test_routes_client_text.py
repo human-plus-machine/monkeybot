@@ -232,9 +232,11 @@ async def test_assistant_boundary_writes_talk_transcript(
     deps.inspectors = []
     deps.hook_manager = None
 
+    executor = MagicMock()
+    executor.aclose = AsyncMock(return_value=[])
     monkeypatch.setattr(
         "monkeybot.gateway.realtime.routes._create_tool_executor",
-        lambda *_args, **_kwargs: MagicMock(),
+        lambda *_args, **_kwargs: executor,
     )
 
     from monkeybot.gateway.sse import reload as reload_mod

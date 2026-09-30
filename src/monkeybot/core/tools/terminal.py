@@ -39,6 +39,18 @@ from monkeybot.core.subprocess_groups import (
     kill_process_group,
     process_group_id,
 )
+from monkeybot.core.tools.background_jobs import (
+    DEFAULT_MAX_BACKGROUND_JOBS,
+    DEFAULT_MAX_JOB_SECONDS,
+    BackgroundJob,
+    JobRegistry,
+    JobStatus,
+    allocate_background_job,
+    append_log,
+    clamp_job_timeout,
+    read_log_from,
+    timeout_failure_message,
+)
 from monkeybot.core.tools.fs_isolation import (
     JailRoots,
     isolated_argv,
@@ -198,6 +210,18 @@ class ExecutionResult:
     stdout: str
     stderr: str
     exit_code: int
+
+
+@dataclass
+class _LocalProcess:
+    """Host subprocess backing one background job."""
+
+    process: asyncio.subprocess.Process
+    pgid: int | None
+    handle: object
+    done: asyncio.Event
+    kill_requested: bool = False
+    watcher: asyncio.Task[None] | None = None
 
 
 class SecurityError(Exception):
@@ -372,6 +396,8 @@ class TerminalExecutor:
         allowed_commands: Sequence[str] | None = None,
         allowed_path_prefixes: Sequence[str] | None = None,
         hidden_paths: Sequence[Path | str] | None = None,
+        max_background_jobs: int = DEFAULT_MAX_BACKGROUND_JOBS,
+        max_job_seconds: int = DEFAULT_MAX_JOB_SECONDS,
     ) -> None:
         self._allowed_commands: tuple[str, ...] = (
             tuple(allowed_commands) if allowed_commands is not None else tuple(ALLOWED_COMMANDS)
@@ -382,6 +408,10 @@ class TerminalExecutor:
             else tuple(ALLOWED_PATHS)
         )
         self._hidden_paths: tuple[Path, ...] = tuple(Path(path) for path in (hidden_paths or ()))
+        self._max_background_jobs = max(1, max_background_jobs)
+        self._max_job_seconds = max(1, max_job_seconds)
+        self._jobs = JobRegistry(max_jobs=self._max_background_jobs)
+        self._procs: dict[str, _LocalProcess] = {}
 
     @property
     def allowed_commands(self) -> tuple[str, ...]:
@@ -409,6 +439,8 @@ class TerminalExecutor:
 
         ``None`` for any argument means "keep this instance's value". An empty
         sequence is an explicit override (clear that axis), not a preserve.
+        Background jobs stay on the instance that started them; the copy has
+        an empty registry and the same job cap.
         """
         return TerminalExecutor(
             allowed_commands=(
@@ -420,10 +452,41 @@ class TerminalExecutor:
                 else allowed_path_prefixes
             ),
             hidden_paths=self._hidden_paths if hidden_paths is None else hidden_paths,
+            max_background_jobs=self._max_background_jobs,
+            max_job_seconds=self._max_job_seconds,
         )
 
-    async def aclose(self) -> None:
-        """No-op — TerminalExecutor holds no persistent resources."""
+    def configure_background_limits(self, *, max_jobs: int, max_job_seconds: int) -> None:
+        """Apply harness job caps before any background command starts."""
+        if self._jobs.running():
+            return
+        self._max_background_jobs = max(1, max_jobs)
+        self._max_job_seconds = max(1, max_job_seconds)
+        self._jobs.max_jobs = self._max_background_jobs
+
+    def running_jobs(self) -> list[BackgroundJob]:
+        return self._jobs.running()
+
+    def has_job(self, job_id: str) -> bool:
+        return job_id in self._jobs
+
+    async def aclose(self) -> list[BackgroundJob]:
+        """Kill background jobs still running. A second call returns an empty list."""
+        killed: list[BackgroundJob] = []
+        for job in list(self._jobs.running()):
+            try:
+                killed.append(await self.kill(job.job_id))
+            except Exception:
+                logger.warning(
+                    "failed to kill background job during aclose",
+                    extra={"component": "terminal_executor", "job_id": job.job_id},
+                    exc_info=True,
+                )
+                if job.status is JobStatus.RUNNING:
+                    job.status = JobStatus.LOST
+                    job.error = job.error or "lost during shutdown"
+                killed.append(job)
+        return killed
 
     async def _isolate(
         self, executable: str, args: list[str], *, jail_roots: JailRoots | None = None
@@ -557,41 +620,14 @@ class TerminalExecutor:
             - Processes are killed if they exceed timeout
             - Output is truncated if it exceeds 1MB per stream
         """
-        # CRITICAL: Validate command against allowlist
-        self._validate_command(command, extra_allowed_commands=extra_allowed_commands)
-        if command == "mempalace":
-            self._validate_mempalace_args(args)
-        elif command == "rg":
-            self._validate_rg_args(args)
-
-        # CRITICAL: Validate all paths in arguments
-        self._validate_paths(args, command=command, cwd=cwd)
-
-        # Log execution for audit trail
-        logger.info(
-            f"Executing command: {command} {' '.join(args)}",
-            extra={"component": "terminal_executor", "command": command, "args_count": len(args)},
+        executable, exec_args, exec_cwd, env = await self._prepare_invocation(
+            command,
+            args,
+            cwd=cwd,
+            env_overrides=env_overrides,
+            extra_allowed_commands=extra_allowed_commands,
+            jail_roots=jail_roots,
         )
-
-        exec_cwd: str | None = None
-        env: dict[str, str] | None = None
-        if cwd is not None:
-            exec_cwd = str(Path(cwd).resolve())
-            env = build_skill_runtime_env(cwd=exec_cwd)
-
-        run_env = env if env is not None else os.environ.copy()
-        # Memory routing is an executor capability, not process-global ambient
-        # authority. Generic children (including nested shells/interpreters)
-        # must never inherit a palace route. The owning CoreToolExecutor adds
-        # an explicit route only for an authorized direct ``mempalace`` call.
-        for key in _MEMORY_ROUTING_ENV_KEYS:
-            run_env.pop(key, None)
-        if env_overrides is not None:
-            run_env.update(env_overrides)
-        executable, exec_args = _resolve_run_executable(command, args, run_env)
-        executable, exec_args = await self._isolate(executable, exec_args, jail_roots=jail_roots)
-        if env is None:
-            env = run_env
 
         # Concurrent stream pumps avoid PIPE-buffer deadlock while we wait on
         # the process, and preserve partial output when we kill on timeout.
@@ -687,6 +723,222 @@ class TerminalExecutor:
             stderr=stderr,
             exit_code=exit_code,
         )
+
+    async def _prepare_invocation(
+        self,
+        command: str,
+        args: list[str],
+        *,
+        cwd: Path | str | None,
+        env_overrides: Mapping[str, str] | None,
+        extra_allowed_commands: Sequence[str] | None,
+        jail_roots: JailRoots | None,
+    ) -> tuple[str, list[str], str | None, dict[str, str]]:
+        """Allowlist, path, and jail checks shared by foreground and background runs."""
+        self._validate_command(command, extra_allowed_commands=extra_allowed_commands)
+        if command == "mempalace":
+            self._validate_mempalace_args(args)
+        elif command == "rg":
+            self._validate_rg_args(args)
+        self._validate_paths(args, command=command, cwd=cwd)
+        logger.info(
+            f"Executing command: {command} {' '.join(args)}",
+            extra={"component": "terminal_executor", "command": command, "args_count": len(args)},
+        )
+        exec_cwd: str | None = None
+        env: dict[str, str] | None = None
+        if cwd is not None:
+            exec_cwd = str(Path(cwd).resolve())
+            env = build_skill_runtime_env(cwd=exec_cwd)
+        run_env = env if env is not None else os.environ.copy()
+        # Memory routing is an executor capability, not process-global ambient
+        # authority. Generic children (including nested shells/interpreters)
+        # must never inherit a palace route. The owning CoreToolExecutor adds
+        # an explicit route only for an authorized direct ``mempalace`` call.
+        for key in _MEMORY_ROUTING_ENV_KEYS:
+            run_env.pop(key, None)
+        if env_overrides is not None:
+            run_env.update(env_overrides)
+        executable, exec_args = _resolve_run_executable(command, args, run_env)
+        executable, exec_args = await self._isolate(executable, exec_args, jail_roots=jail_roots)
+        if env is None:
+            env = run_env
+        return executable, exec_args, exec_cwd, env
+
+    async def _spawn_local_job(
+        self,
+        job: BackgroundJob,
+        executable: str,
+        exec_args: list[str],
+        exec_cwd: str | None,
+        env: dict[str, str] | None,
+    ) -> None:
+        handle = job.log_path.open("ab")
+        try:
+            process = await asyncio.create_subprocess_exec(
+                executable,
+                *exec_args,
+                stdout=handle,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=exec_cwd,
+                env=env,
+                start_new_session=SUPPORTS_PROCESS_GROUPS,
+            )
+        except Exception:
+            handle.close()
+            job.status = JobStatus.LOST
+            job.error = "failed to start background command"
+            logger.warning(
+                "background command failed to start",
+                extra={"component": "terminal_executor", "job_id": job.job_id},
+                exc_info=True,
+            )
+            raise
+        local = _LocalProcess(
+            process=process,
+            pgid=process_group_id(process.pid),
+            handle=handle,
+            done=asyncio.Event(),
+        )
+        self._procs[job.job_id] = local
+        local.watcher = asyncio.create_task(
+            self._watch_local(job, local),
+            name=f"bg-job-{job.job_id}",
+        )
+
+    async def start_background(
+        self,
+        command: str,
+        args: list[str],
+        *,
+        timeout: int = 60,
+        cwd: Path | str | None = None,
+        env_overrides: Mapping[str, str] | None = None,
+        extra_allowed_commands: Sequence[str] | None = None,
+        jail_roots: JailRoots | None = None,
+        log_dir: Path | None = None,
+    ) -> BackgroundJob:
+        """Start ``command`` detached. Output is appended to the job log file."""
+        effective, hit_ceiling = clamp_job_timeout(timeout, ceiling=self._max_job_seconds)
+        executable, exec_args, exec_cwd, env = await self._prepare_invocation(
+            command,
+            args,
+            cwd=cwd,
+            env_overrides=env_overrides,
+            extra_allowed_commands=extra_allowed_commands,
+            jail_roots=jail_roots,
+        )
+        job = allocate_background_job(
+            self._jobs,
+            command,
+            args,
+            effective=effective,
+            hit_ceiling=hit_ceiling,
+            log_dir=log_dir,
+        )
+        await self._spawn_local_job(job, executable, exec_args, exec_cwd, env)
+        return job
+
+    async def _watch_local(self, job: BackgroundJob, local: _LocalProcess) -> None:
+        try:
+            timed_out = await _wait_for_exit(local.process, job.timeout_seconds)
+            if timed_out and not local.kill_requested:
+                kill_process_group(local.pgid, local.process)
+                with contextlib.suppress(ProcessLookupError):
+                    await _wait_for_exit(local.process, _STREAM_DRAIN_TIMEOUT_SEC)
+            exit_code = local.process.returncode
+            job.exit_code = exit_code if exit_code is not None else -1
+            if local.kill_requested:
+                job.status = JobStatus.KILLED
+                job.error = job.error or "killed"
+            elif timed_out:
+                job.status = JobStatus.KILLED
+                job.error = timeout_failure_message(
+                    timeout_seconds=job.timeout_seconds,
+                    hit_ceiling=job.hit_ceiling,
+                )
+                append_log(job.log_path, f"\n[{job.error}]\n")
+            else:
+                job.status = JobStatus.EXITED
+            logger.info(
+                "background job %s",
+                job.status.value,
+                extra={
+                    "component": "terminal_executor",
+                    "job_id": job.job_id,
+                    "exit_code": job.exit_code,
+                },
+            )
+        except Exception:
+            logger.warning(
+                "background job watcher failed",
+                extra={"component": "terminal_executor", "job_id": job.job_id},
+                exc_info=True,
+            )
+            if job.status is JobStatus.RUNNING:
+                job.status = JobStatus.LOST
+                job.error = job.error or "background job lost"
+        finally:
+            close = getattr(local.handle, "close", None)
+            if close is not None:
+                close()
+            local.done.set()
+
+    async def get_status(self, job_id: str) -> BackgroundJob:
+        return self._jobs.get(job_id)
+
+    async def read_output(self, job_id: str, cursor: int) -> tuple[str, int]:
+        job = self._jobs.get(job_id)
+        return read_log_from(job.log_path, cursor, final=job.status is not JobStatus.RUNNING)
+
+    async def wait_until_settled(self, job_id: str, *, timeout: float) -> None:
+        """Block until the job leaves ``running`` or ``timeout`` seconds elapse."""
+        job = self._jobs.get(job_id)
+        if job.status is not JobStatus.RUNNING:
+            return
+        local = self._procs.get(job_id)
+        if local is None:
+            return
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(local.done.wait(), timeout=max(0.0, timeout))
+
+    async def kill(self, job_id: str) -> BackgroundJob:
+        job = self._jobs.get(job_id)
+        if job.status is not JobStatus.RUNNING:
+            return job
+        local = self._procs.get(job_id)
+        job.error = job.error or "killed"
+        if local is None:
+            job.status = JobStatus.LOST
+            job.error = job.error or "lost"
+            logger.warning(
+                "background job lost",
+                extra={
+                    "component": "terminal_executor",
+                    "job_id": job.job_id,
+                    "status": job.status.value,
+                },
+            )
+            return job
+        local.kill_requested = True
+        kill_process_group(local.pgid, local.process)
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(local.done.wait(), timeout=_STREAM_DRAIN_TIMEOUT_SEC)
+        if job.status is JobStatus.RUNNING:
+            job.status = JobStatus.KILLED
+            if job.exit_code is None:
+                job.exit_code = (
+                    local.process.returncode if local.process.returncode is not None else -1
+                )
+            logger.info(
+                "background job killed",
+                extra={
+                    "component": "terminal_executor",
+                    "job_id": job.job_id,
+                    "exit_code": job.exit_code,
+                },
+            )
+        return job
 
     def _validate_command(
         self, command: str, *, extra_allowed_commands: Sequence[str] | None = None
