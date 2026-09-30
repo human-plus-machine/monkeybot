@@ -8,9 +8,13 @@ The registry caps how many jobs one executor may run at once.
 from __future__ import annotations
 
 import asyncio
+import codecs
+import os
+import tempfile
+import time
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -20,8 +24,9 @@ DEFAULT_MAX_JOB_SECONDS = 3300
 DEFAULT_RENEW_INTERVAL_SECONDS = 300
 DEFAULT_AWAIT_WAIT_SECONDS = 300
 DEFAULT_AWAIT_MAX_WAIT_SECONDS = 600
-OUTPUT_TAIL_CHARS = 4000
-MAX_BUILD_TIME_MESSAGE = "exceeded max build time; use async build (P2)"
+# One await_command result never carries more than this many log bytes; the
+# model pages the rest by passing the returned cursor back in.
+OUTPUT_CHUNK_BYTES = 16 * 1024
 
 
 class JobStatus(StrEnum):
@@ -65,8 +70,6 @@ class BackgroundJob:
     remote_id: str | None = None
     remote_cursor: int | None = None
     hit_ceiling: bool = False
-    # Byte offset already copied into ``log_path`` from the remote log API.
-    local_bytes: int = field(default=0, repr=False)
 
 
 class JobRegistry:
@@ -115,7 +118,7 @@ def clamp_job_timeout(requested: int, *, ceiling: int) -> tuple[int, bool]:
 
 def timeout_failure_message(*, timeout_seconds: int, hit_ceiling: bool) -> str:
     if hit_ceiling:
-        return MAX_BUILD_TIME_MESSAGE
+        return f"Command exceeded the {timeout_seconds}s maximum job time"
     return f"Command exceeded {timeout_seconds}s timeout"
 
 
@@ -127,28 +130,70 @@ def append_log(path: Path, text: str) -> None:
         handle.write(text)
 
 
-def read_log_from(path: Path, cursor: int) -> tuple[str, int]:
-    """Return ``(new_text, new_cursor)`` for bytes after ``cursor``."""
-    if cursor < 0:
-        cursor = 0
-    if not path.is_file():
+def log_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except FileNotFoundError:
+        return 0
+
+
+def read_log_from(
+    path: Path,
+    cursor: int,
+    *,
+    max_bytes: int = OUTPUT_CHUNK_BYTES,
+    final: bool = False,
+) -> tuple[str, int]:
+    """Return ``(new_text, new_cursor)`` for up to ``max_bytes`` after ``cursor``.
+
+    Reads only the requested window, so large logs are never loaded whole.
+    The returned cursor stops before a trailing partial UTF-8 sequence so the
+    next read decodes it intact; ``final`` (the writer is done) decodes it as
+    ``\ufffd`` instead, but only once the window reaches end of file.
+    """
+    cursor = max(0, cursor)
+    try:
+        handle = path.open("rb")
+    except FileNotFoundError:
         return "", cursor
-    data = path.read_bytes()
-    if cursor > len(data):
-        cursor = len(data)
-    return data[cursor:].decode("utf-8", errors="replace"), len(data)
-
-
-def tail_text(text: str, *, max_chars: int = OUTPUT_TAIL_CHARS) -> str:
-    if len(text) <= max_chars:
-        return text
-    omitted = len(text) - max_chars
-    return f"…(+{omitted} chars omitted)\n{text[-max_chars:]}"
+    with handle:
+        size = os.fstat(handle.fileno()).st_size
+        cursor = min(cursor, size)
+        handle.seek(cursor)
+        data = handle.read(max_bytes)
+    end = cursor + len(data)
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    text = decoder.decode(data, final=final and end >= size)
+    pending = len(decoder.getstate()[0])
+    return text, end - pending
 
 
 def allocate_log_path(log_dir: Path, job_id: str) -> Path:
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir / f"{job_id}.log"
+
+
+def allocate_background_job(
+    registry: JobRegistry,
+    command: str,
+    args: Sequence[str],
+    *,
+    effective: int,
+    hit_ceiling: bool,
+    log_dir: Path | None,
+) -> BackgroundJob:
+    """Register a new running job with its log file path. Raises when at the cap."""
+    job_id = new_job_id()
+    directory = log_dir if log_dir is not None else Path(tempfile.mkdtemp(prefix="monkeybot-job-"))
+    job = BackgroundJob(
+        job_id=job_id,
+        command=" ".join([command, *args]),
+        log_path=allocate_log_path(directory, job_id),
+        started_at=time.monotonic(),
+        timeout_seconds=effective,
+        hit_ceiling=hit_ceiling,
+    )
+    return registry.add(job)
 
 
 def format_running_jobs(jobs: Sequence[Any]) -> str:
@@ -229,8 +274,9 @@ async def poll_background_job(
         "ok": ok,
         "status": job.status.value,
         "exit_code": job.exit_code,
-        "new_output_tail": tail_text(chunk),
+        "new_output": chunk,
         "cursor": new_cursor,
+        "has_more": log_size(job.log_path) > new_cursor,
         "log_path": str(job.log_path),
         "job_id": job.job_id,
     }

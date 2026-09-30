@@ -102,6 +102,7 @@ from monkeybot.core.tools.background_jobs import (
     JobNotFoundError,
     poll_background_job,
 )
+from monkeybot.core.tools.command_executor import BackgroundCommandExecutor
 from monkeybot.core.tools.fs_isolation import (
     JailRoots,
     local_whisper_model_dirs,
@@ -897,16 +898,6 @@ def _run_command_parse_envelope(exc: ValueError) -> str:
     )
 
 
-def _coerce_bool(val: object) -> bool:
-    if isinstance(val, bool):
-        return val
-    if isinstance(val, int):
-        return val != 0
-    if isinstance(val, str):
-        return val.strip().lower() in {"1", "true", "yes", "on"}
-    return False
-
-
 def _coerce_int(val: object | None, default: int | None = None) -> int | None:
     if val is None:
         return default
@@ -1132,7 +1123,7 @@ class CoreToolExecutor(ToolExecutorPort):
             jobs.extend(running())
         return jobs
 
-    def _executor_for_job(self, job_id: str) -> TerminalExecutor | SandboxExecutor:
+    def _executor_for_job(self, job_id: str) -> BackgroundCommandExecutor:
         for executor in (self._terminal, self._host_terminal):
             if executor is None:
                 continue
@@ -2054,7 +2045,17 @@ class CoreToolExecutor(ToolExecutorPort):
         except WorkspaceError as exc:
             return None, _workspace_error_envelope(exc)
         timeout = _coerce_int(args.get("timeout"), 60) or 60
-        background = _coerce_bool(args.get("background"))
+        background = args.get("background", False)
+        if not isinstance(background, bool):
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "background must be a boolean",
+                    "Pass background as true or false (a JSON boolean, not a string).",
+                    {"background": background},
+                ),
+            )
         if cmd == "mempalace" and self._memory is None:
             return (
                 None,
@@ -2176,7 +2177,18 @@ class CoreToolExecutor(ToolExecutorPort):
         thread_id: str,
         execute_kwargs: dict[str, Any],
     ) -> tuple[str | None, str | None]:
-        job = await executor.start_background(
+        start = getattr(executor, "start_background", None)
+        if start is None:
+            return (
+                None,
+                _built_in_tool_error(
+                    "runtime",
+                    "Background commands are not supported by this shell executor.",
+                    "Run the command in the foreground (omit background) with a suitable timeout.",
+                    {"tool": "run_command", "command": cmd},
+                ),
+            )
+        job = await start(
             cmd,
             argv,
             log_dir=self._background_log_dir(thread_id),

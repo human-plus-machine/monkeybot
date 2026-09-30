@@ -19,7 +19,6 @@ from monkeybot.core.tools.background_jobs import (
     jobs_check_failed_error,
     poll_background_job,
     read_log_from,
-    tail_text,
 )
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
@@ -92,17 +91,43 @@ def test_registry_cap_and_cursor(tmp_path: Path) -> None:
     again, cursor2 = read_log_from(path, cursor)
     assert again == ""
     assert cursor2 == cursor
-    long = "x" * 50
-    tailed = tail_text(long, max_chars=10)
-    assert tailed.endswith("x" * 10)
-    assert "omitted" in tailed
+
+
+def test_read_log_from_pages_without_splitting_utf8(tmp_path: Path) -> None:
+    path = tmp_path / "log.txt"
+    path.write_bytes(("a" + "é" * 4).encode("utf-8"))  # 1 + 4*2 bytes
+    # 4-byte window ends mid-character: the cursor stops before the partial "é".
+    text, cursor = read_log_from(path, 0, max_bytes=4)
+    assert text == "aé"
+    assert cursor == 3
+    rest = ""
+    while cursor < path.stat().st_size:
+        chunk, cursor = read_log_from(path, cursor, max_bytes=4)
+        rest += chunk
+    assert text + rest == "a" + "é" * 4
+    assert "\ufffd" not in text + rest
+
+
+def test_read_log_from_final_flushes_trailing_partial_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "log.txt"
+    path.write_bytes(b"ok\xc3")
+    text, cursor = read_log_from(path, 0)
+    assert (text, cursor) == ("ok", 2)
+    text, cursor = read_log_from(path, 0, final=True)
+    assert text == "ok\ufffd"
+    assert cursor == 3
+
+
+def test_read_log_from_clamps_cursor_and_missing_file(tmp_path: Path) -> None:
+    path = tmp_path / "log.txt"
+    assert read_log_from(path, 5) == ("", 5)
+    path.write_text("abc", encoding="utf-8")
+    assert read_log_from(path, 99) == ("", 3)
+    assert read_log_from(path, -4) == ("abc", 3)
 
 
 def test_executors_implement_background_protocol() -> None:
     """SF adapter overrides must match this surface (see command_executor.py)."""
-    import monkeybot.core.tools.command_executor as command_executor
-
-    assert command_executor.BackgroundCommandExecutor.__name__ == "BackgroundCommandExecutor"
     required = (
         "execute",
         "start_background",
@@ -139,11 +164,11 @@ async def test_terminal_background_echo_await_and_cursor(tmp_path: Path) -> None
     payload = await poll_background_job(executor, job.job_id, wait_seconds=10, cursor=0)
     assert payload["status"] == "exited"
     assert payload["exit_code"] == 0
-    assert "hello-bg" in payload["new_output_tail"]
+    assert "hello-bg" in payload["new_output"]
     again = await poll_background_job(
         executor, job.job_id, wait_seconds=0, cursor=payload["cursor"]
     )
-    assert again["new_output_tail"] == ""
+    assert again["new_output"] == ""
     assert await executor.aclose() == []
 
 
@@ -182,7 +207,7 @@ async def test_terminal_background_ceiling_message(tmp_path: Path) -> None:
     )
     payload = await poll_background_job(executor, job.job_id, wait_seconds=5, cursor=0)
     assert payload["status"] == "killed"
-    assert payload["error"] == "exceeded max build time; use async build (P2)"
+    assert payload["error"] == "Command exceeded the 1s maximum job time"
     await executor.aclose()
 
 
@@ -244,10 +269,61 @@ async def test_sandbox_background_poll_renew_and_lost_status(tmp_path: Path) -> 
     running = SandboxExecutor(cfg, tmp_path)
     with patch.dict(sys.modules, _opensandbox_sys_modules(opened)):
         job = await running.start_background("python3", ["-c", "print(1)"], log_dir=tmp_path)
-        lost = await running.get_status(job.job_id)
+        stopped = await running.get_status(job.job_id)
+        # Unknown status: the remote process is interrupted, not left running.
+        assert stopped.status is JobStatus.KILLED
+        assert "status endpoint missing" in (stopped.error or "")
+        sandbox.commands.interrupt.assert_awaited_with("exec-1")
+        assert running.running_jobs() == []
+        await running.aclose()
+
+    sandbox.commands.interrupt = AsyncMock(side_effect=RuntimeError("interrupt failed"))
+    unreachable = SandboxExecutor(cfg, tmp_path)
+    with patch.dict(sys.modules, _opensandbox_sys_modules(opened)):
+        job = await unreachable.start_background("python3", ["-c", "print(1)"], log_dir=tmp_path)
+        lost = await unreachable.get_status(job.job_id)
         assert lost.status is JobStatus.LOST
         assert "status endpoint missing" in (lost.error or "")
-        await running.aclose()
+        await unreachable.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sandbox_kill_waits_for_status_lock(tmp_path: Path) -> None:
+    import asyncio
+
+    execution = MagicMock()
+    execution.id = "exec-1"
+    execution.exit_code = None
+    execution.complete = None
+    execution.logs.stdout = []
+    execution.logs.stderr = []
+    sandbox = MagicMock()
+    sandbox.id = "sb"
+    sandbox.commands.run = AsyncMock(return_value=execution)
+    sandbox.commands.interrupt = AsyncMock()
+    sandbox.renew = AsyncMock()
+    sandbox.kill = AsyncMock()
+    mock_cls, _sandbox = _make_create_mock(sandbox)
+    opened = _make_opensandbox_module(mock_cls)
+    cfg = SandboxConfig(
+        True,
+        "http://localhost:8080",
+        None,
+        "test",
+        30,
+        renew_interval_seconds=0,
+        max_job_seconds=60,
+    )
+    executor = SandboxExecutor(cfg, tmp_path)
+    with patch.dict(sys.modules, _opensandbox_sys_modules(opened)):
+        job = await executor.start_background("python3", ["-c", "print(1)"], log_dir=tmp_path)
+        async with executor._lock:
+            killing = asyncio.create_task(executor.kill(job.job_id))
+            await asyncio.sleep(0.05)
+            sandbox.commands.interrupt.assert_not_awaited()
+        assert (await killing).status is JobStatus.KILLED
+        sandbox.commands.interrupt.assert_awaited_once_with("exec-1")
+        await executor.aclose()
 
 
 @pytest.mark.asyncio
@@ -307,7 +383,7 @@ async def test_run_command_background_tools(
     assert waited.error is None
     done = json.loads(waited.blocks[0].text)  # type: ignore[index]
     assert done["status"] == "exited"
-    assert "from-tool" in done["new_output_tail"]
+    assert "from-tool" in done["new_output"]
     assert done["log_path"].startswith(".monkeybot/spill/")
     unknown = await executor.execute(
         call=ToolCall(call_id="3", name="kill_command", args={"job_id": "missing"}),
@@ -318,9 +394,48 @@ async def test_run_command_background_tools(
 
 
 @pytest.mark.asyncio
+async def test_run_command_background_argument_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SANDBOX_ENABLED", "false")
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    executor = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),  # type: ignore[arg-type]
+    )
+    ctx = _ctx(tmp_path)
+    not_bool = await executor.execute(
+        call=ToolCall(
+            call_id="1",
+            name="run_command",
+            args={"argv": ["python3", "-c", "print(1)"], "background": "true"},
+        ),
+        ctx=ctx,
+    )
+    assert not_bool.error is not None
+    assert "background must be a boolean" in not_bool.error
+
+    # An injected terminal without start_background gets a tool error, not AttributeError.
+    executor._terminal = SimpleNamespace()  # type: ignore[assignment]
+    unsupported = await executor.execute(
+        call=ToolCall(
+            call_id="2",
+            name="run_command",
+            args={"argv": ["python3", "-c", "print(1)"], "background": True},
+        ),
+        ctx=ctx,
+    )
+    assert unsupported.error is not None
+    assert "not supported" in unsupported.error
+
+
+@pytest.mark.asyncio
 async def test_turn_guard_nudges_then_allows_finish() -> None:
     from monkeybot.core.llm.provider import Done, TextDelta
-    from monkeybot.core.runtime.events import Error, TurnComplete
+    from monkeybot.core.runtime.events import AssistantDelta, Error, TurnComplete
     from monkeybot.core.runtime.loop import run
     from monkeybot.core.types.content_blocks import Text
     from tests.core.test_loop import AllowInspector, FakeHistory, FakeProvider, _ctx
@@ -338,7 +453,8 @@ async def test_turn_guard_nudges_then_allows_finish() -> None:
 
         def running_background_jobs(self) -> list[SimpleNamespace]:
             self.calls += 1
-            if self.calls > 1:
+            # Call 1: pre-stream check; call 2: the turn-end check that nudges.
+            if self.calls > 2:
                 return []
             return [SimpleNamespace(job_id="job1", command="python3 build")]
 
@@ -367,6 +483,9 @@ async def test_turn_guard_nudges_then_allows_finish() -> None:
     assert "await_command" in blob
     assert "job1" in blob
     assert not any(isinstance(event, Error) and "kills them" in event.error for event in events)
+    # The blocked "started" reply never reaches the client; only the real answer does.
+    streamed = "".join(e.delta for e in events if isinstance(e, AssistantDelta))
+    assert streamed == "build finished"
     assert any(isinstance(event, TurnComplete) for event in events)
 
 
@@ -401,7 +520,12 @@ async def test_turn_guard_fails_closed_when_job_check_raises() -> None:
     ):
         events.append(event)
     assert provider.stream_calls == 1
-    assert any(
-        isinstance(event, Error) and event.error == jobs_check_failed_error() for event in events
+    kinds = [type(event).__name__ for event in events]
+    error_at = next(
+        i
+        for i, event in enumerate(events)
+        if isinstance(event, Error) and event.error == jobs_check_failed_error()
     )
+    # Held text is released before the error so the user still sees the reply.
+    assert "AssistantDelta" in kinds[:error_at]
     assert any(isinstance(event, TurnComplete) for event in events)

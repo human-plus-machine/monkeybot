@@ -30,8 +30,6 @@ import os
 import shlex
 import shutil
 import sys
-import tempfile
-import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,10 +45,9 @@ from monkeybot.core.tools.background_jobs import (
     BackgroundJob,
     JobRegistry,
     JobStatus,
-    allocate_log_path,
+    allocate_background_job,
     append_log,
     clamp_job_timeout,
-    new_job_id,
     read_log_from,
     timeout_failure_message,
 )
@@ -768,30 +765,6 @@ class TerminalExecutor:
             env = run_env
         return executable, exec_args, exec_cwd, env
 
-    def _allocate_local_job(
-        self,
-        command: str,
-        args: list[str],
-        *,
-        effective: int,
-        hit_ceiling: bool,
-        log_dir: Path | None,
-    ) -> BackgroundJob:
-        job_id = new_job_id()
-        directory = (
-            log_dir if log_dir is not None else Path(tempfile.mkdtemp(prefix="monkeybot-job-"))
-        )
-        job = BackgroundJob(
-            job_id=job_id,
-            command=" ".join([command, *args]),
-            log_path=allocate_log_path(directory, job_id),
-            started_at=time.monotonic(),
-            timeout_seconds=effective,
-            hit_ceiling=hit_ceiling,
-        )
-        self._jobs.add(job)
-        return job
-
     async def _spawn_local_job(
         self,
         job: BackgroundJob,
@@ -855,7 +828,8 @@ class TerminalExecutor:
             extra_allowed_commands=extra_allowed_commands,
             jail_roots=jail_roots,
         )
-        job = self._allocate_local_job(
+        job = allocate_background_job(
+            self._jobs,
             command,
             args,
             effective=effective,
@@ -915,7 +889,7 @@ class TerminalExecutor:
 
     async def read_output(self, job_id: str, cursor: int) -> tuple[str, int]:
         job = self._jobs.get(job_id)
-        return read_log_from(job.log_path, cursor)
+        return read_log_from(job.log_path, cursor, final=job.status is not JobStatus.RUNNING)
 
     async def wait_until_settled(self, job_id: str, *, timeout: float) -> None:
         """Block until the job leaves ``running`` or ``timeout`` seconds elapse."""

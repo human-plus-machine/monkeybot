@@ -672,8 +672,7 @@ def _core_tool_defs(
             "wait_seconds": {
                 "type": "integer",
                 "description": (
-                    "Block until the job exits or this many seconds pass. "
-                    "Default 300, maximum 600."
+                    "Block until the job exits or this many seconds pass. Default 300, maximum 600."
                 ),
             },
             "cursor": {
@@ -777,8 +776,7 @@ def _core_tool_defs(
                 "log_path. Then call await_command until it exits, or kill_command "
                 "to stop it. Do not end the turn while a background job is still "
                 "running — running jobs are killed when the turn ends. Pass timeout "
-                "up to the job ceiling; hitting that ceiling fails and tells you to "
-                "use a longer async build."
+                "up to the job ceiling; a job that reaches the ceiling is killed."
             ),
             run_schema,
         ),
@@ -787,8 +785,10 @@ def _core_tool_defs(
             (
                 "Wait for a background command started with run_command background true. "
                 "Blocks until the job exits or wait_seconds elapses (default 300, max 600) "
-                "and returns status, exit_code, a tail of new output, and a cursor. "
-                "Pass the previous cursor to read only output you have not seen. "
+                "and returns status, exit_code, the next chunk of new output (up to 16 KiB), "
+                "a cursor, and has_more. Pass the previous cursor to read only output "
+                "you have not seen; when has_more is true, call again with the returned "
+                "cursor for the rest (or read log_path). "
                 "Several await_command calls may run in parallel. "
                 "Repeating await_command on a job that is still running is expected."
             ),

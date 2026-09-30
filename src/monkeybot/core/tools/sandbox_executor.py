@@ -31,8 +31,6 @@ import logging
 import os
 import re
 import shlex
-import tempfile
-import time
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -50,10 +48,9 @@ from monkeybot.core.tools.background_jobs import (
     BackgroundJob,
     JobRegistry,
     JobStatus,
-    allocate_log_path,
+    allocate_background_job,
     append_log,
     clamp_job_timeout,
-    new_job_id,
     read_log_from,
     timeout_failure_message,
 )
@@ -83,20 +80,13 @@ _ABSOLUTE_PATH_FRAGMENT = re.compile(r"(?<![\w.-])/(?:[^\s'\"`;()]+)")
 # the job continues until the worker is reaped or the local ceiling fires.
 
 
-def _positive_int(raw: str, default: int) -> int:
+def _int_at_least(raw: str, default: int, min_: int) -> int:
+    """Parse ``raw`` as an int, falling back to ``default`` when invalid or below ``min_``."""
     try:
         value = int(raw)
     except (TypeError, ValueError):
         return default
-    return value if value > 0 else default
-
-
-def _non_negative_int(raw: str, default: int) -> int:
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    return value if value >= 0 else default
+    return value if value >= min_ else default
 
 
 @dataclass
@@ -135,33 +125,38 @@ class SandboxConfig:
             env_value_or_current(config, "SANDBOX_SHARED_FILESYSTEM", "true").strip().lower()
         )
         shared_filesystem = shared_raw not in ("0", "false", "no", "off")
-        max_jobs = _positive_int(
+        max_jobs = _int_at_least(
             env_value_or_current(
                 config, "SANDBOX_MAX_BACKGROUND_JOBS", str(DEFAULT_MAX_BACKGROUND_JOBS)
             ),
             DEFAULT_MAX_BACKGROUND_JOBS,
+            1,
         )
-        max_job_seconds = _positive_int(
+        max_job_seconds = _int_at_least(
             env_value_or_current(config, "SANDBOX_MAX_JOB_SECONDS", str(DEFAULT_MAX_JOB_SECONDS)),
             DEFAULT_MAX_JOB_SECONDS,
+            1,
         )
-        renew_interval = _non_negative_int(
+        renew_interval = _int_at_least(
             env_value_or_current(
                 config, "SANDBOX_RENEW_INTERVAL_SECONDS", str(DEFAULT_RENEW_INTERVAL_SECONDS)
             ),
             DEFAULT_RENEW_INTERVAL_SECONDS,
+            0,
         )
-        await_default = _positive_int(
+        await_default = _int_at_least(
             env_value_or_current(
                 config, "SANDBOX_AWAIT_DEFAULT_WAIT_SECONDS", str(DEFAULT_AWAIT_WAIT_SECONDS)
             ),
             DEFAULT_AWAIT_WAIT_SECONDS,
+            1,
         )
-        await_max = _positive_int(
+        await_max = _int_at_least(
             env_value_or_current(
                 config, "SANDBOX_AWAIT_MAX_WAIT_SECONDS", str(DEFAULT_AWAIT_MAX_WAIT_SECONDS)
             ),
             DEFAULT_AWAIT_MAX_WAIT_SECONDS,
+            1,
         )
         if await_default > await_max:
             await_default = await_max
@@ -497,30 +492,6 @@ class SandboxExecutor:
             exc_info=exc_info,
         )
 
-    def _allocate_background_job(
-        self,
-        command: str,
-        args: list[str],
-        *,
-        effective: int,
-        hit_ceiling: bool,
-        log_dir: Path | None,
-    ) -> BackgroundJob:
-        job_id = new_job_id()
-        directory = (
-            log_dir if log_dir is not None else Path(tempfile.mkdtemp(prefix="monkeybot-job-"))
-        )
-        job = BackgroundJob(
-            job_id=job_id,
-            command=" ".join([command, *args]),
-            log_path=allocate_log_path(directory, job_id),
-            started_at=time.monotonic(),
-            timeout_seconds=effective,
-            hit_ceiling=hit_ceiling,
-        )
-        self._jobs.add(job)
-        return job
-
     async def _run_remote_background(
         self,
         job: BackgroundJob,
@@ -565,7 +536,8 @@ class SandboxExecutor:
         effective, hit_ceiling = clamp_job_timeout(timeout, ceiling=self._config.max_job_seconds)
         self._screen_command(command, args, cwd=cwd, extra_allowed_commands=extra_allowed_commands)
         await self._ensure_sandbox()
-        job = self._allocate_background_job(
+        job = allocate_background_job(
+            self._jobs,
             command,
             args,
             effective=effective,
@@ -611,13 +583,13 @@ class SandboxExecutor:
 
     async def read_output(self, job_id: str, cursor: int) -> tuple[str, int]:
         job = self._jobs.get(job_id)
-        return read_log_from(job.log_path, cursor)
+        return read_log_from(job.log_path, cursor, final=job.status is not JobStatus.RUNNING)
 
     async def kill(self, job_id: str) -> BackgroundJob:
         job = self._jobs.get(job_id)
-        if job.status is not JobStatus.RUNNING:
-            return job
-        await self._stop_remote(job, reason="killed")
+        async with self._lock:
+            if job.status is JobStatus.RUNNING:
+                await self._stop_remote(job, reason="killed")
         return job
 
     async def aclose(self) -> list[BackgroundJob]:
@@ -701,22 +673,13 @@ class SandboxExecutor:
     async def _refresh_unlocked(self, job: BackgroundJob) -> None:
         if job.status is not JobStatus.RUNNING or not job.remote_id or self._sandbox is None:
             return
-        if time.monotonic() - job.started_at >= job.timeout_seconds:
-            await self._stop_remote(
-                job,
-                reason=timeout_failure_message(
-                    timeout_seconds=job.timeout_seconds,
-                    hit_ceiling=job.hit_ceiling,
-                ),
-            )
-            return
         try:
             status = await self._sandbox.commands.get_command_status(job.remote_id)
         except Exception as exc:
-            job.status = JobStatus.LOST
-            job.error = str(exc) or "sandbox command status failed"
-            self._cancel_timeout(job.job_id)
             self._log_job(job, "sandbox command status failed", failed=True, exc_info=True)
+            # Status is unknown, so stop the remote process rather than leave it
+            # running unseen; ``_stop_remote`` marks the job lost if that fails too.
+            await self._stop_remote(job, reason=str(exc) or "sandbox command status failed")
             return
         await self._pull_remote_logs(job)
         running = getattr(status, "running", None)
@@ -777,20 +740,10 @@ class SandboxExecutor:
         self._log_job(job, "sandbox background job killed")
 
     async def _enforce_timeout(self, job_id: str) -> None:
-        try:
-            job = self._jobs.get(job_id)
-        except Exception:
-            logger.warning(
-                "sandbox job timeout could not load job",
-                extra={"job_id": job_id},
-                exc_info=True,
-            )
-            return
+        job = self._jobs.get(job_id)
         try:
             await asyncio.sleep(job.timeout_seconds)
         except asyncio.CancelledError:
-            return
-        if job.status is not JobStatus.RUNNING:
             return
         async with self._lock:
             if job.status is JobStatus.RUNNING:

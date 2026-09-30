@@ -72,6 +72,9 @@ from .doom_loop import (
 )
 from .events import (
     AgentEvent,
+    AssistantDelta,
+    AssistantTextEnded,
+    AssistantTextStarted,
     AttachmentDescriptorEvent,
     ContextSummarized,
     ContextSummarizing,
@@ -473,6 +476,10 @@ class _TurnState:
     post_tool_empty_retries_left: int = _POST_TOOL_EMPTY_RETRIES
     background_job_nudges_left: int = _BACKGROUND_JOB_NUDGES
     background_jobs_reported: bool = False
+    # While background jobs run, a text-only reply may be blocked by the nudge,
+    # so assistant text events are held back until the turn knows it may finish.
+    hold_assistant_text: bool = False
+    held_text_events: list[AgentEvent] = dataclasses.field(default_factory=list)
     turn_input_text: str = ""
     turn_output_text: str = ""
     chat_messages: list[Message] = dataclasses.field(default_factory=list)
@@ -1044,12 +1051,12 @@ async def _consume_provider_stream_body(
                         llm_cache_creation += ev.cache_creation_tokens
                         continue
                     if isinstance(ev, Done):
-                        for aev in stream_mapper.map(ev):
+                        for aev in _hold_or_pass_text(state, stream_mapper.map(ev)):
                             yield aev
                         break
-                    for aev in stream_mapper.map(ev):
+                    for aev in _hold_or_pass_text(state, stream_mapper.map(ev)):
                         yield aev
-            for aev in stream_mapper.finish():
+            for aev in _hold_or_pass_text(state, stream_mapper.finish()):
                 yield aev
             state.pending = stream_mapper.pending
             state.assistant_text = stream_mapper.assistant_text
@@ -1146,8 +1153,10 @@ async def _consume_provider_stream_body(
             },
         )
     except asyncio.CancelledError:
-        for aev in stream_mapper.finish():
+        state.hold_assistant_text = False
+        for aev in [*state.held_text_events, *stream_mapper.finish()]:
             yield aev
+        state.held_text_events.clear()
         _sync_stream_mapper_text(state, stream_mapper)
         logger.info(
             "provider stream cancelled %s",
@@ -1191,8 +1200,10 @@ async def _consume_provider_stream_body(
         state.action = "return"
         return
     except Exception as exc:
-        for aev in stream_mapper.finish():
+        state.hold_assistant_text = False
+        for aev in [*state.held_text_events, *stream_mapper.finish()]:
             yield aev
+        state.held_text_events.clear()
         _sync_stream_mapper_text(state, stream_mapper)
         logger.exception(
             "provider stream failed %s",
@@ -1346,6 +1357,35 @@ async def _scan_outbound_before_provider_call(state: _TurnState) -> AsyncIterato
         state.action = "return"
 
 
+_TEXT_EVENT_TYPES = (AssistantTextStarted, AssistantDelta, AssistantTextEnded)
+
+
+def _hold_or_pass_text(state: _TurnState, events: Sequence[AgentEvent]) -> list[AgentEvent]:
+    """Buffer assistant text events while ``hold_assistant_text`` is set."""
+    if not state.hold_assistant_text:
+        return list(events)
+    passed: list[AgentEvent] = []
+    for evt in events:
+        if isinstance(evt, _TEXT_EVENT_TYPES):
+            state.held_text_events.append(evt)
+        else:
+            passed.append(evt)
+    return passed
+
+
+def _release_held_text(state: _TurnState) -> list[AgentEvent]:
+    """Return held assistant text events and stop holding."""
+    state.hold_assistant_text = False
+    released = state.held_text_events
+    state.held_text_events = []
+    return released
+
+
+def _discard_held_text(state: _TurnState) -> None:
+    state.hold_assistant_text = False
+    state.held_text_events.clear()
+
+
 async def _stream_provider_turn(
     state: _TurnState,
     *,
@@ -1354,9 +1394,16 @@ async def _stream_provider_turn(
     hook_manager: HookManager | None,
     transcript_writer: TranscriptWriter | None,
     vertex_google_search: bool,
+    tool_executor: object | None = None,
     cancelled: asyncio.Event | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Stream provider events; fill ``state.pending`` / text fields. May set action=return."""
+    state.held_text_events.clear()
+    try:
+        state.hold_assistant_text = bool(_running_background_jobs(tool_executor))
+    except Exception:
+        # Unknown job state: hold, the turn-end check fails closed anyway.
+        state.hold_assistant_text = True
     async for evt in _scan_outbound_before_provider_call(state):
         yield evt
     if state.action == "return":
@@ -1402,6 +1449,8 @@ async def _nudge_or_error_on_background_jobs(
     try:
         running_jobs = _running_background_jobs(tool_executor)
     except Exception:
+        for evt in _release_held_text(state):
+            yield evt
         state.background_jobs_reported = True
         yield Error(
             request_id=state.ctx.request_id,
@@ -1413,6 +1462,8 @@ async def _nudge_or_error_on_background_jobs(
     if not running_jobs:
         return
     if state.turn_index < state.effective_max and state.background_job_nudges_left > 0:
+        # The blocked reply is never shown; the model retries after the nudge.
+        _discard_held_text(state)
         state.background_job_nudges_left -= 1
         note = jobs_still_running_note(running_jobs)
         state.pre_tool_extra_next = _combine_extras(state.pre_tool_extra_next, note)
@@ -1429,6 +1480,8 @@ async def _nudge_or_error_on_background_jobs(
         state.needs_followup_after_tools = False
         state.action = "continue"
         return
+    for evt in _release_held_text(state):
+        yield evt
     state.background_jobs_reported = True
     yield Error(
         request_id=state.ctx.request_id,
@@ -1451,6 +1504,8 @@ async def _handle_empty_or_final_text(
         yield evt
     if state.action in ("continue", "break"):
         return
+    for evt in _release_held_text(state):
+        yield evt
     if cleaned_text:
         # Fire-and-forget: this is the final assistant turn (we break
         # right after), so nothing reads it again in-loop. Keeping it
@@ -1733,10 +1788,13 @@ async def _run_inner_core(
                 hook_manager=hook_manager,
                 transcript_writer=transcript_writer,
                 vertex_google_search=vertex_google_search,
+                tool_executor=tool_executor,
                 cancelled=cancelled,
             ):
                 yield evt
             if state.action == "return":
+                for evt in _release_held_text(state):
+                    yield evt
                 # Cancel/error mid-stream skips _handle_empty_or_final_text —
                 # persist any text already shown to the user before exiting.
                 # Break (do not return) so freeze_attachments_in_history still runs.
@@ -1751,6 +1809,8 @@ async def _run_inner_core(
                 # Stream already finished (and may have been shown over SSE).
                 # Persist text and settle any finalized tool calls the same way
                 # mid-stream abort does.
+                for evt in _release_held_text(state):
+                    yield evt
                 yield Error(request_id=state.ctx.request_id, error="Request cancelled")
                 state.needs_followup_after_tools = False
                 await _persist_partial_assistant_on_abort(
@@ -1772,6 +1832,8 @@ async def _run_inner_core(
                     break
 
             else:
+                for evt in _release_held_text(state):
+                    yield evt
                 async for evt in _append_tool_requests_and_dispatch(
                     state,
                     history=history,

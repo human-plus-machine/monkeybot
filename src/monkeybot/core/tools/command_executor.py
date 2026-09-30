@@ -12,6 +12,7 @@ running. A second call is a no-op and returns an empty list.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
 
@@ -34,10 +35,10 @@ class BackgroundCommandExecutor(Protocol):
         self,
         command: str,
         args: list[str],
-        timeout: int = 60,
         *,
+        timeout: int = 60,
         cwd: Path | str | None = None,
-        extra_allowed_commands: list[str] | tuple[str, ...] | None = None,
+        extra_allowed_commands: Sequence[str] | None = None,
     ) -> ExecutionResult:
         """Run a command and block until it exits or times out."""
         ...
@@ -49,7 +50,7 @@ class BackgroundCommandExecutor(Protocol):
         *,
         timeout: int = 60,
         cwd: Path | str | None = None,
-        extra_allowed_commands: list[str] | tuple[str, ...] | None = None,
+        extra_allowed_commands: Sequence[str] | None = None,
         log_dir: Path | None = None,
     ) -> BackgroundJob:
         """Start a detached command and return its job handle immediately."""
