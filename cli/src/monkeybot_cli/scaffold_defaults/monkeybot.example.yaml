@@ -241,6 +241,14 @@ sandbox:
   server_url: http://localhost:18080
   image: python:3.12
   ttl_seconds: 1800
+  # Background command caps. Jobs longer than max_job_seconds fail and should
+  # move to a broker-owned build. renew_interval_seconds extends the worker
+  # while a job is running (0 renews once at start). await_* bounds await_command.
+  max_background_jobs: 4
+  max_job_seconds: 3300
+  renew_interval_seconds: 300
+  await_default_wait_seconds: 300
+  await_max_wait_seconds: 600
   # Set false only for a remote sandbox server with no shared filesystem. It
   # then runs compute-only commands and refuses workspace/skills file access.
   shared_filesystem: true

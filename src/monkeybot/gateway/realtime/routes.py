@@ -55,6 +55,7 @@ from monkeybot.core.runtime.events import (
 from monkeybot.core.runtime.events import Error as AgentError
 from monkeybot.core.runtime.realtime_loop import run_realtime_turn
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
+from monkeybot.core.tools.background_jobs import jobs_killed_at_turn_end_error
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.todo_list import TodoListStore, TodoListTool
@@ -485,6 +486,12 @@ async def _handle_assistant_boundary(
             if state.state == "tool_running":
                 state.transition("listening")
     finally:
+        killed_jobs = await tool_executor.aclose()
+        if killed_jobs:
+            await _send_frame(
+                ws,
+                ServerErrorFrame(error=jobs_killed_at_turn_end_error(killed_jobs)),
+            )
         end_in_flight_turn()
 
 

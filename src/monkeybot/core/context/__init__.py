@@ -651,8 +651,49 @@ def _core_tool_defs(
                 ),
             },
             "timeout": {"type": "integer"},
+            "background": {
+                "type": "boolean",
+                "description": (
+                    "When true, start the command and return immediately with job_id and "
+                    "log_path. Poll with await_command or stop it with kill_command. "
+                    "Do not finish the turn while the job is still running."
+                ),
+            },
         },
         "required": [],
+    }
+    await_command_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "job_id": {
+                "type": "string",
+                "description": "job_id returned by run_command with background true.",
+            },
+            "wait_seconds": {
+                "type": "integer",
+                "description": (
+                    "Block until the job exits or this many seconds pass. Default 300, maximum 600."
+                ),
+            },
+            "cursor": {
+                "type": "integer",
+                "description": (
+                    "Byte offset from the previous await_command result. "
+                    "Omit or pass 0 to start at the beginning of the log."
+                ),
+            },
+        },
+        "required": ["job_id"],
+    }
+    kill_command_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "job_id": {
+                "type": "string",
+                "description": "job_id returned by run_command with background true.",
+            },
+        },
+        "required": ["job_id"],
     }
     list_skills_schema: dict[str, object] = {"type": "object", "properties": {}}
     task_props: dict[str, object] = {
@@ -729,9 +770,37 @@ def _core_tool_defs(
                 "do not pass a combined string as the binary. Shell starts in "
                 "workspace root unless cwd (workspace-relative) is set. "
                 "cd is a builtin and is not a valid command — pass cwd or "
-                "workspace-relative paths to the binary instead."
+                "workspace-relative paths to the binary instead. "
+                "Set background true for a long command (image build, large test "
+                "suite, migration) so the call returns immediately with job_id and "
+                "log_path. Then call await_command until it exits, or kill_command "
+                "to stop it. Do not end the turn while a background job is still "
+                "running — running jobs are killed when the turn ends. Pass timeout "
+                "up to the job ceiling; a job that reaches the ceiling is killed."
             ),
             run_schema,
+        ),
+        ToolDef(
+            "await_command",
+            (
+                "Wait for a background command started with run_command background true. "
+                "Blocks until the job exits or wait_seconds elapses (default 300, max 600) "
+                "and returns status, exit_code, the next chunk of new output (up to 16 KiB), "
+                "a cursor, and has_more. Pass the previous cursor to read only output "
+                "you have not seen; when has_more is true, call again with the returned "
+                "cursor for the rest (or read log_path). "
+                "Several await_command calls may run in parallel. "
+                "Repeating await_command on a job that is still running is expected."
+            ),
+            await_command_schema,
+            parallel_safe=True,
+            read_only=True,
+            doom_loop_exempt=True,
+        ),
+        ToolDef(
+            "kill_command",
+            "Stop a background command started with run_command background true.",
+            kill_command_schema,
         ),
         ToolDef(
             "read_file",
