@@ -6,6 +6,12 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Core
+
+### Added
+
+- `run_command` can start a long command in the background and return `job_id` and `log_path` immediately. `await_command` pages its output until it exits, and `kill_command` stops it, on the local terminal and in the OpenSandbox executor. A turn cannot finish while a job is still running; leftover jobs are killed when the turn ends. The sandbox renews its lease while a job runs, up to the job time ceiling.
+
 ## [browser v0.8.1] - 2026-09-28
 
 ### Fixed
