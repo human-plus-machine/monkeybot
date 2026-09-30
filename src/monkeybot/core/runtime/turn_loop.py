@@ -44,6 +44,11 @@ from monkeybot.core.runtime.context_budget import (
     compute_context_pressure_tier,
 )
 from monkeybot.core.runtime.provider_stream_mapper import ProviderStreamMapper
+from monkeybot.core.tools.background_jobs import (
+    jobs_check_failed_error,
+    jobs_still_running_note,
+    jobs_will_be_killed_error,
+)
 from monkeybot.core.tools.inspector import ToolInspector
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
@@ -143,6 +148,7 @@ _POST_TOOL_EMPTY_COMPLETION_NOTE = (
 _EMPTY_COMPLETION_EXHAUSTED_ERROR = (
     "Empty model completion after recovery: ending turn with no reply"
 )
+_BACKGROUND_JOB_NUDGES = 3
 
 
 def _require_prompt(state: _TurnState) -> tuple[Message, EpochAdmit]:
@@ -465,6 +471,8 @@ class _TurnState:
     pre_tool_extra_next: str | None = None
     empty_completion_retries_left: int = _EMPTY_COMPLETION_RETRIES
     post_tool_empty_retries_left: int = _POST_TOOL_EMPTY_RETRIES
+    background_job_nudges_left: int = _BACKGROUND_JOB_NUDGES
+    background_jobs_reported: bool = False
     turn_input_text: str = ""
     turn_output_text: str = ""
     chat_messages: list[Message] = dataclasses.field(default_factory=list)
@@ -1368,14 +1376,81 @@ async def _stream_provider_turn(
         yield evt
 
 
+def _running_background_jobs(tool_executor: object) -> list[object]:
+    fn = getattr(tool_executor, "running_background_jobs", None)
+    if not callable(fn):
+        return []
+    try:
+        jobs = fn()
+    except Exception:
+        logger.warning("running_background_jobs failed", exc_info=True)
+        raise
+    return list(jobs or [])
+
+
+async def _nudge_or_error_on_background_jobs(
+    state: _TurnState,
+    tool_executor: object | None,
+) -> AsyncIterator[AgentEvent]:
+    """Stop a final answer while jobs run, or when their status cannot be read.
+
+    Sets ``state.action`` to ``continue`` or ``break`` when the turn must not
+    finish. Leaves ``state.action`` unchanged when it may.
+    """
+    if tool_executor is None:
+        return
+    try:
+        running_jobs = _running_background_jobs(tool_executor)
+    except Exception:
+        state.background_jobs_reported = True
+        yield Error(
+            request_id=state.ctx.request_id,
+            error=jobs_check_failed_error(),
+        )
+        state.needs_followup_after_tools = False
+        state.action = "break"
+        return
+    if not running_jobs:
+        return
+    if state.turn_index < state.effective_max and state.background_job_nudges_left > 0:
+        state.background_job_nudges_left -= 1
+        note = jobs_still_running_note(running_jobs)
+        state.pre_tool_extra_next = _combine_extras(state.pre_tool_extra_next, note)
+        logger.warning(
+            "final answer blocked; background jobs still running %s",
+            kv(
+                request_id=state.ctx.request_id,
+                thread_id=state.ctx.thread_id,
+                turn=state.turn_index,
+                jobs=len(running_jobs),
+                nudges_left=state.background_job_nudges_left,
+            ),
+        )
+        state.needs_followup_after_tools = False
+        state.action = "continue"
+        return
+    state.background_jobs_reported = True
+    yield Error(
+        request_id=state.ctx.request_id,
+        error=jobs_will_be_killed_error(running_jobs),
+    )
+    state.needs_followup_after_tools = False
+    state.action = "break"
+
+
 async def _handle_empty_or_final_text(
     state: _TurnState,
     *,
     history: HistoryStore,
     last_assistant: list[str],
+    tool_executor: object | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """No tool calls: final assistant write, empty-completion retry, or exhausted Error."""
     cleaned_text = (state.assistant_text or "").strip()
+    async for evt in _nudge_or_error_on_background_jobs(state, tool_executor):
+        yield evt
+    if state.action in ("continue", "break"):
+        return
     if cleaned_text:
         # Fire-and-forget: this is the final assistant turn (we break
         # right after), so nothing reads it again in-loop. Keeping it
@@ -1685,7 +1760,10 @@ async def _run_inner_core(
 
             if not state.pending:
                 async for evt in _handle_empty_or_final_text(
-                    state, history=history, last_assistant=last_assistant
+                    state,
+                    history=history,
+                    last_assistant=last_assistant,
+                    tool_executor=tool_executor,
                 ):
                     yield evt
                 if state.action == "continue":
@@ -1726,6 +1804,23 @@ async def _run_inner_core(
                 max_turns=state.effective_max,
             ),
         )
+
+    if not state.background_jobs_reported:
+        try:
+            still_running = _running_background_jobs(tool_executor)
+        except Exception:
+            state.background_jobs_reported = True
+            yield Error(
+                request_id=state.ctx.request_id,
+                error=jobs_check_failed_error(),
+            )
+        else:
+            if still_running:
+                state.background_jobs_reported = True
+                yield Error(
+                    request_id=state.ctx.request_id,
+                    error=jobs_will_be_killed_error(still_running),
+                )
 
     # Ensure the backgrounded assistant write has landed before any load/reset
     # below (freeze) so the assistant row is durable and not overwritten.

@@ -337,6 +337,8 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
         "get_mcp_prompt",
         "load_file",
         "ask_user",
+        "await_command",
+        "kill_command",
     }
     assert core_names.issubset(set(names))
     assert "start_loop" not in names

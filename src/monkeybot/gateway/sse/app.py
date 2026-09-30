@@ -84,6 +84,7 @@ from monkeybot.core.runtime.events import Error as AgentError
 from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
+from monkeybot.core.tools.background_jobs import jobs_killed_at_turn_end_error
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.grant_store import build_grants_persist_hook
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
@@ -1126,7 +1127,15 @@ class GatewayLoopPort:
             if in_flight:
                 end_in_flight_turn()
             if executor is not None:
-                await executor.aclose()
+                killed_jobs = await executor.aclose()
+                if killed_jobs:
+                    killed_event = AgentError(
+                        request_id=request_id,
+                        error=jobs_killed_at_turn_end_error(killed_jobs),
+                    )
+                    if transcript_writer is not None:
+                        await transcript_writer.write_event(killed_event)
+                    await bus.publish_data(event_to_json(killed_event))
             watcher.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await watcher
