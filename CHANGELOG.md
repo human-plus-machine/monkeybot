@@ -6,7 +6,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Core
+## [core v3.7.0] - 2026-09-30
 
 ### Added
 
