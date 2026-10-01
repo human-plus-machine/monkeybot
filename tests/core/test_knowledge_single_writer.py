@@ -13,7 +13,7 @@ from monkeybot.core.knowledge.sqlite_index import (
     KnowledgeIndex,
     KnowledgeWriterConflictError,
 )
-from monkeybot.core.knowledge.subsystem import KnowledgeSubsystem
+from monkeybot.core.knowledge.subsystem import KnowledgeSubsystem, open_knowledge_for_gateway
 from monkeybot.core.knowledge.types import KnowledgeSettings, TextChunk
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
@@ -77,9 +77,7 @@ async def test_second_writer_raises_while_first_open(tmp_path: Path) -> None:
         sqlite_index_mod._pid_alive = lambda _pid: True
         try:
             second = KnowledgeIndex(db)
-            with pytest.raises(
-                KnowledgeWriterConflictError, match="already has an active writer"
-            ):
+            with pytest.raises(KnowledgeWriterConflictError, match="already has an active writer"):
                 await second.open()
         finally:
             sqlite_index_mod._pid_alive = original
@@ -129,9 +127,7 @@ async def test_writer_claim_is_exclusive_create(tmp_path: Path) -> None:
     try:
         with patch("os.open", _racing_open):
             index = KnowledgeIndex(db)
-            with pytest.raises(
-                KnowledgeWriterConflictError, match="already has an active writer"
-            ):
+            with pytest.raises(KnowledgeWriterConflictError, match="already has an active writer"):
                 await index.open()
     finally:
         sqlite_index_mod._pid_alive = original_alive
@@ -288,4 +284,52 @@ async def test_core_tool_executor_search_with_read_only_knowledge(
         finally:
             await reader.close()
     finally:
+        await writer.close()
+
+
+@pytest.mark.asyncio
+async def test_gateway_open_falls_back_to_read_only_on_writer_conflict(tmp_path: Path) -> None:
+    """A second gateway keeps search when the index writer is already live."""
+    import os
+
+    import monkeybot.core.knowledge.sqlite_index as sqlite_index_mod
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    knowledge = tmp_path / ".monkeybot" / "knowledge"
+    knowledge.mkdir(parents=True)
+    settings = KnowledgeSettings(
+        enabled=True,
+        knowledge_root=str(knowledge),
+        index_path=str(knowledge / "index.sqlite"),
+        debounce_ms=0,
+        startup_scan=False,
+    )
+    writer = await KnowledgeSubsystem.create(
+        workspace_root=ws,
+        settings=settings,
+        knowledge_root=knowledge,
+        index_path=Path(settings.index_path),
+        read_only=False,
+    )
+    sentinel = Path(settings.index_path).with_suffix(
+        Path(settings.index_path).suffix + ".writer-pid"
+    )
+    sentinel.write_text(str(os.getpid() + 1), encoding="utf-8")
+    original = sqlite_index_mod._pid_alive
+    sqlite_index_mod._pid_alive = lambda _pid: True
+    try:
+        reader, mode = await open_knowledge_for_gateway(
+            workspace_root=ws,
+            settings=settings,
+            knowledge_root=knowledge,
+            index_path=Path(settings.index_path),
+        )
+        try:
+            assert mode == "read-only"
+            assert reader.read_only is True
+        finally:
+            await reader.close()
+    finally:
+        sqlite_index_mod._pid_alive = original
         await writer.close()

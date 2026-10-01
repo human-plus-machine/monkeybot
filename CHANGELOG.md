@@ -6,6 +6,12 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [core v3.7.1] - 2026-10-01
+
+### Fixed
+
+- A second gateway for the same workspace opens the knowledge index read-only instead of turning knowledge off when another process already holds the writer lock.
+
 ## [core v3.7.0] - 2026-09-30
 
 ### Added

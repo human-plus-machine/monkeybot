@@ -49,7 +49,11 @@ from monkeybot.core.context import LoopsToolRegistry, build_context
 from monkeybot.core.context.common import text_from_blocks
 from monkeybot.core.context.slash_skills import apply_invoked_skill
 from monkeybot.core.hooks import HookManager
-from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
+from monkeybot.core.knowledge import (
+    KnowledgeSubsystem,
+    open_knowledge_for_gateway,
+    resolve_knowledge_settings,
+)
 from monkeybot.core.knowledge.config import (
     knowledge_enabled_from_config,
     knowledge_read_only_from_env,
@@ -1268,30 +1272,32 @@ async def _startup(fastapi_app: FastAPI) -> None:
                 )
             layout = AgentLayout.from_environment()
             settings = resolve_knowledge_settings(workspace_root=layout.workspace_root)
-            knowledge = await KnowledgeSubsystem.create(
+            knowledge, knowledge_mode = await open_knowledge_for_gateway(
                 workspace_root=layout.workspace_root,
                 settings=settings,
                 knowledge_root=Path(settings.knowledge_root),
                 index_path=Path(settings.index_path),
-                read_only=False,
             )
-            hook_mgr = gateway_runtime.hook_manager
-            if hook_mgr is None:
-                hook_mgr = HookManager()
-                gateway_runtime.hook_manager = hook_mgr
-            knowledge.register_hooks(hook_mgr)
             gateway_runtime.knowledge = knowledge
             fastapi_app.state.knowledge = knowledge
+            if knowledge_mode == "writer":
+                hook_mgr = gateway_runtime.hook_manager
+                if hook_mgr is None:
+                    hook_mgr = HookManager()
+                    gateway_runtime.hook_manager = hook_mgr
+                knowledge.register_hooks(hook_mgr)
 
-            async def _knowledge_startup_scan() -> None:
-                try:
-                    await knowledge.ensure_ready()
-                    logger.info("knowledge index ready (path=%s)", settings.index_path)
-                except Exception as scan_exc:
-                    logger.warning("knowledge startup scan failed: %r", scan_exc)
+                async def _knowledge_startup_scan() -> None:
+                    try:
+                        await knowledge.ensure_ready()
+                        logger.info("knowledge index ready (path=%s)", settings.index_path)
+                    except Exception as scan_exc:
+                        logger.warning("knowledge startup scan failed: %r", scan_exc)
 
-            asyncio.create_task(_knowledge_startup_scan())
-            logger.info("knowledge layer enabled (index=%s)", settings.index_path)
+                asyncio.create_task(_knowledge_startup_scan())
+                logger.info("knowledge layer enabled (index=%s)", settings.index_path)
+            else:
+                logger.info("knowledge layer enabled read-only (index=%s)", settings.index_path)
         except Exception as exc:
             logger.warning("knowledge layer setup failed; continuing without: %r", exc)
             gateway_runtime.knowledge = None
