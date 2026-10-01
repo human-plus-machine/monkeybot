@@ -16,7 +16,7 @@ from monkeybot.core.knowledge.fusion import search as fusion_search
 from monkeybot.core.knowledge.hook import KnowledgeHook
 from monkeybot.core.knowledge.indexer import KnowledgeIndexer
 from monkeybot.core.knowledge.salience import IndexAnnouncer, SearchUsageNudge
-from monkeybot.core.knowledge.sqlite_index import KnowledgeIndex
+from monkeybot.core.knowledge.sqlite_index import KnowledgeIndex, KnowledgeWriterConflictError
 from monkeybot.core.knowledge.tool import serialize_search_result
 from monkeybot.core.knowledge.types import EmbeddingSettings, KnowledgeSettings, RecallHit
 from monkeybot.core.persistence.sqlite_vector import SQLiteVectorStore
@@ -295,4 +295,37 @@ class KnowledgeSubsystem:
         return payload
 
 
-__all__ = ["KnowledgeSubsystem"]
+async def open_knowledge_for_gateway(
+    *,
+    workspace_root: Path,
+    settings: KnowledgeSettings,
+    knowledge_root: Path | None = None,
+    index_path: Path | None = None,
+) -> tuple[KnowledgeSubsystem, Literal["writer", "read-only"]]:
+    """Open the gateway knowledge layer.
+
+    The first gateway for a workspace is the writer. A second gateway keeps
+    search by opening the same index read-only instead of disabling knowledge.
+    """
+    try:
+        knowledge = await KnowledgeSubsystem.create(
+            workspace_root=workspace_root,
+            settings=settings,
+            knowledge_root=knowledge_root,
+            index_path=index_path,
+            read_only=False,
+        )
+        return knowledge, "writer"
+    except KnowledgeWriterConflictError as exc:
+        logger.warning("knowledge index already has a writer; opening read-only: %s", exc)
+        knowledge = await KnowledgeSubsystem.create(
+            workspace_root=workspace_root,
+            settings=settings,
+            knowledge_root=knowledge_root,
+            index_path=index_path,
+            read_only=True,
+        )
+        return knowledge, "read-only"
+
+
+__all__ = ["KnowledgeSubsystem", "open_knowledge_for_gateway"]
