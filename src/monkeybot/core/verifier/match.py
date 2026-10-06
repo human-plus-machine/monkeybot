@@ -16,7 +16,7 @@ _PATH_KEYS = ("path", "file_path", "file", "filename", "dest", "destination", "t
 _PATH_LIST_KEYS = ("paths", "files")
 _COMMAND_KEYS = ("command", "cmd", "script", "argv")
 WRITE_TOOLS = frozenset({"write_file", "edit_file", "apply_patch"})
-READ_TOOLS = frozenset({"read_file", "glob", "search"})
+READ_TOOLS = frozenset({"read_file", "glob"})
 LEDGER_SIGNALS = frozenset({"constraint_touch", "repeat_correction", "done_unmet"})
 
 

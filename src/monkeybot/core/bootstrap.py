@@ -17,11 +17,6 @@ from monkeybot.core.config.settings import auto_schema_enabled_from_config, get_
 from monkeybot.core.config.snapshot import context_window_tokens, current_env, get_config_store
 from monkeybot.core.context import build_context
 from monkeybot.core.hooks import HookManager
-from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
-from monkeybot.core.knowledge.config import (
-    knowledge_enabled_from_config,
-    knowledge_read_only_from_env,
-)
 from monkeybot.core.llm.provider import Provider
 from monkeybot.core.llm.usage import usage_from_totals
 from monkeybot.core.mcp.mcp_client import MCPClient
@@ -52,7 +47,6 @@ class HarnessDeps:
     mcp: MCPClient
     provider: Provider
     model: str
-    knowledge: KnowledgeSubsystem | None = None
 
     async def close(self) -> None:
         """Close persisted storage and tear down MCP sessions.
@@ -61,8 +55,6 @@ class HarnessDeps:
         does not define ``aclose``/``close`` today; cloud SDK clients are process-scoped.
         Call explicit workspace teardown here if the protocol gains lifecycle hooks.
         """
-        if self.knowledge is not None:
-            await self.knowledge.close()
         if self.memory is not None:
             await self.memory.close()
         await self.storage.close()
@@ -120,7 +112,8 @@ async def create_harness_deps(
         open_mcp: When False, MCP is not loaded from disk (typical for Lambda).
         provider_override: Inject a custom :class:`~monkeybot.core.llm.provider.Provider` (skips config lookup).
         _provider_override: Deprecated alias for ``provider_override`` (tests).
-        workspace_root: When set with knowledge enabled, constructs :class:`KnowledgeSubsystem`.
+        workspace_root: Kept so existing callers that pass a workspace root keep working.
+            Workspace exploration uses ``grep`` and ``glob``; this argument is not read.
         agent_scope: Namespaces conversation history in ``db_url``, same as the gateway's
             resolved agent root (see :func:`~monkeybot.core.persistence.backends.create_storage_backend`).
             **Required** whenever more than one ``create_harness_deps`` caller (e.g. one Lambda
@@ -177,22 +170,6 @@ async def create_harness_deps(
                     logger.warning("memory setup failed; continuing without: %r", exc)
                     memory = None
 
-        knowledge: KnowledgeSubsystem | None = None
-        if knowledge_enabled_from_config() and workspace_root is not None:
-            try:
-                settings = resolve_knowledge_settings(workspace_root=workspace_root)
-                knowledge = await KnowledgeSubsystem.create(
-                    workspace_root=workspace_root,
-                    settings=settings,
-                    knowledge_root=Path(settings.knowledge_root),
-                    index_path=Path(settings.index_path),
-                    read_only=knowledge_read_only_from_env(),
-                )
-                await knowledge.ensure_ready()
-            except Exception as exc:
-                logger.warning("knowledge layer setup failed; continuing without: %r", exc)
-                knowledge = None
-
         mcp = MCPClient()
         if open_mcp and mcp_config_path is not None:
             strict = os.environ.get("MCP_STRICT_LOAD", "").strip().lower() in ("1", "true", "yes")
@@ -201,7 +178,6 @@ async def create_harness_deps(
         return HarnessDeps(
             storage=backend,
             memory=memory,
-            knowledge=knowledge,
             mcp=mcp,
             provider=prov,
             model=model_str,
@@ -258,7 +234,6 @@ async def run_pattern_bc_turn(
     executor = CoreToolExecutor(
         workspace_root=workspace_root,
         memory=deps.memory,
-        knowledge=deps.knowledge,
         skills_path=skills_path,
         artifacts_path=artifacts_path,
         mcp=deps.mcp,

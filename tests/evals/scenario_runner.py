@@ -39,8 +39,6 @@ def tool_category(tool_name: str) -> str:
         return "todo"
     if tool_name == "load_file":
         return "attachment"
-    if tool_name == "search":
-        return "knowledge_search"
     if tool_name in code_search_tools:
         return "code_search"
     return "other"

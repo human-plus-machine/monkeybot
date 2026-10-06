@@ -66,11 +66,6 @@ observability = [
     "opentelemetry-exporter-otlp-proto-http>=1.28",
     "opentelemetry-instrumentation-fastapi>=0.62b1",
 ]
-# Optional AST-aware knowledge chunking (tree-sitter). Without this extra the
-# indexer falls back to an indent/brace heuristic for code suffixes.
-knowledge-ast = ["tree-sitter-language-pack>=1.6"]
-# Optional PDF/DOCX extraction for the knowledge indexer.
-knowledge-media = ["pypdf>=6.14.2", "python-docx>=1.1.0"]
 
 [dependency-groups]
 dev = [
@@ -93,10 +88,6 @@ dev = [
     "typer>=0.12.0",
     # Shims in src/monkeybot/cli re-export from monkeybot_cli (talk consolidation).
     "monkeybot-cli",
-    # Exercise tree-sitter code chunking in CI / local tests.
-    "monkeybot[knowledge-ast]",
-    # Exercise PDF/DOCX knowledge extraction in CI / local tests.
-    "monkeybot[knowledge-media]",
     # MemPalace is an optional extra; tests still exercise the adapter.
     "monkeybot[memory]",
     # Native goal persistence tests hit a real Postgres via asyncpg.

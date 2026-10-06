@@ -602,32 +602,6 @@ def _core_tool_defs(
         },
         "required": ["patch_text"],
     }
-    search_schema: dict[str, object] = {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": (
-                    "One focused conceptual query (distinctive nouns). "
-                    "Avoid dumping many near-duplicate questions in parallel. "
-                    "Not for past conversations — use `mempalace search`."
-                ),
-            },
-            "q": {"type": "string"},
-            "path_prefix": {
-                "type": "string",
-                "description": "Optional path filter (workspace-relative or notes/).",
-            },
-            "source": {
-                "type": "string",
-                "enum": ["any", "note", "workspace_file"],
-                "description": "Filter by provenance. Default any.",
-            },
-            "limit": {"type": "integer", "description": "Max hits (default ~10)."},
-            "max_hits": {"type": "integer"},
-        },
-        "required": [],
-    }
     run_schema: dict[str, object] = {
         "type": "object",
         "properties": {
@@ -835,7 +809,7 @@ def _core_tool_defs(
         ToolDef(
             "glob",
             "List workspace file paths matching a glob pattern. Prefer over run_command+ls for "
-            "discovery. For content questions ('how does X work?'), use `search` first. "
+            "discovery. For content questions ('how does X work?'), use `grep`, then `read_file`. "
             "A path list is evidence of absence only when the call succeeds with ok:true "
             "(incomplete scans return ok:false / incomplete_scan — narrow root or pattern).",
             glob_schema,
@@ -845,7 +819,8 @@ def _core_tool_defs(
         ToolDef(
             "grep",
             "Search workspace file contents with a Python regex. Prefer over run_command+grep. "
-            "Best for exact identifiers; for conceptual / paraphrased questions, use `search` first. "
+            "Use this for exact identifiers and for conceptual or cross-file questions: pick "
+            "distinctive terms, then `read_file` the matching paths. "
             "An empty match list is evidence of absence only when the payload has "
             "scan_complete=true (incomplete scans return ok:false / incomplete_scan — narrow "
             "root or pass file_glob). Capped pages still report total_match_count and next_offset.",
@@ -858,19 +833,6 @@ def _core_tool_defs(
             "Apply a multi-file Codex-style patch (Add / Update / Delete / Move). "
             "Fail-closed: nothing is written if any hunk fails to validate.",
             apply_patch_schema,
-        ),
-        ToolDef(
-            "search",
-            "Search the local workspace index (source files + knowledge notes) via "
-            "keyword FTS, link graph, and optional embeddings. Has no record of past "
-            "conversations — use `mempalace search` for those. Default first step for "
-            "unfamiliar code / conceptual / paraphrased / cross-file questions. "
-            "Hits return normalized score (top≈1.0), optional cosine/bm25/signals; "
-            "read until the score drops sharply (top 3–5). For locate-a-file/asset "
-            "questions prefer `glob`. Prefer `grep` for exact identifiers.",
-            search_schema,
-            parallel_safe=True,
-            read_only=True,
         ),
         ToolDef(
             "list_skills",
