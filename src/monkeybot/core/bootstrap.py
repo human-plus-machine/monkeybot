@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -112,8 +113,8 @@ async def create_harness_deps(
         open_mcp: When False, MCP is not loaded from disk (typical for Lambda).
         provider_override: Inject a custom :class:`~monkeybot.core.llm.provider.Provider` (skips config lookup).
         _provider_override: Deprecated alias for ``provider_override`` (tests).
-        workspace_root: Kept so existing callers that pass a workspace root keep working.
-            Workspace exploration uses ``grep`` and ``glob``; this argument is not read.
+        workspace_root: Deprecated and ignored; emits :class:`DeprecationWarning` when set.
+            Removed in the next major release.
         agent_scope: Namespaces conversation history in ``db_url``, same as the gateway's
             resolved agent root (see :func:`~monkeybot.core.persistence.backends.create_storage_backend`).
             **Required** whenever more than one ``create_harness_deps`` caller (e.g. one Lambda
@@ -129,6 +130,12 @@ async def create_harness_deps(
             with no shared ``db_url``); passing a concrete value always wins over the
             environment.
     """
+    if workspace_root is not None:
+        warnings.warn(
+            "create_harness_deps(workspace_root=...) is deprecated and ignored",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     override = provider_override if provider_override is not None else _provider_override
     resolved_agent_scope = (
         current_env("MONKEYBOT_AGENT_ID", "").strip() if agent_scope is None else agent_scope

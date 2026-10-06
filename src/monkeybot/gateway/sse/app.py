@@ -49,6 +49,7 @@ from monkeybot.core.context import LoopsToolRegistry, build_context
 from monkeybot.core.context.common import text_from_blocks
 from monkeybot.core.context.slash_skills import apply_invoked_skill
 from monkeybot.core.hooks import HookManager
+from monkeybot.core.hooks.evidence_guard import EvidencePathGuard
 from monkeybot.core.layout import AgentLayout, resolve_agent_path
 from monkeybot.core.llm.provider import (
     Done,
@@ -201,6 +202,7 @@ class GatewayRuntime:
     verdict_mailbox: VerdictMailbox | None = None
     nudge_actuator: NudgeActuator | None = None
     judge_worker: JudgeWorker | None = None
+    evidence_guard: EvidencePathGuard = field(default_factory=EvidencePathGuard)
 
     def build_inspectors(
         self, layout: AgentLayout, cfg: RuntimeConfig | None = None, *, fail_closed: bool = False
@@ -426,23 +428,19 @@ class GatewayRuntime:
         self.inspectors = kept
 
     def rebuild_memory_hooks(self, cfg: RuntimeConfig | None, fastapi_app: FastAPI | None) -> None:
-        """Re-bind memory hooks without reopening storage (URI is restart-only)."""
+        """Re-bind memory, evidence, and verifier hooks without reopening storage."""
         enabled = env_flag(cfg, "MONKEYBOT_MEMORY_HOOK_ENABLED", default=True)
         mgr = HookManager()
-        has_hooks = False
         if enabled and self.memory is not None:
             self.memory.register_hooks(mgr)
-            has_hooks = True
+        self.evidence_guard.register(mgr)
         if self.goal_ledger is not None:
             self.goal_ledger.register(mgr)
-            has_hooks = True
         if self.progress_tracker is not None:
             self.progress_tracker.register(mgr)
-            has_hooks = True
         if self.nudge_actuator is not None:
             self.nudge_actuator.register(mgr)
-            has_hooks = True
-        self.hook_manager = mgr if has_hooks else None
+        self.hook_manager = mgr
         if fastapi_app is None:
             return
         if enabled and self.memory is not None:

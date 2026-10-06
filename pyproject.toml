@@ -20,9 +20,6 @@ dependencies = [
     "mcp>=1.27.1,<2",
     "python-ulid>=2.0.0",
     "google-genai>=1.0.0",
-    # <2.5: newer numpy stub files use PEP 695 `type` statements that mypy
-    # cannot parse while this project's [tool.mypy] targets python_version 3.11.
-    "numpy>=1.26.0,<2.5",
     "pillow>=10.0.0",
 ]
 

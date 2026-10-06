@@ -6,6 +6,17 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Removed
+
+- The workspace knowledge index and the `search` tool. Agents explore the workspace with `grep` and `glob`, then `read_file`. Memory search, web search, and browser DOM indexing are unchanged.
+- The `knowledge-ast` and `knowledge-media` extras. Installs that still request them get an unknown-extra warning; drop them from agent deps.
+- `numpy` is no longer a core dependency.
+
+### Changed
+
+- A leftover `knowledge:` section in `monkeybot.yaml` is warned once and ignored. Old index files (`index.sqlite`, `.monkeybot/knowledge/`) are no longer read and can be deleted.
+- The `Evidence:` path guard moved to `core/hooks/evidence_guard.py` and is always registered by the gateway. Before, it ran only when `knowledge.enabled` was on.
+
 ## [core v3.7.0] - 2026-09-30
 
 ### Added

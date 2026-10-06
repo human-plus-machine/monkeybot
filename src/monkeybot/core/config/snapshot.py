@@ -47,7 +47,7 @@ from monkeybot.core.config.runtime_env import (
     _merge_with_includes,
     _resolve_config_path,
     check_yaml_only_model_env,
-    warn_retired_curation_keys,
+    warn_retired_sections,
     warn_retired_tools_keys,
 )
 from monkeybot.core.config.settings import (
@@ -590,7 +590,7 @@ def build_runtime_config(
     pinned = _capture_pins()
     source_path, merged = _load_merged_yaml(config_path=config_path, agent_root=agent_root)
     warn_retired_tools_keys(merged)
-    warn_retired_curation_keys(merged)
+    warn_retired_sections(merged)
     check_yaml_only_model_env(merged)
     anchor = agent_root or resolve_agent_root(config_path=source_path)
     env_values = _effective_env(_flatten_config(merged), pinned, anchor)

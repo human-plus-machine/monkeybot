@@ -115,14 +115,14 @@ contract stated by the user.
 - Do not mention the summary process or that context was compacted.\
 """
 
-# Appended to every compacted summary so search-first / format rules survive
+# Appended to every compacted summary so exploration / format rules survive
 # even when middle-history exemplars are dropped (post-summarization epoch).
 # Keep this a short pointer — full rules live in the harness (avoid drift /
 # duplicated "Standing instructions" blocks accumulating across compactions epochs).
 _POST_COMPACTION_STANDING_HEADING = "## Standing instructions (still in effect after compaction)"
 _POST_COMPACTION_STANDING = f"""\
 {_POST_COMPACTION_STANDING_HEADING}
-Harness rules still apply: prefer `search` before broad exploration for codebase Q&A; \
+Harness rules still apply: prefer `grep` / `glob` before broad exploration for codebase Q&A; \
 `read_file` (or `glob` for binary assets) before `Evidence:` citations; keep incremental \
 answers in a workspace file for long multi-item tasks; preserve any user answer-format \
 contract verbatim.\

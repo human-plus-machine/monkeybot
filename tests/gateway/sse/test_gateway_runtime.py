@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from monkeybot.core.hooks import HookEvent
 from monkeybot.core.layout import AgentLayout
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector
 from monkeybot.core.tools.loop_inspector import LoopStartInspector
@@ -815,3 +816,17 @@ async def test_staged_verifier_reload_keeps_sticky_nudge_and_drains_judge(
     finally:
         runtime.close_verifier()
         reset_runtime_env_state_for_tests()
+
+
+def test_rebuild_memory_hooks_registers_evidence_guard_without_memory() -> None:
+    runtime = GatewayRuntime()
+    guard = runtime.evidence_guard
+    runtime.rebuild_memory_hooks(None, None)
+    first = runtime.hook_manager
+    assert first is not None
+    assert guard.on_after_provider in first._handlers[HookEvent.AFTER_PROVIDER_RESPONSE]
+    assert guard.on_pre_tool in first._handlers[HookEvent.PRE_TOOL]
+
+    runtime.rebuild_memory_hooks(None, None)
+    assert runtime.hook_manager is not first
+    assert runtime.evidence_guard is guard

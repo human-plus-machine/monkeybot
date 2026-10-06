@@ -116,7 +116,7 @@ YAML_ONLY_ENV_KEYS: frozenset[str] = frozenset(
     env for (section, _), env in ENV_MAP.items() if section == "model"
 )
 _yaml_only_model_env_warned = False
-_retired_curation_warned = False
+_retired_sections_warned: set[str] = set()
 
 # Backward-compatible alias for internal/tests.
 _ENV_MAP = ENV_MAP
@@ -293,16 +293,25 @@ def warn_retired_tools_keys(doc: Mapping[str, Any]) -> list[str]:
     return found
 
 
-def warn_retired_curation_keys(doc: Mapping[str, Any]) -> None:
-    """Warn once per process if a leftover ``context_curation:`` section is present."""
-    global _retired_curation_warned
-    if "context_curation" not in doc or _retired_curation_warned:
-        return
-    _retired_curation_warned = True
-    logger.warning(
+RETIRED_SECTIONS: dict[str, str] = {
+    "context_curation": (
         "context_curation is retired and ignored — MemPalace wake-up replaced "
         "INDEX.md + the LLM curator; leftover window/cap settings are unused"
-    )
+    ),
+    "knowledge": (
+        "knowledge is retired and ignored — the workspace index and `search` tool "
+        "were removed; agents explore with `grep` / `glob`. Leftover index files "
+        "(index.sqlite, .monkeybot/knowledge/) can be deleted"
+    ),
+}
+
+
+def warn_retired_sections(doc: Mapping[str, Any]) -> None:
+    """Warn once per process for each leftover retired top-level YAML section."""
+    for section, message in RETIRED_SECTIONS.items():
+        if section in doc and section not in _retired_sections_warned:
+            _retired_sections_warned.add(section)
+            logger.warning(message)
 
 
 def check_yaml_only_model_env(merged: Mapping[str, Any] | None = None) -> list[str]:
@@ -336,12 +345,12 @@ def check_yaml_only_model_env(merged: Mapping[str, Any] | None = None) -> list[s
 
 def reset_runtime_env_state_for_tests() -> None:
     """Clear the process ConfigStore and pin capture (tests only)."""
-    global _yaml_only_model_env_warned, _retired_curation_warned
+    global _yaml_only_model_env_warned
     from monkeybot.core.config.settings import reset_transcript_enabled_cache_for_tests
     from monkeybot.core.config.snapshot import reset_snapshot_state_for_tests
 
     _yaml_only_model_env_warned = False
-    _retired_curation_warned = False
+    _retired_sections_warned.clear()
     reset_snapshot_state_for_tests()
     reset_transcript_enabled_cache_for_tests()
 
