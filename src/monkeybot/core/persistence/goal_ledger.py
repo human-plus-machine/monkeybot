@@ -123,7 +123,10 @@ def first_dropped_seq(entries: Sequence[GoalEntry], dropped_texts: Sequence[str]
 
     Walks entries and ``dropped_texts`` newest first, so rows pruned from the
     head of the ledger cannot shift the match. A dropped message with no row
-    is skipped. ``None`` means no dropped message has a ledger row.
+    is skipped. The walk stops at the first row that matches no remaining
+    dropped text: that row belongs to a kept message, and matching past it
+    would drop kept rows that share text with a dropped message. ``None``
+    means no dropped message has a ledger row.
     """
     wanted = [_normalized_text(text) for text in reversed(dropped_texts)]
     position = 0
@@ -133,7 +136,7 @@ def first_dropped_seq(entries: Sequence[GoalEntry], dropped_texts: Sequence[str]
             break
         verbatim = _normalized_text(entry.verbatim)
         if verbatim not in wanted[position:]:
-            continue
+            break
         position = wanted.index(verbatim, position) + 1
         first = entry.seq
     return first

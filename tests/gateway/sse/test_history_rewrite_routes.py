@@ -164,6 +164,38 @@ async def test_branch_op_rejects_busy_session(backend: SQLiteStorageBackend) -> 
                 await task
 
 
+class _LiveVoice:
+    def __init__(self, session_id: str) -> None:
+        self._session_id = session_id
+
+    def get(self, session_id: str) -> object | None:
+        return object() if session_id == self._session_id else None
+
+
+@pytest.mark.asyncio
+async def test_rewrites_reject_a_live_voice_session(backend: SQLiteStorageBackend) -> None:
+    registry = SessionRegistry()
+    app = _app(registry, backend, RecordingLoop(registry))
+    app.state.realtime_manager = _LiveVoice("sess-voice")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/sessions", json={"session_id": "sess-voice"})
+        await _seed(backend, "sess-voice")
+        anchor = await _anchor(client, "sess-voice", "again")
+        attempts = [
+            client.post("/sessions/sess-voice/branches", json={"op": "rewind", "anchor": anchor}),
+            client.post("/sessions/sess-voice/truncate", json={"anchor": anchor}),
+            client.post("/sessions/sess-voice/fork", json={"anchor": anchor}),
+            client.put("/sessions/sess-voice/branches/active", json={"branch_id": "root"}),
+        ]
+        for attempt in attempts:
+            response = await attempt
+            assert response.status_code == 409
+            assert response.json()["error"]["code"] == "SESSION_BUSY"
+        assert await backend.branches().list("sess-voice") == []
+        assert len(await backend.history().load("sess-voice")) == 4
+        assert await backend.session_turns().try_acquire("sess-voice", "after")
+
+
 @pytest.mark.asyncio
 async def test_fork_creates_a_new_session(backend: SQLiteStorageBackend) -> None:
     registry = SessionRegistry()

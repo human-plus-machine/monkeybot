@@ -37,6 +37,7 @@ from monkeybot.core.runtime.history_rewrite import (
     locate_anchor,
     overlay_active_previews,
     prefix_end_for,
+    purge_session_branches,
     truncate_active,
 )
 from monkeybot.core.types.content_blocks import SystemNotification, Text, ToolRequest, ToolResponse
@@ -354,6 +355,13 @@ def test_first_dropped_seq_survives_pruning_and_join_differences() -> None:
     assert first_dropped_seq(entries, ["unrelated"]) is None
 
 
+def test_first_dropped_seq_stops_at_a_kept_row() -> None:
+    # The dropped "yes" never got a row; the older kept "yes" must not match.
+    entries = [_ledger_entry("e1", 1, "yes"), _ledger_entry("e2", 2, "deploy")]
+    assert first_dropped_seq(entries, ["yes"]) is None
+    assert first_dropped_seq(entries, ["deploy", "yes"]) == 2
+
+
 @pytest.mark.asyncio
 async def test_ledger_truncate_without_match_keeps_rows() -> None:
     store = InMemoryGoalLedgerStore()
@@ -429,6 +437,85 @@ async def test_truncate_refuses_to_cut_own_fork_point(backend: SQLiteStorageBack
     assert exc.value.code == "BRANCHES_IN_TAIL"
     view = await load_active_history(backend.history(), backend.branches(), "s1")
     assert [point["options"] for point in view.branch_points] == [["root", branched.branch_id]]
+
+
+@pytest.mark.asyncio
+async def test_truncate_guard_ignores_earlier_duplicate_of_fork_row(
+    backend: SQLiteStorageBackend,
+) -> None:
+    rows = [
+        _user("a"),
+        _assistant("Done."),
+        _user("b"),
+        _assistant("Done."),
+        _user("c"),
+        _assistant("x"),
+    ]
+    for message in rows:
+        await backend.history().append("s1", message)
+    messages = await backend.history().load("s1")
+    await branch_op(
+        history=backend.history(),
+        branches=backend.branches(),
+        session_id="s1",
+        op="edit",
+        anchor=_anchor(messages, 4),
+    )
+    await activate_branch(branches=backend.branches(), session_id="s1", branch_id="root")
+    with pytest.raises(HistoryRewriteError) as exc:
+        await truncate_active(
+            history=backend.history(),
+            branches=backend.branches(),
+            session_id="s1",
+            anchor=_anchor(messages, 2),
+        )
+    assert exc.value.code == "BRANCHES_IN_TAIL"
+    view = await load_active_history(backend.history(), backend.branches(), "s1")
+    assert [point["anchor"]["row_index"] for point in view.branch_points] == [3]
+
+
+def test_locate_anchor_never_resolves_to_a_later_duplicate() -> None:
+    messages = [_user("a"), _assistant("Done."), _user("b"), _assistant("Done.")]
+    shifted = HistoryAnchor(2, message_fingerprint(messages[1]))
+    assert locate_anchor(messages, shifted) == 1
+    past_end = HistoryAnchor(9, message_fingerprint(messages[1]))
+    assert locate_anchor(messages, past_end) == 3
+    before_tail = HistoryAnchor(-1, message_fingerprint(messages[1]))
+    assert locate_anchor(messages, before_tail) is None
+
+
+@pytest.mark.asyncio
+async def test_purge_keeps_branch_rows_when_a_thread_wipe_fails(
+    backend: SQLiteStorageBackend,
+) -> None:
+    await _seed(backend, "s1")
+    messages = await backend.history().load("s1")
+    branched = await branch_op(
+        history=backend.history(),
+        branches=backend.branches(),
+        session_id="s1",
+        op="rewind",
+        anchor=_anchor(messages, 1),
+    )
+    history = backend.history()
+    real_reset = history.reset
+
+    async def _reset(thread_id: str, rows: list[Message]) -> None:
+        if thread_id == branched.thread_id:
+            raise RuntimeError("boom")
+        await real_reset(thread_id, rows)
+
+    history.reset = _reset  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        await purge_session_branches(history, backend.branches(), "s1")
+    history.reset = real_reset  # type: ignore[method-assign]
+    assert {row.branch_id for row in await backend.branches().list("s1")} == {
+        "root",
+        branched.branch_id,
+    }
+    await purge_session_branches(history, backend.branches(), "s1")
+    assert await backend.history().load(branched.thread_id) == []
+    assert await backend.branches().list("s1") == []
 
 
 def _superseding_pair(thread_id: str) -> list[GoalEntry]:

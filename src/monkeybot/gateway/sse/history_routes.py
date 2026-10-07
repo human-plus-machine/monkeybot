@@ -86,6 +86,36 @@ def _require_storage(request: Request) -> Any:
     return storage
 
 
+async def _acquire_idle(
+    *,
+    bus: SessionBus,
+    request: Request,
+    storage: Any,
+    session_id: str,
+    request_id: str,
+) -> None:
+    """Take the turn lock, or 409 ``SESSION_BUSY``.
+
+    A live voice session writes history without the turn lock and keeps the
+    thread it resolved at connect, so it counts as busy too.
+    """
+    realtime = getattr(request.app.state, "realtime_manager", None)
+    if realtime is not None and realtime.get(session_id) is not None:
+        raise APIError(
+            409,
+            "SESSION_BUSY",
+            "End the voice session before changing chat history",
+            uuid.uuid4().hex,
+        )
+    await _try_acquire_turn(
+        bus=bus,
+        storage=storage,
+        session_id=session_id,
+        request_id=request_id,
+        busy_is_error=True,
+    )
+
+
 async def _publish(
     bus: SessionBus,
     *,
@@ -199,12 +229,12 @@ async def post_branch(
             "edit requires message or content",
             uuid.uuid4().hex,
         )
-    await _try_acquire_turn(
+    await _acquire_idle(
         bus=bus,
+        request=request,
         storage=storage,
         session_id=session_id,
         request_id=request_id,
-        busy_is_error=True,
     )
     handed_off = [False]
     try:
@@ -250,12 +280,12 @@ async def put_active_branch(
     bus = _require_bus(reg_dep, session_id)
     storage = _require_storage(request)
     request_id = uuid.uuid4().hex
-    await _try_acquire_turn(
+    await _acquire_idle(
         bus=bus,
+        request=request,
         storage=storage,
         session_id=session_id,
         request_id=request_id,
-        busy_is_error=True,
     )
     try:
         record = await activate_branch(
@@ -292,12 +322,12 @@ async def post_truncate(
     bus = _require_bus(reg_dep, session_id)
     storage = _require_storage(request)
     request_id = uuid.uuid4().hex
-    await _try_acquire_turn(
+    await _acquire_idle(
         bus=bus,
+        request=request,
         storage=storage,
         session_id=session_id,
         request_id=request_id,
-        busy_is_error=True,
     )
     try:
         result = await truncate_active(
@@ -331,12 +361,12 @@ async def post_fork(
     bus = _require_bus(reg_dep, session_id)
     storage = _require_storage(request)
     request_id = uuid.uuid4().hex
-    await _try_acquire_turn(
+    await _acquire_idle(
         bus=bus,
+        request=request,
         storage=storage,
         session_id=session_id,
         request_id=request_id,
-        busy_is_error=True,
     )
     try:
         result = await fork_session(

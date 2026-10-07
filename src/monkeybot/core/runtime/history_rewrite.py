@@ -112,20 +112,17 @@ def locate_anchor(messages: list[Message], anchor: HistoryAnchor) -> int | None:
     """Resolve ``anchor`` against ``messages``. ``None`` if the row is gone.
 
     The hinted index wins when its fingerprint still matches. Otherwise the
-    nearest row with that fingerprint is used, so a compaction that shifted
-    indexes can still find a tail row that survived.
+    closest earlier row with that fingerprint is used: compaction and
+    truncation only move surviving rows to lower indexes, so a later row with
+    identical content is never the same message.
     """
     hinted = anchor.row_index
     if 0 <= hinted < len(messages) and message_fingerprint(messages[hinted]) == anchor.fingerprint:
         return hinted
-    found = [
-        index
-        for index, message in enumerate(messages)
-        if message_fingerprint(message) == anchor.fingerprint
-    ]
-    if not found:
-        return None
-    return min(found, key=lambda index: abs(index - anchor.row_index))
+    for index in range(min(hinted, len(messages) - 1), -1, -1):
+        if message_fingerprint(messages[index]) == anchor.fingerprint:
+            return index
+    return None
 
 
 def resolve_anchor(messages: list[Message], anchor: HistoryAnchor) -> int:
@@ -309,7 +306,6 @@ def _assert_fork_points_kept(
     The other version would survive but its navigator point would vanish,
     leaving it unreachable from the chat. Rewind keeps both versions instead.
     """
-    kept = messages[:end]
     for record in records:
         is_child = record.parent_branch_id == branch_id
         is_own_fork = record.branch_id == branch_id and record.parent_branch_id is not None
@@ -318,9 +314,8 @@ def _assert_fork_points_kept(
         if record.fork_row_index is None or record.fork_fingerprint is None:
             continue
         anchor = HistoryAnchor(record.fork_row_index, record.fork_fingerprint)
-        if locate_anchor(messages, anchor) is None:
-            continue
-        if locate_anchor(kept, anchor) is None:
+        located = locate_anchor(messages, anchor)
+        if located is not None and located >= end:
             raise HistoryRewriteError(
                 409,
                 "BRANCHES_IN_TAIL",
@@ -661,15 +656,24 @@ async def purge_session_branches(
     branches: BranchStore,
     session_id: str,
 ) -> None:
-    """Delete the session transcript, its branch rows, and every branch thread."""
-    records = await branches.delete_session(session_id)
-    await history.reset(session_id, [])
-    wiped = {session_id}
-    for record in records:
-        if record.thread_id in wiped:
-            continue
-        await history.reset(record.thread_id, [])
-        wiped.add(record.thread_id)
+    """Delete the session transcript, every branch thread, and the branch rows.
+
+    Threads go first so a failure leaves branch rows pointing at whatever
+    survived, and a retry can finish the job.
+    """
+    wiped: set[str] = set()
+
+    async def _wipe(thread_id: str) -> None:
+        if thread_id in wiped:
+            return
+        await history.reset(thread_id, [])
+        wiped.add(thread_id)
+
+    await _wipe(session_id)
+    for record in await branches.list(session_id):
+        await _wipe(record.thread_id)
+    for record in await branches.delete_session(session_id):
+        await _wipe(record.thread_id)
 
 
 async def resolve_active_thread_id(backend: Any, session_id: str) -> str:

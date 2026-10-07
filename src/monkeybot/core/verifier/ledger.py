@@ -278,11 +278,18 @@ class GoalLedger:
             kept = sorted((e for e in entries if e.seq <= upto), key=lambda e: e.seq)
             restored = statuses_without_dropped(kept, [e for e in entries if e.seq > upto])
             if restored:
-                # copy_prefix renumbers the copied rows 1..n in seq order.
-                copied = sorted(await self._store.list_entries(dst_thread), key=lambda e: e.seq)
-                id_map = {src.entry_id: dst.entry_id for src, dst in zip(kept, copied, strict=True)}
+                # A prune between list_entries and copy_prefix can skip rows, so
+                # match copies by content rather than by position.
+                copied = {
+                    (e.created_at_ms, e.verbatim): e.entry_id
+                    for e in await self._store.list_entries(dst_thread)
+                }
+                by_id = {e.entry_id: e for e in kept}
                 for entry_id, status in restored.items():
-                    await self._store.update_status(id_map[entry_id], status)
+                    src = by_id[entry_id]
+                    dst_id = copied.get((src.created_at_ms, src.verbatim))
+                    if dst_id is not None:
+                        await self._store.update_status(dst_id, status)
         self.invalidate(dst_thread)
         await self._refresh_view(dst_thread)
 
