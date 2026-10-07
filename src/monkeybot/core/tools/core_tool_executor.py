@@ -1798,7 +1798,7 @@ class CoreToolExecutor(ToolExecutorPort):
         parent_label = f"{ctx.request_id}:{call.call_id}"
         traceparent = _inject_subagent_traceparent()
         run_id = make_run_id()
-        child_thread_id = f"subagent:{ctx.thread_id}:{uuid.uuid4().hex[:10]}"
+        child_thread_id = f"subagent:{ctx.session_id}:{uuid.uuid4().hex[:10]}"
         envelope = SubagentEnvelope(
             task=task,
             context=context_val,
