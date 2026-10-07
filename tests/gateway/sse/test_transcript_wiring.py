@@ -74,6 +74,7 @@ def _wire_start_turn_deps(
     mock_history.load = AsyncMock(return_value=[])
     mock_storage = MagicMock()
     mock_storage.history.return_value = mock_history
+    mock_storage.branches.return_value.get_active = AsyncMock(return_value=None)
     mock_storage.usage.return_value = mock_usage
     gateway_app.app.state.storage = mock_storage
 

@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
     from monkeybot.core.llm.provider import Message
     from monkeybot.core.llm.usage import Usage, UsageBreakdown, UsageGranularity, UsageSummary
+    from monkeybot.core.persistence.branches import BranchStore
     from monkeybot.core.persistence.durable_runs import SubagentEnvelope, SubagentRunRow
     from monkeybot.core.persistence.goal_ledger import GoalLedgerStore
     from monkeybot.core.persistence.scheduled_loops import (
@@ -43,6 +44,10 @@ class HistoryStore(Protocol):
     ) -> None: ...
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None: ...
+
+    async def last_row(self, thread_id: str) -> tuple[int, str] | None:
+        """Message count and the newest row's content JSON, or ``None`` if empty."""
+        ...
 
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]: ...
 
@@ -209,6 +214,8 @@ class StorageBackend(Protocol):
     def goal_ledger(self) -> GoalLedgerStore | None: ...
 
     def session_turns(self) -> SessionTurnLockStore: ...
+
+    def branches(self) -> BranchStore: ...
 
     def outbox(self) -> Any: ...
 

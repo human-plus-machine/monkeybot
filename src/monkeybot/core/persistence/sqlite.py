@@ -208,6 +208,21 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
 )""",
     """CREATE UNIQUE INDEX IF NOT EXISTS idx_goal_ledger_thread_seq
     ON goal_ledger(thread_id, seq)""",
+    """CREATE TABLE IF NOT EXISTS session_branches (
+    agent_scope TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL,
+    branch_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    parent_branch_id TEXT,
+    fork_row_id TEXT,
+    op TEXT,
+    created_at INTEGER NOT NULL,
+    last_active_at INTEGER NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (agent_scope, session_id, branch_id)
+)""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_session_branches_active
+    ON session_branches(agent_scope, session_id) WHERE is_active = 1""",
     OUTBOX_DDL,
     OUTBOX_INDEX_DDL,
 )

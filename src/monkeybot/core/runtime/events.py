@@ -477,6 +477,21 @@ class VerifierVerdict:
         return payload
 
 
+@dataclass(frozen=True)
+class HistoryRewritten:
+    """The session's active branch changed (edit, regenerate, rewind, switch).
+
+    Clients reload chat history. ``request_id`` is the follow-up turn when the
+    op also starts one (edit, regenerate); otherwise it is empty.
+    """
+
+    kind: Literal["HistoryRewritten"] = "HistoryRewritten"
+    request_id: str = ""
+    session_id: str = ""
+    branch_id: str = ""
+    op: str = ""
+
+
 AgentEvent: TypeAlias = (
     Thinking
     | AssistantDelta
@@ -515,6 +530,7 @@ AgentEvent: TypeAlias = (
     | SubagentCompleted
     | CredentialEgressBlockedEvent
     | VerifierVerdict
+    | HistoryRewritten
 )
 
 # Durable vs live-only (OpenCode V2-style). Conversation history persists
@@ -544,6 +560,7 @@ DURABLE_EVENT_KINDS: frozenset[str] = frozenset(
         "SubagentCompleted",  # nested drain boundary (parent SSE)
         # SubagentEvent is live-only; durable nested transcript is the child thread.
         "CredentialEgressBlocked",
+        "HistoryRewritten",
     }
 )
 
@@ -829,6 +846,13 @@ def _story5_event_dict(event: AgentEvent) -> dict[str, object]:
         if event.origin:
             out["origin"] = event.origin
         return out
+    if isinstance(event, HistoryRewritten):
+        return {
+            **base,
+            "session_id": event.session_id,
+            "branch_id": event.branch_id,
+            "op": event.op,
+        }
     raise AssertionError(f"_story5_event_dict: unsupported type {type(event)!r}")
 
 
@@ -935,6 +959,7 @@ def event_to_json(event: AgentEvent) -> str:
             ThinkingBlockStarted,
             ToolInputDeltaEvent,
             CredentialEgressBlockedEvent,
+            HistoryRewritten,
         ),
     ):
         payload = _story5_event_dict(event)
@@ -1407,5 +1432,17 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
             final_message=final_message,
             errors=errors,
             tool_call_count=tool_call_count,
+        )
+    if t == "HistoryRewritten":
+
+        def _str_field(key: str) -> str:
+            raw = payload.get(key, "")
+            return raw if isinstance(raw, str) else ""
+
+        return HistoryRewritten(
+            request_id=rid,
+            session_id=_str_field("session_id"),
+            branch_id=_str_field("branch_id"),
+            op=_str_field("op"),
         )
     raise EventDecodeError(f"unknown AgentEvent type: {t!r}")

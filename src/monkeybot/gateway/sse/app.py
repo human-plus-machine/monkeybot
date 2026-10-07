@@ -83,6 +83,7 @@ from monkeybot.core.runtime.events import (
     event_to_json,
 )
 from monkeybot.core.runtime.events import Error as AgentError
+from monkeybot.core.runtime.history_rewrite import resolve_active_thread_id
 from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
@@ -1001,10 +1002,6 @@ class GatewayLoopPort:
             attachment_store: AttachmentStore | None = getattr(
                 serving.state, "attachment_store", None
             )
-            if bus.attachment_catalog is not None:
-                rows = await history.load(session_id)
-                bus.attachment_catalog.rebuild_from_history(rows)
-
             extra_tools: list[Any] = [web_search_tool] if web_search_tool is not None else []
             extra_tools.extend(computer_tools)
             todo_store = None
@@ -1021,9 +1018,14 @@ class GatewayLoopPort:
             summarization_model = env_value(cfg, "CONTEXT_SUMMARIZATION_MODEL", "").strip() or None
 
             try:
+                thread_id = await resolve_active_thread_id(backend, session_id)
+                if bus.attachment_catalog is not None:
+                    rows = await history.load(thread_id)
+                    bus.attachment_catalog.rebuild_from_history(rows)
                 ctx = await build_context(
-                    session_id,
+                    thread_id,
                     request_id,
+                    session_id=session_id,
                     agent_md_path=agent_path,
                     memory=getattr(serving.state, "memory", None),
                     skills_path=skills_resolved,
