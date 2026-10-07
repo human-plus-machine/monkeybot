@@ -479,10 +479,11 @@ class VerifierVerdict:
 
 @dataclass(frozen=True)
 class HistoryRewritten:
-    """The session's active branch changed (edit, regenerate, rewind, switch).
+    """The session's active branch changed (edit, regenerate, rewind, restore, switch).
 
     Clients reload chat history. ``request_id`` is the follow-up turn when the
-    op also starts one (edit, regenerate); otherwise it is empty.
+    op also starts one (edit, regenerate); otherwise it is empty. Restore never
+    starts a turn: the client lifts the dropped user message into its composer.
     """
 
     kind: Literal["HistoryRewritten"] = "HistoryRewritten"

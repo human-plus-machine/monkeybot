@@ -1,8 +1,9 @@
-"""History routes: edit, regenerate, rewind, list, switch, truncate, and fork.
+"""History routes: edit, regenerate, rewind, restore, list, switch, truncate, and fork.
 
 Every op needs an idle session: it takes the turn lock and blocks new voice
 calls. Edit and regenerate hand the lock to the reply scheduler, so the new
-turn cannot race another admission.
+turn cannot race another admission. Restore starts no turn: like rewind, it
+drains queued follow-ups onto the new branch.
 """
 
 from __future__ import annotations
@@ -157,6 +158,10 @@ def register_history_rewrite_routes(api: APIRouter) -> None:
         storage = _storage_backend(request)
         if body.op == "edit" and body.message is None and not body.content:
             raise APIError(400, "BAD_REQUEST", "edit requires message or content", uuid.uuid4().hex)
+        if body.op == "restore" and (body.message is not None or body.content):
+            raise APIError(
+                400, "BAD_REQUEST", "restore does not take message or content", uuid.uuid4().hex
+            )
         edited: list[ContentBlock] | None = None
         if body.op == "edit":
             edited = _parse_user_content(body=body, session_id=session_id, request=request)

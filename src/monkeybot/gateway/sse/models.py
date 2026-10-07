@@ -248,12 +248,13 @@ class HistoryAnchorBody(BaseModel):
 
 
 class BranchOpRequest(ReplyBodyFields):
-    """POST /sessions/{id}/branches — edit, regenerate, or rewind.
+    """POST /sessions/{id}/branches — edit, regenerate, rewind, or restore.
 
     ``message`` / ``content`` are the edited user turn and are required for edit.
+    Restore keeps the prefix before the user message and does not start a turn.
     """
 
-    op: Literal["edit", "regenerate", "rewind"]
+    op: Literal["edit", "regenerate", "rewind", "restore"]
     anchor: HistoryAnchorBody
     request_id: str | None = Field(default=None, max_length=128)
 

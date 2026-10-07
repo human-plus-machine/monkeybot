@@ -41,7 +41,7 @@ from monkeybot.core.types.content_blocks import ContentBlock, ToolRequest, ToolR
 
 logger = logging.getLogger(__name__)
 
-BranchOp = Literal["edit", "regenerate", "rewind"]
+BranchOp = Literal["edit", "regenerate", "rewind", "restore"]
 
 
 class RewriteEffects(Protocol):
@@ -186,18 +186,43 @@ def _rewind_end(messages: list[Message], index: int) -> int:
     return end
 
 
+_USER_ONLY_MESSAGES = {
+    "edit": "Only a user message can be edited.",
+    "restore": "Only a user message can be redone.",
+}
+
+
+def _assert_keeps_summary(messages: list[Message], end: int) -> None:
+    """Reject a cut at ``end`` that would drop the newest compaction summary.
+
+    The wire op flags apply the same rule, so every op a client offers is one
+    the server takes.
+    """
+    summary = last_summary_index(messages)
+    if summary is not None and end <= summary:
+        raise HistoryRewriteError(
+            422, "SUMMARIZED", "That part of the chat was summarized and can't be changed."
+        )
+
+
 def prefix_end_for(messages: list[Message], index: int, op: BranchOp) -> int:
     """Exclusive end of the prefix ``op`` keeps, after boundary checks."""
-    if op == "edit":
+    if op == "edit" or op == "restore":
         if not is_user_text_row(messages[index]):
-            raise HistoryRewriteError(422, "TURN_BOUNDARY", "Only a user message can be edited.")
+            raise HistoryRewriteError(422, "TURN_BOUNDARY", _USER_ONLY_MESSAGES[op])
         end = index
+        if op == "restore" and end == 0:
+            # An empty branch has no row to carry a navigator back to the parent.
+            raise HistoryRewriteError(
+                422, "NOTHING_TO_KEEP", "The first message can't be redone. Edit it instead."
+            )
     elif op == "regenerate":
         end = _owning_user_index(messages, index)
     else:
         end = _rewind_end(messages, index)
         if end >= len(messages):
             raise HistoryRewriteError(422, "NOTHING_TO_REWIND", "Nothing after that message.")
+    _assert_keeps_summary(messages, end)
     assert_tool_pairs(messages, end)
     return end
 
@@ -260,9 +285,16 @@ async def branch_op(
     return RewriteResult(op=op, branch_id=branch_id, thread_id=thread_id, replay_content=replay)
 
 
-def _turn_cut(messages: list[Message], anchor_row_id: str, *, must_drop: bool) -> int:
-    """Exclusive end keeping the turn that holds ``anchor_row_id``."""
+def _turn_cut(
+    messages: list[Message], anchor_row_id: str, *, must_drop: bool, keep_summary: bool
+) -> int:
+    """Exclusive end keeping the turn that holds ``anchor_row_id``.
+
+    ``keep_summary`` refuses a cut that drops the summary; an in-place cut must set it.
+    """
     end = _rewind_end(messages, _row_index(messages, anchor_row_id))
+    if keep_summary:
+        _assert_keeps_summary(messages, end)
     if must_drop and end >= len(messages):
         raise HistoryRewriteError(422, "NOTHING_TO_TRUNCATE", "Nothing after that message.")
     assert_tool_pairs(messages, end)
@@ -311,7 +343,7 @@ async def truncate_active(
     records = await branches.list(session_id)
     active = _active_of(session_id, records)
     messages: list[Message] = await history.load(active.thread_id)
-    end = _turn_cut(messages, anchor_row_id, must_drop=True)
+    end = _turn_cut(messages, anchor_row_id, must_drop=True, keep_summary=True)
     dropped = {message.row_id for message in messages[end:] if message.row_id}
     if _strands_a_branch(records, active.branch_id, messages, end, dropped):
         raise HistoryRewriteError(
@@ -352,7 +384,8 @@ async def fork_session(
     """
     active = _active_of(session_id, await branches.list(session_id))
     messages: list[Message] = await history.load(active.thread_id)
-    end = _turn_cut(messages, anchor_row_id, must_drop=False)
+    # A fork is a new session, so it may start inside the summarized part.
+    end = _turn_cut(messages, anchor_row_id, must_drop=False, keep_summary=False)
     prefix = messages[:end]
     forked_session_id = str(uuid.uuid4())
     copied = 0

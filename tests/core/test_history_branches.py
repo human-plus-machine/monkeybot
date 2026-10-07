@@ -218,6 +218,83 @@ async def test_rewind_keeps_turn_and_requires_a_drop(env) -> None:
     assert await env.texts() == ["u1", "a1"]
 
 
+@pytest.mark.asyncio
+async def test_ops_refuse_rows_at_or_before_the_summary(env) -> None:
+    await env.turn("u1", "a1")
+    rows = await env.rows()
+    summary = _text("assistant", f"{CONTEXT_SUMMARY_PREFIX}\nearlier")
+    # Compaction mid-turn: the continuation after the summary has no user row of its own.
+    await env.history.reset(await env.thread(), [rows[0], summary, _text("assistant", "continued")])
+    rows = await env.rows()
+    for op, row in [("regenerate", rows[2]), ("edit", rows[0]), ("rewind", rows[0])]:
+        with pytest.raises(HistoryRewriteError) as exc:
+            await env.op(op, row.row_id)
+        assert exc.value.code == "SUMMARIZED", op
+    with pytest.raises(HistoryRewriteError) as exc:
+        await _truncate(env, rows[0].row_id)
+    assert exc.value.code == "SUMMARIZED"
+    assert await env.branches.list(SESSION) == []
+
+
+@pytest.mark.asyncio
+async def test_ops_after_the_summary_and_forks_are_allowed(env) -> None:
+    await env.turn("u1", "a1")
+    await env.turn("u2", "a2")
+    rows = await env.rows()
+    summary = _text("assistant", f"{CONTEXT_SUMMARY_PREFIX}\nearlier")
+    await env.history.reset(
+        await env.thread(), [*rows, summary, _text("user", "u3"), _text("assistant", "a3")]
+    )
+    rows = await env.rows()
+    folded = ["u1", "a1", "u2", "a2", f"{CONTEXT_SUMMARY_PREFIX}\nearlier"]
+    with pytest.raises(HistoryRewriteError) as exc:
+        await env.op("restore", rows[2].row_id)
+    assert exc.value.code == "SUMMARIZED"
+    forked = await fork_session(
+        history=env.history,
+        branches=env.branches,
+        attachments=None,
+        session_id=SESSION,
+        anchor_row_id=rows[0].row_id,
+    )
+    assert [m.row_id for m in await env.history.load(forked.session_id)] == [rows[0].row_id]
+    # Cutting right after a user row before the summary would drop it.
+    for row in (rows[2], rows[0]):
+        with pytest.raises(HistoryRewriteError) as exc:
+            await env.op("rewind", row.row_id)
+        assert exc.value.code == "SUMMARIZED"
+        with pytest.raises(HistoryRewriteError) as exc:
+            await _truncate(env, row.row_id)
+        assert exc.value.code == "SUMMARIZED"
+    # The summary row's turn started before it, but rewinding there keeps it.
+    for row in (rows[4], rows[3]):
+        await env.op("rewind", row.row_id)
+        assert await env.texts() == folded
+        await activate_branch(branches=env.branches, session_id=SESSION, branch_id=ROOT_BRANCH_ID)
+    await env.op("rewind", rows[5].row_id)
+    assert await env.texts() == [*folded, "u3"]
+    await activate_branch(branches=env.branches, session_id=SESSION, branch_id=ROOT_BRANCH_ID)
+    result = await env.op("restore", rows[5].row_id)
+    assert result.replay_content is None
+    assert await env.texts() == folded
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_non_user_and_first_rows(env) -> None:
+    await env.turn("u1", "a1")
+    await env.turn("u2", "a2")
+    rows = await env.rows()
+    with pytest.raises(HistoryRewriteError) as exc:
+        await env.op("restore", rows[1].row_id)
+    assert exc.value.code == "TURN_BOUNDARY"
+    with pytest.raises(HistoryRewriteError) as exc:
+        await env.op("restore", rows[0].row_id)
+    assert exc.value.code == "NOTHING_TO_KEEP"
+    result = await env.op("restore", rows[2].row_id)
+    assert result.replay_content is None
+    assert await env.texts() == ["u1", "a1"]
+
+
 def test_cut_between_tool_pair_is_rejected_but_old_orphans_are_not() -> None:
     rows = [
         _text("user", "u1"),
@@ -428,6 +505,7 @@ async def test_random_ops_keep_every_branch_reachable(env, seed: int) -> None:
                 "NOTHING_TO_TRUNCATE",
                 "TURN_BOUNDARY",
                 "BRANCHES_IN_TAIL",
+                "SUMMARIZED",
             }
 
         records = await env.branches.list(SESSION)
