@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 
 from monkeybot.core.llm.provider import Done, TextDelta, ToolCall
-from monkeybot.core.runtime.events import AssistantDelta, Error, ToolCallResult, TurnComplete
+from monkeybot.core.runtime.events import (
+    AssistantDelta,
+    Error,
+    HarnessIntervention,
+    ToolCallResult,
+    TurnComplete,
+)
 from monkeybot.core.runtime.loop import run
 from monkeybot.core.runtime.tool_batch import (
     _rejected_tool_batch_error,
@@ -133,6 +139,13 @@ async def test_run_rejects_all_parse_error_batch_without_executing() -> None:
     ]
     assert any(isinstance(e, AssistantDelta) and e.delta == "recovered" for e in events)
     assert not any(isinstance(e, Error) and "Max turns" in e.error for e in events)
+    rejected = [
+        e
+        for e in events
+        if isinstance(e, HarnessIntervention) and e.intervention == "truncated_batch"
+    ]
+    assert len(rejected) == 1
+    assert rejected[0].detail == "all_parse_error"
 
 
 @pytest.mark.asyncio

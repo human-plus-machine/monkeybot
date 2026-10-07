@@ -33,6 +33,7 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.memory.ingest import persist_message
 from monkeybot.core.messages.tool_integrity import cancelled_tool_result_text
 from monkeybot.core.persistence.backends import HistoryStore
+from monkeybot.core.persistence.row_ids import new_row_id
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.events import (
     ActionRequiredEvent,
@@ -165,6 +166,7 @@ async def _fire_hook(
     ctx: TurnContext,
     timeout_s: float,
     user_message: str | None = None,
+    user_row_id: str | None = None,
     tool_name: str | None = None,
     tool_args: dict[str, Any] | None = None,
     tool_result: str | None = None,
@@ -178,6 +180,7 @@ async def _fire_hook(
         request_id=ctx.request_id,
         ctx=ctx,
         user_message=user_message,
+        user_row_id=user_row_id,
         tool_name=tool_name,
         tool_args=tool_args,
         tool_result=tool_result,
@@ -501,9 +504,10 @@ async def run_realtime_turn(
     try:
         # 1. Commit user message to history (skip empty audio-only placeholders).
         if user_text or any(not isinstance(b, Text) for b in blocks):
+            user_row_id = new_row_id()
             await persist_message(
                 history,
-                Message(role="user", content=list(blocks)),
+                Message(role="user", content=list(blocks), row_id=user_row_id),
                 thread_id=ctx.thread_id,
                 turn_id=ctx.request_id,
                 memory=ctx.memory,
@@ -515,6 +519,7 @@ async def run_realtime_turn(
                 ctx=ctx,
                 timeout_s=0,
                 user_message=user_text,
+                user_row_id=user_row_id,
             )
 
             if transcript_writer is not None:

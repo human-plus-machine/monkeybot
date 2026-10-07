@@ -110,7 +110,7 @@ async def _provider_prompt_input_tokens(
 
 def _provider_call_hints(ctx: TurnContext) -> ProviderCallHints:
     return ProviderCallHints(
-        session_id=ctx.thread_id,
+        session_id=ctx.session_id,
         cache_retention=cache_retention_from_env(ctx.config),
     )
 
@@ -159,7 +159,7 @@ async def _prompt_input_tokens_for_history(
     resolved_messages = convert_to_provider(
         chat_messages,
         attachment_store=attachment_store,
-        session_id=ctx.thread_id,
+        session_id=ctx.session_id,
     )
     provider_messages = _messages_for_provider(
         system, resolved_messages, mid_conversation_update=mid_conversation_update

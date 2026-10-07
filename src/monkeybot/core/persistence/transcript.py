@@ -14,8 +14,10 @@ and drifting system prompts (``base_seq`` + unified ``diff``) — always pointin
 at the record in this file that holds the real bytes.
 
 Not surfaced to the agent or any tool; gated by YAML ``runtime.transcript_enabled``
-(default off; config-file only) and wired from the SSE gateway loop and realtime
-WebSocket route.
+(default off; config-file only) and wired from the SSE gateway loop, the realtime
+WebSocket route, and subagent workers (under ``subagents/`` of the parent session).
+Harness guard hits are recorded as ``HarnessIntervention`` and are not published
+on the SSE wire.
 """
 
 from __future__ import annotations
@@ -50,8 +52,11 @@ from monkeybot.core.runtime.events import (
 logger = logging.getLogger(__name__)
 
 _TRANSCRIPT_REL_DIR = Path(".monkeybot") / "transcripts"
-_TRANSCRIPT_FILENAME = "transcript.ndjson"
-_TRANSCRIPT_EXTRA_KINDS: frozenset[str] = frozenset({"SystemPromptSnapshot", "ContextUsage"})
+TRANSCRIPT_FILENAME = "transcript.ndjson"
+SUBAGENTS_DIRNAME = "subagents"
+_TRANSCRIPT_EXTRA_KINDS: frozenset[str] = frozenset(
+    {"SystemPromptSnapshot", "ContextUsage", "HarnessIntervention"}
+)
 _HASH_TEXT_FIELDS: dict[str, str] = {
     "SystemPromptSnapshot": "text",
     "SystemContextUpdated": "text",
@@ -132,6 +137,19 @@ def _find_existing_session_dir(transcripts_root: Path, session_id: str) -> Path 
     return None
 
 
+def subagent_transcript_dir(parent_session_dir: Path, child_thread_id: str) -> Path:
+    """Child transcript directory: ``{parent}/subagents/{sanitized child id}/``."""
+    return parent_session_dir / SUBAGENTS_DIRNAME / sanitize_path_component(child_thread_id)
+
+
+def child_transcript_dir(
+    workspace_root: Path, parent_session_id: str, child_thread_id: str
+) -> Path:
+    """Resolve a child transcript dir, reusing the parent's session folder when it exists."""
+    parent = resolve_session_artifact_dir(workspace_root, parent_session_id)
+    return subagent_transcript_dir(parent, child_thread_id)
+
+
 def resolve_session_artifact_dir(
     workspace_root: Path,
     session_id: str,
@@ -183,7 +201,9 @@ def _text_diff(base: str, text: str) -> list[str] | None:
             n=_DIFF_CONTEXT_LINES,
         )
     )
-    body = [line for line in hunks if not line.startswith(("---", "+++"))]
+    # Slice the two file-header lines rather than filtering by prefix: a removed
+    # "--x" or added "++x" body line also starts with "---" / "+++".
+    body = hunks[2:]
     if not body:
         return None
     if sum(len(line) + 1 for line in body) >= len(text) * _DIFF_MAX_RATIO:
@@ -386,13 +406,17 @@ class TranscriptWriter:
         *,
         workspace_root: Path,
         provider_records: bool = True,
+        session_dir: Path | None = None,
     ) -> None:
         self._session_id = session_id
         self._started_at = now_iso()
-        self._session_dir = resolve_session_artifact_dir(
-            workspace_root, session_id, started_at=self._started_at
-        )
-        self._path = self._session_dir / _TRANSCRIPT_FILENAME
+        if session_dir is not None:
+            self._session_dir = session_dir
+        else:
+            self._session_dir = resolve_session_artifact_dir(
+                workspace_root, session_id, started_at=self._started_at
+            )
+        self._path = self._session_dir / TRANSCRIPT_FILENAME
         self._lock = asyncio.Lock()
         self._provider_records = provider_records
         scanned = _scan_transcript(self._path) if self._path.is_file() else _ScanState()
@@ -728,9 +752,51 @@ class TranscriptWriter:
         await self._append_line(record)
 
 
+async def start_child_transcript(
+    *,
+    workspace_root: Path,
+    parent_session_id: str,
+    child_thread_id: str,
+    request_id: str,
+    task: str,
+    model: str,
+    provider: str,
+    agent_md: str,
+    subagent_type: str | None,
+    parent_run_id: str,
+    memory_on: bool | None = None,
+) -> TranscriptWriter:
+    """Open a subagent transcript under the parent session and write its manifest."""
+    session_dir = child_transcript_dir(workspace_root, parent_session_id, child_thread_id)
+    writer = TranscriptWriter(
+        child_thread_id,
+        workspace_root=workspace_root,
+        session_dir=session_dir,
+    )
+    await writer.ensure_manifest(
+        **runtime_manifest_fields(
+            model=model,
+            provider=provider,
+            workspace_root=str(workspace_root),
+            agent_md=agent_md,
+            memory_on=memory_on,
+        ),
+        parent_session_id=parent_session_id,
+        subagent_type=subagent_type,
+        parent_run_id=parent_run_id,
+    )
+    await writer.write_user_message(request_id=request_id, content=task)
+    return writer
+
+
 __all__ = [
+    "SUBAGENTS_DIRNAME",
+    "TRANSCRIPT_FILENAME",
     "TranscriptWriter",
+    "child_transcript_dir",
     "now_iso",
     "resolve_session_artifact_dir",
     "runtime_manifest_fields",
+    "start_child_transcript",
+    "subagent_transcript_dir",
 ]

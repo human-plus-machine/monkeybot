@@ -8,11 +8,16 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from monkeybot.core.runtime.events import AssistantDelta, TurnComplete, UsageTotals
+from monkeybot.core.runtime.events import (
+    AssistantDelta,
+    HarnessIntervention,
+    TurnComplete,
+    UsageTotals,
+)
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.gateway.sse import app as gateway_app
 from monkeybot.gateway.sse.app import GatewayLoopPort
-from monkeybot.gateway.sse.session_bus import SessionRegistry
+from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
 
 
 class _FakeExecutor:
@@ -69,6 +74,7 @@ def _wire_start_turn_deps(
     mock_history.load = AsyncMock(return_value=[])
     mock_storage = MagicMock()
     mock_storage.history.return_value = mock_history
+    mock_storage.branches.return_value.get_active = AsyncMock(return_value=None)
     mock_storage.usage.return_value = mock_usage
     gateway_app.app.state.storage = mock_storage
 
@@ -155,3 +161,48 @@ async def test_start_turn_reuses_transcript_writer_across_turns(
     assert len(manifest_lines) == 1
     user_messages = [line for line in lines if line.get("type") == "UserMessage"]
     assert len(user_messages) == 2
+
+
+@pytest.mark.asyncio
+async def test_harness_intervention_is_transcript_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    published: list[str] = []
+
+    async def _capture(self: SessionBus, data_json: str, *, lane: str = "primary") -> int:
+        del self, lane
+        published.append(data_json)
+        return 1
+
+    async def _fake_run_loop(*_args: object, **kwargs: object):
+        yield HarnessIntervention(
+            request_id="req-1",
+            intervention="doom_loop",
+            inner_turn=1,
+            detail="stuck",
+        )
+        yield TurnComplete(request_id="req-1", usage=UsageTotals())
+
+    monkeypatch.setattr(gateway_app, "transcript_enabled_from_config", lambda: True)
+    monkeypatch.setattr(SessionBus, "publish_data", _capture)
+    registry = SessionRegistry()
+    registry.create("s4", agent_md=None, created_at_ms=0)
+    _wire_start_turn_deps(
+        monkeypatch,
+        tmp_path,
+        provider=_NamedProvider("fake"),
+        captured_run={},
+    )
+    monkeypatch.setattr(gateway_app, "run_loop", _fake_run_loop)
+
+    port = GatewayLoopPort(registry)
+    await port.start_turn("s4", "req-1", [Text(text="hello")])
+
+    bus = registry.get("s4")
+    assert bus is not None and bus.transcript_writer is not None
+    types = [line["type"] for line in _read_lines(bus.transcript_writer.path)]
+    assert "HarnessIntervention" in types
+    published_types = [json.loads(line)["type"] for line in published]
+    assert "HarnessIntervention" not in published_types
+    assert "TurnComplete" in published_types

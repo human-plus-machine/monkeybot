@@ -9,7 +9,7 @@ import pytest
 
 from monkeybot.core.context import TurnContext
 from monkeybot.core.hooks import HookEvent, HookPayload
-from monkeybot.core.knowledge.evidence_guard import (
+from monkeybot.core.hooks.evidence_guard import (
     EvidencePathGuard,
     extract_evidence_paths,
     format_evidence_correction,
@@ -145,7 +145,7 @@ async def test_guard_noop_when_all_paths_exist_and_read(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_guard_flags_existing_but_unread_citation(tmp_path: Path) -> None:
-    """F22: citing a real file that was only seen in a search snippet."""
+    """F22: citing a real file that was only seen in a grep match line."""
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "flags.ts").write_text("x", encoding="utf-8")
     guard = EvidencePathGuard()

@@ -85,6 +85,8 @@ class HookPayload:
     ctx: "TurnContext"
 
     user_message: str | None = None
+    # USER_MESSAGE: history row_id of the persisted user message.
+    user_row_id: str | None = None
     tool_name: str | None = None
     tool_args: dict[str, Any] | None = None
     tool_result: str | None = None

@@ -17,6 +17,7 @@ from monkeybot.core.config.settings import (
     get_subagent_settings,
     normalize_model_provider,
     subagent_vertex_google_search_from_config,
+    transcript_enabled_from_config,
 )
 from monkeybot.core.config.snapshot import (
     context_window_tokens,
@@ -26,8 +27,6 @@ from monkeybot.core.config.snapshot import (
     get_config_store,
 )
 from monkeybot.core.context import TurnContext, build_context
-from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
-from monkeybot.core.knowledge.config import knowledge_enabled_from_config
 from monkeybot.core.layout import AgentLayout, bootstrap_agent_layout
 from monkeybot.core.llm.provider import (
     Done,
@@ -40,6 +39,7 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import HistoryStore, create_storage_backend
+from monkeybot.core.persistence.transcript import TranscriptWriter, start_child_transcript
 from monkeybot.core.runtime.events import (
     AgentEvent,
     Error,
@@ -138,6 +138,37 @@ def _clear_span_exporter_buffer() -> None:
         return
 
 
+async def _open_child_transcript(
+    envelope: SubagentEnvelope,
+    *,
+    workspace: Path,
+    thread_id: str,
+    request_id: str,
+    user_text: str,
+    config_path: str | None,
+    agent_md: Path,
+    provider_name: str,
+    memory_on: bool,
+) -> TranscriptWriter | None:
+    """Write a child transcript when capture is on and the parent session is known."""
+    parent_session_id = (envelope.parent_session_id or "").strip()
+    if not parent_session_id or not transcript_enabled_from_config(config_path):
+        return None
+    return await start_child_transcript(
+        workspace_root=workspace,
+        parent_session_id=parent_session_id,
+        child_thread_id=thread_id,
+        request_id=request_id,
+        task=user_text,
+        model=envelope.model,
+        provider=provider_name,
+        agent_md=str(agent_md),
+        subagent_type=envelope.subagent_type,
+        parent_run_id=envelope.parent_run_id,
+        memory_on=memory_on,
+    )
+
+
 async def _stream_run_loop_events(
     body: str,
     ctx: TurnContext,
@@ -149,6 +180,7 @@ async def _stream_run_loop_events(
     run_id: str,
     max_turns: int,
     vertex_google_search: bool = False,
+    transcript_writer: TranscriptWriter | None = None,
 ) -> AsyncIterator[AgentEvent]:
     if run_loop is _BUILTIN_RUN_LOOP:
         async for evt in run_loop(
@@ -161,6 +193,7 @@ async def _stream_run_loop_events(
             cancelled=None,
             max_turns=max_turns,
             vertex_google_search=vertex_google_search,
+            transcript_writer=transcript_writer,
         ):
             yield evt
         return
@@ -178,6 +211,7 @@ async def _stream_run_loop_events(
             cancelled=None,
             max_turns=max_turns,
             vertex_google_search=vertex_google_search,
+            transcript_writer=transcript_writer,
         ):
             yield evt
 
@@ -296,7 +330,6 @@ async def _async_main() -> None:
     )
     mcp: MCPClient | None = None
     executor: CoreToolExecutor | None = None
-    knowledge: KnowledgeSubsystem | None = None
 
     try:
         await backend.open(run_schema=auto_schema_enabled_from_config(config_path))
@@ -392,29 +425,6 @@ async def _async_main() -> None:
                 writer_enabled=False,
             )
 
-        # Read-only knowledge search against the parent gateway's index.
-        # Subagents must not claim the writer lock or run indexing/hooks.
-        if knowledge_enabled_from_config(config_path):
-            try:
-                settings = resolve_knowledge_settings(
-                    agent_root=agent_root,
-                    config_path=Path(config_path) if config_path else None,
-                    workspace_root=ws,
-                )
-                knowledge = await KnowledgeSubsystem.create(
-                    workspace_root=ws,
-                    settings=settings,
-                    knowledge_root=Path(settings.knowledge_root),
-                    index_path=Path(settings.index_path),
-                    read_only=True,
-                )
-            except FileNotFoundError as exc:
-                logger.info("knowledge read-only open skipped (index not ready yet): %s", exc)
-                knowledge = None
-            except Exception as exc:
-                logger.warning("knowledge read-only setup failed for subagent: %r", exc)
-                knowledge = None
-
         ctx = await build_context(
             thread_id,
             request_id,
@@ -440,7 +450,6 @@ async def _async_main() -> None:
             extra_tools=extra_tools,
             run_command_allowed_commands=run_allow_cmds,
             run_command_allowed_path_prefixes=run_allow_paths,
-            knowledge=knowledge,
             config=cfg,
             grants_path=grants_path,
         )
@@ -451,6 +460,17 @@ async def _async_main() -> None:
             body += "\n\n---\nContext from parent agent:\n" + envelope.context.strip()
 
         max_turns = get_subagent_settings(config_path).max_turns
+        transcript_writer = await _open_child_transcript(
+            envelope,
+            workspace=ws,
+            thread_id=thread_id,
+            request_id=request_id,
+            user_text=body,
+            config_path=config_path,
+            agent_md=agent_md_path,
+            provider_name=provider.name,
+            memory_on=memory is not None,
+        )
 
         from monkeybot.observability.spans import span_subagent
 
@@ -460,7 +480,6 @@ async def _async_main() -> None:
         try:
             # Subagents read palace wake-up via MemorySubsystem but do not
             # register ingest hooks or start a writer — parent owns automatic capture.
-            # Knowledge search is read-only against the parent index (no indexer/hooks).
             async with span_subagent(
                 thread_id=thread_id,
                 request_id=request_id,
@@ -478,20 +497,20 @@ async def _async_main() -> None:
                     run_id=request_id,
                     max_turns=max_turns,
                     vertex_google_search=subagent_vertex_google_search_from_config(config_path),
+                    transcript_writer=transcript_writer,
                 ):
+                    if transcript_writer is not None:
+                        await transcript_writer.write_event(evt)
                     print(event_to_json(_event_for_ndjson_pipe(evt)), flush=True)
         finally:
+            if transcript_writer is not None:
+                await transcript_writer.drain()
             shutdown_observability()
     finally:
         _detach_trace(reset_token)
         _detach_trace(attach_token)
         if executor is not None:
             await executor.aclose()
-        if knowledge is not None:
-            try:
-                await knowledge.close()
-            except Exception as exc:
-                logger.warning("knowledge close failed in subagent: %r", exc)
         if mcp is not None:
             for name in list(getattr(mcp, "_servers", {}).keys()):
                 await mcp.disconnect(name)

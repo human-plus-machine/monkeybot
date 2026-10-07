@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from monkeybot_cli.commands import chat, doctor, loop, new, refresh, run_cmd, talk, validate
+from monkeybot_cli.commands import chat, doctor, loop, new, refresh, run_cmd, talk, trace, validate
 from monkeybot_cli.runtime_python import RuntimeUpgradeError, report_runtime_upgrade_error
 
 
@@ -24,6 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     chat.register(sub)
     talk.register(sub)
     loop.register(sub)
+    trace.register(sub)
     return parser
 
 

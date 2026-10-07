@@ -6,6 +6,35 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### CLI
+
+### Added
+
+- `monkeybot trace list` and `monkeybot trace digest` turn a session transcript into a resolved timeline, with each subagent run shown under the `task` call that started it. In chat, `/export-trace` copies the whole session directory. The `mb-retro` skill proposes environment fixes from one hard session and does not edit anything until you pick a candidate.
+
+## [core v3.8.0] - 2026-10-07
+
+### Added
+
+- Stored chat history can branch. Rows keep a stable `row_id`. `POST /sessions/{id}/branches` edits, regenerates, rewinds, or restores from an anchor; truncate shortens the active thread in place; fork copies a prefix into a new session. A summarized prefix stays read-only unless the cut keeps that summary. Queued follow-ups drain onto the branch that becomes active. Goal ledger and tracker state carry across a rewrite. Older databases rebuild `session_branches` on startup, including Postgres.
+- Session transcripts record harness guard hits as `HarnessIntervention` (not sent on SSE) and write each subagent run under the parent session's `subagents/` directory when `runtime.transcript_enabled` is on.
+
+### Fixed
+
+- Transcript prompt diffs no longer drop changed lines that start with `--` or `++`, such as a removed `---` rule. Diffs already written that way are flagged as `text_error: diff_mismatch` when read instead of being rebuilt wrong.
+- A background `run_command` in the sandbox keeps running after launch returns.
+
+### Removed
+
+- The workspace knowledge index and the `search` tool. Agents explore the workspace with `grep` and `glob`, then `read_file`. Memory search, web search, and browser DOM indexing are unchanged.
+- The `knowledge-ast` and `knowledge-media` extras. Installs that still request them get an unknown-extra warning; drop them from agent deps.
+- `numpy` is no longer a core dependency.
+
+### Changed
+
+- A leftover `knowledge:` section in `monkeybot.yaml` is warned once and ignored. Old index files (`index.sqlite`, `.monkeybot/knowledge/`) are no longer read and can be deleted.
+- The `Evidence:` path guard moved to `core/hooks/evidence_guard.py` and is always registered by the gateway. Before, it ran only when `knowledge.enabled` was on.
+
 ## [core v3.7.0] - 2026-09-30
 
 ### Added

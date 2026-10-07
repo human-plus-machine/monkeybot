@@ -90,6 +90,7 @@ async def test_apply_schema_creates_only_expected_history_columns() -> None:
             "agent_scope",
             "turn_id",
             "message_id",
+            "row_id",
         }
     finally:
         await conn.close()
@@ -165,6 +166,7 @@ async def test_apply_schema_succeeds_after_wipe_simulated(tmp_path: Path) -> Non
             "agent_scope",
             "turn_id",
             "message_id",
+            "row_id",
         }
     finally:
         await conn2.close()

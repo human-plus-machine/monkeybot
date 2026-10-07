@@ -212,6 +212,66 @@ async def test_terminal_background_ceiling_message(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_sandbox_background_launch_complete_stays_running(tmp_path: Path) -> None:
+    """A background ``execution_complete`` means the process started, not that it exited."""
+    execution = MagicMock()
+    execution.id = "exec-bg"
+    execution.exit_code = None
+    execution.complete = MagicMock(name="ExecutionComplete")
+    execution.logs.stdout = []
+    execution.logs.stderr = []
+    sandbox = MagicMock()
+    sandbox.id = "sb"
+    sandbox.commands.run = AsyncMock(return_value=execution)
+    status = MagicMock(running=True, exit_code=None, error=None)
+    sandbox.commands.get_command_status = AsyncMock(return_value=status)
+    sandbox.commands.get_background_command_logs = AsyncMock(
+        return_value=MagicMock(content="", cursor=0)
+    )
+    sandbox.commands.interrupt = AsyncMock()
+    sandbox.renew = AsyncMock()
+    sandbox.kill = AsyncMock()
+    mock_cls, _sandbox = _make_create_mock(sandbox)
+    opened = _make_opensandbox_module(mock_cls)
+    cfg = SandboxConfig(
+        True,
+        "http://localhost:8080",
+        None,
+        "test",
+        30,
+        renew_interval_seconds=0,
+        max_job_seconds=60,
+    )
+    executor = SandboxExecutor(cfg, tmp_path)
+    with patch.dict(sys.modules, _opensandbox_sys_modules(opened)):
+        job = await executor.start_background(
+            "python3",
+            ["-c", "import time; time.sleep(30); print('hi')"],
+            log_dir=tmp_path,
+        )
+        assert job.status is JobStatus.RUNNING
+        assert job.exit_code is None
+        assert job.remote_id == "exec-bg"
+        assert executor.running_jobs() == [job]
+        sandbox.commands.get_command_status.assert_not_awaited()
+        sandbox.commands.get_background_command_logs.assert_not_awaited()
+        assert executor._renew_task is not None
+        assert job.job_id in executor._timeout_tasks
+
+        status.running = False
+        status.exit_code = 0
+        sandbox.commands.get_background_command_logs = AsyncMock(
+            return_value=MagicMock(content="hi\n", cursor=3)
+        )
+        payload = await poll_background_job(executor, job.job_id, wait_seconds=0, cursor=0)
+        assert payload["status"] == "exited"
+        assert payload["exit_code"] == 0
+        assert payload["new_output"] == "hi\n"
+        sandbox.commands.get_command_status.assert_awaited()
+        await executor.aclose()
+
+
+@pytest.mark.asyncio
 async def test_sandbox_background_poll_renew_and_lost_status(tmp_path: Path) -> None:
     execution = MagicMock()
     execution.id = "exec-1"

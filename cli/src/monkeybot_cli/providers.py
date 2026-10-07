@@ -111,8 +111,6 @@ def extra_module(extra: str) -> str:
         "cli": "typer",
         "cli-realtime": "pyaudio",
         "evals": "deepeval",
-        "knowledge-ast": "tree_sitter_language_pack",
-        "knowledge-media": "pypdf",
     }
     return mapping.get(extra, extra)
 

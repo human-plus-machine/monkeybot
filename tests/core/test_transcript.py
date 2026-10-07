@@ -14,6 +14,7 @@ from monkeybot.core.runtime.events import (
     AssistantDelta,
     AssistantTextEnded,
     ContextUsage,
+    HarnessIntervention,
     SystemContextUpdated,
     SystemPromptSnapshot,
     ThinkingBlockComplete,
@@ -21,6 +22,7 @@ from monkeybot.core.runtime.events import (
     ToolCallStarted,
     TurnComplete,
     UsageTotals,
+    is_durable_event,
 )
 
 
@@ -743,3 +745,31 @@ async def test_failed_append_does_not_advance_seq_or_indexes(
     await writer.write_event(ToolCallResult(request_id="r2", tool="t", result="ok", call_id="c2"))
     assert writer._seq == first_seq
     assert "c2" not in writer._result_seq_by_call_id
+
+
+@pytest.mark.asyncio
+async def test_session_dir_override(tmp_path: Path) -> None:
+    custom = tmp_path / "custom" / "child"
+    writer = TranscriptWriter("child-1", workspace_root=tmp_path, session_dir=custom)
+    await writer.write_user_message(request_id="r1", content="task")
+    assert writer.path == custom / "transcript.ndjson"
+    assert writer.path.is_file()
+    assert _read_lines(writer.path)[0]["content"] == "task"
+
+
+@pytest.mark.asyncio
+async def test_write_event_keeps_harness_intervention(tmp_path: Path) -> None:
+    writer = TranscriptWriter("sess-1", workspace_root=tmp_path)
+    event = HarnessIntervention(
+        request_id="r1",
+        intervention="doom_loop",
+        inner_turn=2,
+        detail="Doom loop detected",
+    )
+    assert not is_durable_event(event)
+    await writer.write_event(event)
+    lines = _read_lines(writer.path)
+    assert lines[0]["type"] == "HarnessIntervention"
+    assert lines[0]["intervention"] == "doom_loop"
+    assert lines[0]["inner_turn"] == 2
+    assert lines[0]["detail"] == "Doom loop detected"

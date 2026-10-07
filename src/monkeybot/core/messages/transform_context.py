@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from dataclasses import replace
 
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.logging_utils import kv
@@ -50,7 +51,7 @@ def _strip_provider_excluded(messages: Sequence[Message]) -> list[Message]:
         if len(kept) == len(msg.content):
             out.append(msg)
         else:
-            out.append(Message(role=msg.role, content=kept))
+            out.append(replace(msg, content=kept))
     return out
 
 
@@ -82,7 +83,7 @@ def _strip_completed_turn_thinking(messages: Sequence[Message]) -> list[Message]
         if len(kept) == len(msg.content):
             out.append(msg)
         else:
-            out.append(Message(role=msg.role, content=kept))
+            out.append(replace(msg, content=kept))
     return out
 
 
@@ -100,7 +101,7 @@ def _coalesce_adjacent_same_role(messages: Sequence[Message]) -> list[Message]:
     for msg in messages[1:]:
         prev = out[-1]
         if msg.role == prev.role:
-            out[-1] = Message(role=prev.role, content=[*prev.content, *msg.content])
+            out[-1] = replace(prev, content=[*prev.content, *msg.content])
         else:
             out.append(msg)
     return out

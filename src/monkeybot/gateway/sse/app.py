@@ -49,11 +49,7 @@ from monkeybot.core.context import LoopsToolRegistry, build_context
 from monkeybot.core.context.common import text_from_blocks
 from monkeybot.core.context.slash_skills import apply_invoked_skill
 from monkeybot.core.hooks import HookManager
-from monkeybot.core.knowledge import KnowledgeSubsystem, resolve_knowledge_settings
-from monkeybot.core.knowledge.config import (
-    knowledge_enabled_from_config,
-    knowledge_read_only_from_env,
-)
+from monkeybot.core.hooks.evidence_guard import EvidencePathGuard
 from monkeybot.core.layout import AgentLayout, resolve_agent_path
 from monkeybot.core.llm.provider import (
     Done,
@@ -79,8 +75,15 @@ from monkeybot.core.persistence.transcript import (
     TranscriptWriter,
     runtime_manifest_fields,
 )
-from monkeybot.core.runtime.events import AgentEvent, TurnComplete, UsageTotals, event_to_json
+from monkeybot.core.runtime.events import (
+    AgentEvent,
+    HarnessIntervention,
+    TurnComplete,
+    UsageTotals,
+    event_to_json,
+)
 from monkeybot.core.runtime.events import Error as AgentError
+from monkeybot.core.runtime.history_rewrite import resolve_active_thread_id
 from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
@@ -144,7 +147,7 @@ class RuntimeApplyResult:
 # Restart-only GatewayRuntime fields. Everything else is a live slice that
 # ``apply()`` stages and installs. Derived so adding a field cannot be silently
 # dropped from ``_install_live_slices``.
-_RESTART_ONLY_ATTRS = frozenset({"mcp", "memory", "knowledge", "loops_registry"})
+_RESTART_ONLY_ATTRS = frozenset({"mcp", "memory", "loops_registry"})
 _LIVE_SLICE_ATTRS: tuple[str, ...] = ()
 
 
@@ -192,7 +195,6 @@ class GatewayRuntime:
     provider: Provider | None = None
     hook_manager: HookManager | None = None
     memory: MemorySubsystem | None = None
-    knowledge: KnowledgeSubsystem | None = None
     web_search_tool: WebSearchTool | None = None
     run_command_allowed_commands: list[str] | None = None
     run_command_allowed_path_prefixes: list[str] | None = None
@@ -207,6 +209,7 @@ class GatewayRuntime:
     verdict_mailbox: VerdictMailbox | None = None
     nudge_actuator: NudgeActuator | None = None
     judge_worker: JudgeWorker | None = None
+    evidence_guard: EvidencePathGuard = field(default_factory=EvidencePathGuard)
 
     def build_inspectors(
         self, layout: AgentLayout, cfg: RuntimeConfig | None = None, *, fail_closed: bool = False
@@ -431,27 +434,20 @@ class GatewayRuntime:
             kept.append(VerifierInspector(self.verdict_mailbox))
         self.inspectors = kept
 
-    def rebuild_memory_hooks(self, cfg: RuntimeConfig | None, fastapi_app: FastAPI | None) -> None:
-        """Re-bind memory/knowledge hooks without reopening storage (URI is restart-only)."""
+    def rebuild_hooks(self, cfg: RuntimeConfig | None, fastapi_app: FastAPI | None) -> None:
+        """Re-bind memory, evidence, and verifier hooks without reopening storage."""
         enabled = env_flag(cfg, "MONKEYBOT_MEMORY_HOOK_ENABLED", default=True)
         mgr = HookManager()
-        has_hooks = False
         if enabled and self.memory is not None:
             self.memory.register_hooks(mgr)
-            has_hooks = True
-        if self.knowledge is not None:
-            self.knowledge.register_hooks(mgr)
-            has_hooks = True
+        self.evidence_guard.register(mgr)
         if self.goal_ledger is not None:
             self.goal_ledger.register(mgr)
-            has_hooks = True
         if self.progress_tracker is not None:
             self.progress_tracker.register(mgr)
-            has_hooks = True
         if self.nudge_actuator is not None:
             self.nudge_actuator.register(mgr)
-            has_hooks = True
-        self.hook_manager = mgr if has_hooks else None
+        self.hook_manager = mgr
         if fastapi_app is None:
             return
         if enabled and self.memory is not None:
@@ -548,7 +544,7 @@ class GatewayRuntime:
                 )
                 return applied, error
         if "MONKEYBOT_MEMORY_HOOK_ENABLED" in diff.changed_env_keys:
-            self.rebuild_memory_hooks(cfg, fastapi_app)
+            self.rebuild_hooks(cfg, fastapi_app)
             applied.append("MONKEYBOT_MEMORY_HOOK_ENABLED")
             logger.info(
                 "config slice rebuilt %s",
@@ -559,7 +555,7 @@ class GatewayRuntime:
                 getattr(fastapi_app.state, "storage", None) if fastapi_app is not None else None
             )
             self.build_verifier(cfg, storage=storage)
-            self.rebuild_memory_hooks(cfg, fastapi_app)
+            self.rebuild_hooks(cfg, fastapi_app)
             applied.append(VERIFIER_DIFF_KEY)
             logger.info(
                 "config slice rebuilt %s",
@@ -1006,10 +1002,6 @@ class GatewayLoopPort:
             attachment_store: AttachmentStore | None = getattr(
                 serving.state, "attachment_store", None
             )
-            if bus.attachment_catalog is not None:
-                rows = await history.load(session_id)
-                bus.attachment_catalog.rebuild_from_history(rows)
-
             extra_tools: list[Any] = [web_search_tool] if web_search_tool is not None else []
             extra_tools.extend(computer_tools)
             todo_store = None
@@ -1026,9 +1018,14 @@ class GatewayLoopPort:
             summarization_model = env_value(cfg, "CONTEXT_SUMMARIZATION_MODEL", "").strip() or None
 
             try:
+                thread_id = await resolve_active_thread_id(backend, session_id)
+                if bus.attachment_catalog is not None:
+                    rows = await history.load(thread_id)
+                    bus.attachment_catalog.rebuild_from_history(rows)
                 ctx = await build_context(
-                    session_id,
+                    thread_id,
                     request_id,
+                    session_id=session_id,
                     agent_md_path=agent_path,
                     memory=getattr(serving.state, "memory", None),
                     skills_path=skills_resolved,
@@ -1066,7 +1063,6 @@ class GatewayLoopPort:
             executor = CoreToolExecutor(
                 workspace_root=workspace_root,
                 memory=getattr(serving.state, "memory", None),
-                knowledge=getattr(serving.state, "knowledge", None),
                 skills_path=skills_resolved,
                 artifacts_path=artifacts_resolved,
                 mcp=mcp,
@@ -1122,7 +1118,9 @@ class GatewayLoopPort:
                     )
                 if transcript_writer is not None:
                     await transcript_writer.write_event(evt)
-                await bus.publish_data(event_to_json(evt))
+                # Guard hits stay in the transcript. Clients keep the existing wire.
+                if not isinstance(evt, HarnessIntervention):
+                    await bus.publish_data(event_to_json(evt))
         finally:
             if in_flight:
                 end_in_flight_turn()
@@ -1256,50 +1254,6 @@ async def _startup(fastapi_app: FastAPI) -> None:
         fastapi_app.state.memory_status = "unavailable"
         fastapi_app.state.memory_detail = str(exc)
 
-    # Unified knowledge layer — FTS + ANN + links + search
-    if knowledge_enabled_from_config():
-        try:
-            if knowledge_read_only_from_env():
-                logger.warning(
-                    "MONKEYBOT_KNOWLEDGE_READ_ONLY is set but ignored here: the gateway "
-                    "process is the sole writer per workspace and always opens the "
-                    "knowledge index read-write. Set it on subagent/harness-as-library "
-                    "clients instead."
-                )
-            layout = AgentLayout.from_environment()
-            settings = resolve_knowledge_settings(workspace_root=layout.workspace_root)
-            knowledge = await KnowledgeSubsystem.create(
-                workspace_root=layout.workspace_root,
-                settings=settings,
-                knowledge_root=Path(settings.knowledge_root),
-                index_path=Path(settings.index_path),
-                read_only=False,
-            )
-            hook_mgr = gateway_runtime.hook_manager
-            if hook_mgr is None:
-                hook_mgr = HookManager()
-                gateway_runtime.hook_manager = hook_mgr
-            knowledge.register_hooks(hook_mgr)
-            gateway_runtime.knowledge = knowledge
-            fastapi_app.state.knowledge = knowledge
-
-            async def _knowledge_startup_scan() -> None:
-                try:
-                    await knowledge.ensure_ready()
-                    logger.info("knowledge index ready (path=%s)", settings.index_path)
-                except Exception as scan_exc:
-                    logger.warning("knowledge startup scan failed: %r", scan_exc)
-
-            asyncio.create_task(_knowledge_startup_scan())
-            logger.info("knowledge layer enabled (index=%s)", settings.index_path)
-        except Exception as exc:
-            logger.warning("knowledge layer setup failed; continuing without: %r", exc)
-            gateway_runtime.knowledge = None
-            fastapi_app.state.knowledge = None
-    else:
-        logger.info("knowledge layer disabled via knowledge.enabled")
-        fastapi_app.state.knowledge = None
-
     if attachments_enabled_from_env():
         try:
             fastapi_app.state.attachment_store = FilesystemAttachmentStore(
@@ -1321,7 +1275,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
 
     gateway_runtime.close_verifier()
     gateway_runtime.build_verifier(cfg, storage=fastapi_app.state.storage)
-    gateway_runtime.rebuild_memory_hooks(cfg, fastapi_app)
+    gateway_runtime.rebuild_hooks(cfg, fastapi_app)
 
     fastapi_app.state.gateway_runtime = gateway_runtime
 
@@ -1385,18 +1339,6 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
     if mcp is not None:
         for name in list(getattr(mcp, "_servers", {}).keys()):
             await mcp.disconnect(name)
-
-    knowledge = gateway_runtime.knowledge or getattr(fastapi_app.state, "knowledge", None)
-    if knowledge is not None:
-        try:
-            await knowledge.close()
-        except Exception as exc:
-            logger.warning("knowledge close failed: %s", exc)
-        gateway_runtime.knowledge = None
-        try:
-            fastapi_app.state.knowledge = None
-        except Exception as exc:
-            logger.warning("knowledge state clear failed: %s", exc)
 
     try:
         gateway_runtime.close_verifier()

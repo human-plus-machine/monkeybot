@@ -13,7 +13,7 @@ from monkeybot.core.runtime.doom_loop import (
     _effective_doom_loop_threshold,
     _tool_call_fingerprint,
 )
-from monkeybot.core.runtime.events import Error, TurnComplete
+from monkeybot.core.runtime.events import Error, HarnessIntervention, TurnComplete
 from monkeybot.core.runtime.loop import run
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.types_tools import ToolDef
@@ -313,6 +313,13 @@ async def test_run_doom_loop_emits_error_and_forces_no_tools(
     ]
     assert len(doom_errors) == 1
     assert doom_errors[0].error == _doom_loop_texts("run_command", 3)[0]
+    interventions = [
+        e
+        for e in events
+        if isinstance(e, HarnessIntervention) and e.intervention == "doom_loop"
+    ]
+    assert len(interventions) == 1
+    assert interventions[0].detail == doom_errors[0].error
     assert isinstance(events[-1], TurnComplete)
     assert prov.stream_calls == 4
     assert prov.stream_tools[:3] == [["run_command"]] * 3

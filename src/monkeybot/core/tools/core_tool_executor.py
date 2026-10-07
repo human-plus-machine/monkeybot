@@ -53,7 +53,6 @@ from monkeybot.core.goals.service import (
     GoalNotFoundError,
     goal_to_json,
 )
-from monkeybot.core.knowledge.subsystem import KnowledgeSubsystem
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.mcp.mcp_client import (
@@ -152,7 +151,6 @@ _CORE_TOOL_NAMES = frozenset(
         "glob",
         "grep",
         "apply_patch",
-        "search",
         "list_skills",
         "task",
         "run_command",
@@ -182,11 +180,11 @@ _SPILL_SKIP_TOOLS = frozenset({"read_file", "load_file"})
 
 def _mcp_call_meta(ctx: TurnContext) -> dict[str, object]:
     """Request ``_meta.monkeybot`` so MCP servers can attribute work to a chat."""
-    if not str(ctx.thread_id).strip():
+    if not str(ctx.session_id).strip():
         logger.debug("mcp call _meta missing thread_id %s", kv(request_id=ctx.request_id))
     return {
         "monkeybot": {
-            "thread_id": ctx.thread_id,
+            "thread_id": ctx.session_id,
             "request_id": ctx.request_id,
             "run_id": os.environ.get("MONKEYBOT_RUN_ID") or None,
         }
@@ -952,7 +950,6 @@ class CoreToolExecutor(ToolExecutorPort):
         scheduled_loop_store: ScheduledLoopStore | None = None,
         subagent_registry: dict[str, SubagentConfig] | None = None,
         loops_registry: LoopsToolRegistry | None = None,
-        knowledge: KnowledgeSubsystem | None = None,
         config: RuntimeConfig | None = None,
         grants_path: Path | None = None,
     ) -> None:
@@ -968,7 +965,6 @@ class CoreToolExecutor(ToolExecutorPort):
             artifacts_root=self._artifacts_path,
         )
         self._memory = memory
-        self._knowledge = knowledge
         self._mcp = mcp
         self._attachment_store = attachment_store
         self._run_store = run_store
@@ -1191,8 +1187,6 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = self._tool_grep(args)
             elif name == "apply_patch":
                 result_text, err_text = self._tool_apply_patch(args)
-            elif name == "search":
-                result_text, err_text = await self._tool_search(args)
             elif name == "list_skills":
                 result_text, err_text = self._tool_list_skills(ctx)
             elif name == "task":
@@ -1334,7 +1328,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text = write_spill_with_inventory(
                     result_text,
                     self._workspace.repo_root,
-                    ctx.thread_id,
+                    ctx.session_id,
                     call.call_id,
                     tool_name=name,
                     inline_budget=budgets.inline_budget,
@@ -1391,10 +1385,10 @@ class CoreToolExecutor(ToolExecutorPort):
     ) -> ToolExecutionResult:
         if self._attachment_store is None:
             return ToolExecutionResult.err("Attachments are not enabled for this session")
-        if not self._attachment_store.exists(ctx.thread_id, attachment_id):
+        if not self._attachment_store.exists(ctx.session_id, attachment_id):
             return ToolExecutionResult.err(f"Unknown attachment_id: {attachment_id}")
         try:
-            raw, mime, filename = self._attachment_store.read(ctx.thread_id, attachment_id)
+            raw, mime, filename = self._attachment_store.read(ctx.session_id, attachment_id)
         except FileNotFoundError:
             return ToolExecutionResult.err(
                 f"Attachment {attachment_id} expired or removed; ask user to re-upload"
@@ -1402,7 +1396,7 @@ class CoreToolExecutor(ToolExecutorPort):
         meta: dict[str, object] = {
             "attachment_id": attachment_id,
             "filename": filename,
-            "path": attachment_workspace_path(ctx.thread_id, attachment_id),
+            "path": attachment_workspace_path(ctx.session_id, attachment_id),
         }
         return self._media_result(raw, mime, meta)
 
@@ -1446,7 +1440,7 @@ class CoreToolExecutor(ToolExecutorPort):
         if self._attachment_store is not None:
             try:
                 stored = self._attachment_store.save(
-                    ctx.thread_id,
+                    ctx.session_id,
                     data=raw,
                     mime_type=mime,
                     filename=filename,
@@ -1704,62 +1698,6 @@ class CoreToolExecutor(ToolExecutorPort):
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
 
-    async def _tool_search(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        query = _str_arg(args, "query", "q")
-        if not query:
-            return (
-                None,
-                _built_in_tool_error(
-                    "validation",
-                    "search requires a non-empty query.",
-                    'Use query, e.g. {"query": "refund policy"}.',
-                    {"field": "query", "example": {"query": "refund policy"}},
-                ),
-            )
-        if self._knowledge is None:
-            return (
-                None,
-                _built_in_tool_error(
-                    "validation",
-                    "search requires the knowledge layer to be configured.",
-                    "Set knowledge.enabled: true in monkeybot.yaml.",
-                    {"field": "knowledge"},
-                ),
-            )
-        limit = _coerce_int(args.get("limit"), None)
-        if limit is None:
-            limit = _coerce_int(args.get("max_hits"), self._knowledge.settings.default_limit) or (
-                self._knowledge.settings.default_limit
-            )
-        path_prefix = args.get("path_prefix")
-        if not isinstance(path_prefix, str) or not path_prefix.strip():
-            path_prefix = None
-        else:
-            path_prefix = path_prefix.strip()
-        source_raw = args.get("source")
-        source = "any"
-        if isinstance(source_raw, str) and source_raw.strip() in {
-            "any",
-            "note",
-            "workspace_file",
-        }:
-            source = source_raw.strip()
-        payload = await self._knowledge.search(
-            query,
-            limit=limit,
-            path_prefix=path_prefix,
-            source=source,  # type: ignore[arg-type]
-        )
-        hits = payload.get("hits") if isinstance(payload, dict) else None
-        if isinstance(payload, dict) and not hits:
-            note = payload.get("note") or ""
-            cross = (
-                "no knowledge matches — if this is about past sessions or preferences, "
-                "use `mempalace search` via `run_command`"
-            )
-            payload["note"] = f"{note}; {cross}".strip("; ") if note else cross
-        return (_j(payload), None)
-
     def _tool_list_skills(self, ctx: TurnContext) -> tuple[str | None, str | None]:
         rows = [{"name": s.name, "description": s.description} for s in ctx.skills]
         return (
@@ -1860,7 +1798,7 @@ class CoreToolExecutor(ToolExecutorPort):
         parent_label = f"{ctx.request_id}:{call.call_id}"
         traceparent = _inject_subagent_traceparent()
         run_id = make_run_id()
-        child_thread_id = f"subagent:{ctx.thread_id}:{uuid.uuid4().hex[:10]}"
+        child_thread_id = f"subagent:{ctx.session_id}:{uuid.uuid4().hex[:10]}"
         envelope = SubagentEnvelope(
             task=task,
             context=context_val,
@@ -1870,7 +1808,7 @@ class CoreToolExecutor(ToolExecutorPort):
             traceparent=traceparent,
             agent_md=str(agent_md_path),
             subagent_type=subagent_type,
-            parent_session_id=ctx.thread_id,
+            parent_session_id=ctx.session_id,
             child_thread_id=child_thread_id,
         )
 
@@ -2095,7 +2033,7 @@ class CoreToolExecutor(ToolExecutorPort):
                     executor,
                     cmd,
                     argv,
-                    thread_id=ctx.thread_id,
+                    thread_id=ctx.session_id,
                     execute_kwargs=execute_kwargs,
                 )
             result = await executor.execute(
@@ -2118,7 +2056,7 @@ class CoreToolExecutor(ToolExecutorPort):
         except CommandTimeoutError as exc:
             spill_path = write_run_command_timeout_spill(
                 workspace_root=self._workspace.repo_root,
-                thread_id=ctx.thread_id,
+                thread_id=ctx.session_id,
                 call_id=call.call_id,
                 stdout=exc.stdout,
                 stderr=exc.stderr,
@@ -2519,7 +2457,7 @@ class CoreToolExecutor(ToolExecutorPort):
             max_ticks = _coerce_int(max_ticks_raw, 0)
             if max_ticks is None or max_ticks < 1:
                 return (None, "max_ticks must be a positive integer when set")
-        session_id = _str_arg(args, "session_id") or ctx.thread_id
+        session_id = _str_arg(args, "session_id") or ctx.session_id
         loop_id = _str_arg(args, "loop_id")
         skip_if_busy = args.get("skip_if_busy", True)
         if not isinstance(skip_if_busy, bool):
@@ -2664,23 +2602,23 @@ class CoreToolExecutor(ToolExecutorPort):
         try:
             row, created = await service_or_err.create(
                 objective=objective,
-                session_id=ctx.thread_id,
+                session_id=ctx.session_id,
             )
         except GoalConflictError as exc:
             logger.warning(
                 "create_goal conflict %s",
-                kv(session_id=ctx.thread_id, error=str(exc)),
+                kv(session_id=ctx.session_id, error=str(exc)),
             )
             return (None, str(exc))
         except ValueError as exc:
             logger.warning(
                 "create_goal rejected %s",
-                kv(session_id=ctx.thread_id, error=str(exc)),
+                kv(session_id=ctx.session_id, error=str(exc)),
             )
             return (None, str(exc))
         logger.info(
             "create_goal %s",
-            kv(session_id=ctx.thread_id, goal_id=row.loop_id, created=created, status=row.status),
+            kv(session_id=ctx.session_id, goal_id=row.loop_id, created=created, status=row.status),
         )
         return (
             _j(
@@ -2714,24 +2652,24 @@ class CoreToolExecutor(ToolExecutorPort):
         try:
             row = await service_or_err.update(
                 goal_id=goal_id,
-                session_id=ctx.thread_id,
+                session_id=ctx.session_id,
                 status=status,
             )
         except GoalNotFoundError as exc:
             logger.warning(
                 "update_goal missed %s",
-                kv(session_id=ctx.thread_id, status=status, error=str(exc)),
+                kv(session_id=ctx.session_id, status=status, error=str(exc)),
             )
             return (None, str(exc))
         except ValueError as exc:
             logger.warning(
                 "update_goal rejected %s",
-                kv(session_id=ctx.thread_id, status=status, error=str(exc)),
+                kv(session_id=ctx.session_id, status=status, error=str(exc)),
             )
             return (None, str(exc))
         logger.info(
             "update_goal %s",
-            kv(session_id=ctx.thread_id, goal_id=row.loop_id, status=row.status),
+            kv(session_id=ctx.session_id, goal_id=row.loop_id, status=row.status),
         )
         return (
             _j(

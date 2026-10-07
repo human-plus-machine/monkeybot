@@ -53,6 +53,7 @@ from monkeybot.core.runtime.events import (
     ToolConfirmationRequestEvent,
 )
 from monkeybot.core.runtime.events import Error as AgentError
+from monkeybot.core.runtime.history_rewrite import resolve_active_thread_id
 from monkeybot.core.runtime.realtime_loop import run_realtime_turn
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
 from monkeybot.core.tools.background_jobs import jobs_killed_at_turn_end_error
@@ -166,6 +167,7 @@ async def _build_realtime_context(
     request_id: str,
     deps: RealtimeDependencies,
     *,
+    thread_id: str | None = None,
     todo_store: TodoListStore | None = None,
     cancelled: asyncio.Event | None = None,
 ) -> TurnContext:
@@ -188,8 +190,9 @@ async def _build_realtime_context(
     try:
         model = env_value(cfg, "MODEL_NAME", "gemini-2.5-flash") or "gemini-2.5-flash"
         return await build_context(
-            thread_id=session_id,
+            thread_id=thread_id or session_id,
             request_id=request_id,
+            session_id=session_id,
             agent_md_path=agent_path,
             memory=deps.memory,
             skills_path=skills_path,
@@ -846,6 +849,7 @@ def create_realtime_router(
         state: RealtimeConnectionState | None = None
         ctx: TurnContext | None = None
         close_reason = "connection_closed"
+        claimed = False
         try:
             provider = deps.realtime_provider
             if provider is None:
@@ -855,7 +859,14 @@ def create_realtime_router(
             if storage is None:
                 raise GatewayInternalError("Storage backend not initialized")
 
+            claimed = manager.claim(session_id)
+            if not claimed:
+                raise SessionConflictError(
+                    "Session is busy with another call or a chat history change",
+                    details="session_busy",
+                )
             history = storage.history()
+            thread_id = await resolve_active_thread_id(storage, session_id)
             workspace_root, _skills_path = _resolved_workspace_paths()
             todo_store = await _maybe_todo_store(manager, session_id, workspace_root)
             cancelled = asyncio.Event()
@@ -863,11 +874,12 @@ def create_realtime_router(
                 session_id,
                 request_id,
                 deps,
+                thread_id=thread_id,
                 todo_store=todo_store,
                 cancelled=cancelled,
             )
             if ctx.verdict_mailbox is not None:
-                ctx.verdict_mailbox.open_request(session_id, request_id)
+                ctx.verdict_mailbox.open_request(ctx.thread_id, request_id)
             session_config = _make_realtime_session_config(ctx, manager.config)
             try:
                 realtime_session = await provider.connect(config=session_config)
@@ -924,7 +936,7 @@ def create_realtime_router(
             attachment_catalog = SessionAttachmentCatalog(session_id=session_id)
             if attachment_store is not None:
                 try:
-                    rows = await history.load(session_id)
+                    rows = await history.load(thread_id)
                     attachment_catalog.rebuild_from_history(rows)
                 except Exception:
                     logger.warning(
@@ -992,11 +1004,15 @@ def create_realtime_router(
                 await _safe_client_notify(ws, ws.close(code=1011, reason="Internal error"))
         finally:
             if ctx is not None and ctx.verdict_mailbox is not None:
-                ctx.verdict_mailbox.clear_request(session_id, request_id)
-            if state is not None:
-                await _close_session(state, manager, reason=close_reason)
-            else:
-                manager.release_slot(session_id)
+                ctx.verdict_mailbox.clear_request(ctx.thread_id, request_id)
+            try:
+                if state is not None:
+                    await _close_session(state, manager, reason=close_reason)
+                else:
+                    manager.release_slot(session_id)
+            finally:
+                if claimed:
+                    manager.unclaim(session_id)
             logger.info(
                 "realtime websocket closed %s",
                 kv(

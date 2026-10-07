@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.persistence.backends import HistoryStore
@@ -28,7 +29,6 @@ from .text import (
 def _freeze_user_row(
     msg: Message,
     *,
-    thread_id: str,
     last_assistant_text: str,
     catalog: SessionAttachmentCatalog | None,
     events: list[AttachmentDescriptorEvent],
@@ -70,12 +70,10 @@ def _freeze_user_row(
                     filename=filename,
                     mime_type=block.mime_type,
                     description=description[:500],
-                    storage_path=attachment_workspace_path(
-                        thread_id, block.attachment_id
-                    ),
+                    storage_path=attachment_workspace_path(catalog.session_id, block.attachment_id),
                 )
             )
-    return Message(role=msg.role, content=new_content)
+    return replace(msg, content=new_content)
 
 
 def _freeze_tool_responses(msg: Message) -> Message:
@@ -89,9 +87,7 @@ def _freeze_tool_responses(msg: Message) -> Message:
             new_content.append(block)
             continue
         kind = "image" if any(isinstance(b, Image) for b in block.result) else "file"
-        if any(
-            isinstance(b, File) and b.mime_type == "application/pdf" for b in block.result
-        ):
+        if any(isinstance(b, File) and b.mime_type == "application/pdf" for b in block.result):
             kind = "pdf"
         attachment_id: str | None = None
         path: str | None = None
@@ -126,7 +122,7 @@ def _freeze_tool_responses(msg: Message) -> Message:
         )
     if not changed:
         return msg
-    return Message(role=msg.role, content=new_content)
+    return replace(msg, content=new_content)
 
 
 async def freeze_attachments_in_history(
@@ -147,7 +143,6 @@ async def freeze_attachments_in_history(
         if msg.role == "user" and any(isinstance(b, AttachmentRef) for b in msg.content):
             frozen_msg = _freeze_user_row(
                 msg,
-                thread_id=thread_id,
                 last_assistant_text=last_assistant_text,
                 catalog=catalog,
                 events=events,

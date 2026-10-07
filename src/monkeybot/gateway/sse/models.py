@@ -241,6 +241,51 @@ class AgentUsageResponse(BaseModel):
     by_bucket_model: list[UsageSeriesPointResponse] = Field(default_factory=list)
 
 
+class HistoryAnchorBody(BaseModel):
+    """Stored-row address: the ``anchor`` a chat-history message carries."""
+
+    row_id: str = Field(min_length=1, max_length=128)
+
+
+class BranchOpRequest(ReplyBodyFields):
+    """POST /sessions/{id}/branches — edit, regenerate, rewind, or restore.
+
+    ``message`` / ``content`` are the edited user turn and are required for edit.
+    Restore keeps the prefix before the user message and does not start a turn.
+    """
+
+    op: Literal["edit", "regenerate", "rewind", "restore"]
+    anchor: HistoryAnchorBody
+    request_id: str | None = Field(default=None, max_length=128)
+
+
+class BranchOpResponse(BaseModel):
+    """POST /sessions/{id}/branches response. ``request_id`` is the started turn."""
+
+    branch_id: str
+    request_id: str | None = None
+
+
+class HistoryAnchorRequest(BaseModel):
+    """POST /sessions/{id}/truncate and /fork — keep through the anchor's turn."""
+
+    anchor: HistoryAnchorBody
+
+
+class TruncateResponse(BaseModel):
+    branch_id: str
+
+
+class ForkResponse(BaseModel):
+    session_id: str
+
+
+class SetActiveBranchRequest(BaseModel):
+    """PUT /sessions/{id}/branches/active body."""
+
+    branch_id: str = Field(min_length=1, max_length=64)
+
+
 def error_payload_dict(code: str, message: str, request_id: str) -> dict[str, Any]:
     """Build a JSON-serializable error body for JSONResponse."""
     return {"error": {"code": code, "message": message, "request_id": request_id}}

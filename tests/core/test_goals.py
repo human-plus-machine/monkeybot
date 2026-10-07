@@ -345,6 +345,36 @@ async def test_create_goal_requires_slash_invocation(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_goal_on_branch_thread_targets_the_session(tmp_path) -> None:
+    backend = SQLiteStorageBackend(f"sqlite:///{tmp_path / 'tool.db'}")
+    await backend.open()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        scheduled_loop_store=backend.scheduled_loops(),
+    )
+    session_id = _ctx().thread_id
+    ctx = replace(
+        _ctx(),
+        thread_id=f"branch:{session_id}:b1",
+        session=session_id,
+        invoked_skill=SkillRef(name="goal", description="Goal"),
+    )
+    created = await ex.execute(
+        call=ToolCall(name="create_goal", args={"objective": "Ship it"}, call_id="1"),
+        ctx=ctx,
+    )
+    assert created.error is None
+    payload = json.loads(created.blocks[0].text)  # type: ignore[index]
+    assert payload["goal"]["session_id"] == session_id
+    await backend.close()
+
+
+@pytest.mark.asyncio
 async def test_create_goal_skips_loop_confirmation() -> None:
     inspector = LoopStartInspector()
     allowed = await inspector.check(

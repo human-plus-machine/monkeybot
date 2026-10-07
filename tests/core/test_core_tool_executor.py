@@ -1207,87 +1207,6 @@ async def test_apply_patch_tool(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_search_hits_knowledge_notes(tmp_path: Path) -> None:
-    from monkeybot.core.knowledge import KnowledgeSubsystem
-    from monkeybot.core.knowledge.types import KnowledgeSettings
-
-    root = tmp_path / "ws"
-    root.mkdir()
-    (root / "policy.md").write_text(
-        "Refund policy for annual plans requires approval.\n", encoding="utf-8"
-    )
-    knowledge_root = tmp_path / ".monkeybot" / "knowledge"
-    notes = knowledge_root / "notes"
-    notes.mkdir(parents=True)
-    (notes / "refund.md").write_text(
-        "Annual refunds.\n\n[[workspace:policy.md#L1-1]]\n",
-        encoding="utf-8",
-    )
-    settings = KnowledgeSettings(
-        enabled=True,
-        knowledge_root=str(knowledge_root),
-        index_path=str(knowledge_root / "index.sqlite"),
-        debounce_ms=0,
-        startup_scan=True,
-        default_limit=8,
-    )
-    knowledge = await KnowledgeSubsystem.create(
-        workspace_root=root,
-        settings=settings,
-        knowledge_root=knowledge_root,
-        index_path=Path(settings.index_path),
-    )
-    await knowledge.ensure_ready()
-    skills = tmp_path / "skills"
-    skills.mkdir()
-    try:
-        ex = CoreToolExecutor(
-            workspace_root=root,
-            memory=_mem_sub(tmp_path / "memory"),
-            knowledge=knowledge,
-            skills_path=skills,
-            mcp=_NoMCP(),
-        )
-        out, err = unwrap_tool_execution_result(
-            await ex.execute(
-                call=ToolCall(
-                    call_id="1",
-                    name="search",
-                    args={"query": "annual refund approval"},
-                ),
-                ctx=_ctx(),
-            )
-        )
-        assert err is None and out is not None
-        payload = json.loads(out)
-        assert payload["ok"] is True
-        assert payload["hits"]
-    finally:
-        await knowledge.close()
-
-
-@pytest.mark.asyncio
-async def test_search_without_knowledge_returns_validation_error(tmp_path: Path) -> None:
-    skills = tmp_path / "skills"
-    skills.mkdir()
-    ex = CoreToolExecutor(
-        workspace_root=tmp_path,
-        memory=None,
-        knowledge=None,
-        skills_path=skills,
-        mcp=_NoMCP(),
-    )
-    out, err = unwrap_tool_execution_result(
-        await ex.execute(
-            call=ToolCall(call_id="1", name="search", args={"query": "x"}),
-            ctx=_ctx(),
-        )
-    )
-    assert out is None and err is not None
-    assert "knowledge" in err.lower() or "search" in err.lower()
-
-
-@pytest.mark.asyncio
 async def test_list_skills_echoes_context_skill_refs(tmp_path: Path) -> None:
     """``list_skills`` returns whatever is already on ``TurnContext.skills`` (no disk read)."""
     root = tmp_path
@@ -3344,6 +3263,44 @@ async def test_load_file_from_attachment_id_returns_image_block(tmp_path: Path) 
     assert img.mime_type == "image/png"
     assert img.metadata is not None
     assert img.metadata.get("attachment_id") == stored.attachment_id
+
+
+@pytest.mark.asyncio
+async def test_load_file_reads_session_attachment_on_branch_thread(tmp_path: Path) -> None:
+    from monkeybot.core.attachments.store import FilesystemAttachmentStore
+    from monkeybot.core.types.content_blocks import Image
+
+    png = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+        b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc"
+        b"\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    ctx = dataclasses.replace(_ctx(), thread_id="branch:t:b1", session="t")
+    store = FilesystemAttachmentStore(tmp_path)
+    stored = store.save("t", data=png, mime_type="image/png", filename="up.png")
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        attachment_store=store,
+    )
+
+    result = await ex.execute(
+        call=ToolCall(
+            call_id="lf5",
+            name="load_file",
+            args={"attachment_id": stored.attachment_id},
+        ),
+        ctx=ctx,
+    )
+
+    assert result.error is None
+    img = next(b for b in result.blocks if isinstance(b, Image))
+    assert img.metadata is not None
+    assert img.metadata["path"] == f".monkeybot/attachments/t/{stored.attachment_id}"
 
 
 @pytest.mark.asyncio

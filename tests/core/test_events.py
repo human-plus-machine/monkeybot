@@ -756,6 +756,36 @@ def test_wrap_subagent_event_returns_wrapper() -> None:
     assert wrapped.subagent_type == "researcher"
 
 
+def test_harness_intervention_roundtrip_and_not_forwarded() -> None:
+    from monkeybot.core.runtime.events import (
+        HarnessIntervention,
+        is_durable_event,
+        is_subagent_forwardable,
+        wrap_subagent_event,
+    )
+
+    ev = HarnessIntervention(
+        request_id="r1",
+        intervention="empty_completion",
+        inner_turn=3,
+        detail="retry",
+    )
+    assert event_from_json(event_to_json(ev)) == ev
+    assert not is_durable_event(ev)
+    assert not is_subagent_forwardable(ev)
+    assert (
+        wrap_subagent_event(
+            request_id="parent",
+            parent_call_id="c",
+            run_id="run",
+            child_thread_id="child",
+            subagent_type="explore",
+            inner=ev,
+        )
+        is None
+    )
+
+
 def test_wrap_subagent_event_returns_none_for_denylisted() -> None:
     from monkeybot.core.runtime.events import wrap_subagent_event
 
