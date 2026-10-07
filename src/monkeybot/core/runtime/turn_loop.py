@@ -80,6 +80,7 @@ from .events import (
     ContextSummarizing,
     ContextUsage,
     Error,
+    HarnessIntervention,
     SystemPromptSnapshot,
     Thinking,
     UserSteered,
@@ -383,11 +384,14 @@ def _stash_escalation(
     mailbox.arm_escalation(thread_id, verdict, max_severity=capped)
 
 
-def _arm_replan_from_mailbox(state: _TurnState) -> None:
-    """Reuse doom-loop ``force_no_tools`` for a drained ``replan`` verdict."""
+def _arm_replan_from_mailbox(state: _TurnState) -> str | None:
+    """Reuse doom-loop ``force_no_tools`` for a drained ``replan`` verdict.
+
+    Returns the replan note when one was armed, otherwise ``None``.
+    """
     mailbox = state.ctx.verdict_mailbox
     if mailbox is None:
-        return
+        return None
     try:
         note = mailbox.take_replan(state.ctx.thread_id, state.ctx.request_id)
     except Exception:
@@ -396,9 +400,9 @@ def _arm_replan_from_mailbox(state: _TurnState) -> None:
             kv(thread_id=state.ctx.thread_id, request_id=state.ctx.request_id),
             exc_info=True,
         )
-        return
+        return None
     if not note:
-        return
+        return None
     state.doom_tracker.force_no_tools = True
     existing = state.doom_tracker.recovery_note
     state.doom_tracker.recovery_note = f"{existing}\n\n{note}" if existing else note
@@ -406,6 +410,7 @@ def _arm_replan_from_mailbox(state: _TurnState) -> None:
         "verifier replan armed %s",
         kv(thread_id=state.ctx.thread_id, request_id=state.ctx.request_id),
     )
+    return note
 
 
 def _admit_steer_to_ledger(ctx: TurnContext, verbatim: str, item: SteerItem) -> None:
@@ -548,7 +553,14 @@ async def _prepare_turn_context(
         yield epoch_evt
     system = _system_message_from_text(state.admit.leading_system_text)
     combined_extra = _combine_extras(state.pre_turn_extra, state.pre_tool_extra_next)
-    _arm_replan_from_mailbox(state)
+    replan_note = _arm_replan_from_mailbox(state)
+    if replan_note:
+        yield HarnessIntervention(
+            request_id=state.ctx.request_id,
+            intervention="verifier_replan",
+            inner_turn=state.turn_index,
+            detail=replan_note,
+        )
     force_no_tools, doom_loop_note = state.doom_tracker.consume_recovery()
     combined_extra = _combine_extras(combined_extra, doom_loop_note)
     state.system = _append_extra_system_text(system, combined_extra)
@@ -808,6 +820,12 @@ async def _apply_history_load_max_safety(
         ),
     )
     await history.reset(state.ctx.thread_id, truncated)
+    yield HarnessIntervention(
+        request_id=state.ctx.request_id,
+        intervention="compaction_fallback",
+        inner_turn=state.turn_index,
+        detail=f"dropped {dropped} messages; load_max={HISTORY_LOAD_MAX}",
+    )
     async for evt in _refresh_prompt_after_history_change(
         state,
         history=history,
@@ -1467,6 +1485,12 @@ async def _nudge_or_error_on_background_jobs(
         state.background_job_nudges_left -= 1
         note = jobs_still_running_note(running_jobs)
         state.pre_tool_extra_next = _combine_extras(state.pre_tool_extra_next, note)
+        yield HarnessIntervention(
+            request_id=state.ctx.request_id,
+            intervention="background_jobs_nudge",
+            inner_turn=state.turn_index,
+            detail=note,
+        )
         logger.warning(
             "final answer blocked; background jobs still running %s",
             kv(
@@ -1571,10 +1595,22 @@ async def _handle_empty_or_final_text(
             state.pre_tool_extra_next,
             recovery_note,
         )
+        yield HarnessIntervention(
+            request_id=state.ctx.request_id,
+            intervention="post_tool_empty" if owes_tool_followup else "empty_completion",
+            inner_turn=state.turn_index,
+            detail="retry",
+        )
         logger.warning(log_msg, kv(**log_fields))
         state.action = "continue"
         return
     logger.warning("empty model completion; ending turn %s", kv(**log_fields))
+    yield HarnessIntervention(
+        request_id=state.ctx.request_id,
+        intervention="post_tool_empty" if owes_tool_followup else "empty_completion",
+        inner_turn=state.turn_index,
+        detail="exhausted",
+    )
     yield Error(
         request_id=state.ctx.request_id,
         error=_EMPTY_COMPLETION_EXHAUSTED_ERROR,
@@ -1917,4 +1953,10 @@ async def _run_inner_core(
     # Settlement for POST_TURN / lingering POST_TOOL runs in run() finally
     # before TurnComplete — do not drain twice here.
     if state.needs_followup_after_tools:
+        yield HarnessIntervention(
+            request_id=state.ctx.request_id,
+            intervention="max_turns",
+            inner_turn=state.turn_index,
+            detail=MAX_TURNS_ERROR,
+        )
         yield Error(request_id=state.ctx.request_id, error=MAX_TURNS_ERROR)

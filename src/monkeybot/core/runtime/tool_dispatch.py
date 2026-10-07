@@ -43,6 +43,7 @@ from .events import (
     AgentEvent,
     Error,
     FileBlock,
+    HarnessIntervention,
     ImageBlock,
     ToolCallResult,
     ToolCallStarted,
@@ -227,8 +228,15 @@ async def _emit_rejected_batch(
     thread_id: str,
     all_tool_responses: list[ContentBlock],
     finish_tool: _FinishTool,
+    inner_turn: int,
 ) -> AsyncIterator[AgentEvent]:
     """Yield ToolCallStarted + error results for a truncated/incomplete batch."""
+    yield HarnessIntervention(
+        request_id=ctx.request_id,
+        intervention="truncated_batch",
+        inner_turn=inner_turn,
+        detail="stream_truncated" if stream_truncated else "all_parse_error",
+    )
     logger.warning(
         "rejecting truncated/incomplete tool batch %s",
         kv(
@@ -877,11 +885,18 @@ async def _post_batch_budget_and_registry(
     attachment_catalog: SessionAttachmentCatalog | None,
     vertex_google_search: bool,
     epoch_tracker: ContextEpochTracker,
+    inner_turn: int,
 ) -> AsyncIterator[AgentEvent]:
     """Doom-loop error, budgeted history append, and MCP/loops registry refresh."""
     ctx = state.ctx
     doom_msg = doom_tracker.take_error()
     if doom_msg is not None:
+        yield HarnessIntervention(
+            request_id=ctx.request_id,
+            intervention="doom_loop",
+            inner_turn=inner_turn,
+            detail=doom_msg,
+        )
         logger.warning(
             "doom loop detected %s",
             kv(
@@ -1101,6 +1116,7 @@ async def dispatch_tool_batch(
             thread_id=ctx.thread_id,
             all_tool_responses=all_tool_responses,
             finish_tool=_finish_tool,
+            inner_turn=turn_index,
         ):
             yield evt
 
@@ -1194,5 +1210,6 @@ async def dispatch_tool_batch(
         attachment_catalog=attachment_catalog,
         vertex_google_search=vertex_google_search,
         epoch_tracker=epoch_tracker,
+        inner_turn=turn_index,
     ):
         yield evt

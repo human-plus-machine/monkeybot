@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from monkeybot.core.llm.provider import Done, TextDelta, ThinkingDelta
-from monkeybot.core.runtime.events import Error, TurnComplete
+from monkeybot.core.runtime.events import Error, HarnessIntervention, TurnComplete
 from monkeybot.core.runtime.loop import run
 from monkeybot.core.runtime.turn_loop import (
     _EMPTY_COMPLETION_EXHAUSTED_ERROR,
@@ -47,6 +47,12 @@ async def test_run_retries_thinking_only_empty_completion() -> None:
     # failure for a retry the harness resolved on its own.
     errors = [e for e in events if isinstance(e, Error)]
     assert len(errors) == 0
+    retries = [
+        e
+        for e in events
+        if isinstance(e, HarnessIntervention) and e.intervention == "empty_completion"
+    ]
+    assert [e.detail for e in retries] == ["retry"]
 
     # Recovery note injected into the second provider call's system message.
     second_msgs = prov.stream_messages[1]
@@ -90,6 +96,12 @@ async def test_run_empty_completion_exhausted_emits_error() -> None:
     # recovery retries in between are silent (logged, not user-facing).
     error_texts = [e.error for e in events if isinstance(e, Error)]
     assert error_texts == [_EMPTY_COMPLETION_EXHAUSTED_ERROR]
+    details = [
+        e.detail
+        for e in events
+        if isinstance(e, HarnessIntervention) and e.intervention == "empty_completion"
+    ]
+    assert details == ["retry", "retry", "exhausted"]
 
 
 @pytest.mark.asyncio

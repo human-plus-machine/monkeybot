@@ -17,6 +17,7 @@ from monkeybot.core.config.settings import (
     get_subagent_settings,
     normalize_model_provider,
     subagent_vertex_google_search_from_config,
+    transcript_enabled_from_config,
 )
 from monkeybot.core.config.snapshot import (
     context_window_tokens,
@@ -38,6 +39,7 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.mcp.mcp_client import MCPClient
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import HistoryStore, create_storage_backend
+from monkeybot.core.persistence.transcript import TranscriptWriter, start_child_transcript
 from monkeybot.core.runtime.events import (
     AgentEvent,
     Error,
@@ -136,6 +138,37 @@ def _clear_span_exporter_buffer() -> None:
         return
 
 
+async def _open_child_transcript(
+    envelope: SubagentEnvelope,
+    *,
+    workspace: Path,
+    thread_id: str,
+    request_id: str,
+    user_text: str,
+    config_path: str | None,
+    agent_md: Path,
+    provider_name: str,
+    memory_on: bool,
+) -> TranscriptWriter | None:
+    """Write a child transcript when capture is on and the parent session is known."""
+    parent_session_id = (envelope.parent_session_id or "").strip()
+    if not parent_session_id or not transcript_enabled_from_config(config_path):
+        return None
+    return await start_child_transcript(
+        workspace_root=workspace,
+        parent_session_id=parent_session_id,
+        child_thread_id=thread_id,
+        request_id=request_id,
+        task=user_text,
+        model=envelope.model,
+        provider=provider_name,
+        agent_md=str(agent_md),
+        subagent_type=envelope.subagent_type,
+        parent_run_id=envelope.parent_run_id,
+        memory_on=memory_on,
+    )
+
+
 async def _stream_run_loop_events(
     body: str,
     ctx: TurnContext,
@@ -147,6 +180,7 @@ async def _stream_run_loop_events(
     run_id: str,
     max_turns: int,
     vertex_google_search: bool = False,
+    transcript_writer: TranscriptWriter | None = None,
 ) -> AsyncIterator[AgentEvent]:
     if run_loop is _BUILTIN_RUN_LOOP:
         async for evt in run_loop(
@@ -159,6 +193,7 @@ async def _stream_run_loop_events(
             cancelled=None,
             max_turns=max_turns,
             vertex_google_search=vertex_google_search,
+            transcript_writer=transcript_writer,
         ):
             yield evt
         return
@@ -176,6 +211,7 @@ async def _stream_run_loop_events(
             cancelled=None,
             max_turns=max_turns,
             vertex_google_search=vertex_google_search,
+            transcript_writer=transcript_writer,
         ):
             yield evt
 
@@ -424,6 +460,17 @@ async def _async_main() -> None:
             body += "\n\n---\nContext from parent agent:\n" + envelope.context.strip()
 
         max_turns = get_subagent_settings(config_path).max_turns
+        transcript_writer = await _open_child_transcript(
+            envelope,
+            workspace=ws,
+            thread_id=thread_id,
+            request_id=request_id,
+            user_text=body,
+            config_path=config_path,
+            agent_md=agent_md_path,
+            provider_name=provider.name,
+            memory_on=memory is not None,
+        )
 
         from monkeybot.observability.spans import span_subagent
 
@@ -450,9 +497,14 @@ async def _async_main() -> None:
                     run_id=request_id,
                     max_turns=max_turns,
                     vertex_google_search=subagent_vertex_google_search_from_config(config_path),
+                    transcript_writer=transcript_writer,
                 ):
+                    if transcript_writer is not None:
+                        await transcript_writer.write_event(evt)
                     print(event_to_json(_event_for_ndjson_pipe(evt)), flush=True)
         finally:
+            if transcript_writer is not None:
+                await transcript_writer.drain()
             shutdown_observability()
     finally:
         _detach_trace(reset_token)
