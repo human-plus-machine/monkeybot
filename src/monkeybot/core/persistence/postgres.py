@@ -168,8 +168,6 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     is_active BOOLEAN NOT NULL DEFAULT FALSE,
     PRIMARY KEY (agent_scope, session_id, branch_id)
 )""",
-    """CREATE UNIQUE INDEX IF NOT EXISTS idx_session_branches_active
-    ON session_branches(agent_scope, session_id) WHERE is_active""",
     """CREATE TABLE IF NOT EXISTS memory_outbox (
     id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL DEFAULT '',
@@ -195,10 +193,55 @@ _SCHEMA_DDLS: tuple[str, ...] = (
 )
 
 
+async def _upgrade_legacy_session_branches(conn: Any) -> None:
+    """Reshape a pre-row-id ``session_branches`` table in place.
+
+    The first branch schema stored ``fork_row_index`` / ``fork_fingerprint``,
+    an INTEGER ``is_active`` and ``PRIMARY KEY (session_id, branch_id)``.
+    Branches forked at a known position lose their parent link, since that
+    position is not a row id. The advisory lock and re-check keep two
+    gateways from reshaping the same table.
+    """
+    async with conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext('session_branches_upgrade'))")
+        legacy = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'session_branches' "
+            "AND column_name = 'fork_row_index')"
+        )
+        if not legacy:
+            return
+        logger.info(
+            "upgrading session_branches from the pre-row-id schema; "
+            "fork_row_index and fork_fingerprint are dropped"
+        )
+        await conn.execute(
+            "UPDATE session_branches SET parent_branch_id = NULL WHERE fork_row_index IS NOT NULL"
+        )
+        await conn.execute("DROP INDEX IF EXISTS idx_session_branches_one_active")
+        await conn.execute(
+            """ALTER TABLE session_branches
+            DROP CONSTRAINT IF EXISTS session_branches_pkey,
+            DROP COLUMN fork_row_index,
+            DROP COLUMN fork_fingerprint,
+            ADD COLUMN IF NOT EXISTS agent_scope TEXT NOT NULL DEFAULT '',
+            ADD COLUMN IF NOT EXISTS fork_row_id TEXT,
+            ALTER COLUMN is_active DROP DEFAULT,
+            ALTER COLUMN is_active TYPE BOOLEAN USING is_active <> 0,
+            ALTER COLUMN is_active SET DEFAULT FALSE,
+            ADD PRIMARY KEY (agent_scope, session_id, branch_id)"""
+        )
+
+
 async def _apply_schema(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
         for ddl in _SCHEMA_DDLS:
             await conn.execute(ddl)
+        await _upgrade_legacy_session_branches(conn)
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_branches_active "
+            "ON session_branches(agent_scope, session_id) WHERE is_active"
+        )
         await conn.execute(
             "ALTER TABLE memory_outbox ADD COLUMN IF NOT EXISTS agent_id TEXT NOT NULL DEFAULT ''"
         )

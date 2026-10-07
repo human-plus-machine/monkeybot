@@ -228,9 +228,6 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
 )""",
     """CREATE UNIQUE INDEX IF NOT EXISTS idx_goal_ledger_thread_seq
     ON goal_ledger(thread_id, seq)""",
-    # The active-branch index is created in ``_ensure_session_branches_shape``,
-    # after a pre-row-id table has been rebuilt. It cannot live here: that
-    # statement references ``agent_scope``, which the earlier table lacks.
     SESSION_BRANCHES_DDL,
     OUTBOX_DDL,
     OUTBOX_INDEX_DDL,
@@ -329,10 +326,7 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
     await _ensure_outbox_agent_id_column(conn)
     await _ensure_outbox_palace_id_column(conn)
     await _ensure_scheduled_loop_kind_columns(conn)
-    cursor = await conn.execute("PRAGMA table_info(conversation_history)")
-    rows = await cursor.fetchall()
-    await cursor.close()
-    col_names = {str(r[1]) for r in rows}
+    col_names = await _column_names(conn, "conversation_history")
     if "tool_name" in col_names or "tool_call_id" in col_names:
         await _log_legacy_schema_error(conn)
         raise RuntimeError(_LEGACY_SCHEMA_MESSAGE)
@@ -362,13 +356,23 @@ async def _ensure_session_branches_shape(conn: aiosqlite.Connection) -> None:
 
 
 async def _rebuild_legacy_session_branches(conn: aiosqlite.Connection) -> None:
-    """Copy lineage into the current table. Old fork positions are not row ids."""
-    logger.info(
-        "rebuilding session_branches from the pre-row-id schema; "
-        "fork_row_index and fork_fingerprint are dropped"
-    )
-    await conn.execute("BEGIN")
+    """Copy lineage into the current table. Old fork positions are not row ids.
+
+    A branch forked at a known position loses its parent link: with a NULL
+    ``fork_row_id`` it would read as a fork before the first row and anchor
+    its navigator on the first message. The shape is checked again under
+    ``BEGIN IMMEDIATE`` so a gateway sharing the file that already rebuilt
+    the table is not rebuilt over.
+    """
+    await conn.execute("BEGIN IMMEDIATE")
     try:
+        if "agent_scope" in await _column_names(conn, "session_branches"):
+            await conn.rollback()
+            return
+        logger.info(
+            "rebuilding session_branches from the pre-row-id schema; "
+            "fork_row_index and fork_fingerprint are dropped"
+        )
         await conn.execute("ALTER TABLE session_branches RENAME TO session_branches_legacy")
         await conn.execute(SESSION_BRANCHES_DDL)
         await conn.execute(
@@ -377,7 +381,8 @@ async def _rebuild_legacy_session_branches(conn: aiosqlite.Connection) -> None:
                 fork_row_id, op, created_at, last_active_at, is_active
             )
             SELECT
-                '', session_id, branch_id, thread_id, parent_branch_id,
+                '', session_id, branch_id, thread_id,
+                CASE WHEN fork_row_index IS NULL THEN parent_branch_id END,
                 NULL, op, created_at, last_active_at, is_active
             FROM session_branches_legacy"""
         )
@@ -390,10 +395,7 @@ async def _rebuild_legacy_session_branches(conn: aiosqlite.Connection) -> None:
 
 async def _ensure_turn_usage_estimated_column(conn: aiosqlite.Connection) -> None:
     """Add ``estimated_prompt_tokens`` when upgrading an existing DB."""
-    cur = await conn.execute("PRAGMA table_info(turn_usage)")
-    rows = await cur.fetchall()
-    await cur.close()
-    names = {str(r[1]) for r in rows}
+    names = await _column_names(conn, "turn_usage")
     if "estimated_prompt_tokens" in names:
         return
     await conn.execute(
@@ -404,10 +406,7 @@ async def _ensure_turn_usage_estimated_column(conn: aiosqlite.Connection) -> Non
 
 async def _ensure_turn_usage_cache_columns(conn: aiosqlite.Connection) -> None:
     """Add cache token columns when upgrading an existing DB."""
-    cur = await conn.execute("PRAGMA table_info(turn_usage)")
-    rows = await cur.fetchall()
-    await cur.close()
-    names = {str(r[1]) for r in rows}
+    names = await _column_names(conn, "turn_usage")
     for col in ("cache_read_tokens", "cache_creation_tokens"):
         if col in names:
             continue
@@ -417,10 +416,7 @@ async def _ensure_turn_usage_cache_columns(conn: aiosqlite.Connection) -> None:
 
 async def _ensure_subagent_runs_claim_columns(conn: aiosqlite.Connection) -> None:
     """Add worker claim columns when upgrading an existing DB."""
-    cur = await conn.execute("PRAGMA table_info(subagent_runs)")
-    rows = await cur.fetchall()
-    await cur.close()
-    names = {str(r[1]) for r in rows}
+    names = await _column_names(conn, "subagent_runs")
     if "worker_id" not in names:
         await conn.execute("ALTER TABLE subagent_runs ADD COLUMN worker_id TEXT")
     if "claimed_at" not in names:
@@ -435,10 +431,7 @@ async def _ensure_conversation_history_agent_scope_column(conn: aiosqlite.Connec
     ``SCHEMA_DDLS``, which runs first and would fail referencing a column not
     yet on a pre-existing table.
     """
-    cur = await conn.execute("PRAGMA table_info(conversation_history)")
-    rows = await cur.fetchall()
-    await cur.close()
-    names = {str(r[1]) for r in rows}
+    names = await _column_names(conn, "conversation_history")
     column_added = "agent_scope" not in names
     if column_added:
         try:
@@ -487,11 +480,18 @@ async def backfill_legacy_agent_scope(conn: aiosqlite.Connection, agent_scope: s
         (agent_scope,),
     )
     # Rebuilt pre-row-id branch rows land with agent_scope '' and stay invisible
-    # to a scoped store until claimed, same as legacy history.
+    # to a scoped store until claimed, same as legacy history. A branch whose
+    # thread history belongs to another agent is left for that agent.
     if "agent_scope" in await _column_names(conn, "session_branches"):
         await conn.execute(
-            "UPDATE session_branches SET agent_scope = ? WHERE agent_scope = ''",
-            (agent_scope,),
+            """UPDATE session_branches SET agent_scope = ?
+            WHERE agent_scope = ''
+            AND NOT EXISTS (
+                SELECT 1 FROM conversation_history h
+                WHERE h.thread_id = session_branches.thread_id
+                AND h.agent_scope NOT IN ('', ?)
+            )""",
+            (agent_scope, agent_scope),
         )
     await conn.commit()
 
@@ -505,6 +505,12 @@ async def warn_if_legacy_unscoped_history(conn: aiosqlite.Connection) -> None:
 
         UPDATE conversation_history SET agent_scope = '<agent-id>'
         WHERE thread_id = '<thread-id>' AND agent_scope = '';
+
+    Also warns about unscoped ``session_branches`` rows (left by the
+    pre-row-id rebuild), which no scoped branch store lists until claimed::
+
+        UPDATE session_branches SET agent_scope = '<agent-id>'
+        WHERE session_id = '<session-id>' AND agent_scope = '';
     """
     cur = await conn.execute(
         "SELECT EXISTS(SELECT 1 FROM conversation_history WHERE agent_scope = '')"
@@ -519,14 +525,23 @@ async def warn_if_legacy_unscoped_history(conn: aiosqlite.Connection) -> None:
             "thread_id by hand (see warn_if_legacy_unscoped_history docstring "
             "for the exact UPDATE statement)."
         )
+    if "agent_scope" not in await _column_names(conn, "session_branches"):
+        return
+    cur = await conn.execute("SELECT EXISTS(SELECT 1 FROM session_branches WHERE agent_scope = '')")
+    row = await cur.fetchone()
+    await cur.close()
+    if row and row[0]:
+        logger.warning(
+            "session_branches has rows with agent_scope='' — no agent-scoped "
+            "branch store lists them until an operator backfills agent_scope "
+            "for each legacy session_id (see warn_if_legacy_unscoped_history "
+            "docstring for the exact UPDATE statement)."
+        )
 
 
 async def _ensure_outbox_agent_id_column(conn: aiosqlite.Connection) -> None:
     """Add agent_id on memory_outbox when upgrading an existing DB."""
-    cur = await conn.execute("PRAGMA table_info(memory_outbox)")
-    rows = await cur.fetchall()
-    await cur.close()
-    names = {str(r[1]) for r in rows}
+    names = await _column_names(conn, "memory_outbox")
     if not names:
         return
     if "agent_id" not in names:
@@ -536,10 +551,7 @@ async def _ensure_outbox_agent_id_column(conn: aiosqlite.Connection) -> None:
 
 async def _ensure_history_memory_columns(conn: aiosqlite.Connection) -> None:
     """Add turn_id / message_id on conversation_history for the memory outbox."""
-    cur = await conn.execute("PRAGMA table_info(conversation_history)")
-    rows = await cur.fetchall()
-    await cur.close()
-    names = {str(r[1]) for r in rows}
+    names = await _column_names(conn, "conversation_history")
     if not names:
         return
     if "turn_id" not in names:
@@ -552,10 +564,7 @@ async def _ensure_history_memory_columns(conn: aiosqlite.Connection) -> None:
 
 async def _ensure_history_row_id_column(conn: aiosqlite.Connection) -> None:
     """Add ``row_id`` on conversation_history when upgrading an existing DB."""
-    cur = await conn.execute("PRAGMA table_info(conversation_history)")
-    rows = await cur.fetchall()
-    await cur.close()
-    names = {str(r[1]) for r in rows}
+    names = await _column_names(conn, "conversation_history")
     if not names or "row_id" in names:
         return
     try:
@@ -568,10 +577,7 @@ async def _ensure_history_row_id_column(conn: aiosqlite.Connection) -> None:
 
 async def _ensure_goal_ledger_source_row_column(conn: aiosqlite.Connection) -> None:
     """Add ``source_row_id`` on goal_ledger when upgrading an existing DB."""
-    cur = await conn.execute("PRAGMA table_info(goal_ledger)")
-    rows = await cur.fetchall()
-    await cur.close()
-    names = {str(r[1]) for r in rows}
+    names = await _column_names(conn, "goal_ledger")
     if not names or "source_row_id" in names:
         return
     try:
@@ -584,10 +590,7 @@ async def _ensure_goal_ledger_source_row_column(conn: aiosqlite.Connection) -> N
 
 async def _ensure_outbox_palace_id_column(conn: aiosqlite.Connection) -> None:
     """Add palace_id on memory_outbox when upgrading an existing DB."""
-    cur = await conn.execute("PRAGMA table_info(memory_outbox)")
-    rows = await cur.fetchall()
-    await cur.close()
-    names = {str(r[1]) for r in rows}
+    names = await _column_names(conn, "memory_outbox")
     if not names:
         return
     if "palace_id" not in names:
@@ -600,10 +603,7 @@ async def _ensure_outbox_palace_id_column(conn: aiosqlite.Connection) -> None:
 
 async def _ensure_scheduled_loop_kind_columns(conn: aiosqlite.Connection) -> None:
     """Migrate scheduled-loop kind fields and enforce one open goal per session."""
-    cur = await conn.execute("PRAGMA table_info(scheduled_loops)")
-    rows = await cur.fetchall()
-    await cur.close()
-    names = {str(r[1]) for r in rows}
+    names = await _column_names(conn, "scheduled_loops")
     if not names:
         return
     if "kind" not in names:
