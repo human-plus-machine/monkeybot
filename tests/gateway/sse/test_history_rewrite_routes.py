@@ -276,6 +276,39 @@ async def test_delete_chat_history_cascades_to_branches(
 
 
 @pytest.mark.asyncio
+async def test_delete_chat_history_waits_for_an_idle_session(
+    backend: SQLiteStorageBackend,
+) -> None:
+    registry = SessionRegistry()
+    app = _app(registry, backend, RecordingLoop(registry))
+    manager = _voice_manager()
+    app.state.realtime_manager = manager
+    turns = backend.session_turns()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/sessions", json={"session_id": "sess-busy"})
+        await _seed(backend, "sess-busy")
+
+        assert await turns.try_acquire("sess-busy", "running-turn")
+        during_turn = await client.delete("/api/chat-history/sess-busy")
+        assert during_turn.status_code == 409
+        assert during_turn.json()["error"]["code"] == "SESSION_BUSY"
+        await turns.release("sess-busy", "running-turn")
+
+        assert manager.claim("sess-busy")
+        during_call = await client.delete("/api/chat-history/sess-busy")
+        assert during_call.status_code == 409
+        assert during_call.json()["error"]["code"] == "SESSION_BUSY"
+        manager.unclaim("sess-busy")
+
+        assert len(await backend.history().load("sess-busy")) == 4
+        deleted = await client.delete("/api/chat-history/sess-busy")
+        assert deleted.status_code == 200
+        assert await backend.history().load("sess-busy") == []
+    assert await turns.try_acquire("sess-busy", "next-turn")
+    assert manager.claim("sess-busy")
+
+
+@pytest.mark.asyncio
 async def test_ending_a_session_keeps_its_branches(backend: SQLiteStorageBackend) -> None:
     registry = SessionRegistry()
     app = _app(registry, backend, RecordingLoop(registry))

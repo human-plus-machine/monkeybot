@@ -311,6 +311,25 @@ class GoalLedger:
         self.invalidate(thread_id)
         await self._refresh_view(thread_id)
 
+    async def clear_thread(self, thread_id: str) -> None:
+        """Delete every ledger row on ``thread_id``, for a deleted chat.
+
+        Pending classifications are discarded, and an in-flight one is given
+        time to finish first so it cannot write a row back after the delete.
+        """
+        pending = self._pending.get(thread_id, 0)
+        if pending:
+            newest = self._tickets.get(thread_id, 0)
+            self._discarded.setdefault(thread_id, set()).update(
+                range(newest - pending + 1, newest + 1)
+            )
+        try:
+            await self.wait_idle(thread_id)
+        except TimeoutError:
+            logger.warning("goal_ledger clear drain timed out %s", kv(thread_id=thread_id))
+        await self._store.drop_after(thread_id, 0)
+        self.invalidate(thread_id)
+
     def close(self) -> None:
         self._closed = True
         for task in self._workers.values():

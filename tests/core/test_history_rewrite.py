@@ -520,6 +520,53 @@ async def test_purge_keeps_branch_rows_when_a_thread_wipe_fails(
     assert await backend.branches().list("s1") == []
 
 
+@pytest.mark.asyncio
+async def test_purge_clears_goal_ledger_on_every_thread(backend: SQLiteStorageBackend) -> None:
+    await _seed(backend, "s1")
+    messages = await backend.history().load("s1")
+    branched = await branch_op(
+        history=backend.history(),
+        branches=backend.branches(),
+        session_id="s1",
+        op="rewind",
+        anchor=_anchor(messages, 1),
+    )
+    store = InMemoryGoalLedgerStore()
+    await store.append(_ledger_entry("r1", 1, "hello", "s1"))
+    await store.append(_ledger_entry("b1", 1, "hello", branched.thread_id))
+    await store.append(_ledger_entry("o1", 1, "hello", "other"))
+    ledger = GoalLedger(store, classifier=object())  # type: ignore[arg-type]
+    await purge_session_branches(
+        backend.history(),
+        backend.branches(),
+        "s1",
+        effects=RewriteEffects(ledger=ledger),
+    )
+    assert await store.list_entries("s1") == []
+    assert await store.list_entries(branched.thread_id) == []
+    assert [row.entry_id for row in await store.list_entries("other")] == ["o1"]
+
+
+@pytest.mark.asyncio
+async def test_clear_thread_discards_a_classification_that_outlives_the_wait() -> None:
+    store = InMemoryGoalLedgerStore()
+    await store.append(_ledger_entry("e1", 1, "do x"))
+    classifier = _BlockedClassifier()
+    ledger = GoalLedger(store, classifier=classifier)  # type: ignore[arg-type]
+    ledger.admit("t", "do y", provenance=Provenance.HUMAN, channel=Channel.MESSAGE)
+
+    async def _timeout(*_args: object, **_kwargs: object) -> None:
+        raise TimeoutError
+
+    ledger.wait_idle = _timeout  # type: ignore[method-assign]
+    await ledger.clear_thread("t")
+    assert await store.list_entries("t") == []
+    classifier.release.set()
+    await asyncio.wait_for(ledger._queues["t"].join(), timeout=1)
+    assert await store.list_entries("t") == []
+    ledger.close()
+
+
 def _superseding_pair(thread_id: str) -> list[GoalEntry]:
     goal = replace(_ledger_entry("g1", 1, "build x", thread_id), status=Status.SUPERSEDED)
     pivot = replace(

@@ -71,6 +71,8 @@ class _LedgerEffects(Protocol):
 
     async def drop_truncated(self, thread_id: str, dropped_texts: list[str]) -> None: ...
 
+    async def clear_thread(self, thread_id: str) -> None: ...
+
 
 @dataclass
 class RewriteEffects:
@@ -671,18 +673,24 @@ async def purge_session_branches(
     history: Any,
     branches: BranchStore,
     session_id: str,
+    effects: RewriteEffects | None = None,
 ) -> None:
-    """Delete the session transcript, every branch thread, and the branch rows.
+    """Delete the session transcript, every branch thread with its goal-ledger
+    rows, and the branch rows.
 
     Threads go first so a failure leaves branch rows pointing at whatever
-    survived, and a retry can finish the job.
+    survived, and a retry can finish the job. The caller must hold the
+    session idle, or a running turn could write to a thread after its wipe.
     """
+    ledger = effects.ledger if effects is not None else None
     wiped: set[str] = set()
 
     async def _wipe(thread_id: str) -> None:
         if thread_id in wiped:
             return
         await history.reset(thread_id, [])
+        if ledger is not None:
+            await ledger.clear_thread(thread_id)
         wiped.add(thread_id)
 
     await _wipe(session_id)

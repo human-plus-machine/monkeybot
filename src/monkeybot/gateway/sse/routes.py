@@ -173,6 +173,29 @@ async def _try_acquire_turn(
     return False
 
 
+def _block_voice_calls(request: Request, session_id: str) -> None:
+    """Refuse new voice calls until :func:`_unblock_voice_calls`, or 409
+    ``SESSION_BUSY`` when a call is already connecting or live.
+
+    A call writes history without the turn lock and keeps the thread it
+    resolved at connect, so history changes need it out of the way.
+    """
+    realtime = getattr(request.app.state, "realtime_manager", None)
+    if realtime is not None and not realtime.begin_rewrite(session_id):
+        raise APIError(
+            409,
+            "SESSION_BUSY",
+            "End the voice session before changing chat history",
+            uuid.uuid4().hex,
+        )
+
+
+def _unblock_voice_calls(request: Request, session_id: str) -> None:
+    realtime = getattr(request.app.state, "realtime_manager", None)
+    if realtime is not None:
+        realtime.end_rewrite(session_id)
+
+
 def _schedule_turn(
     *,
     bus: SessionBus,
@@ -1372,16 +1395,38 @@ def create_app(
             )
         from monkeybot.core.runtime.history_rewrite import purge_session_branches
 
+        from .history_routes import rewrite_effects
+
         backend = _storage_backend(request)
         thread_id = session_id.strip()
+        request_id = uuid.uuid4().hex
+        turns = backend.session_turns()
+        _block_voice_calls(request, thread_id)
         try:
-            await purge_session_branches(backend.history(), backend.branches(), thread_id)
-        except Exception:
-            logger.exception(
-                "chat history delete failed %s",
-                kv(session_id=thread_id),
-            )
-            raise
+            if not await turns.try_acquire(thread_id, request_id):
+                raise APIError(
+                    409,
+                    "SESSION_BUSY",
+                    "Wait for the current turn to finish before deleting this chat",
+                    uuid.uuid4().hex,
+                )
+            try:
+                await purge_session_branches(
+                    backend.history(),
+                    backend.branches(),
+                    thread_id,
+                    effects=rewrite_effects(),
+                )
+            except Exception:
+                logger.exception(
+                    "chat history delete failed %s",
+                    kv(session_id=thread_id),
+                )
+                raise
+            finally:
+                await turns.release(thread_id, request_id)
+        finally:
+            _unblock_voice_calls(request, thread_id)
         logger.info("chat history deleted %s", kv(session_id=thread_id))
         return {"deleted": True}
 

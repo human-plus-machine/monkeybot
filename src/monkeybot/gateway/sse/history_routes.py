@@ -36,7 +36,14 @@ from .models import (
     SetActiveBranchRequest,
     TruncateRequest,
 )
-from .routes import _parse_user_content, _require_bus, _schedule_turn, _try_acquire_turn
+from .routes import (
+    _block_voice_calls,
+    _parse_user_content,
+    _require_bus,
+    _schedule_turn,
+    _try_acquire_turn,
+    _unblock_voice_calls,
+)
 from .session_bus import SessionBus, SessionRegistry
 
 logger = logging.getLogger(__name__)
@@ -50,7 +57,7 @@ def _registry(request: Request) -> SessionRegistry:
     return cast(SessionRegistry, _get_registry(request))
 
 
-def _effects() -> RewriteEffects:
+def rewrite_effects() -> RewriteEffects:
     from monkeybot.gateway.sse.app import gateway_runtime
 
     return RewriteEffects(
@@ -94,20 +101,11 @@ async def _acquire_idle(
     session_id: str,
     request_id: str,
 ) -> None:
-    """Take the turn lock and block new voice calls, or 409 ``SESSION_BUSY``.
+    """Block new voice calls and take the turn lock, or 409 ``SESSION_BUSY``.
 
-    A voice call writes history without the turn lock and keeps the thread it
-    resolved at connect, so a connecting or live call counts as busy too.
-    Pair with :func:`_end_rewrite`.
+    Pair with :func:`_unblock_voice_calls`.
     """
-    realtime = getattr(request.app.state, "realtime_manager", None)
-    if realtime is not None and not realtime.begin_rewrite(session_id):
-        raise APIError(
-            409,
-            "SESSION_BUSY",
-            "End the voice session before changing chat history",
-            uuid.uuid4().hex,
-        )
+    _block_voice_calls(request, session_id)
     try:
         await _try_acquire_turn(
             bus=bus,
@@ -117,14 +115,8 @@ async def _acquire_idle(
             busy_is_error=True,
         )
     except BaseException:
-        _end_rewrite(request, session_id)
+        _unblock_voice_calls(request, session_id)
         raise
-
-
-def _end_rewrite(request: Request, session_id: str) -> None:
-    realtime = getattr(request.app.state, "realtime_manager", None)
-    if realtime is not None:
-        realtime.end_rewrite(session_id)
 
 
 async def _publish(
@@ -259,7 +251,7 @@ async def post_branch(
                 session_id=session_id,
                 op=body.op,
                 anchor=_anchor(body.anchor),
-                effects=_effects(),
+                effects=rewrite_effects(),
             )
         except HistoryRewriteError as exc:
             raise _rewrite_error(exc) from exc
@@ -278,7 +270,7 @@ async def post_branch(
             handed_off=handed_off,
         )
     finally:
-        _end_rewrite(request, session_id)
+        _unblock_voice_calls(request, session_id)
         if not handed_off[0]:
             await _release_turn(storage, session_id, request_id, bus)
 
@@ -314,7 +306,7 @@ async def put_active_branch(
     except HistoryRewriteError as exc:
         raise _rewrite_error(exc) from exc
     finally:
-        _end_rewrite(request, session_id)
+        _unblock_voice_calls(request, session_id)
         await _release_turn(storage, session_id, request_id, bus)
     await _publish(
         bus,
@@ -348,13 +340,13 @@ async def post_truncate(
             branches=storage.branches(),
             session_id=session_id,
             anchor=_anchor(body.anchor),
-            effects=_effects(),
+            effects=rewrite_effects(),
         )
         bus.admission.clear_all()
     except HistoryRewriteError as exc:
         raise _rewrite_error(exc) from exc
     finally:
-        _end_rewrite(request, session_id)
+        _unblock_voice_calls(request, session_id)
         await _release_turn(storage, session_id, request_id, bus)
     await _publish(
         bus,
@@ -388,12 +380,12 @@ async def post_fork(
             branches=storage.branches(),
             session_id=session_id,
             anchor=_anchor(body.anchor),
-            effects=_effects(),
+            effects=rewrite_effects(),
         )
     except HistoryRewriteError as exc:
         raise _rewrite_error(exc) from exc
     finally:
-        _end_rewrite(request, session_id)
+        _unblock_voice_calls(request, session_id)
         await _release_turn(storage, session_id, request_id, bus)
     if result.forked_session_id is None:
         raise APIError(500, "INTERNAL", "Fork did not create a session", uuid.uuid4().hex)
