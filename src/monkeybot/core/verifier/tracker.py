@@ -113,6 +113,43 @@ class ProgressTracker:
             self._by_thread.popitem(last=False)
         return state
 
+    def fork_thread(self, source_thread: str, target_thread: str) -> None:
+        """Start ``target_thread`` with ``source_thread``'s workspace knowledge.
+
+        File reads and write counts carry over because a history rewrite does
+        not revert the workspace. Turn-scoped counters start fresh, or the new
+        branch would inherit suspicion from turns it dropped.
+        """
+        source = self._by_thread.get(source_thread)
+        if source is None:
+            self._by_thread.pop(target_thread, None)
+            return
+        self._by_thread[target_thread] = _ThreadTrack(
+            files_read=set(source.files_read),
+            write_counts=dict(source.write_counts),
+            unread_writes=set(source.unread_writes),
+            churn_paths=set(source.churn_paths),
+        )
+        self._by_thread.move_to_end(target_thread)
+        while len(self._by_thread) > _THREAD_STATE_CAP:
+            self._by_thread.popitem(last=False)
+
+    def reset_conversation_state(self, thread_id: str) -> None:
+        """Clear turn-scoped counters on ``thread_id``; workspace knowledge stays."""
+        state = self._by_thread.get(thread_id)
+        if state is None:
+            return
+        fresh = _ThreadTrack(
+            files_read=state.files_read,
+            write_counts=state.write_counts,
+            unread_writes=state.unread_writes,
+            churn_paths=state.churn_paths,
+        )
+        self._by_thread[thread_id] = fresh
+
+    def forget(self, thread_id: str) -> None:
+        self._by_thread.pop(thread_id, None)
+
     def _observe_tool(self, payload: HookPayload) -> None:
         state = self._state(payload.thread_id)
         state.inner_turn = payload.inner_turn or state.inner_turn

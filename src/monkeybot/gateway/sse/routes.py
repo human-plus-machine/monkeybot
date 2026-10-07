@@ -41,6 +41,7 @@ from monkeybot.core.runtime.input_admission import (
 )
 from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
 from monkeybot.core.types.content_blocks import ContentBlock
+from monkeybot.core.verifier.rewrite_effects import VerifierRewriteEffects
 
 from .goal_routes import build_goals_router
 from .loop_port import LoopPort, UsagePort
@@ -83,6 +84,15 @@ def get_registry(request: Request) -> SessionRegistry:
 
 def _attachment_store(request: Request) -> AttachmentStore | None:
     return getattr(request.app.state, "attachment_store", None)
+
+
+def _rewrite_effects() -> VerifierRewriteEffects:
+    """Goal ledger and progress tracker of the live gateway runtime."""
+    from monkeybot.gateway.sse.app import gateway_runtime
+
+    return VerifierRewriteEffects(
+        ledger=gateway_runtime.goal_ledger, tracker=gateway_runtime.progress_tracker
+    )
 
 
 def _default_loop_port(registry: SessionRegistry) -> LoopPort:
@@ -1396,7 +1406,9 @@ def create_app(
                     uuid.uuid4().hex,
                 )
             try:
-                await purge_session_branches(backend.history(), backend.branches(), thread_id)
+                await purge_session_branches(
+                    backend.history(), backend.branches(), thread_id, effects=_rewrite_effects()
+                )
             except Exception:
                 logger.exception(
                     "chat history delete failed %s",

@@ -15,9 +15,9 @@ import logging
 import math
 import time
 import uuid
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator
 from dataclasses import dataclass, replace
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from monkeybot.core.attachments.catalog import referenced_attachment_ids
 from monkeybot.core.attachments.store import AttachmentStore
@@ -42,6 +42,35 @@ from monkeybot.core.types.content_blocks import ContentBlock, ToolRequest, ToolR
 logger = logging.getLogger(__name__)
 
 BranchOp = Literal["edit", "regenerate", "rewind"]
+
+
+class RewriteEffects(Protocol):
+    """Per-thread state outside history (goal ledger, progress tracker) that
+    follows a rewrite. Applied best-effort: a failure is logged, never raised.
+    """
+
+    async def branched(
+        self, source_thread: str, target_thread: str, dropped_row_ids: Collection[str]
+    ) -> None: ...
+
+    async def truncated(self, thread_id: str, dropped_row_ids: Collection[str]) -> None: ...
+
+    async def purged(self, thread_ids: Collection[str]) -> None: ...
+
+
+async def _apply_effects(
+    effects: RewriteEffects | None, name: str, apply: Callable[[RewriteEffects], Awaitable[None]]
+) -> None:
+    if effects is None:
+        return
+    try:
+        await apply(effects)
+    except Exception:
+        logger.warning("history rewrite %s effects failed", name, exc_info=True)
+
+
+def _row_ids(messages: Iterable[Message]) -> set[str]:
+    return {message.row_id for message in messages if message.row_id}
 
 
 class HistoryRewriteError(Exception):
@@ -180,6 +209,7 @@ async def branch_op(
     session_id: str,
     op: BranchOp,
     anchor_row_id: str,
+    effects: RewriteEffects | None = None,
 ) -> RewriteResult:
     """Copy a prefix of the active branch onto a new active branch."""
     parent = _active_of(session_id, await branches.list(session_id))
@@ -221,6 +251,8 @@ async def branch_op(
                 exc_info=True,
             )
         raise
+    dropped = _row_ids(messages[end:])
+    await _apply_effects(effects, op, lambda fx: fx.branched(parent.thread_id, thread_id, dropped))
     logger.info(
         "history rewrite %s",
         kv(session_id=session_id, op=op, branch_id=branch_id, parent=parent.branch_id, prefix=end),
@@ -269,6 +301,7 @@ async def truncate_active(
     branches: BranchStore,
     session_id: str,
     anchor_row_id: str,
+    effects: RewriteEffects | None = None,
 ) -> TruncateResult:
     """Delete the active branch's rows after the anchor's turn, in place.
 
@@ -292,6 +325,7 @@ async def truncate_active(
         await history.reset(active.thread_id, messages[:end])
     else:
         await history.delete_rows(active.thread_id, dropped)
+    await _apply_effects(effects, "truncate", lambda fx: fx.truncated(active.thread_id, dropped))
     result = TruncateResult(
         branch_id=active.branch_id, thread_id=active.thread_id, dropped=len(messages) - end
     )
@@ -309,6 +343,7 @@ async def fork_session(
     attachments: AttachmentStore | None,
     session_id: str,
     anchor_row_id: str,
+    effects: RewriteEffects | None = None,
 ) -> ForkResult:
     """Start a new session holding the active branch through the anchor's turn.
 
@@ -317,7 +352,8 @@ async def fork_session(
     """
     active = _active_of(session_id, await branches.list(session_id))
     messages: list[Message] = await history.load(active.thread_id)
-    prefix = messages[: _turn_cut(messages, anchor_row_id, must_drop=False)]
+    end = _turn_cut(messages, anchor_row_id, must_drop=False)
+    prefix = messages[:end]
     forked_session_id = str(uuid.uuid4())
     copied = 0
     if attachments is not None:
@@ -327,6 +363,10 @@ async def fork_session(
             ):
                 copied += 1
     await history.reset(forked_session_id, prefix)
+    dropped = _row_ids(messages[end:])
+    await _apply_effects(
+        effects, "fork", lambda fx: fx.branched(active.thread_id, forked_session_id, dropped)
+    )
     logger.info(
         "history fork %s",
         kv(
@@ -568,7 +608,12 @@ async def overlay_active_previews(
     return out
 
 
-async def purge_session_branches(history: Any, branches: BranchStore, session_id: str) -> None:
+async def purge_session_branches(
+    history: Any,
+    branches: BranchStore,
+    session_id: str,
+    effects: RewriteEffects | None = None,
+) -> None:
     """Delete the session transcript, every branch thread, and the branch rows.
 
     Threads go first so a failure leaves branch rows pointing at whatever
@@ -587,6 +632,7 @@ async def purge_session_branches(history: Any, branches: BranchStore, session_id
         await _wipe(record.thread_id)
     for record in await branches.delete_session(session_id):
         await _wipe(record.thread_id)
+    await _apply_effects(effects, "purge", lambda fx: fx.purged(wiped))
 
 
 async def resolve_active_thread_id(backend: Any, session_id: str) -> str:

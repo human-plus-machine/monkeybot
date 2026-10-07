@@ -37,6 +37,7 @@ from monkeybot.core.messages.tool_integrity import (
     interrupted_tool_result_text,
 )
 from monkeybot.core.persistence.backends import HistoryStore
+from monkeybot.core.persistence.row_ids import new_row_id
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.prompts.prompt import latest_user_message_text
 from monkeybot.core.runtime.context_budget import (
@@ -245,16 +246,17 @@ async def _drain_steers(
             if item is None:
                 break
             steered = item.content
+            row_id = new_row_id()
             await persist_message(
                 history,
-                Message(role="user", content=list(steered)),
+                Message(role="user", content=list(steered), row_id=row_id),
                 thread_id=ctx.thread_id,
                 turn_id=ctx.request_id,
                 memory=ctx.memory,
                 ingest=True,
             )
             preview = preview_text(steered)
-            _admit_steer_to_ledger(ctx, join_text(steered), item)
+            _admit_steer_to_ledger(ctx, join_text(steered), item, row_id)
             logger.info(
                 "steer injected %s",
                 kv(
@@ -413,7 +415,9 @@ def _arm_replan_from_mailbox(state: _TurnState) -> str | None:
     return note
 
 
-def _admit_steer_to_ledger(ctx: TurnContext, verbatim: str, item: SteerItem) -> None:
+def _admit_steer_to_ledger(
+    ctx: TurnContext, verbatim: str, item: SteerItem, row_id: str | None = None
+) -> None:
     ledger = ctx.goal_ledger
     if ledger is None or not verbatim:
         return
@@ -430,6 +434,7 @@ def _admit_steer_to_ledger(ctx: TurnContext, verbatim: str, item: SteerItem) -> 
             verbatim,
             provenance=provenance,
             channel=Channel.STEER,
+            source_row_id=row_id,
         )
     except Exception:
         logger.warning(
@@ -1739,9 +1744,10 @@ async def _run_inner_core(
             exempt_names=_doom_loop_exempt_names(ctx.tools),
         ),
     )
+    user_row_id = new_row_id()
     await persist_message(
         history,
-        Message(role="user", content=list(user_content)),
+        Message(role="user", content=list(user_content), row_id=user_row_id),
         thread_id=state.ctx.thread_id,
         turn_id=state.ctx.request_id,
         memory=state.ctx.memory,
@@ -1754,6 +1760,7 @@ async def _run_inner_core(
         ctx=state.ctx,
         timeout_s=0,
         user_message=state.user_text,
+        user_row_id=user_row_id,
     )
 
     while state.turn_index < state.effective_max:
