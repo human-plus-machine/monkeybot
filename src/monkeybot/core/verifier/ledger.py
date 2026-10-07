@@ -406,6 +406,9 @@ class GoalLedger:
                     exc_info=True,
                 )
                 result = fail_open_classification(open_entries)
+            # A rewrite may have dropped this row while the classifier ran.
+            if self._is_stale(job):
+                return
             await self._apply_classification(job, result, entries)
         finally:
             reset_verifier_session(token)
