@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 import logging
 import os
 import time
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -30,6 +32,13 @@ from monkeybot.core.memory.outbox import (
     backoff_iso,
     is_permanent_error,
 )
+from monkeybot.core.persistence.branches import (
+    BRANCH_COLUMNS,
+    ROOT_BRANCH_ID,
+    BranchRecord,
+    implicit_root,
+    record_from_mapping,
+)
 from monkeybot.core.persistence.durable_runs import (
     _SUBAGENT_COLUMNS,
     SubagentEnvelope,
@@ -50,6 +59,7 @@ from monkeybot.core.persistence.scheduled_loops import (
     resolve_complete_tick,
 )
 from monkeybot.core.persistence.thread_summary import (
+    BRANCH_THREAD_ID_PREFIX,
     SUBAGENT_THREAD_ID_PREFIX,
     ChatThreadSummary,
     preview_from_content_blob,
@@ -145,6 +155,21 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     request_id TEXT,
     claimed_at_ms BIGINT
 )""",
+    """CREATE TABLE IF NOT EXISTS session_branches (
+    agent_scope TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL,
+    branch_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    parent_branch_id TEXT,
+    fork_row_id TEXT,
+    op TEXT,
+    created_at BIGINT NOT NULL,
+    last_active_at BIGINT NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (agent_scope, session_id, branch_id)
+)""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_session_branches_active
+    ON session_branches(agent_scope, session_id) WHERE is_active""",
     """CREATE TABLE IF NOT EXISTS memory_outbox (
     id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL DEFAULT '',
@@ -417,14 +442,37 @@ class PostgresHistoryStore:
             for msg in messages:
                 await self._insert_message(conn, thread_id, msg)
 
-    async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
-        """Return recent threads, newest first, excluding subagent transcripts.
+    async def last_row(self, thread_id: str) -> tuple[int, str] | None:
+        """Message count and the newest row's content JSON, without loading the thread."""
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                SELECT
+                    COUNT(*)::int AS message_count,
+                    (
+                        SELECT h2.content
+                        FROM conversation_history h2
+                        WHERE h2.thread_id = $1 AND h2.agent_scope = $2
+                        ORDER BY h2.created_at DESC, h2.id DESC
+                        LIMIT 1
+                    ) AS last_content
+                FROM conversation_history h
+                WHERE h.thread_id = $1 AND h.agent_scope = $2
+                """,
+                thread_id,
+                self._agent_scope,
+            )
+        if row is None or not row["message_count"]:
+            return None
+        return int(row["message_count"]), str(row["last_content"] or "")
 
-        A subagent thread_id (prefixed ``SUBAGENT_THREAD_ID_PREFIX``) that
-        finishes after its parent's last turn would otherwise outrank the
-        parent as "newest," making ``--continue`` resume the subagent's
-        transcript under the main-agent prompt and tools instead of the
-        actual previous chat.
+    async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
+        """Return recent threads, newest first, excluding hidden threads.
+
+        A subagent transcript (``SUBAGENT_THREAD_ID_PREFIX``) or conversation
+        branch (``BRANCH_THREAD_ID_PREFIX``) that finishes after its parent's
+        last turn would otherwise outrank the parent as "newest," making
+        ``--continue`` resume the wrong transcript.
         """
         cap = max(1, min(limit, 200))
         async with self._pool.acquire() as conn:
@@ -442,7 +490,9 @@ class PostgresHistoryStore:
                         LIMIT 1
                     ) AS last_content
                 FROM conversation_history h
-                WHERE h.agent_scope = $1 AND h.thread_id NOT LIKE $3
+                WHERE h.agent_scope = $1
+                  AND h.thread_id NOT LIKE $3
+                  AND h.thread_id NOT LIKE $4
                 GROUP BY h.thread_id
                 ORDER BY last_message_at DESC
                 LIMIT $2
@@ -450,6 +500,7 @@ class PostgresHistoryStore:
                 self._agent_scope,
                 cap,
                 f"{SUBAGENT_THREAD_ID_PREFIX}%",
+                f"{BRANCH_THREAD_ID_PREFIX}%",
             )
         out: list[ChatThreadSummary] = []
         for row in rows:
@@ -1674,6 +1725,145 @@ class PostgresOutboxStore:
         return
 
 
+_BRANCH_SELECT = f"SELECT {', '.join(BRANCH_COLUMNS)} FROM session_branches"
+
+
+class PostgresBranchStore:
+    """Postgres-backed branch lineage."""
+
+    def __init__(self, pool: asyncpg.Pool, agent_scope: str = "") -> None:
+        self._pool = pool
+        self._agent_scope = agent_scope
+
+    async def _lock_session(self, conn: asyncpg.Connection, session_id: str) -> None:
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            f"session_branches:{self._agent_scope}:{session_id}",
+        )
+
+    async def _insert(self, conn: asyncpg.Connection, record: BranchRecord) -> None:
+        await conn.execute(
+            f"INSERT INTO session_branches(agent_scope, {', '.join(BRANCH_COLUMNS)}) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            self._agent_scope,
+            record.branch_id,
+            record.session_id,
+            record.thread_id,
+            record.parent_branch_id,
+            record.fork_row_id,
+            record.op,
+            record.created_at,
+            record.last_active_at,
+            record.is_active,
+        )
+
+    async def list(self, session_id: str) -> builtins.list[BranchRecord]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"{_BRANCH_SELECT} WHERE agent_scope = $1 AND session_id = $2 "
+                "ORDER BY created_at ASC, branch_id ASC",
+                self._agent_scope,
+                session_id,
+            )
+        return [record_from_mapping(row) for row in rows]
+
+    async def get_active(self, session_id: str) -> BranchRecord | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"{_BRANCH_SELECT} WHERE agent_scope = $1 AND session_id = $2 AND is_active",
+                self._agent_scope,
+                session_id,
+            )
+        return record_from_mapping(row) if row is not None else None
+
+    async def create(self, record: BranchRecord) -> BranchRecord:
+        stored = replace(record, is_active=True)
+        async with self._pool.acquire() as conn, conn.transaction():
+            await self._lock_session(conn, record.session_id)
+            has_root = await conn.fetchval(
+                "SELECT 1 FROM session_branches "
+                "WHERE agent_scope = $1 AND session_id = $2 AND branch_id = $3",
+                self._agent_scope,
+                record.session_id,
+                ROOT_BRANCH_ID,
+            )
+            await conn.execute(
+                "UPDATE session_branches SET is_active = FALSE "
+                "WHERE agent_scope = $1 AND session_id = $2 AND is_active",
+                self._agent_scope,
+                record.session_id,
+            )
+            if not has_root:
+                await self._insert(conn, implicit_root(record))
+            await self._insert(conn, stored)
+        return stored
+
+    async def set_active(self, session_id: str, branch_id: str) -> BranchRecord | None:
+        now = int(time.time() * 1000)
+        async with self._pool.acquire() as conn, conn.transaction():
+            await self._lock_session(conn, session_id)
+            exists = await conn.fetchval(
+                "SELECT 1 FROM session_branches "
+                "WHERE agent_scope = $1 AND session_id = $2 AND branch_id = $3",
+                self._agent_scope,
+                session_id,
+                branch_id,
+            )
+            if not exists:
+                return None
+            await conn.execute(
+                "UPDATE session_branches SET is_active = FALSE "
+                "WHERE agent_scope = $1 AND session_id = $2 AND is_active",
+                self._agent_scope,
+                session_id,
+            )
+            row = await conn.fetchrow(
+                "UPDATE session_branches SET is_active = TRUE, last_active_at = $4 "
+                "WHERE agent_scope = $1 AND session_id = $2 AND branch_id = $3 "
+                f"RETURNING {', '.join(BRANCH_COLUMNS)}",
+                self._agent_scope,
+                session_id,
+                branch_id,
+                now,
+            )
+        return record_from_mapping(row) if row is not None else None
+
+    async def touch(self, session_id: str, branch_id: str) -> None:
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE session_branches SET last_active_at = $4 "
+                "WHERE agent_scope = $1 AND session_id = $2 AND branch_id = $3",
+                self._agent_scope,
+                session_id,
+                branch_id,
+                int(time.time() * 1000),
+            )
+
+    async def active_non_root(self, session_ids: Sequence[str]) -> dict[str, BranchRecord]:
+        ids = list(dict.fromkeys(session_ids))
+        if not ids:
+            return {}
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"{_BRANCH_SELECT} WHERE agent_scope = $1 AND is_active "
+                "AND branch_id <> $2 AND session_id = ANY($3::text[])",
+                self._agent_scope,
+                ROOT_BRANCH_ID,
+                ids,
+            )
+        return {record.session_id: record for record in map(record_from_mapping, rows)}
+
+    async def delete_session(self, session_id: str) -> builtins.list[BranchRecord]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "DELETE FROM session_branches WHERE agent_scope = $1 AND session_id = $2 "
+                f"RETURNING {', '.join(BRANCH_COLUMNS)}",
+                self._agent_scope,
+                session_id,
+            )
+        return [record_from_mapping(row) for row in rows]
+
+
 class PostgresStorageBackend:
     """Postgres-backed storage backend using an asyncpg connection pool."""
 
@@ -1688,6 +1878,7 @@ class PostgresStorageBackend:
         self._runs_store: PostgresRunStore | None = None
         self._scheduled_loops_store: PostgresScheduledLoopStore | None = None
         self._session_turn_lock_store: PostgresSessionTurnLockStore | None = None
+        self._branch_store: PostgresBranchStore | None = None
         self._outbox_store: PostgresOutboxStore | None = None
 
     async def open(self, *, run_schema: bool = True) -> None:
@@ -1703,6 +1894,7 @@ class PostgresStorageBackend:
         self._runs_store = PostgresRunStore(self._pool)
         self._scheduled_loops_store = PostgresScheduledLoopStore(self._pool)
         self._session_turn_lock_store = PostgresSessionTurnLockStore(self._pool)
+        self._branch_store = PostgresBranchStore(self._pool, self._agent_scope)
         self._outbox_store = PostgresOutboxStore(self._pool)
 
     async def close(self) -> None:
@@ -1714,6 +1906,7 @@ class PostgresStorageBackend:
             self._runs_store = None
             self._scheduled_loops_store = None
             self._session_turn_lock_store = None
+            self._branch_store = None
             self._outbox_store = None
 
     def history(self) -> PostgresHistoryStore:
@@ -1743,6 +1936,11 @@ class PostgresStorageBackend:
         if self._session_turn_lock_store is None:
             raise RuntimeError("PostgresStorageBackend.open() has not been called")
         return self._session_turn_lock_store
+
+    def branches(self) -> PostgresBranchStore:
+        if self._branch_store is None:
+            raise RuntimeError("PostgresStorageBackend.open() has not been called")
+        return self._branch_store
 
     def outbox(self) -> PostgresOutboxStore:
         if self._outbox_store is None:

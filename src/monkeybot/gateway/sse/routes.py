@@ -169,6 +169,29 @@ async def _try_acquire_turn(
     return False
 
 
+def _block_voice_calls(request: Request, session_id: str) -> None:
+    """Refuse new voice calls until :func:`_unblock_voice_calls`.
+
+    409 ``SESSION_BUSY`` when a call is connecting or live, or another history
+    change is running: a call writes history without the turn lock and keeps
+    the thread it resolved at connect.
+    """
+    realtime = getattr(request.app.state, "realtime_manager", None)
+    if realtime is not None and not realtime.begin_rewrite(session_id):
+        raise APIError(
+            409,
+            "SESSION_BUSY",
+            "Wait for the voice call or chat history change to finish",
+            uuid.uuid4().hex,
+        )
+
+
+def _unblock_voice_calls(request: Request, session_id: str) -> None:
+    realtime = getattr(request.app.state, "realtime_manager", None)
+    if realtime is not None:
+        realtime.end_rewrite(session_id)
+
+
 def _schedule_turn(
     *,
     bus: SessionBus,
@@ -1293,10 +1316,12 @@ def create_app(
                 uuid.uuid4().hex,
             )
         from monkeybot.core.persistence.thread_summary import ChatThreadSummary
+        from monkeybot.core.runtime.history_rewrite import overlay_active_previews
 
         backend = _storage_backend(request)
         cap = max(1, min(limit, 200))
-        rows: list[ChatThreadSummary] = await backend.history().list_threads(cap)
+        listed: list[ChatThreadSummary] = await backend.history().list_threads(cap)
+        rows = await overlay_active_previews(backend.history(), backend.branches(), listed)
         return {
             "threads": [
                 {
@@ -1315,7 +1340,7 @@ def create_app(
         request: Request,
         limit: int = 200,
     ) -> dict[str, Any]:
-        """Return persisted chat turns for one thread (user/assistant/thinking/tool)."""
+        """Return the active branch's persisted turns plus its branch navigator points."""
         if not _chat_history_api_enabled():
             raise APIError(
                 404,
@@ -1324,13 +1349,17 @@ def create_app(
                 uuid.uuid4().hex,
             )
         from monkeybot.core.persistence.thread_summary import messages_to_wire
+        from monkeybot.core.runtime.history_rewrite import load_active_history
 
         backend = _storage_backend(request)
         cap = max(1, min(limit, 500))
-        messages = await backend.history().load(session_id.strip(), limit=cap)
+        key = session_id.strip()
+        view = await load_active_history(backend.history(), backend.branches(), key, limit=cap)
         return {
             "session_id": session_id,
-            "messages": messages_to_wire(messages, thread_id=session_id.strip()),
+            "branch_id": view.branch_id,
+            "branch_points": view.branch_points,
+            "messages": messages_to_wire(view.messages, thread_id=key, include_anchors=True),
         }
 
     @api.delete("/api/chat-history/{session_id}")
@@ -1338,10 +1367,11 @@ def create_app(
         session_id: str,
         request: Request,
     ) -> dict[str, bool]:
-        """Clear one transcript and any backend-specific thread summary.
+        """Clear one transcript, its branches, and any backend-specific thread summary.
 
         The ``deleted`` response is an idempotent wipe acknowledgment, not an
-        indication that a persisted thread previously existed.
+        indication that a persisted thread previously existed. 409 while a turn
+        or voice call is running, since either could write after the wipe.
         """
         if not _chat_history_api_enabled():
             raise APIError(
@@ -1350,19 +1380,39 @@ def create_app(
                 "Chat history API is disabled",
                 uuid.uuid4().hex,
             )
+        from monkeybot.core.runtime.history_rewrite import purge_session_branches
+
         backend = _storage_backend(request)
         thread_id = session_id.strip()
+        request_id = uuid.uuid4().hex
+        turns = backend.session_turns()
+        _block_voice_calls(request, thread_id)
         try:
-            await backend.history().reset(thread_id, [])
-        except Exception:
-            logger.exception(
-                "chat history delete failed %s",
-                kv(session_id=thread_id),
-            )
-            raise
+            if not await turns.try_acquire(thread_id, request_id):
+                raise APIError(
+                    409,
+                    "SESSION_BUSY",
+                    "Wait for the current turn to finish before deleting this chat",
+                    uuid.uuid4().hex,
+                )
+            try:
+                await purge_session_branches(backend.history(), backend.branches(), thread_id)
+            except Exception:
+                logger.exception(
+                    "chat history delete failed %s",
+                    kv(session_id=thread_id),
+                )
+                raise
+            finally:
+                await turns.release(thread_id, request_id)
+        finally:
+            _unblock_voice_calls(request, thread_id)
         logger.info("chat history deleted %s", kv(session_id=thread_id))
         return {"deleted": True}
 
+    from .history_routes import register_history_rewrite_routes
+
+    register_history_rewrite_routes(api)
     app.include_router(api)
     app.include_router(build_scheduler_router(loop_port=loop, registry=reg))
     app.include_router(build_goals_router())

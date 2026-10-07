@@ -248,6 +248,7 @@ async def test_start_turn_prefers_session_provider(
     mock_history.load = AsyncMock(return_value=[])
     mock_storage = MagicMock()
     mock_storage.history.return_value = mock_history
+    mock_storage.branches.return_value.get_active = AsyncMock(return_value=None)
     mock_storage.usage.return_value = mock_usage
     gateway_app.app.state.storage = mock_storage
 
@@ -303,6 +304,7 @@ async def test_start_turn_falls_back_to_env(
     mock_history.load = AsyncMock(return_value=[])
     mock_storage = MagicMock()
     mock_storage.history.return_value = mock_history
+    mock_storage.branches.return_value.get_active = AsyncMock(return_value=None)
     mock_storage.usage.return_value = mock_usage
     gateway_app.app.state.storage = mock_storage
 
@@ -311,3 +313,58 @@ async def test_start_turn_falls_back_to_env(
 
     assert captured_run.get("provider") is global_provider
     assert captured_build.get("model") == "env-default-model"
+
+
+@pytest.mark.asyncio
+async def test_start_turn_runs_on_the_active_branch_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from monkeybot.core.persistence.branches import BranchRecord, branch_thread_id
+
+    registry = SessionRegistry()
+    registry.create("s3", agent_md=None, created_at_ms=0)
+    captured_args: list[object] = []
+    captured_build: dict[str, object] = {}
+
+    async def _fake_build_context(*args: object, **kwargs: object) -> MagicMock:
+        captured_args.extend(args)
+        captured_build.update(kwargs)
+        return MagicMock()
+
+    async def _fake_run_loop(*_args: object, **_kwargs: object):
+        yield TurnComplete(request_id="r3", usage=UsageTotals())
+
+    agent_md = tmp_path / "AGENT.md"
+    agent_md.write_text("# agent\n", encoding="utf-8")
+    monkeypatch.setattr(gateway_app, "build_context", _fake_build_context)
+    monkeypatch.setattr(gateway_app, "run_loop", _fake_run_loop)
+    monkeypatch.setattr(gateway_app, "CoreToolExecutor", lambda **_kw: _FakeExecutor())
+    monkeypatch.setattr(gateway_app, "_default_agent_path", lambda _bus: agent_md)
+    monkeypatch.setattr(
+        gateway_app,
+        "_resolved_workspace_paths",
+        lambda *_a, **_k: (tmp_path, tmp_path / "skills", tmp_path / "artifacts"),
+    )
+    gateway_app.gateway_runtime.mcp = MagicMock()
+    gateway_app.gateway_runtime.provider = object()
+    gateway_app.gateway_runtime.inspectors = []
+    gateway_app.gateway_runtime.hook_manager = None
+    gateway_app.gateway_runtime.web_search_tool = None
+
+    thread = branch_thread_id("s3", "b1")
+    active = BranchRecord("b1", "s3", thread, "root", None, "edit", 1, 1, True)
+    mock_usage = AsyncMock()
+    mock_storage = MagicMock()
+    mock_storage.history.return_value.load = AsyncMock(return_value=[])
+    mock_storage.branches.return_value.get_active = AsyncMock(return_value=active)
+    mock_storage.branches.return_value.touch = AsyncMock()
+    mock_storage.usage.return_value = mock_usage
+    gateway_app.app.state.storage = mock_storage
+
+    await GatewayLoopPort(registry).start_turn("s3", "req-3", [Text(text="hello")])
+
+    assert captured_args[0] == thread
+    assert captured_build["session_id"] == "s3"
+    mock_storage.branches.return_value.touch.assert_awaited_once_with("s3", "b1")
+    assert mock_usage.record.await_args.args[0] == "s3"

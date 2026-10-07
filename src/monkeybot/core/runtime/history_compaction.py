@@ -16,6 +16,7 @@ from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import HistoryStore
+from monkeybot.core.persistence.thread_summary import CONTEXT_SUMMARY_PREFIX
 from monkeybot.core.runtime.context_budget import (
     ContextBudgeter,
     estimate_tokens_from_char_count,
@@ -510,9 +511,9 @@ async def _summarize_history(
                 break
     summary_text = summary_text.strip() or "(empty summary)"
     if _POST_COMPACTION_STANDING_HEADING in summary_text:
-        summary_body = f"[Context Summary]:\n{summary_text}"
+        summary_body = f"{CONTEXT_SUMMARY_PREFIX}\n{summary_text}"
     else:
-        summary_body = f"[Context Summary]:\n{summary_text}\n\n{_POST_COMPACTION_STANDING}"
+        summary_body = f"{CONTEXT_SUMMARY_PREFIX}\n{summary_text}\n\n{_POST_COMPACTION_STANDING}"
     summary_row = Message(
         role="assistant",
         content=[Text(text=summary_body)],
