@@ -6,7 +6,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### CLI
+## [cli v0.9.0] - 2026-10-07
 
 ### Added
 
