@@ -180,11 +180,11 @@ _SPILL_SKIP_TOOLS = frozenset({"read_file", "load_file"})
 
 def _mcp_call_meta(ctx: TurnContext) -> dict[str, object]:
     """Request ``_meta.monkeybot`` so MCP servers can attribute work to a chat."""
-    if not str(ctx.thread_id).strip():
+    if not str(ctx.session_id).strip():
         logger.debug("mcp call _meta missing thread_id %s", kv(request_id=ctx.request_id))
     return {
         "monkeybot": {
-            "thread_id": ctx.thread_id,
+            "thread_id": ctx.session_id,
             "request_id": ctx.request_id,
             "run_id": os.environ.get("MONKEYBOT_RUN_ID") or None,
         }
@@ -1328,7 +1328,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text = write_spill_with_inventory(
                     result_text,
                     self._workspace.repo_root,
-                    ctx.thread_id,
+                    ctx.session_id,
                     call.call_id,
                     tool_name=name,
                     inline_budget=budgets.inline_budget,
@@ -1385,10 +1385,10 @@ class CoreToolExecutor(ToolExecutorPort):
     ) -> ToolExecutionResult:
         if self._attachment_store is None:
             return ToolExecutionResult.err("Attachments are not enabled for this session")
-        if not self._attachment_store.exists(ctx.thread_id, attachment_id):
+        if not self._attachment_store.exists(ctx.session_id, attachment_id):
             return ToolExecutionResult.err(f"Unknown attachment_id: {attachment_id}")
         try:
-            raw, mime, filename = self._attachment_store.read(ctx.thread_id, attachment_id)
+            raw, mime, filename = self._attachment_store.read(ctx.session_id, attachment_id)
         except FileNotFoundError:
             return ToolExecutionResult.err(
                 f"Attachment {attachment_id} expired or removed; ask user to re-upload"
@@ -1396,7 +1396,7 @@ class CoreToolExecutor(ToolExecutorPort):
         meta: dict[str, object] = {
             "attachment_id": attachment_id,
             "filename": filename,
-            "path": attachment_workspace_path(ctx.thread_id, attachment_id),
+            "path": attachment_workspace_path(ctx.session_id, attachment_id),
         }
         return self._media_result(raw, mime, meta)
 
@@ -1440,7 +1440,7 @@ class CoreToolExecutor(ToolExecutorPort):
         if self._attachment_store is not None:
             try:
                 stored = self._attachment_store.save(
-                    ctx.thread_id,
+                    ctx.session_id,
                     data=raw,
                     mime_type=mime,
                     filename=filename,
@@ -1808,7 +1808,7 @@ class CoreToolExecutor(ToolExecutorPort):
             traceparent=traceparent,
             agent_md=str(agent_md_path),
             subagent_type=subagent_type,
-            parent_session_id=ctx.thread_id,
+            parent_session_id=ctx.session_id,
             child_thread_id=child_thread_id,
         )
 
@@ -2033,7 +2033,7 @@ class CoreToolExecutor(ToolExecutorPort):
                     executor,
                     cmd,
                     argv,
-                    thread_id=ctx.thread_id,
+                    thread_id=ctx.session_id,
                     execute_kwargs=execute_kwargs,
                 )
             result = await executor.execute(
@@ -2056,7 +2056,7 @@ class CoreToolExecutor(ToolExecutorPort):
         except CommandTimeoutError as exc:
             spill_path = write_run_command_timeout_spill(
                 workspace_root=self._workspace.repo_root,
-                thread_id=ctx.thread_id,
+                thread_id=ctx.session_id,
                 call_id=call.call_id,
                 stdout=exc.stdout,
                 stderr=exc.stderr,
@@ -2457,7 +2457,7 @@ class CoreToolExecutor(ToolExecutorPort):
             max_ticks = _coerce_int(max_ticks_raw, 0)
             if max_ticks is None or max_ticks < 1:
                 return (None, "max_ticks must be a positive integer when set")
-        session_id = _str_arg(args, "session_id") or ctx.thread_id
+        session_id = _str_arg(args, "session_id") or ctx.session_id
         loop_id = _str_arg(args, "loop_id")
         skip_if_busy = args.get("skip_if_busy", True)
         if not isinstance(skip_if_busy, bool):
@@ -2602,23 +2602,23 @@ class CoreToolExecutor(ToolExecutorPort):
         try:
             row, created = await service_or_err.create(
                 objective=objective,
-                session_id=ctx.thread_id,
+                session_id=ctx.session_id,
             )
         except GoalConflictError as exc:
             logger.warning(
                 "create_goal conflict %s",
-                kv(session_id=ctx.thread_id, error=str(exc)),
+                kv(session_id=ctx.session_id, error=str(exc)),
             )
             return (None, str(exc))
         except ValueError as exc:
             logger.warning(
                 "create_goal rejected %s",
-                kv(session_id=ctx.thread_id, error=str(exc)),
+                kv(session_id=ctx.session_id, error=str(exc)),
             )
             return (None, str(exc))
         logger.info(
             "create_goal %s",
-            kv(session_id=ctx.thread_id, goal_id=row.loop_id, created=created, status=row.status),
+            kv(session_id=ctx.session_id, goal_id=row.loop_id, created=created, status=row.status),
         )
         return (
             _j(
@@ -2652,24 +2652,24 @@ class CoreToolExecutor(ToolExecutorPort):
         try:
             row = await service_or_err.update(
                 goal_id=goal_id,
-                session_id=ctx.thread_id,
+                session_id=ctx.session_id,
                 status=status,
             )
         except GoalNotFoundError as exc:
             logger.warning(
                 "update_goal missed %s",
-                kv(session_id=ctx.thread_id, status=status, error=str(exc)),
+                kv(session_id=ctx.session_id, status=status, error=str(exc)),
             )
             return (None, str(exc))
         except ValueError as exc:
             logger.warning(
                 "update_goal rejected %s",
-                kv(session_id=ctx.thread_id, status=status, error=str(exc)),
+                kv(session_id=ctx.session_id, status=status, error=str(exc)),
             )
             return (None, str(exc))
         logger.info(
             "update_goal %s",
-            kv(session_id=ctx.thread_id, goal_id=row.loop_id, status=row.status),
+            kv(session_id=ctx.session_id, goal_id=row.loop_id, status=row.status),
         )
         return (
             _j(
