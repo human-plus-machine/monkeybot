@@ -12,6 +12,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 - `monkeybot trace list` and `monkeybot trace digest` turn a session transcript into a resolved timeline, with each subagent run shown under the `task` call that started it. In chat, `/export-trace` copies the whole session directory. The `mb-retro` skill proposes environment fixes from one hard session and does not edit anything until you pick a candidate.
 
+### Changed
+
+- Requires `monkeybot[cli]>=3.8.0,<4`. `monkeybot trace` imports the transcript reader added in core 3.8.0.
+
 ## [core v3.8.0] - 2026-10-07
 
 ### Added
