@@ -563,9 +563,12 @@ def _child_digest(
 def _task_child(
     started: dict[str, Any] | None, result: dict[str, Any]
 ) -> tuple[str, str | None] | None:
-    """``(child_thread_id, subagent_type)`` named by a ``task`` tool result."""
+    """``(child_thread_id, subagent_type)`` named by a ``task`` tool result.
+
+    A queued run returns its body as the tool ``error``, with the ids under ``details``.
+    """
     name = started.get("tool") if started is not None else result.get("tool")
-    raw = result.get("result")
+    raw = result.get("result") or result.get("error")
     if name != _TASK_TOOL or not isinstance(raw, str) or not raw:
         return None
     try:
@@ -573,6 +576,9 @@ def _task_child(
     except ValueError:
         payload = None
     if isinstance(payload, dict):
+        details = payload.get("details")
+        if "child_thread_id" not in payload and isinstance(details, dict):
+            payload = details
         child = payload.get("child_thread_id")
         sub_type = payload.get("subagent_type")
         if not isinstance(child, str) or not child:

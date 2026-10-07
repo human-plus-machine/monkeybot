@@ -101,12 +101,12 @@ def run_trace_list(args: argparse.Namespace) -> int:
 
 def run_trace_digest(args: argparse.Namespace) -> int:
     workspace = _workspace(args)
-    session_dir = _resolve_target(args.target, workspace)
-    if session_dir is None:
-        target = args.target or "(latest)"
-        print(f"No transcript found for {target}", file=sys.stderr)
-        return 1
     try:
+        session_dir = _resolve_target(args.target, workspace)
+        if session_dir is None:
+            target = args.target or "(latest)"
+            print(f"No transcript found for {target}", file=sys.stderr)
+            return 1
         seqs = args.seq or []
         if seqs:
             found = records_by_seq(session_dir, seqs)

@@ -363,6 +363,24 @@ def test_clipped_task_result_still_links_child() -> None:
     assert _task_child({"tool": "grep"}, clipped) is None
 
 
+def test_queued_task_error_still_links_child() -> None:
+    queued = {
+        "result": "",
+        "error": json.dumps(
+            {
+                "ok": False,
+                "error_kind": "pending",
+                "details": {
+                    "queued": True,
+                    "child_thread_id": "subagent:p:q1",
+                    "subagent_type": "explore",
+                },
+            }
+        ),
+    }
+    assert _task_child({"tool": "task"}, queued) == ("subagent:p:q1", "explore")
+
+
 def test_unreferenced_child_is_listed_and_scored(tmp_path: Path) -> None:
     session = tmp_path / "20260101T000000Z_parent"
     _write(

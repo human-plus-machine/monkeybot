@@ -71,3 +71,15 @@ def test_trace_read_failure_exits_nonzero(
         assert "Transcript read failed" in capsys.readouterr().err
     finally:
         ndjson.chmod(0o644)
+
+
+def test_trace_digest_unreadable_root_exits_nonzero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _session(tmp_path).parent
+    root.chmod(0)
+    try:
+        assert main(["trace", "digest", "--cwd", str(tmp_path)]) == 1
+        assert "Transcript read failed" in capsys.readouterr().err
+    finally:
+        root.chmod(0o755)
