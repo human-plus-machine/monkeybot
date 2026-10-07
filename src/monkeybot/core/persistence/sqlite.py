@@ -219,6 +219,7 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     last_active_at INTEGER NOT NULL,
     is_active INTEGER NOT NULL DEFAULT 0,
     inherited_forks TEXT,
+    fork_summary TEXT,
     PRIMARY KEY (session_id, branch_id)
 )""",
     """CREATE INDEX IF NOT EXISTS idx_session_branches_session
@@ -319,7 +320,7 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
     await _ensure_outbox_agent_id_column(conn)
     await _ensure_outbox_palace_id_column(conn)
     await _ensure_scheduled_loop_kind_columns(conn)
-    await _ensure_session_branches_inherited_column(conn)
+    await _ensure_session_branches_columns(conn)
     cursor = await conn.execute("PRAGMA table_info(conversation_history)")
     rows = await cursor.fetchall()
     await cursor.close()
@@ -343,14 +344,17 @@ async def _ensure_turn_usage_estimated_column(conn: aiosqlite.Connection) -> Non
     await conn.commit()
 
 
-async def _ensure_session_branches_inherited_column(conn: aiosqlite.Connection) -> None:
-    """Add ``inherited_forks`` when upgrading an existing DB."""
+async def _ensure_session_branches_columns(conn: aiosqlite.Connection) -> None:
+    """Add ``inherited_forks`` and ``fork_summary`` when upgrading an existing DB."""
     cur = await conn.execute("PRAGMA table_info(session_branches)")
     rows = await cur.fetchall()
     await cur.close()
-    if "inherited_forks" in {str(r[1]) for r in rows}:
+    names = {str(r[1]) for r in rows}
+    missing = [name for name in ("inherited_forks", "fork_summary") if name not in names]
+    if not missing:
         return
-    await conn.execute("ALTER TABLE session_branches ADD COLUMN inherited_forks TEXT")
+    for name in missing:
+        await conn.execute(f"ALTER TABLE session_branches ADD COLUMN {name} TEXT")
     await conn.commit()
 
 

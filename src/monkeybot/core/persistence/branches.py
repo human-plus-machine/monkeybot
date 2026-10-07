@@ -40,6 +40,7 @@ _COLUMNS = (
     "last_active_at",
     "is_active",
     "inherited_forks",
+    "fork_summary",
 )
 
 
@@ -79,6 +80,10 @@ class BranchRecord:
     # Branches whose fork row this branch's copied prefix kept, so their
     # navigator shows here. Fixed at creation; later compaction cannot change it.
     inherited_forks: tuple[str, ...] = ()
+    # Fingerprint of the newest compaction summary on the thread ``fork_row_index``
+    # indexes, or ``None`` if it had none. A thread with a different newest
+    # summary has compacted since, so that index no longer points at the fork row.
+    fork_summary: str | None = None
 
 
 def _record_from_row(row: Any) -> BranchRecord:
@@ -98,6 +103,7 @@ def _record_from_row(row: Any) -> BranchRecord:
         last_active_at=int(row[8]),
         is_active=bool(row[9]),
         inherited_forks=decode_fork_keys(row[10]),
+        fork_summary=str(row[11]) if row[11] is not None else None,
     )
 
 
@@ -178,8 +184,8 @@ class SQLiteBranchStore:
             INSERT INTO session_branches(
                 branch_id, session_id, thread_id, parent_branch_id,
                 fork_row_index, fork_fingerprint, op, created_at, last_active_at, is_active,
-                inherited_forks
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                inherited_forks, fork_summary
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.branch_id,
@@ -193,6 +199,7 @@ class SQLiteBranchStore:
                 record.last_active_at,
                 1 if record.is_active else 0,
                 encode_fork_keys(record.inherited_forks),
+                record.fork_summary,
             ),
         )
 

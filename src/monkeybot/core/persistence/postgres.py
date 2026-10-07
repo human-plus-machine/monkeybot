@@ -165,9 +165,11 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     last_active_at BIGINT NOT NULL,
     is_active INTEGER NOT NULL DEFAULT 0,
     inherited_forks TEXT,
+    fork_summary TEXT,
     PRIMARY KEY (session_id, branch_id)
 )""",
     "ALTER TABLE session_branches ADD COLUMN IF NOT EXISTS inherited_forks TEXT",
+    "ALTER TABLE session_branches ADD COLUMN IF NOT EXISTS fork_summary TEXT",
     """CREATE INDEX IF NOT EXISTS idx_session_branches_session
     ON session_branches(session_id, created_at)""",
     """CREATE UNIQUE INDEX IF NOT EXISTS idx_session_branches_one_active
@@ -1758,12 +1760,14 @@ def _branch_from_pg(row: Any) -> BranchRecord:
         last_active_at=int(row["last_active_at"]),
         is_active=bool(row["is_active"]),
         inherited_forks=decode_fork_keys(row["inherited_forks"]),
+        fork_summary=str(row["fork_summary"]) if row["fork_summary"] is not None else None,
     )
 
 
 _BRANCH_COLUMNS = (
     "branch_id, session_id, thread_id, parent_branch_id, fork_row_index, "
-    "fork_fingerprint, op, created_at, last_active_at, is_active, inherited_forks"
+    "fork_fingerprint, op, created_at, last_active_at, is_active, inherited_forks, "
+    "fork_summary"
 )
 
 
@@ -1831,8 +1835,8 @@ class PostgresBranchStore:
                 INSERT INTO session_branches(
                     branch_id, session_id, thread_id, parent_branch_id,
                     fork_row_index, fork_fingerprint, op, created_at, last_active_at, is_active,
-                    inherited_forks
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    inherited_forks, fork_summary
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 """,
                 stored.branch_id,
                 stored.session_id,
@@ -1845,6 +1849,7 @@ class PostgresBranchStore:
                 stored.last_active_at,
                 1 if stored.is_active else 0,
                 encode_fork_keys(stored.inherited_forks),
+                stored.fork_summary,
             )
         return stored
 

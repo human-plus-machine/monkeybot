@@ -770,7 +770,7 @@ def _nested_branches(
 
 def test_divergence_points_skip_a_fork_row_the_branch_never_inherited() -> None:
     records, grandchild = _nested_branches(grandchild_fork_row=1)
-    points = divergence_points(records, "grandchild", grandchild)
+    points = divergence_points(records, "grandchild", grandchild, summary=None)
     assert [(p["anchor"]["row_index"], p["options"]) for p in points] == [
         (1, ["child", "grandchild"]),
     ]
@@ -778,7 +778,7 @@ def test_divergence_points_skip_a_fork_row_the_branch_never_inherited() -> None:
 
 def test_divergence_points_keep_an_inherited_ancestor_fork_row() -> None:
     records, grandchild = _nested_branches(grandchild_fork_row=6)
-    points = divergence_points(records, "grandchild", grandchild)
+    points = divergence_points(records, "grandchild", grandchild, summary=None)
     assert [(p["anchor"]["row_index"], p["options"]) for p in points] == [
         (5, ["root", "child"]),
         (6, ["child", "grandchild"]),
@@ -786,7 +786,7 @@ def test_divergence_points_keep_an_inherited_ancestor_fork_row() -> None:
 
 
 @pytest.mark.asyncio
-async def test_nested_branch_keeps_ancestor_navigator_after_parent_compacts(
+async def test_nested_branch_drops_ancestor_navigator_after_parent_compacts(
     backend: SQLiteStorageBackend,
 ) -> None:
     history = backend.history()
@@ -817,9 +817,10 @@ async def test_nested_branch_keeps_ancestor_navigator_after_parent_compacts(
         op="edit",
         anchor=_anchor(compacted, 5),
     )
+    # The child compacted after forking from root, so root's row indexes no
+    # longer place that fork; only the fork made after compaction shows.
     view = await load_active_history(history, branches, "s1")
     assert [(p["anchor"]["row_index"], p["options"][0]) for p in view.branch_points] == [
-        (2, "root"),
         (4, child.branch_id),
     ]
 
@@ -929,8 +930,48 @@ async def test_editing_the_first_message_again_adds_a_sibling(
     await _seed(backend, "s1")
     first = await _rewrite_and_reply(backend, "edit", 0, "one b")
     second = await _rewrite_and_reply(backend, "edit", 0, "one c")
+    options = ["root", first, second]
 
-    assert await _points_on(backend, "root") == [(0, ["root", first, second], 0)]
+    assert await _points_on(backend, second) == [(0, options, 2)]
+    assert await _points_on(backend, first) == [(0, options, 1)]
+    assert await _points_on(backend, "root") == [(0, options, 0)]
+
+
+@pytest.mark.asyncio
+async def test_compaction_never_moves_a_navigator_to_a_later_duplicate(
+    backend: SQLiteStorageBackend,
+) -> None:
+    for message in (_user("a"), _assistant("Done."), _user("b"), _assistant("Done."), _user("c")):
+        await backend.history().append("s1", message)
+    await _rewrite_and_reply(backend, "edit", 4, "c2")
+    await activate_branch(branches=backend.branches(), session_id="s1", branch_id="root")
+    # Root compacts the fork row away, then a later "Done." lands on its old index.
+    summary = _assistant("[Context Summary]:\na to b")
+    await backend.history().reset("s1", [_user("a"), summary, _user("c"), _assistant("Done.")])
+
+    assert await _points_on(backend, "root") == []
+    rows = await backend.history().load("s1")
+    await truncate_active(
+        history=backend.history(),
+        branches=backend.branches(),
+        session_id="s1",
+        anchor=_anchor(rows, 2),
+    )
+    assert len(await backend.history().load("s1")) == 3
+
+
+@pytest.mark.asyncio
+async def test_fork_at_the_head_row_survives_compaction(
+    backend: SQLiteStorageBackend,
+) -> None:
+    await _seed(backend, "s1")
+    child = await _rewrite_and_reply(backend, "rewind", 0, "one again")
+    await activate_branch(branches=backend.branches(), session_id="s1", branch_id="root")
+    rows = await backend.history().load("s1")
+    summary = _assistant("[Context Summary]:\nack one")
+    await backend.history().reset("s1", [rows[0], summary, *rows[2:]])
+
+    assert await _points_on(backend, "root") == [(0, ["root", child], 0)]
 
 
 @pytest.mark.asyncio
@@ -956,7 +997,7 @@ def test_divergence_points_merge_forks_that_share_a_row() -> None:
         _branch("child", "root", 1, root),
         _branch("grandchild", "child", 1, root),
     ]
-    points = divergence_points(records, "grandchild", root)
+    points = divergence_points(records, "grandchild", root, summary=None)
     assert [(p["anchor"]["row_index"], p["options"], p["active_index"]) for p in points] == [
         (1, ["root", "child", "grandchild"], 2),
     ]

@@ -1515,6 +1515,7 @@ def _branch_from_fs(data: dict[str, Any]) -> BranchRecord:
     fork_index = data.get("fork_row_index")
     fingerprint = data.get("fork_fingerprint")
     op = data.get("op")
+    summary = data.get("fork_summary")
     return BranchRecord(
         branch_id=str(data.get("branch_id") or ""),
         session_id=str(data.get("session_id") or ""),
@@ -1527,6 +1528,7 @@ def _branch_from_fs(data: dict[str, Any]) -> BranchRecord:
         last_active_at=int(data.get("last_active_at") or 0),
         is_active=bool(data.get("is_active")),
         inherited_forks=decode_fork_keys(data.get("inherited_forks")),
+        fork_summary=summary if isinstance(summary, str) else None,
     )
 
 
@@ -1543,6 +1545,7 @@ def _branch_to_fs(record: BranchRecord) -> dict[str, Any]:
         "last_active_at": record.last_active_at,
         "is_active": record.is_active,
         "inherited_forks": list(record.inherited_forks),
+        "fork_summary": record.fork_summary,
     }
 
 

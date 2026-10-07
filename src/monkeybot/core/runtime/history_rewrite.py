@@ -31,6 +31,7 @@ from monkeybot.core.persistence.thread_summary import (
     preview_from_content_blob,
     text_from_message,
 )
+from monkeybot.core.runtime.history_compaction import SUMMARY_KEEP_HEAD_COUNT
 from monkeybot.core.types.content_blocks import ContentBlock, ToolRequest, ToolResponse
 
 logger = logging.getLogger(__name__)
@@ -241,34 +242,40 @@ def _fork_anchor(messages: list[Message], prefix_end: int) -> tuple[int, str]:
     return row, message_fingerprint(messages[row])
 
 
+def _summary_fingerprint(messages: list[Message]) -> str | None:
+    """Fingerprint of the newest compaction summary row, or ``None``."""
+    index = last_summary_index(messages)
+    return None if index is None else message_fingerprint(messages[index])
+
+
 def _fork_owner(
     parent: BranchRecord,
     by_id: dict[str, BranchRecord],
     messages: list[Message],
     fork: tuple[int, str],
-) -> tuple[BranchRecord, int]:
-    """Branch the new version hangs off, and the fork row on its thread.
+) -> BranchRecord:
+    """Branch the new version hangs off.
 
     Forking at the parent's own fork row (editing the same message again)
     makes the new branch the parent's sibling, so every version of one row
-    shares one navigator. ``messages`` is the parent's thread.
+    shares one navigator. ``messages`` is the parent's thread. A parent that
+    compacted since it forked no longer shares row indexes with its own
+    parent, so the new branch stays its child.
     """
     local_row, fingerprint = fork
-    owner, stored_row = parent, local_row
+    summary = _summary_fingerprint(messages)
+    owner = parent
     while owner.parent_branch_id is not None and owner.fork_fingerprint == fingerprint:
-        own_row = owner.fork_row_index
-        if own_row is None:
-            break
         if (
             fingerprint != START_FORK_FINGERPRINT
-            and locate_anchor(messages, HistoryAnchor(own_row, fingerprint)) != local_row
+            and _locate_fork(messages, owner, 0, summary) != local_row
         ):
             break
         grand = by_id.get(owner.parent_branch_id)
         if grand is None:
             break
-        owner, stored_row = grand, own_row
-    return owner, stored_row
+        owner = grand
+    return owner
 
 
 def _user_texts(messages: list[Message]) -> list[str]:
@@ -342,15 +349,13 @@ def _assert_fork_points_kept(
     The other version would survive but its navigator point would vanish,
     leaving it unreachable from the chat. Rewind keeps both versions instead.
     """
+    summary = _summary_fingerprint(messages)
     for record in records:
         is_child = record.parent_branch_id == branch_id
         is_own_fork = record.branch_id == branch_id and record.parent_branch_id is not None
         if not (is_child or is_own_fork):
             continue
-        if record.fork_row_index is None or record.fork_fingerprint is None:
-            continue
-        anchor = HistoryAnchor(record.fork_row_index, record.fork_fingerprint)
-        located = locate_anchor(messages, anchor)
+        located = _locate_fork(messages, record, 0, summary)
         if located is not None and located >= end:
             raise HistoryRewriteError(
                 409,
@@ -392,9 +397,7 @@ async def branch_op(
     thread_id = branch_thread_id(session_id, branch_id)
     fork = _fork_anchor(messages, end)
     records = await branches.list(session_id)
-    owner, fork_row = _fork_owner(
-        parent, {record.branch_id: record for record in records}, messages, fork
-    )
+    owner = _fork_owner(parent, {record.branch_id: record for record in records}, messages, fork)
     inherited = _inherited_forks(records, parent.branch_id, messages, end)
     now = int(time.time() * 1000)
     created = BranchRecord(
@@ -402,13 +405,14 @@ async def branch_op(
         session_id=session_id,
         thread_id=thread_id,
         parent_branch_id=owner.branch_id,
-        fork_row_index=fork_row,
+        fork_row_index=fork[0],
         fork_fingerprint=fork[1],
         op=op,
         created_at=now,
         last_active_at=now,
         is_active=False,
         inherited_forks=inherited,
+        fork_summary=_summary_fingerprint(messages),
     )
     await history.reset(thread_id, prefix)
     try:
@@ -570,18 +574,21 @@ def divergence_points(
     active_branch_id: str,
     messages: list[Message],
     *,
+    summary: str | None,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     """Navigator points whose fork row still exists on ``messages``.
 
-    A point whose anchor was compacted away (or sits before a sliced tail
-    starting at absolute ``offset``) is omitted. Options are the parent
-    branch plus the children that forked there, and only when the active
-    branch is one of them, or a descendant that inherited the fork row.
+    ``summary`` is the fingerprint of the thread's newest compaction summary,
+    which may sit before a sliced tail starting at absolute ``offset``. A
+    point whose fork row was compacted since the fork (or sits before the
+    tail) is omitted. Options are the parent branch plus the children that
+    forked there, and only when the active branch is one of them, or a
+    descendant that inherited the fork row.
     """
     by_id = {record.branch_id: record for record in records}
     points: list[dict[str, Any]] = []
-    for index, children in _located_forks(records, active_branch_id, messages, offset):
+    for index, children in _located_forks(records, active_branch_id, messages, offset, summary):
         options = list(
             dict.fromkeys(
                 [
@@ -610,23 +617,39 @@ def _inherited_forks(
     prefix_end: int,
 ) -> tuple[str, ...]:
     """Branches whose navigator a branch copying ``messages[:prefix_end]`` keeps."""
+    summary = _summary_fingerprint(messages)
     return tuple(
         child.branch_id
-        for index, children in _located_forks(records, parent_branch_id, messages, 0)
+        for index, children in _located_forks(records, parent_branch_id, messages, 0, summary)
         if index < prefix_end
         for child in children
     )
 
 
-def _locate_fork(messages: list[Message], record: BranchRecord, offset: int) -> int | None:
-    """Local index on ``messages`` of the row ``record`` forked after."""
-    if record.fork_row_index is None or record.fork_fingerprint is None:
+def _locate_fork(
+    messages: list[Message],
+    record: BranchRecord,
+    offset: int,
+    summary: str | None,
+) -> int | None:
+    """Local index on ``messages`` of the row ``record`` forked after.
+
+    Without a compaction since the fork, rows keep their indexes, so the
+    stored index must match exactly. Once the thread compacts (its newest
+    ``summary`` changed), that index can hold a later row with identical
+    content, so only the head rows compaction never moves are trusted.
+    """
+    row, fingerprint = record.fork_row_index, record.fork_fingerprint
+    if row is None or fingerprint is None:
         return None
-    if record.fork_fingerprint == START_FORK_FINGERPRINT:
+    if fingerprint == START_FORK_FINGERPRINT:
         return 0 if offset == 0 and messages else None
-    return locate_anchor(
-        messages, HistoryAnchor(record.fork_row_index - offset, record.fork_fingerprint)
-    )
+    if record.fork_summary != summary and row >= SUMMARY_KEEP_HEAD_COUNT:
+        return None
+    local = row - offset
+    if 0 <= local < len(messages) and message_fingerprint(messages[local]) == fingerprint:
+        return local
+    return None
 
 
 def _located_forks(
@@ -634,6 +657,7 @@ def _located_forks(
     active_branch_id: str,
     messages: list[Message],
     offset: int,
+    summary: str | None,
 ) -> list[tuple[int, list[BranchRecord]]]:
     """Forks visible on the active branch, grouped by absolute row, oldest first.
 
@@ -652,10 +676,9 @@ def _located_forks(
         own = active_branch_id in (parent_id, child.branch_id)
         if not own and child.branch_id not in inherited:
             limit = _inherited_limit(active_branch_id, {parent_id, child.branch_id}, by_id)
-            # A start fork (row -1) counts as inherited only with row 0.
-            if limit is None or max(child.fork_row_index, 0) > limit:
+            if limit is None or child.fork_row_index > limit:
                 continue
-        local = _locate_fork(messages, child, offset)
+        local = _locate_fork(messages, child, offset, summary)
         if local is not None:
             at_row.setdefault(offset + local, []).append(child)
     return sorted(at_row.items())
@@ -693,7 +716,15 @@ async def load_active_history(
     points: list[dict[str, Any]] = []
     if active is not None:
         records = await branches.list(session_id)
-        points = divergence_points(records, active.branch_id, messages, offset=offset)
+        if local_summary is not None:
+            summary = message_fingerprint(messages[local_summary])
+        elif offset == 0:
+            summary = None
+        else:
+            summary = _summary_fingerprint(await history.load(thread_id))
+        points = divergence_points(
+            records, active.branch_id, messages, summary=summary, offset=offset
+        )
     return ActiveHistory(
         session_id=session_id,
         branch_id=branch_id,
