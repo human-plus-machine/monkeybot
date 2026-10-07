@@ -22,7 +22,7 @@ from monkeybot.core.persistence.goal_ledger import (
     ResolvedIntent,
     Status,
     empty_resolved,
-    match_verbatim_seq,
+    first_dropped_seq,
     new_entry_id,
     now_ms,
     resolve_intent,
@@ -186,25 +186,37 @@ class GoalLedger:
         """Drop the cached intent for ``thread_id`` so the next read reloads it."""
         self._cache.pop(thread_id, None)
 
-    async def copy_matched_prefix(
+    async def _drain_before_rewrite(self, thread_id: str) -> None:
+        """Let queued classifications land so a dropped message is not written back later."""
+        try:
+            await self.wait_idle(thread_id)
+        except TimeoutError:
+            logger.warning("goal_ledger drain timed out %s", kv(thread_id=thread_id))
+
+    async def copy_branch_prefix(
         self,
         src_thread: str,
         dst_thread: str,
-        user_texts: list[str],
+        dropped_texts: list[str],
     ) -> None:
-        """Copy ledger rows up through the last user text kept in a branch prefix."""
+        """Copy ledger rows recorded before the first user message the branch drops."""
+        await self._drain_before_rewrite(src_thread)
         entries = await self._store.list_entries(src_thread)
-        seq = match_verbatim_seq(entries, user_texts)
-        if seq is not None and seq > 0:
-            await self._store.copy_prefix(src_thread, dst_thread, seq)
+        first = first_dropped_seq(entries, dropped_texts)
+        last_seq = max((entry.seq for entry in entries), default=0)
+        upto = last_seq if first is None else first - 1
+        if upto > 0:
+            await self._store.copy_prefix(src_thread, dst_thread, upto)
         self.invalidate(dst_thread)
         await self._refresh_view(dst_thread)
 
-    async def drop_after_user_texts(self, thread_id: str, user_texts: list[str]) -> None:
-        """Drop ledger rows recorded after the last user text still in the thread."""
+    async def drop_truncated(self, thread_id: str, dropped_texts: list[str]) -> None:
+        """Drop ledger rows recorded for user messages a truncate removed."""
+        await self._drain_before_rewrite(thread_id)
         entries = await self._store.list_entries(thread_id)
-        seq = match_verbatim_seq(entries, user_texts)
-        await self._store.drop_after(thread_id, 0 if seq is None else seq)
+        first = first_dropped_seq(entries, dropped_texts)
+        if first is not None:
+            await self._store.drop_after(thread_id, first - 1)
         self.invalidate(thread_id)
         await self._refresh_view(thread_id)
 

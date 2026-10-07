@@ -53,6 +53,7 @@ from monkeybot.core.runtime.events import (
     ToolConfirmationRequestEvent,
 )
 from monkeybot.core.runtime.events import Error as AgentError
+from monkeybot.core.runtime.history_rewrite import resolve_active_thread_id
 from monkeybot.core.runtime.realtime_loop import run_realtime_turn
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
 from monkeybot.core.tools.background_jobs import jobs_killed_at_turn_end_error
@@ -166,6 +167,7 @@ async def _build_realtime_context(
     request_id: str,
     deps: RealtimeDependencies,
     *,
+    thread_id: str | None = None,
     todo_store: TodoListStore | None = None,
     cancelled: asyncio.Event | None = None,
 ) -> TurnContext:
@@ -188,7 +190,7 @@ async def _build_realtime_context(
     try:
         model = env_value(cfg, "MODEL_NAME", "gemini-2.5-flash") or "gemini-2.5-flash"
         return await build_context(
-            thread_id=session_id,
+            thread_id=thread_id or session_id,
             request_id=request_id,
             agent_md_path=agent_path,
             memory=deps.memory,
@@ -856,6 +858,7 @@ def create_realtime_router(
                 raise GatewayInternalError("Storage backend not initialized")
 
             history = storage.history()
+            thread_id = await resolve_active_thread_id(storage, session_id)
             workspace_root, _skills_path = _resolved_workspace_paths()
             todo_store = await _maybe_todo_store(manager, session_id, workspace_root)
             cancelled = asyncio.Event()
@@ -863,6 +866,7 @@ def create_realtime_router(
                 session_id,
                 request_id,
                 deps,
+                thread_id=thread_id,
                 todo_store=todo_store,
                 cancelled=cancelled,
             )
@@ -924,7 +928,7 @@ def create_realtime_router(
             attachment_catalog = SessionAttachmentCatalog(session_id=session_id)
             if attachment_store is not None:
                 try:
-                    rows = await history.load(session_id)
+                    rows = await history.load(thread_id)
                     attachment_catalog.rebuild_from_history(rows)
                 except Exception:
                     logger.warning(

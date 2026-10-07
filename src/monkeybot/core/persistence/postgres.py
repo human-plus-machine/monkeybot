@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import time
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -433,6 +433,27 @@ class PostgresHistoryStore:
         if row is None or int(row["message_count"] or 0) == 0:
             return None
         return int(row["message_count"]), str(row["last_content"] or "")
+
+    async def truncate_tail(self, thread_id: str, keep: int) -> int:
+        """Delete every row after the first ``keep`` in load order, in one statement."""
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                DELETE FROM conversation_history
+                WHERE thread_id = $1 AND agent_scope = $2
+                  AND id NOT IN (
+                      SELECT id FROM conversation_history
+                      WHERE thread_id = $1 AND agent_scope = $2
+                      ORDER BY created_at ASC, id ASC
+                      LIMIT $3
+                  )
+                """,
+                thread_id,
+                self._agent_scope,
+                max(0, keep),
+            )
+        # asyncpg returns e.g. "DELETE 3".
+        return int(str(status).rsplit(" ", 1)[-1] or 0)
 
     async def clear(self, thread_id: str) -> None:
         async with self._pool.acquire() as conn:
@@ -1765,6 +1786,7 @@ class PostgresBranchStore:
                 branch_id, session_id, thread_id, parent_branch_id,
                 fork_row_index, fork_fingerprint, op, created_at, last_active_at, is_active
             ) VALUES ($1, $2, $3, NULL, NULL, NULL, NULL, $4, $4, $5)
+            ON CONFLICT DO NOTHING
             """,
             ROOT_BRANCH_ID,
             session_id,
@@ -1883,6 +1905,19 @@ class PostgresBranchStore:
                 session_id,
                 branch_id,
             )
+
+    async def active_non_root(self, session_ids: Sequence[str]) -> dict[str, BranchRecord]:
+        ids = builtins.list(dict.fromkeys(session_ids))
+        if not ids:
+            return {}
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"SELECT {_BRANCH_COLUMNS} FROM session_branches "
+                "WHERE is_active = 1 AND branch_id != $1 AND session_id = ANY($2::text[])",
+                ROOT_BRANCH_ID,
+                ids,
+            )
+        return {str(row["session_id"]): _branch_from_pg(row) for row in rows}
 
     async def delete_session(self, session_id: str) -> builtins.list[BranchRecord]:
         # `list` on this class shadows the builtin in this annotation.

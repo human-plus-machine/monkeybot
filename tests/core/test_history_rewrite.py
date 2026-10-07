@@ -13,7 +13,7 @@ from monkeybot.core.persistence.goal_ledger import (
     Intent,
     Provenance,
     Status,
-    match_verbatim_seq,
+    first_dropped_seq,
 )
 from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
 from monkeybot.core.persistence.thread_summary import (
@@ -26,10 +26,13 @@ from monkeybot.core.runtime.history_rewrite import (
     HistoryAnchor,
     HistoryRewriteError,
     RewriteEffects,
+    activate_branch,
     assert_tool_pairs,
     branch_op,
     fork_session,
+    load_active_history,
     locate_anchor,
+    overlay_active_previews,
     prefix_end_for,
     truncate_active,
 )
@@ -296,7 +299,7 @@ async def test_ledger_copy_prefix_and_drop_after() -> None:
     await store.append(entry("e1", 1, "one"))
     await store.append(entry("e2", 2, "two"))
     await store.append(entry("e3", 3, "three"))
-    assert match_verbatim_seq(await store.list_entries("src"), ["one", "two"]) == 2
+    assert first_dropped_seq(await store.list_entries("src"), ["three"]) == 3
     copied = await store.copy_prefix("src", "dst", 2)
     assert copied == 2
     rows = await store.list_entries("dst")
@@ -308,9 +311,151 @@ async def test_ledger_copy_prefix_and_drop_after() -> None:
     assert [row.verbatim for row in await store.list_entries("src")] == ["one"]
 
     ledger = GoalLedger(store, classifier=object())  # type: ignore[arg-type]
-    await ledger.copy_matched_prefix("dst", "other", ["one"])
+    await ledger.copy_branch_prefix("dst", "other", ["two"])
     assert [row.verbatim for row in await store.list_entries("other")] == ["one"]
     assert ledger.resolved_intent("other") is not None
+
+
+def _ledger_entry(entry_id: str, seq: int, verbatim: str, thread_id: str = "t") -> GoalEntry:
+    return GoalEntry(
+        entry_id=entry_id,
+        thread_id=thread_id,
+        seq=seq,
+        verbatim=verbatim,
+        provenance=Provenance.HUMAN,
+        channel=Channel.MESSAGE,
+        intent=Intent.NEW_GOAL,
+        status=Status.ACTIVE,
+        relates_to=None,
+        constraints=(),
+        done_when=(),
+        created_at_ms=seq,
+    )
+
+
+def test_first_dropped_seq_survives_pruning_and_join_differences() -> None:
+    # Ledger head pruned (no row for "one"); verbatim joins blocks with a space
+    # while the stored row joins them with a newline.
+    entries = [
+        _ledger_entry("e2", 2, "two"),
+        _ledger_entry("e3", 3, "noise"),
+        _ledger_entry("e4", 4, "three part"),
+        _ledger_entry("e5", 5, "four"),
+    ]
+    assert first_dropped_seq(entries, ["three\npart", "four"]) == 4
+    # A dropped message with no ledger row is skipped, not a reason to stop.
+    assert first_dropped_seq(entries, ["three part", "never classified", "four"]) == 4
+    assert first_dropped_seq(entries, []) is None
+    assert first_dropped_seq(entries, ["unrelated"]) is None
+
+
+@pytest.mark.asyncio
+async def test_ledger_truncate_without_match_keeps_rows() -> None:
+    store = InMemoryGoalLedgerStore()
+    for index, text in enumerate(("one", "two"), start=1):
+        await store.append(_ledger_entry(f"e{index}", index, text))
+    ledger = GoalLedger(store, classifier=object())  # type: ignore[arg-type]
+    await ledger.drop_truncated("t", ["not in the ledger"])
+    assert [row.verbatim for row in await store.list_entries("t")] == ["one", "two"]
+    await ledger.drop_truncated("t", ["two"])
+    assert [row.verbatim for row in await store.list_entries("t")] == ["one"]
+
+
+def test_unpaired_tool_call_before_cut_does_not_block_rewrites() -> None:
+    messages = [
+        _user("run it"),
+        Message(role="assistant", content=[ToolRequest(id="c1", name="terminal", args={})]),
+        _user("never mind"),
+        _assistant("ok"),
+        _user("third"),
+        _assistant("ack"),
+    ]
+    assert prefix_end_for(messages, 4, "edit") == 4
+    assert prefix_end_for(messages, 5, "regenerate") == 4
+    assert prefix_end_for(messages, 5, "rewind") == 6
+    assert prefix_end_for(messages, 5, "fork") == 6
+
+
+@pytest.mark.asyncio
+async def test_truncate_refuses_to_cut_a_child_fork_point(
+    backend: SQLiteStorageBackend,
+) -> None:
+    await _seed(backend, "s1")
+    messages = await backend.history().load("s1")
+    branched = await branch_op(
+        history=backend.history(),
+        branches=backend.branches(),
+        session_id="s1",
+        op="rewind",
+        anchor=_anchor(messages, 3),
+    )
+    await activate_branch(branches=backend.branches(), session_id="s1", branch_id="root")
+    with pytest.raises(HistoryRewriteError) as exc:
+        await truncate_active(
+            history=backend.history(),
+            branches=backend.branches(),
+            session_id="s1",
+            anchor=_anchor(messages, 0),
+        )
+    assert exc.value.code == "BRANCHES_IN_TAIL"
+    assert len(await backend.history().load("s1")) == 4
+    assert await backend.history().load(branched.thread_id) == messages
+
+
+@pytest.mark.asyncio
+async def test_branch_create_failure_removes_copied_thread(
+    backend: SQLiteStorageBackend,
+) -> None:
+    await _seed(backend, "s1")
+    messages = await backend.history().load("s1")
+    branches = backend.branches()
+
+    async def _fail(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("boom")
+
+    branches.create = _fail  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        await branch_op(
+            history=backend.history(),
+            branches=branches,
+            session_id="s1",
+            op="rewind",
+            anchor=_anchor(messages, 1),
+        )
+    cursor = await backend._conn.execute(  # type: ignore[union-attr]
+        "SELECT COUNT(*) FROM conversation_history WHERE thread_id GLOB 'branch:*'"
+    )
+    row = await cursor.fetchone()
+    await cursor.close()
+    assert row is not None and row[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_load_active_history_tail_keeps_absolute_indexes(
+    backend: SQLiteStorageBackend,
+) -> None:
+    await _seed(backend, "s1")
+    view = await load_active_history(backend.history(), backend.branches(), "s1", limit=2)
+    assert view.offset == 2
+    assert [message.content[0].text for message in view.messages] == [  # type: ignore[union-attr]
+        "two",
+        "ack two",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_preview_overlay_keeps_rows_when_branch_lookup_fails(
+    backend: SQLiteStorageBackend,
+) -> None:
+    await _seed(backend, "s1")
+    rows = await backend.history().list_threads()
+    branches = backend.branches()
+
+    async def _fail(_session_ids: object) -> dict[str, object]:
+        raise RuntimeError("index missing")
+
+    branches.active_non_root = _fail  # type: ignore[method-assign]
+    assert await overlay_active_previews(backend.history(), branches, rows) == rows
 
 
 @pytest.mark.asyncio

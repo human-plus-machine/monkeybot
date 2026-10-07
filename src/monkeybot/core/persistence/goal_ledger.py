@@ -113,26 +113,30 @@ def new_entry_id() -> str:
     return str(uuid.uuid4())
 
 
-def match_verbatim_seq(entries: Sequence[GoalEntry], user_texts: Sequence[str]) -> int | None:
-    """Seq of the ledger row that lines up with the last kept user message.
+def _normalized_text(text: str) -> str:
+    # Ledger verbatim joins text blocks with spaces; stored rows join with newlines.
+    return " ".join(text.split())
 
-    Walks ``entries`` in seq order and consumes ``user_texts`` in order. Entries
-    whose verbatim does not match the next kept user text are skipped, so
-    classifier noise between two user messages stays inside the copied prefix
-    when it was recorded before the last match.
+
+def first_dropped_seq(entries: Sequence[GoalEntry], dropped_texts: Sequence[str]) -> int | None:
+    """Seq of the oldest ledger row recorded for a user message a rewrite drops.
+
+    Walks entries and ``dropped_texts`` newest first, so rows pruned from the
+    head of the ledger cannot shift the match. A dropped message with no row
+    is skipped. ``None`` means no dropped message has a ledger row.
     """
-    if not user_texts:
-        return None
-    index = 0
-    last: int | None = None
-    wanted = [text.strip() for text in user_texts]
-    for entry in entries:
-        if index >= len(wanted):
+    wanted = [_normalized_text(text) for text in reversed(dropped_texts)]
+    position = 0
+    first: int | None = None
+    for entry in sorted(entries, key=lambda row: row.seq, reverse=True):
+        if position >= len(wanted):
             break
-        if entry.verbatim.strip() == wanted[index]:
-            last = entry.seq
-            index += 1
-    return last
+        verbatim = _normalized_text(entry.verbatim)
+        if verbatim not in wanted[position:]:
+            continue
+        position = wanted.index(verbatim, position) + 1
+        first = entry.seq
+    return first
 
 
 def retarget_entry(
@@ -142,14 +146,15 @@ def retarget_entry(
     seq: int,
     id_map: Mapping[str, str],
 ) -> GoalEntry:
-    """Copy ``entry`` onto ``thread_id`` with new ids. Drops relates_to that
-    point at a row outside the copied prefix.
+    """Copy ``entry`` onto ``thread_id`` with new ids. References to a row
+    outside the copied prefix are dropped (``relates_to``) or point at the
+    copied entry itself (constraint sources).
     """
     new_id = id_map[entry.entry_id]
     constraints = tuple(
         replace(
             constraint,
-            source_entry_id=id_map.get(constraint.source_entry_id, constraint.source_entry_id),
+            source_entry_id=id_map.get(constraint.source_entry_id, new_id),
         )
         for constraint in entry.constraints
     )

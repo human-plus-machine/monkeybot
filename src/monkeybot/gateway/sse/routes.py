@@ -647,7 +647,6 @@ def create_app(
     @api.delete("/sessions/{session_id}", response_model=DeleteSessionResponse)
     async def delete_session(
         session_id: str,
-        request: Request,
         reg_dep: SessionRegistry = Depends(get_registry),
     ) -> DeleteSessionResponse:
         """End a session: cancel pending work and free its in-process state.
@@ -656,25 +655,9 @@ def create_app(
         ``deleted=false`` rather than a 404, since the end state (no session) is
         identical. When transcripts were enabled for the session, returns
         ``transcript_dir`` (the folder containing ``transcript.ndjson``).
+        Persisted history, including branches, is kept; ``DELETE
+        /api/chat-history/{id}`` removes it.
         """
-        storage = getattr(request.app.state, "storage", None)
-        if storage is not None and getattr(storage, "branches", None) is not None:
-            from monkeybot.core.runtime.history_rewrite import purge_session_branches
-
-            try:
-                await purge_session_branches(
-                    storage.history(),
-                    storage.branches(),
-                    session_id,
-                    include_root=False,
-                )
-            except Exception:
-                logger.exception(
-                    "session branch purge failed %s",
-                    kv(session_id=session_id),
-                )
-                raise
-            logger.info("session branches purged %s", kv(session_id=session_id))
         result = await reg_dep.remove_async(session_id)
         return DeleteSessionResponse(
             deleted=result.deleted,
@@ -1316,23 +1299,12 @@ def create_app(
                 uuid.uuid4().hex,
             )
         from monkeybot.core.persistence.thread_summary import ChatThreadSummary
-        from monkeybot.core.runtime.history_rewrite import overlay_active_preview
+        from monkeybot.core.runtime.history_rewrite import overlay_active_previews
 
         backend = _storage_backend(request)
         cap = max(1, min(limit, 200))
         rows: list[ChatThreadSummary] = await backend.history().list_threads(cap)
-        shown_rows: list[ChatThreadSummary] = []
-        for row in rows:
-            try:
-                shown = await overlay_active_preview(backend.history(), backend.branches(), row)
-            except Exception:
-                logger.warning(
-                    "active branch preview failed %s",
-                    kv(session_id=row.thread_id),
-                    exc_info=True,
-                )
-                continue
-            shown_rows.append(shown)
+        shown_rows = await overlay_active_previews(backend.history(), backend.branches(), rows)
         return {
             "threads": [
                 {
@@ -1359,30 +1331,25 @@ def create_app(
                 "Chat history API is disabled",
                 uuid.uuid4().hex,
             )
-        from monkeybot.core.persistence.thread_summary import last_summary_index, messages_to_wire
+        from monkeybot.core.persistence.thread_summary import messages_to_wire
         from monkeybot.core.runtime.history_rewrite import load_active_history
 
         backend = _storage_backend(request)
         cap = max(1, min(limit, 500))
         thread_key = session_id.strip()
-        view = await load_active_history(backend.history(), backend.branches(), thread_key)
-        summary_at = last_summary_index(view.messages)
-        if len(view.messages) > cap:
-            offset = len(view.messages) - cap
-            shown = view.messages[offset:]
-        else:
-            offset = 0
-            shown = view.messages
+        view = await load_active_history(
+            backend.history(), backend.branches(), thread_key, limit=cap
+        )
         return {
             "session_id": thread_key,
             "branch_id": view.branch_id,
             "branch_points": view.branch_points,
             "messages": messages_to_wire(
-                shown,
+                view.messages,
                 thread_id=view.thread_id,
                 include_anchors=True,
-                index_offset=offset,
-                summary_index=summary_at,
+                index_offset=view.offset,
+                summary_index=view.summary_index,
             ),
         }
 
@@ -1408,12 +1375,7 @@ def create_app(
         backend = _storage_backend(request)
         thread_id = session_id.strip()
         try:
-            await purge_session_branches(
-                backend.history(),
-                backend.branches(),
-                thread_id,
-                include_root=True,
-            )
+            await purge_session_branches(backend.history(), backend.branches(), thread_id)
         except Exception:
             logger.exception(
                 "chat history delete failed %s",

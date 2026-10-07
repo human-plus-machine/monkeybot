@@ -286,6 +286,25 @@ class SQLiteHistoryStore:
             return None
         return int(row[0]), str(row[1] or "")
 
+    async def truncate_tail(self, thread_id: str, keep: int) -> int:
+        """Delete every row after the first ``keep`` in load order, in one transaction."""
+        async with self._lock:
+            cursor = await self._conn.execute(
+                """
+                DELETE FROM conversation_history
+                WHERE thread_id = ? AND agent_scope = ?
+                  AND id NOT IN (
+                      SELECT id FROM conversation_history
+                      WHERE thread_id = ? AND agent_scope = ?
+                      ORDER BY created_at ASC, id ASC
+                      LIMIT ?
+                  )
+                """,
+                (thread_id, self._agent_scope, thread_id, self._agent_scope, max(0, keep)),
+            )
+            await self._conn.commit()
+            return int(cursor.rowcount)
+
     async def clear(self, thread_id: str) -> None:
         """Delete every stored message for ``thread_id`` within this store's agent scope."""
         async with self._lock:

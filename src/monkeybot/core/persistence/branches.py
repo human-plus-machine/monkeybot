@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import builtins
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Protocol, runtime_checkable
 
@@ -18,6 +19,9 @@ from monkeybot.core.persistence.sqlite import TaskReentrantLock, with_conn_lock
 from monkeybot.core.persistence.thread_summary import BRANCH_THREAD_ID_PREFIX
 
 ROOT_BRANCH_ID = "root"
+
+# Stays under SQLite's bound-parameter limit.
+_IN_CHUNK = 500
 
 _COLUMNS = (
     "branch_id",
@@ -95,6 +99,10 @@ class BranchStore(Protocol):
     async def set_active(self, session_id: str, branch_id: str) -> BranchRecord | None: ...
 
     async def touch(self, session_id: str, branch_id: str) -> None: ...
+
+    async def active_non_root(self, session_ids: Sequence[str]) -> dict[str, BranchRecord]:
+        """Active branch per session, for sessions whose active branch is not the root."""
+        ...
 
     # `list` on this class shadows the builtin in later annotations.
     async def delete_session(self, session_id: str) -> builtins.list[BranchRecord]: ...
@@ -276,6 +284,28 @@ class SQLiteBranchStore:
             (now, session_id, branch_id),
         )
         await self._conn.commit()
+
+    @with_conn_lock
+    async def active_non_root(self, session_ids: Sequence[str]) -> dict[str, BranchRecord]:
+        columns = ", ".join(_COLUMNS)
+        ids = builtins.list(dict.fromkeys(session_ids))
+        out: dict[str, BranchRecord] = {}
+        for start in range(0, len(ids), _IN_CHUNK):
+            chunk = ids[start : start + _IN_CHUNK]
+            placeholders = ", ".join("?" for _ in chunk)
+            cursor = await self._conn.execute(
+                f"""
+                SELECT {columns} FROM session_branches
+                WHERE is_active = 1 AND branch_id != ? AND session_id IN ({placeholders})
+                """,
+                (ROOT_BRANCH_ID, *chunk),
+            )
+            rows = await cursor.fetchall()
+            await cursor.close()
+            for row in rows:
+                record = _record_from_row(row)
+                out[record.session_id] = record
+        return out
 
     @with_conn_lock
     async def delete_session(self, session_id: str) -> builtins.list[BranchRecord]:

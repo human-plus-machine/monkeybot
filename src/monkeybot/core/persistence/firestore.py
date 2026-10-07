@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -129,6 +129,17 @@ def _history_row(
         "turn_id": turn_id,
         "message_id": message_id,
     }
+
+
+def _loadable_history_row(data: dict[str, Any]) -> bool:
+    """Mirror of the rows ``FirestoreHistoryStore.load`` keeps rather than skips."""
+    if str(data.get("role", "")) not in _VALID_ROLES:
+        return False
+    try:
+        raw = json.loads(str(data.get("content", "")))
+    except json.JSONDecodeError:
+        return False
+    return isinstance(raw, list)
 
 
 def _thread_summary_update(
@@ -441,6 +452,57 @@ class FirestoreHistoryStore:
         counted = await base.count().get()
         total = int(counted[0][0].value)
         return total, content
+
+    async def truncate_tail(self, thread_id: str, keep: int) -> int:
+        """Delete every row after the first ``keep`` rows ``load`` would return.
+
+        Kept rows are never rewritten, so a failure partway leaves extra tail
+        rows rather than a damaged prefix. Each batch also refreshes the
+        summary doc so ``list_threads`` matches the kept prefix.
+        """
+        query = (
+            self._client.collection(self._collection)
+            .where(filter=FieldFilter("thread_id", "==", thread_id))
+            .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
+            .order_by("created_at", direction=firestore.Query.ASCENDING)
+        )
+        kept = 0
+        last_kept: dict[str, Any] | None = None
+        doomed: list[Any] = []
+        async for doc in query.stream():
+            data = doc.to_dict() or {}
+            if kept < keep:
+                if _loadable_history_row(data):
+                    kept += 1
+                    last_kept = data
+                continue
+            doomed.append(doc.reference)
+        if not doomed:
+            return 0
+        summary_ref = self._client.collection(self._threads_collection).document(
+            self._summary_doc_id(thread_id)
+        )
+        for start in range(0, len(doomed), _FIRESTORE_BATCH_LIMIT):
+            batch = self._client.batch()
+            for ref in doomed[start : start + _FIRESTORE_BATCH_LIMIT]:
+                batch.delete(ref)
+            if not is_hidden_thread_id(thread_id):
+                if last_kept is None:
+                    batch.delete(summary_ref)
+                else:
+                    batch.set(
+                        summary_ref,
+                        {
+                            "thread_id": thread_id,
+                            "last_message_at": int(last_kept.get("created_at") or 0),
+                            "message_count": kept,
+                            "last_content": str(last_kept.get("content") or ""),
+                            "agent_scope": self._agent_scope,
+                        },
+                        merge=True,
+                    )
+            await batch.commit()
+        return len(doomed)
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
         query = (
@@ -1419,6 +1481,26 @@ class FirestoreOutboxStore:
         return
 
 
+_FIRESTORE_IN_LIMIT = 30
+_FIRESTORE_BATCH_LIMIT = 400
+
+
+def _root_record(session_id: str, *, is_active: bool) -> BranchRecord:
+    now = int(time.time() * 1000)
+    return BranchRecord(
+        branch_id=ROOT_BRANCH_ID,
+        session_id=session_id,
+        thread_id=session_id,
+        parent_branch_id=None,
+        fork_row_index=None,
+        fork_fingerprint=None,
+        op=None,
+        created_at=now,
+        last_active_at=now,
+        is_active=is_active,
+    )
+
+
 def _branch_doc_id(session_id: str, branch_id: str) -> str:
     raw = f"{session_id}\n{branch_id}".encode()
     return "branch_" + hashlib.sha256(raw).hexdigest()
@@ -1484,23 +1566,32 @@ class FirestoreBranchStore:
         snapshot = await ref.get()
         if snapshot.exists:
             return _branch_from_fs(snapshot.to_dict() or {})
-        rows = await self._docs(session_id)
-        active = any(bool(data.get("is_active")) for _doc_id, data in rows)
-        now = int(time.time() * 1000)
-        record = BranchRecord(
-            branch_id=ROOT_BRANCH_ID,
-            session_id=session_id,
-            thread_id=session_id,
-            parent_branch_id=None,
-            fork_row_index=None,
-            fork_fingerprint=None,
-            op=None,
-            created_at=now,
-            last_active_at=now,
-            is_active=not active,
+        result: BranchRecord | None = None
+
+        async def _body(txn: firestore.AsyncTransaction) -> None:
+            nonlocal result
+            docs = await self._session_docs_in_txn(txn, session_id)
+            for doc in docs:
+                data = doc.to_dict() or {}
+                if data.get("branch_id") == ROOT_BRANCH_ID:
+                    result = _branch_from_fs(data)
+                    return
+            any_active = any(bool((doc.to_dict() or {}).get("is_active")) for doc in docs)
+            result = _root_record(session_id, is_active=not any_active)
+            txn.set(ref, _branch_to_fs(result))
+
+        await self._run_txn(_body)
+        if result is None:
+            raise RuntimeError(f"session branch root insert failed for {session_id}")
+        return result
+
+    async def _session_docs_in_txn(
+        self, txn: firestore.AsyncTransaction, session_id: str
+    ) -> list[Any]:
+        query = self._client.collection(self._collection).where(
+            filter=FieldFilter("session_id", "==", session_id)
         )
-        await ref.set(_branch_to_fs(record))
-        return record
+        return [doc async for doc in query.stream(transaction=txn)]
 
     async def create(self, record: BranchRecord, *, make_active: bool) -> BranchRecord:
         stored = replace(record, is_active=True) if make_active else record
@@ -1508,10 +1599,7 @@ class FirestoreBranchStore:
         root_ref = self._doc(record.session_id, ROOT_BRANCH_ID)
 
         async def _body(txn: firestore.AsyncTransaction) -> None:
-            query = self._client.collection(self._collection).where(
-                filter=FieldFilter("session_id", "==", record.session_id)
-            )
-            docs = [doc async for doc in query.stream(transaction=txn)]
+            docs = await self._session_docs_in_txn(txn, record.session_id)
             root_exists = False
             any_active = False
             for doc in docs:
@@ -1521,19 +1609,7 @@ class FirestoreBranchStore:
                 if data.get("is_active"):
                     any_active = True
             if not root_exists:
-                now = int(time.time() * 1000)
-                root = BranchRecord(
-                    branch_id=ROOT_BRANCH_ID,
-                    session_id=record.session_id,
-                    thread_id=record.session_id,
-                    parent_branch_id=None,
-                    fork_row_index=None,
-                    fork_fingerprint=None,
-                    op=None,
-                    created_at=now,
-                    last_active_at=now,
-                    is_active=not any_active and not make_active,
-                )
+                root = _root_record(record.session_id, is_active=not any_active and not make_active)
                 txn.set(root_ref, _branch_to_fs(root))
             # Deactivate existing actives before the new row is marked active.
             if make_active:
@@ -1580,10 +1656,7 @@ class FirestoreBranchStore:
                 updated = None
                 return
             current = _branch_from_fs(snapshot.to_dict() or {})
-            query = self._client.collection(self._collection).where(
-                filter=FieldFilter("session_id", "==", session_id)
-            )
-            docs = [doc async for doc in query.stream(transaction=txn)]
+            docs = await self._session_docs_in_txn(txn, session_id)
             for doc in docs:
                 data = doc.to_dict() or {}
                 if data.get("is_active") and data.get("branch_id") != branch_id:
@@ -1608,15 +1681,33 @@ class FirestoreBranchStore:
         now = int(time.time() * 1000)
         await self._doc(session_id, branch_id).update({"last_active_at": now})
 
+    async def active_non_root(self, session_ids: Sequence[str]) -> dict[str, BranchRecord]:
+        ids = builtins.list(dict.fromkeys(session_ids))
+        out: dict[str, BranchRecord] = {}
+        for start in range(0, len(ids), _FIRESTORE_IN_LIMIT):
+            query = (
+                self._client.collection(self._collection)
+                .where(filter=FieldFilter("is_active", "==", True))
+                .where(
+                    filter=FieldFilter("session_id", "in", ids[start : start + _FIRESTORE_IN_LIMIT])
+                )
+            )
+            async for doc in query.stream():
+                record = _branch_from_fs(doc.to_dict() or {})
+                if record.branch_id != ROOT_BRANCH_ID:
+                    out[record.session_id] = record
+        return out
+
     async def delete_session(self, session_id: str) -> builtins.list[BranchRecord]:
         # `list` on this class shadows the builtin in this annotation.
         rows = await self._docs(session_id)
         if not rows:
             return []
-        batch = self._client.batch()
-        for doc_id, _data in rows:
-            batch.delete(self._client.collection(self._collection).document(doc_id))
-        await batch.commit()
+        for start in range(0, len(rows), _FIRESTORE_BATCH_LIMIT):
+            batch = self._client.batch()
+            for doc_id, _data in rows[start : start + _FIRESTORE_BATCH_LIMIT]:
+                batch.delete(self._client.collection(self._collection).document(doc_id))
+            await batch.commit()
         return [_branch_from_fs(data) for _doc_id, data in rows]
 
 

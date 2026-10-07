@@ -62,14 +62,14 @@ class _ThreadEffects(Protocol):
 
 
 class _LedgerEffects(Protocol):
-    async def copy_matched_prefix(
+    async def copy_branch_prefix(
         self,
         src_thread: str,
         dst_thread: str,
-        user_texts: list[str],
+        dropped_texts: list[str],
     ) -> None: ...
 
-    async def drop_after_user_texts(self, thread_id: str, user_texts: list[str]) -> None: ...
+    async def drop_truncated(self, thread_id: str, dropped_texts: list[str]) -> None: ...
 
 
 @dataclass
@@ -93,13 +93,19 @@ class RewriteResult:
 
 @dataclass(frozen=True)
 class ActiveHistory:
-    """The branch a session is currently showing."""
+    """The branch a session is currently showing.
+
+    ``messages`` may be the newest tail of the thread; ``offset`` is the
+    absolute index of ``messages[0]`` and ``summary_index`` is absolute.
+    """
 
     session_id: str
     branch_id: str
     thread_id: str
     messages: list[Message]
     branch_points: list[dict[str, Any]]
+    offset: int = 0
+    summary_index: int | None = None
 
 
 def locate_anchor(messages: list[Message], anchor: HistoryAnchor) -> int | None:
@@ -147,9 +153,15 @@ def _tool_ids(messages: list[Message]) -> tuple[set[str], set[str]]:
 
 
 def assert_tool_pairs(messages: list[Message], prefix_end: int) -> None:
-    """Reject a cut that separates a tool request from its response."""
-    requests, responses = _tool_ids(messages[:prefix_end])
-    if requests != responses:
+    """Reject a cut that separates a tool request from its response.
+
+    Only pairs that straddle the cut count. Stored history can already hold an
+    unpaired call (cancelled tools are repaired in memory, not on disk), and
+    that must not block every later rewrite.
+    """
+    kept_requests, kept_responses = _tool_ids(messages[:prefix_end])
+    cut_requests, cut_responses = _tool_ids(messages[prefix_end:])
+    if kept_requests & cut_responses or kept_responses & cut_requests:
         raise HistoryRewriteError(
             422,
             "TURN_BOUNDARY",
@@ -234,27 +246,84 @@ async def _copy_side_effects(
     effects: RewriteEffects | None,
     src_thread: str,
     dst_thread: str,
-    prefix: list[Message],
+    dropped: list[Message],
 ) -> None:
+    """Carry verifier state onto the new thread. Best effort: the history copy
+    already committed, so a verifier failure must not fail the rewrite.
+    """
     if effects is None:
         return
-    if effects.tracker is not None:
-        effects.tracker.fork_thread(src_thread, dst_thread)
-    if effects.ledger is not None:
-        await effects.ledger.copy_matched_prefix(src_thread, dst_thread, _user_texts(prefix))
+    try:
+        if effects.tracker is not None:
+            effects.tracker.fork_thread(src_thread, dst_thread)
+        if effects.ledger is not None:
+            await effects.ledger.copy_branch_prefix(src_thread, dst_thread, _user_texts(dropped))
+    except Exception:
+        logger.warning(
+            "history rewrite verifier copy failed %s",
+            kv(src_thread=src_thread, dst_thread=dst_thread),
+            exc_info=True,
+        )
 
 
 async def _truncate_side_effects(
     effects: RewriteEffects | None,
     thread_id: str,
-    prefix: list[Message],
+    dropped: list[Message],
 ) -> None:
     if effects is None:
         return
-    if effects.tracker is not None:
-        effects.tracker.reset_conversation_state(thread_id)
-    if effects.ledger is not None:
-        await effects.ledger.drop_after_user_texts(thread_id, _user_texts(prefix))
+    try:
+        if effects.tracker is not None:
+            effects.tracker.reset_conversation_state(thread_id)
+        if effects.ledger is not None:
+            await effects.ledger.drop_truncated(thread_id, _user_texts(dropped))
+    except Exception:
+        logger.warning(
+            "history truncate verifier reset failed %s",
+            kv(thread_id=thread_id),
+            exc_info=True,
+        )
+
+
+def _replay_content(messages: list[Message], index: int) -> list[ContentBlock]:
+    replay = list(messages[_owning_user_index(messages, index)].content)
+    if not replay:
+        raise HistoryRewriteError(
+            422,
+            "TURN_BOUNDARY",
+            "Nothing to regenerate from that message.",
+        )
+    return replay
+
+
+def _assert_no_children_in_tail(
+    records: list[BranchRecord],
+    branch_id: str,
+    messages: list[Message],
+    end: int,
+) -> None:
+    """Truncate must not cut away the row a child branch forked from.
+
+    The child would survive but its navigator point would vanish, leaving it
+    unreachable from the chat. Rewind keeps both versions instead.
+    """
+    kept = messages[:end]
+    for record in records:
+        if record.parent_branch_id != branch_id:
+            continue
+        if record.fork_row_index is None or record.fork_fingerprint is None:
+            continue
+        anchor = HistoryAnchor(record.fork_row_index, record.fork_fingerprint)
+        if locate_anchor(messages, anchor) is None:
+            continue
+        if locate_anchor(kept, anchor) is None:
+            raise HistoryRewriteError(
+                409,
+                "BRANCHES_IN_TAIL",
+                "Another version of this chat starts after that message. "
+                "Rewind instead to keep both.",
+            )
 
 
 async def _active_parent(
@@ -283,10 +352,10 @@ async def branch_op(
     messages = await history.load(parent.thread_id)
     index = resolve_anchor(messages, anchor)
     end = prefix_end_for(messages, index, op)
+    replay = _replay_content(messages, index) if op == "regenerate" else None
     prefix = list(messages[:end])
     branch_id = make_run_id()
     thread_id = branch_thread_id(session_id, branch_id)
-    await history.reset(thread_id, prefix)
     shared = _fork_anchor(messages, end)
     now = int(time.time() * 1000)
     created = BranchRecord(
@@ -301,18 +370,14 @@ async def branch_op(
         last_active_at=now,
         is_active=False,
     )
-    await branches.create(created, make_active=True)
-    await _copy_side_effects(effects, parent.thread_id, thread_id, prefix)
-    replay: list[ContentBlock] | None = None
-    if op == "regenerate":
-        user_index = _owning_user_index(messages, index)
-        replay = list(messages[user_index].content)
-        if not replay:
-            raise HistoryRewriteError(
-                422,
-                "TURN_BOUNDARY",
-                "Nothing to regenerate from that message.",
-            )
+    await history.reset(thread_id, prefix)
+    try:
+        await branches.create(created, make_active=True)
+    except Exception:
+        # No branch row points at the copy, so nothing else would ever purge it.
+        await history.reset(thread_id, [])
+        raise
+    await _copy_side_effects(effects, parent.thread_id, thread_id, messages[end:])
     logger.info(
         "history rewrite %s",
         kv(session_id=session_id, op=op, branch_id=branch_id, prefix=end),
@@ -335,9 +400,9 @@ async def truncate_active(
     messages = await history.load(thread_id)
     index = resolve_anchor(messages, anchor)
     end = prefix_end_for(messages, index, "truncate")
-    prefix = list(messages[:end])
-    await history.reset(thread_id, prefix)
-    await _truncate_side_effects(effects, thread_id, prefix)
+    _assert_no_children_in_tail(await branches.list(session_id), branch_id, messages, end)
+    await history.truncate_tail(thread_id, end)
+    await _truncate_side_effects(effects, thread_id, messages[end:])
     logger.info(
         "history truncate %s",
         kv(session_id=session_id, branch_id=branch_id, prefix=end),
@@ -362,7 +427,7 @@ async def fork_session(
     prefix = list(messages[:end])
     new_session_id = str(uuid.uuid4())
     await history.reset(new_session_id, prefix)
-    await _copy_side_effects(effects, source_thread, new_session_id, prefix)
+    await _copy_side_effects(effects, source_thread, new_session_id, messages[end:])
     logger.info(
         "history fork %s",
         kv(session_id=session_id, forked_session_id=new_session_id, prefix=end),
@@ -438,10 +503,13 @@ def divergence_points(
     records: list[BranchRecord],
     active_branch_id: str,
     messages: list[Message],
+    *,
+    offset: int = 0,
 ) -> list[dict[str, Any]]:
     """Navigator points whose fork row still exists on ``messages``.
 
-    A point whose anchor was compacted away is omitted. Options are the parent
+    A point whose anchor was compacted away (or sits before a sliced tail
+    starting at absolute ``offset``) is omitted. Options are the parent
     branch plus the children that forked there, and only when the active
     branch is one of them or a descendant.
     """
@@ -461,14 +529,13 @@ def divergence_points(
         hint = children[0].fork_row_index
         if hint is None:
             continue
-        index = locate_anchor(messages, HistoryAnchor(hint, fingerprint))
-        if index is None:
+        local = locate_anchor(messages, HistoryAnchor(hint - offset, fingerprint))
+        if local is None:
             continue
+        index = offset + local
         child_ids = {child.branch_id for child in children}
         relevant = {parent_id, *child_ids}
-        if active_branch_id not in relevant and not _is_ancestor(
-            active_branch_id, relevant, by_id
-        ):
+        if active_branch_id not in relevant and not _is_ancestor(active_branch_id, relevant, by_id):
             continue
         options = [parent_id, *[child.branch_id for child in children]]
         points.append(
@@ -485,79 +552,111 @@ def divergence_points(
     return [point for _index, point in points]
 
 
+async def _load_tail(
+    history: Any,
+    thread_id: str,
+    limit: int | None,
+) -> tuple[list[Message], int]:
+    """Newest ``limit`` rows plus the absolute index of the first one."""
+    if limit is None:
+        return await history.load(thread_id), 0
+    messages = await history.load(thread_id, limit=limit)
+    if len(messages) < limit:
+        return messages, 0
+    tail = await history.last_row(thread_id)
+    total = tail[0] if tail is not None else len(messages)
+    return messages, max(0, total - len(messages))
+
+
 async def load_active_history(
     history: Any,
     branches: BranchStore,
     session_id: str,
+    *,
+    limit: int | None = None,
 ) -> ActiveHistory:
-    """Full stored transcript of the session's active branch, plus navigators."""
+    """The active branch's transcript (newest ``limit`` rows), plus navigators."""
     active = await branches.get_active(session_id)
-    if active is None:
-        return ActiveHistory(
-            session_id=session_id,
-            branch_id=ROOT_BRANCH_ID,
-            thread_id=session_id,
-            messages=await history.load(session_id),
-            branch_points=[],
-        )
-    records = await branches.list(session_id)
-    messages = await history.load(active.thread_id)
+    thread_id = active.thread_id if active is not None else session_id
+    branch_id = active.branch_id if active is not None else ROOT_BRANCH_ID
+    messages, offset = await _load_tail(history, thread_id, limit)
+    local_summary = last_summary_index(messages)
+    points: list[dict[str, Any]] = []
+    if active is not None:
+        records = await branches.list(session_id)
+        points = divergence_points(records, active.branch_id, messages, offset=offset)
     return ActiveHistory(
         session_id=session_id,
-        branch_id=active.branch_id,
-        thread_id=active.thread_id,
+        branch_id=branch_id,
+        thread_id=thread_id,
         messages=messages,
-        branch_points=divergence_points(records, active.branch_id, messages),
+        branch_points=points,
+        offset=offset,
+        summary_index=None if local_summary is None else offset + local_summary,
     )
 
 
-async def overlay_active_preview(
+async def overlay_active_previews(
     history: Any,
     branches: BranchStore,
-    summary: ChatThreadSummary,
-) -> ChatThreadSummary:
-    """Sidebar preview from the active branch when it is not the root thread."""
-    active = await branches.get_active(summary.thread_id)
-    if active is None or active.thread_id == summary.thread_id:
-        return summary
-    tail = await history.last_row(active.thread_id)
-    preview = summary.preview
-    count = summary.message_count
-    if tail is not None:
-        count, blob = tail
-        preview = preview_from_content_blob(blob) or summary.preview
-        if count == 0:
-            count = summary.message_count
-    return replace(
-        summary,
-        message_count=count,
-        preview=preview,
-        last_message_at=max(summary.last_message_at, active.last_active_at),
-    )
+    summaries: list[ChatThreadSummary],
+) -> list[ChatThreadSummary]:
+    """Sidebar rows with the preview of each session's active non-root branch.
+
+    One branch query covers every row. A failure keeps the root preview for
+    the affected rows instead of hiding them.
+    """
+    try:
+        active_by_session = await branches.active_non_root(
+            [summary.thread_id for summary in summaries]
+        )
+    except Exception:
+        logger.warning("active branch preview lookup failed", exc_info=True)
+        return summaries
+    out: list[ChatThreadSummary] = []
+    for summary in summaries:
+        active = active_by_session.get(summary.thread_id)
+        if active is None:
+            out.append(summary)
+            continue
+        try:
+            tail = await history.last_row(active.thread_id)
+        except Exception:
+            logger.warning(
+                "active branch preview failed %s",
+                kv(session_id=summary.thread_id),
+                exc_info=True,
+            )
+            out.append(summary)
+            continue
+        preview = summary.preview
+        count = summary.message_count
+        if tail is not None:
+            count, blob = tail
+            preview = preview_from_content_blob(blob) or summary.preview
+        out.append(
+            replace(
+                summary,
+                message_count=count,
+                preview=preview,
+                last_message_at=max(summary.last_message_at, active.last_active_at),
+            )
+        )
+    out.sort(key=lambda row: row.last_message_at, reverse=True)
+    return out
 
 
 async def purge_session_branches(
     history: Any,
     branches: BranchStore,
     session_id: str,
-    *,
-    include_root: bool,
 ) -> None:
-    """Delete branch rows and the history threads they point at.
-
-    ``include_root`` also wipes the session thread itself (chat-history delete).
-    Session delete leaves the root transcript so ``--continue`` still works,
-    and only drops child branches.
-    """
+    """Delete the session transcript, its branch rows, and every branch thread."""
     records = await branches.delete_session(session_id)
-    wiped: set[str] = set()
-    if include_root:
-        await history.reset(session_id, [])
-        wiped.add(session_id)
+    await history.reset(session_id, [])
+    wiped = {session_id}
     for record in records:
         if record.thread_id in wiped:
-            continue
-        if record.thread_id == session_id and not include_root:
             continue
         await history.reset(record.thread_id, [])
         wiped.add(record.thread_id)

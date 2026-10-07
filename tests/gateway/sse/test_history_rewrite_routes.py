@@ -213,6 +213,31 @@ async def test_delete_chat_history_cascades_to_branches(
 
 
 @pytest.mark.asyncio
+async def test_ending_a_session_keeps_its_branches(backend: SQLiteStorageBackend) -> None:
+    registry = SessionRegistry()
+    app = _app(registry, backend, RecordingLoop(registry))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/sessions", json={"session_id": "sess-end"})
+        await _seed(backend, "sess-end")
+        anchor = await _anchor(client, "sess-end", "again")
+        edited = await client.post(
+            "/sessions/sess-end/branches",
+            json={"op": "rewind", "anchor": anchor},
+        )
+        assert edited.status_code == 200
+        branch_id = edited.json()["branch_id"]
+        child = await backend.branches().get("sess-end", branch_id)
+        assert child is not None
+        kept = await backend.history().load(child.thread_id)
+
+        ended = await client.delete("/sessions/sess-end")
+        assert ended.status_code == 200
+        assert await backend.history().load(child.thread_id) == kept
+        active = await backend.branches().get_active("sess-end")
+        assert active is not None and active.branch_id == branch_id
+
+
+@pytest.mark.asyncio
 async def test_switch_branch_reloads_that_transcript(backend: SQLiteStorageBackend) -> None:
     registry = SessionRegistry()
     app = _app(registry, backend, RecordingLoop(registry))

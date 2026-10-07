@@ -38,6 +38,10 @@ class HistoryStore(Protocol):
         """Message count and the newest row's content JSON, or ``None`` if empty."""
         ...
 
+    async def truncate_tail(self, thread_id: str, keep: int) -> int:
+        """Delete every row after the first ``keep`` (load order). Returns rows deleted."""
+        ...
+
     async def append(
         self,
         thread_id: str,
