@@ -705,6 +705,9 @@ async def test_chat_history_detail_includes_thinking(registry: SessionRegistry) 
             ]
             assert [r["editable"] for r in rows] == [True, False, False]
             assert [r["rewritable"] for r in rows] == [True, True, True]
+            assert [r["rewindable"] for r in rows] == [True, True, True]
+            # The first message can be edited but not restored.
+            assert [r["restorable"] for r in rows] == [False, False, False]
             assert rows[1]["anchor"] == rows[2]["anchor"] != rows[0]["anchor"]
             assert body["branch_id"] == "root"
             assert body["branch_points"] == []

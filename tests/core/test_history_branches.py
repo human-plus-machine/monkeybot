@@ -258,14 +258,19 @@ async def test_ops_after_the_summary_and_forks_are_allowed(env) -> None:
         anchor_row_id=rows[0].row_id,
     )
     assert [m.row_id for m in await env.history.load(forked.session_id)] == [rows[0].row_id]
-    # The summary row's turn started before it, so it is read-only like the wire says.
-    for row in (rows[4], rows[3]):
+    # Cutting right after a user row before the summary would drop it.
+    for row in (rows[2], rows[0]):
         with pytest.raises(HistoryRewriteError) as exc:
             await env.op("rewind", row.row_id)
         assert exc.value.code == "SUMMARIZED"
         with pytest.raises(HistoryRewriteError) as exc:
             await _truncate(env, row.row_id)
         assert exc.value.code == "SUMMARIZED"
+    # The summary row's turn started before it, but rewinding there keeps it.
+    for row in (rows[4], rows[3]):
+        await env.op("rewind", row.row_id)
+        assert await env.texts() == folded
+        await activate_branch(branches=env.branches, session_id=SESSION, branch_id=ROOT_BRANCH_ID)
     await env.op("rewind", rows[5].row_id)
     assert await env.texts() == [*folded, "u3"]
     await activate_branch(branches=env.branches, session_id=SESSION, branch_id=ROOT_BRANCH_ID)

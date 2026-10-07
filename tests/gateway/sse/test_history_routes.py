@@ -168,9 +168,10 @@ async def test_summarized_rows_are_read_only_over_http(harness, backend) -> None
     await _seed(backend, "u1", f"{CONTEXT_SUMMARY_PREFIX}\nfolded", "u2", "a2")
     rows = (await _detail(client))["messages"]
     assert [m["rewritable"] for m in rows] == [False, False, True, True]
-    for op in ("rewind", "regenerate"):
+    assert [m["rewindable"] for m in rows] == [False, True, True, True]
+    for op, row in (("rewind", rows[0]), ("regenerate", rows[1])):
         response = await client.post(
-            f"/sessions/{SESSION}/branches", json={"op": op, "anchor": rows[1]["anchor"]}
+            f"/sessions/{SESSION}/branches", json={"op": op, "anchor": row["anchor"]}
         )
         assert response.status_code == 422, response.text
         assert response.json()["error"]["code"] == "SUMMARIZED"

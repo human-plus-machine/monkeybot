@@ -598,13 +598,14 @@ def test_messages_to_wire_rewritable_is_false_only_through_the_summary() -> None
         ],
         include_anchors=True,
     )
-    assert [(row["role"], row["rewritable"], row["editable"]) for row in wire] == [
-        ("user", False, False),
-        ("assistant", False, False),
-        ("assistant", False, False),
-        ("user", True, True),
-        ("thinking", True, False),
-        ("assistant", True, False),
+    flags = ("rewritable", "editable", "restorable", "rewindable")
+    assert [(row["role"], *(row[flag] for flag in flags)) for row in wire] == [
+        ("user", False, False, False, False),
+        ("assistant", False, False, False, True),
+        ("assistant", False, False, False, True),
+        ("user", True, True, True, True),
+        ("thinking", True, False, False, True),
+        ("assistant", True, False, False, True),
     ]
     assert wire[5]["anchor"] == {"row_id": "a2"}
 
@@ -624,3 +625,5 @@ def test_messages_to_wire_mid_turn_compaction_keeps_the_continuation_read_only()
     )
     assert [row["rewritable"] for row in wire] == [False, False, False]
     assert [row["editable"] for row in wire] == [False, False, False]
+    # Rewinding at the summary or the continuation keeps the summary.
+    assert [row["rewindable"] for row in wire] == [False, True, True]

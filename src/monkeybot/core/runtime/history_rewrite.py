@@ -192,19 +192,14 @@ _USER_ONLY_MESSAGES = {
 }
 
 
-def _assert_unsummarized(messages: list[Message], index: int) -> None:
-    """Reject an op on a row whose turn starts at or before the newest summary.
+def _assert_keeps_summary(messages: list[Message], end: int) -> None:
+    """Reject a cut at ``end`` that would drop the newest compaction summary.
 
-    Matches the wire ``rewritable`` flag, so every row a client offers is one
-    the server takes, and no cut can drop the summary.
+    The wire op flags apply the same rule, so every op a client offers is one
+    the server takes.
     """
     summary = last_summary_index(messages)
-    if summary is None:
-        return
-    turn = next(
-        (cursor for cursor in range(index, -1, -1) if is_user_text_row(messages[cursor])), None
-    )
-    if turn is None or turn <= summary:
+    if summary is not None and end <= summary:
         raise HistoryRewriteError(
             422, "SUMMARIZED", "That part of the chat was summarized and can't be changed."
         )
@@ -227,7 +222,7 @@ def prefix_end_for(messages: list[Message], index: int, op: BranchOp) -> int:
         end = _rewind_end(messages, index)
         if end >= len(messages):
             raise HistoryRewriteError(422, "NOTHING_TO_REWIND", "Nothing after that message.")
-    _assert_unsummarized(messages, index)
+    _assert_keeps_summary(messages, end)
     assert_tool_pairs(messages, end)
     return end
 
@@ -295,12 +290,11 @@ def _turn_cut(
 ) -> int:
     """Exclusive end keeping the turn that holds ``anchor_row_id``.
 
-    ``keep_summary`` refuses summarized turns; an in-place cut must set it.
+    ``keep_summary`` refuses a cut that drops the summary; an in-place cut must set it.
     """
-    index = _row_index(messages, anchor_row_id)
-    end = _rewind_end(messages, index)
+    end = _rewind_end(messages, _row_index(messages, anchor_row_id))
     if keep_summary:
-        _assert_unsummarized(messages, index)
+        _assert_keeps_summary(messages, end)
     if must_drop and end >= len(messages):
         raise HistoryRewriteError(422, "NOTHING_TO_TRUNCATE", "Nothing after that message.")
     assert_tool_pairs(messages, end)

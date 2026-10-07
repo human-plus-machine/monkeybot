@@ -351,27 +351,48 @@ def messages_to_wire(
 
     ``thread_id`` is the chat session that owns attachments. ``include_anchors``
     stamps each wire row with ``anchor`` (the stored row's ``row_id``) and
-    two flags. ``rewritable``: the row's turn can be regenerated, rewound, or
-    truncated, i.e. its user message comes after the newest compaction summary.
-    ``editable``: a rewritable user text row, the only rows edit and restore take.
-    Fork applies to any anchored row.
+    one flag per op. An op is offered when its cut keeps the newest compaction
+    summary, the same rule the server enforces. ``editable``: a user text row
+    (edit). ``restorable``: an editable row that is not the first (restore).
+    ``rewritable``: the row's turn can be regenerated. ``rewindable``: the row
+    can be rewound or truncated to. Fork applies to any anchored row.
     """
     responses = _tool_responses_by_id(messages)
     summary_at = last_summary_index(messages) if include_anchors else None
+    next_turn_at = _next_turn_indexes(messages) if include_anchors else []
     turn_at: int | None = None
     out: list[dict[str, Any]] = []
+
+    def keeps_summary(end: int) -> bool:
+        return summary_at is None or end > summary_at
+
     for index, msg in enumerate(messages):
-        if is_user_text_row(msg):
+        user_text = is_user_text_row(msg)
+        if user_text:
             turn_at = index
         start = len(out)
         _append_wire_rows(out, msg, responses, thread_id=thread_id)
         if include_anchors and msg.row_id is not None:
-            rewritable = turn_at is not None and (summary_at is None or turn_at > summary_at)
-            editable = rewritable and turn_at == index
+            editable = user_text and keeps_summary(index)
+            rewind_end = index + 1 if user_text else next_turn_at[index]
+            flags = {
+                "editable": editable,
+                "restorable": editable and index > 0,
+                "rewritable": turn_at is not None and keeps_summary(turn_at),
+                "rewindable": keeps_summary(rewind_end),
+            }
             for row in out[start:]:
                 row["anchor"] = {"row_id": msg.row_id}
-                row["editable"] = editable
-                row["rewritable"] = rewritable
+                row.update(flags)
+    return out
+
+
+def _next_turn_indexes(messages: list[Message]) -> list[int]:
+    """For each index, the first user text row after it, or ``len(messages)``."""
+    out = [len(messages)] * len(messages)
+    for index in range(len(messages) - 2, -1, -1):
+        following = messages[index + 1]
+        out[index] = index + 1 if is_user_text_row(following) else out[index + 1]
     return out
 
 
