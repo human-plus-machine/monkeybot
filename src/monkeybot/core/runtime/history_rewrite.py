@@ -41,7 +41,7 @@ from monkeybot.core.types.content_blocks import ContentBlock, ToolRequest, ToolR
 
 logger = logging.getLogger(__name__)
 
-BranchOp = Literal["edit", "regenerate", "rewind"]
+BranchOp = Literal["edit", "regenerate", "rewind", "restore"]
 
 
 class RewriteEffects(Protocol):
@@ -188,9 +188,15 @@ def _rewind_end(messages: list[Message], index: int) -> int:
 
 def prefix_end_for(messages: list[Message], index: int, op: BranchOp) -> int:
     """Exclusive end of the prefix ``op`` keeps, after boundary checks."""
-    if op == "edit":
+    if op == "edit" or op == "restore":
         if not is_user_text_row(messages[index]):
-            raise HistoryRewriteError(422, "TURN_BOUNDARY", "Only a user message can be edited.")
+            raise HistoryRewriteError(
+                422,
+                "TURN_BOUNDARY",
+                "Only a user message can be edited."
+                if op == "edit"
+                else "Only a user message can be redone.",
+            )
         end = index
     elif op == "regenerate":
         end = _owning_user_index(messages, index)

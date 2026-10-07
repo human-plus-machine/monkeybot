@@ -351,15 +351,17 @@ def messages_to_wire(
 
     ``thread_id`` is the chat session that owns attachments. ``include_anchors``
     stamps each wire row with ``anchor`` (the stored row's ``row_id``) and
-    ``editable`` (true for user text rows).
+    ``editable``. Rows at or before the newest compaction summary are not
+    editable; every later row is, including assistant text.
     """
     responses = _tool_responses_by_id(messages)
+    summary_at = last_summary_index(messages) if include_anchors else None
     out: list[dict[str, Any]] = []
-    for msg in messages:
+    for index, msg in enumerate(messages):
         start = len(out)
         _append_wire_rows(out, msg, responses, thread_id=thread_id)
         if include_anchors and msg.row_id is not None:
-            editable = is_user_text_row(msg)
+            editable = summary_at is None or index > summary_at
             for row in out[start:]:
                 row["anchor"] = {"row_id": msg.row_id}
                 row["editable"] = editable

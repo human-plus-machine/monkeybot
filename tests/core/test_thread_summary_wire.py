@@ -1,7 +1,7 @@
 import json
 
 from monkeybot.core.llm.provider import Message
-from monkeybot.core.persistence.thread_summary import messages_to_wire
+from monkeybot.core.persistence.thread_summary import CONTEXT_SUMMARY_PREFIX, messages_to_wire
 from monkeybot.core.tools.tool_hint import DETAIL_MAX
 from monkeybot.core.types.content_blocks import (
     RedactedThinking,
@@ -577,3 +577,33 @@ def test_messages_to_wire_task_elevates_from_pre_truncation_parse() -> None:
     assert row["run_id"] == "run-abc"
     assert row["child_thread_id"] == "subagent:sess:deadbeef01"
     assert row["subagent_type"] == "researcher"
+
+
+def test_messages_to_wire_editable_is_false_only_through_the_summary() -> None:
+    wire = messages_to_wire(
+        [
+            Message(role="user", content=[Text(text="old")], row_id="u1"),
+            Message(role="assistant", content=[Text(text="old reply")], row_id="a1"),
+            Message(
+                role="assistant",
+                content=[Text(text=f"{CONTEXT_SUMMARY_PREFIX}\nfolded")],
+                row_id="s1",
+            ),
+            Message(role="user", content=[Text(text="new")], row_id="u2"),
+            Message(
+                role="assistant",
+                content=[Thinking(thinking="hmm"), Text(text="new reply")],
+                row_id="a2",
+            ),
+        ],
+        include_anchors=True,
+    )
+    assert [(row["role"], row["editable"]) for row in wire] == [
+        ("user", False),
+        ("assistant", False),
+        ("assistant", False),
+        ("user", True),
+        ("thinking", True),
+        ("assistant", True),
+    ]
+    assert wire[5]["anchor"] == {"row_id": "a2"}

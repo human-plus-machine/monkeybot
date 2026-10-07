@@ -703,7 +703,7 @@ async def test_chat_history_detail_includes_thinking(registry: SessionRegistry) 
                 {"role": "thinking", "text": "weigh options"},
                 {"role": "assistant", "text": "because"},
             ]
-            assert [r["editable"] for r in rows] == [True, False, False]
+            assert [r["editable"] for r in rows] == [True, True, True]
             assert rows[1]["anchor"] == rows[2]["anchor"] != rows[0]["anchor"]
             assert body["branch_id"] == "root"
             assert body["branch_points"] == []

@@ -107,6 +107,31 @@ async def test_edit_branches_and_replays_into_the_new_thread(harness, backend) -
 
 
 @pytest.mark.asyncio
+async def test_restore_drops_the_user_turn_without_replying(harness, backend) -> None:
+    client = harness["client"]
+    await _seed(backend, "keep", "kept reply", "redo me", "redo reply")
+    rows = (await _detail(client))["messages"]
+    created = await client.post(
+        f"/sessions/{SESSION}/branches",
+        json={"op": "restore", "anchor": rows[2]["anchor"]},
+    )
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["request_id"] is None
+    assert [m["text"] for m in (await _detail(client))["messages"]] == ["keep", "kept reply"]
+    assert harness["loop"].turns == []
+
+    await client.put(f"/sessions/{SESSION}/branches/active", json={"branch_id": "root"})
+    opened = (await _detail(client))["messages"]
+    emptied = await client.post(
+        f"/sessions/{SESSION}/branches",
+        json={"op": "restore", "anchor": opened[0]["anchor"]},
+    )
+    assert emptied.status_code == 200, emptied.text
+    assert (await _detail(client))["messages"] == []
+
+
+@pytest.mark.asyncio
 async def test_switch_back_to_root_and_list_branches(harness, backend) -> None:
     client = harness["client"]
     await _seed(backend, "u1", "a1")
