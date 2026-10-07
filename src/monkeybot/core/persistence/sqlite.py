@@ -112,6 +112,25 @@ typed-message-content release. Choose one:
   a JSON tail inside a TEXT column; transcribing it to typed blocks must
   be done by the operator. See docs/migrations/typed-message-content.md."""
 
+SESSION_BRANCHES_DDL: Final[str] = """CREATE TABLE IF NOT EXISTS session_branches (
+    agent_scope TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL,
+    branch_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    parent_branch_id TEXT,
+    fork_row_id TEXT,
+    op TEXT,
+    created_at INTEGER NOT NULL,
+    last_active_at INTEGER NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (agent_scope, session_id, branch_id)
+)"""
+
+SESSION_BRANCHES_ACTIVE_INDEX_DDL: Final[str] = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_branches_active "
+    "ON session_branches(agent_scope, session_id) WHERE is_active = 1"
+)
+
 SCHEMA_DDLS: Final[tuple[str, ...]] = (
     """CREATE TABLE IF NOT EXISTS conversation_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -209,21 +228,10 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
 )""",
     """CREATE UNIQUE INDEX IF NOT EXISTS idx_goal_ledger_thread_seq
     ON goal_ledger(thread_id, seq)""",
-    """CREATE TABLE IF NOT EXISTS session_branches (
-    agent_scope TEXT NOT NULL DEFAULT '',
-    session_id TEXT NOT NULL,
-    branch_id TEXT NOT NULL,
-    thread_id TEXT NOT NULL,
-    parent_branch_id TEXT,
-    fork_row_id TEXT,
-    op TEXT,
-    created_at INTEGER NOT NULL,
-    last_active_at INTEGER NOT NULL,
-    is_active INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (agent_scope, session_id, branch_id)
-)""",
-    """CREATE UNIQUE INDEX IF NOT EXISTS idx_session_branches_active
-    ON session_branches(agent_scope, session_id) WHERE is_active = 1""",
+    # The active-branch index is created in ``_ensure_session_branches_shape``,
+    # after a pre-row-id table has been rebuilt. It cannot live here: that
+    # statement references ``agent_scope``, which the earlier table lacks.
+    SESSION_BRANCHES_DDL,
     OUTBOX_DDL,
     OUTBOX_INDEX_DDL,
 )
@@ -310,6 +318,7 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
     for ddl in SCHEMA_DDLS:
         await conn.execute(ddl)
     await conn.commit()
+    await _ensure_session_branches_shape(conn)
     await _ensure_turn_usage_estimated_column(conn)
     await _ensure_turn_usage_cache_columns(conn)
     await _ensure_subagent_runs_claim_columns(conn)
@@ -327,6 +336,56 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
     if "tool_name" in col_names or "tool_call_id" in col_names:
         await _log_legacy_schema_error(conn)
         raise RuntimeError(_LEGACY_SCHEMA_MESSAGE)
+
+
+async def _column_names(conn: aiosqlite.Connection, table: str) -> set[str]:
+    cur = await conn.execute(f"PRAGMA table_info({table})")
+    rows = await cur.fetchall()
+    await cur.close()
+    return {str(row[1]) for row in rows}
+
+
+async def _ensure_session_branches_shape(conn: aiosqlite.Connection) -> None:
+    """Rebuild a pre-row-id ``session_branches`` table, then index the active branch.
+
+    The first branch schema stored ``fork_row_index`` and ``fork_fingerprint``
+    and used ``PRIMARY KEY (session_id, branch_id)``. ``CREATE TABLE IF NOT
+    EXISTS`` leaves that table in place, and SQLite cannot change its primary
+    key with ``ALTER TABLE``. The active-branch index names ``agent_scope``,
+    so it has to be created after the rebuild.
+    """
+    names = await _column_names(conn, "session_branches")
+    if names and "agent_scope" not in names:
+        await _rebuild_legacy_session_branches(conn)
+    await conn.execute(SESSION_BRANCHES_ACTIVE_INDEX_DDL)
+    await conn.commit()
+
+
+async def _rebuild_legacy_session_branches(conn: aiosqlite.Connection) -> None:
+    """Copy lineage into the current table. Old fork positions are not row ids."""
+    logger.info(
+        "rebuilding session_branches from the pre-row-id schema; "
+        "fork_row_index and fork_fingerprint are dropped"
+    )
+    await conn.execute("BEGIN")
+    try:
+        await conn.execute("ALTER TABLE session_branches RENAME TO session_branches_legacy")
+        await conn.execute(SESSION_BRANCHES_DDL)
+        await conn.execute(
+            """INSERT INTO session_branches (
+                agent_scope, session_id, branch_id, thread_id, parent_branch_id,
+                fork_row_id, op, created_at, last_active_at, is_active
+            )
+            SELECT
+                '', session_id, branch_id, thread_id, parent_branch_id,
+                NULL, op, created_at, last_active_at, is_active
+            FROM session_branches_legacy"""
+        )
+        await conn.execute("DROP TABLE session_branches_legacy")
+        await conn.commit()
+    except BaseException:
+        await conn.rollback()
+        raise
 
 
 async def _ensure_turn_usage_estimated_column(conn: aiosqlite.Connection) -> None:
@@ -404,6 +463,10 @@ async def _ensure_conversation_history_agent_scope_column(conn: aiosqlite.Connec
 async def backfill_legacy_agent_scope(conn: aiosqlite.Connection, agent_scope: str) -> None:
     """Claim pre-migration rows (``agent_scope = ''``) for ``agent_scope``.
 
+    Covers ``conversation_history`` and ``session_branches``. Rebuilt branch
+    rows are inserted unscoped and stay invisible to a scoped store until this
+    runs.
+
     Idempotent — the UPDATE simply matches zero rows once nothing is left
     unscoped, so callers should invoke this on every ``open()``, not just
     once after a schema change. Gating it on "did this call just add the
@@ -423,6 +486,13 @@ async def backfill_legacy_agent_scope(conn: aiosqlite.Connection, agent_scope: s
         "UPDATE conversation_history SET agent_scope = ? WHERE agent_scope = ''",
         (agent_scope,),
     )
+    # Rebuilt pre-row-id branch rows land with agent_scope '' and stay invisible
+    # to a scoped store until claimed, same as legacy history.
+    if "agent_scope" in await _column_names(conn, "session_branches"):
+        await conn.execute(
+            "UPDATE session_branches SET agent_scope = ? WHERE agent_scope = ''",
+            (agent_scope,),
+        )
     await conn.commit()
 
 
