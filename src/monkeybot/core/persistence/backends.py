@@ -45,6 +45,10 @@ class HistoryStore(Protocol):
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None: ...
 
+    async def delete_rows(self, thread_id: str, row_ids: Collection[str]) -> int:
+        """Delete the rows whose loaded ``row_id`` is in ``row_ids``; return the count."""
+        ...
+
     async def last_row(self, thread_id: str) -> tuple[int, str] | None:
         """Message count and the newest row's content JSON, or ``None`` if empty."""
         ...

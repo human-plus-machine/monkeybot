@@ -1,20 +1,26 @@
-"""Edit, regenerate, and rewind for a session's branch tree.
+"""Edit, regenerate, rewind, truncate, and fork for a session's branch tree.
 
-Each branch is its own linear history thread. An op copies a prefix of the
-active thread onto a new branch and makes it active; the caller starts any
-replay turn. Rows are addressed by ``Message.row_id``, which copies keep, so a
-branch finds where it left its parent by id even after either side compacts.
+Each branch is its own linear history thread. A branch op copies a prefix of
+the active thread onto a new branch and makes it active; the caller starts any
+replay turn. Truncate shortens the active thread in place, and fork copies a
+prefix into a new session. Rows are addressed by ``Message.row_id``, which
+copies keep, so a branch finds where it left its parent by id even after
+either side compacts.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import time
-from collections.abc import Callable, Iterable
+import uuid
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
+from monkeybot.core.attachments.catalog import referenced_attachment_ids
+from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.branches import (
@@ -56,6 +62,19 @@ class RewriteResult:
     branch_id: str
     thread_id: str
     replay_content: list[ContentBlock] | None = None
+
+
+@dataclass(frozen=True)
+class TruncateResult:
+    branch_id: str
+    thread_id: str
+    dropped: int
+
+
+@dataclass(frozen=True)
+class ForkResult:
+    session_id: str
+    attachments_copied: int
 
 
 @dataclass(frozen=True)
@@ -209,6 +228,117 @@ async def branch_op(
     return RewriteResult(op=op, branch_id=branch_id, thread_id=thread_id, replay_content=replay)
 
 
+def _turn_cut(messages: list[Message], anchor_row_id: str, *, must_drop: bool) -> int:
+    """Exclusive end keeping the turn that holds ``anchor_row_id``."""
+    end = _rewind_end(messages, _row_index(messages, anchor_row_id))
+    if must_drop and end >= len(messages):
+        raise HistoryRewriteError(422, "NOTHING_TO_TRUNCATE", "Nothing after that message.")
+    assert_tool_pairs(messages, end)
+    return end
+
+
+def _strands_a_branch(
+    records: list[BranchRecord],
+    active_branch_id: str,
+    messages: list[Message],
+    end: int,
+    dropped: set[str],
+) -> bool:
+    """Whether cutting ``messages`` at ``end`` drops a fork row or any offered option.
+
+    The second check covers compacted forks, whose navigator sits on a
+    summary row rather than the fork row itself.
+    """
+    if not records:
+        return False
+    before = {
+        key: set(options) for key, _, options in _key_points(records, active_branch_id, messages)
+    }
+    if any(key in dropped for key in before):
+        return True
+    after = {
+        key: set(options)
+        for key, _, options in _key_points(records, active_branch_id, messages[:end])
+    }
+    return any(not options <= after.get(key, set()) for key, options in before.items())
+
+
+async def truncate_active(
+    *,
+    history: Any,
+    branches: BranchStore,
+    session_id: str,
+    anchor_row_id: str,
+) -> TruncateResult:
+    """Delete the active branch's rows after the anchor's turn, in place.
+
+    Refused while another branch forks from a row that would go: its
+    navigator lives on that row, so the branch would become unreachable.
+    """
+    records = await branches.list(session_id)
+    active = _active_of(session_id, records)
+    messages: list[Message] = await history.load(active.thread_id)
+    end = _turn_cut(messages, anchor_row_id, must_drop=True)
+    dropped = {message.row_id for message in messages[end:] if message.row_id}
+    if _strands_a_branch(records, active.branch_id, messages, end, dropped):
+        raise HistoryRewriteError(
+            409,
+            "BRANCHES_IN_TAIL",
+            "Other versions of this chat branch off after that message.",
+        )
+    kept = {message.row_id for message in messages[:end]}
+    if dropped & kept:
+        # A duplicated id would take a kept row with it; rewrite instead.
+        await history.reset(active.thread_id, messages[:end])
+    else:
+        await history.delete_rows(active.thread_id, dropped)
+    result = TruncateResult(
+        branch_id=active.branch_id, thread_id=active.thread_id, dropped=len(messages) - end
+    )
+    logger.info(
+        "history truncate %s",
+        kv(session_id=session_id, branch_id=active.branch_id, kept=end, dropped=result.dropped),
+    )
+    return result
+
+
+async def fork_session(
+    *,
+    history: Any,
+    branches: BranchStore,
+    attachments: AttachmentStore | None,
+    session_id: str,
+    anchor_row_id: str,
+) -> ForkResult:
+    """Start a new session holding the active branch through the anchor's turn.
+
+    Attachment files are copied first: the new session resolves them under
+    its own id, and a failed copy must not leave a fork with dead references.
+    """
+    active = _active_of(session_id, await branches.list(session_id))
+    messages: list[Message] = await history.load(active.thread_id)
+    prefix = messages[: _turn_cut(messages, anchor_row_id, must_drop=False)]
+    forked_session_id = str(uuid.uuid4())
+    copied = 0
+    if attachments is not None:
+        for attachment_id in referenced_attachment_ids(prefix):
+            if await asyncio.to_thread(
+                attachments.copy, session_id, forked_session_id, attachment_id
+            ):
+                copied += 1
+    await history.reset(forked_session_id, prefix)
+    logger.info(
+        "history fork %s",
+        kv(
+            session_id=session_id,
+            forked_session_id=forked_session_id,
+            rows=len(prefix),
+            attachments=copied,
+        ),
+    )
+    return ForkResult(session_id=forked_session_id, attachments_copied=copied)
+
+
 async def activate_branch(
     *, branches: BranchStore, session_id: str, branch_id: str
 ) -> BranchRecord:
@@ -273,6 +403,31 @@ def divergence_points(
     is offered once, as the active branch or else its most recently active
     member, ordered by its oldest member.
     """
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for _key, anchor_row, options in _key_points(records, active_branch_id, messages):
+        point = merged.get(anchor_row)
+        if point is None:
+            merged[anchor_row] = {"anchor": {"row_id": anchor_row}, "options": options}
+            order.append(anchor_row)
+        else:
+            point["options"] = list(dict.fromkeys([*point["options"], *options]))
+
+    row_position = {message.row_id: index for index, message in enumerate(messages)}
+    points: list[dict[str, Any]] = []
+    for row_id in sorted(order, key=lambda rid: row_position.get(rid, 0)):
+        point = merged[row_id]
+        point["active_index"] = point["options"].index(active_branch_id)
+        points.append(point)
+    return points
+
+
+def _key_points(
+    records: list[BranchRecord],
+    active_branch_id: str,
+    messages: list[Message],
+) -> Iterator[tuple[str | None, str, list[str]]]:
+    """``(fork key, anchor row id, options)`` for each fork key with a point."""
     by_id = {record.branch_id: record for record in records}
     row_position: dict[str, int] = {}
     for index, message in enumerate(messages):
@@ -286,8 +441,6 @@ def divergence_points(
         members = members_by_key.setdefault(record.fork_row_id, set())
         members.update((record.branch_id, record.parent_branch_id))
 
-    merged: dict[str, dict[str, Any]] = {}
-    order: list[str] = []
     for key, members in members_by_key.items():
         if key is None:
             r: float = -1
@@ -336,24 +489,10 @@ def divergence_points(
                 key=lambda bid: (by_id[bid].last_active_at, bid) if bid in by_id else (0, bid),
             )
 
-        options = [representative(group) for group in groups]
         anchor_row = messages[anchor_index].row_id
         if anchor_row is None:
             continue
-        point = merged.get(anchor_row)
-        if point is None:
-            merged[anchor_row] = {"anchor": {"row_id": anchor_row}, "options": options}
-            order.append(anchor_row)
-        else:
-            point["options"] = list(dict.fromkeys([*point["options"], *options]))
-
-    anchor_positions = {row_id: row_position.get(row_id, 0) for row_id in order}
-    points: list[dict[str, Any]] = []
-    for row_id in sorted(order, key=lambda rid: anchor_positions[rid]):
-        point = merged[row_id]
-        point["active_index"] = point["options"].index(active_branch_id)
-        points.append(point)
-    return points
+        yield key, anchor_row, [representative(group) for group in groups]
 
 
 async def load_active_history(

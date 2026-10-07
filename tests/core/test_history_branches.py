@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import replace
 from typing import Any
@@ -9,6 +10,8 @@ from typing import Any
 import pytest
 import pytest_asyncio
 
+from monkeybot.core.attachments.store import FilesystemAttachmentStore
+from monkeybot.core.attachments.text import render_attachment_descriptor_text
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.persistence.branches import (
     ROOT_BRANCH_ID,
@@ -28,12 +31,14 @@ from monkeybot.core.runtime.history_rewrite import (
     assert_tool_pairs,
     branch_op,
     divergence_points,
+    fork_session,
     load_active_history,
     overlay_active_previews,
     purge_session_branches,
     resolve_active_thread_id,
+    truncate_active,
 )
-from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import AttachmentRef, Text, ToolRequest, ToolResponse
 
 SESSION = "s1"
 
@@ -401,8 +406,10 @@ async def test_random_ops_keep_every_branch_reachable(env, seed: int) -> None:
                     thread, Message(role="user", content=result.replay_content)
                 )
                 await env.history.append(thread, _text("assistant", f"regen{counter}"))
-            elif choice < 0.74:
+            elif choice < 0.68:
                 await env.op("rewind", rng.choice(rows).row_id)
+            elif choice < 0.76:
+                await _truncate(env, rng.choice(rows).row_id)
             elif choice < 0.92:
                 points = await env.points()
                 if points:
@@ -416,7 +423,12 @@ async def test_random_ops_keep_every_branch_reachable(env, seed: int) -> None:
                 summary = _text("assistant", f"{CONTEXT_SUMMARY_PREFIX}\nc{counter}")
                 await env.history.reset(await env.thread(), [rows[0], summary, *rows[-2:]])
         except HistoryRewriteError as exc:
-            assert exc.code in {"NOTHING_TO_REWIND", "TURN_BOUNDARY"}
+            assert exc.code in {
+                "NOTHING_TO_REWIND",
+                "NOTHING_TO_TRUNCATE",
+                "TURN_BOUNDARY",
+                "BRANCHES_IN_TAIL",
+            }
 
         records = await env.branches.list(SESSION)
         if not records:
@@ -455,3 +467,108 @@ async def test_purge_wipes_every_thread_and_branch_row(env) -> None:
 @pytest.mark.asyncio
 async def test_resolve_without_branch_support_stays_on_session() -> None:
     assert await resolve_active_thread_id(object(), SESSION) == SESSION
+
+
+# --- truncate and fork -------------------------------------------------------
+
+
+async def _truncate(env: _Env, row_id: str | None) -> Any:
+    return await truncate_active(
+        history=env.history, branches=env.branches, session_id=SESSION, anchor_row_id=row_id
+    )
+
+
+@pytest.mark.asyncio
+async def test_truncate_keeps_anchor_turn_in_place(env) -> None:
+    await env.turn("u1", "a1")
+    await env.turn("u2", "a2")
+    rows = await env.rows()
+    result = await _truncate(env, rows[0].row_id)
+    assert (result.branch_id, result.dropped) == (ROOT_BRANCH_ID, 3)
+    assert await env.rows() == rows[:1]
+    for anchor, code in ((rows[0].row_id, "NOTHING_TO_TRUNCATE"), ("gone", "ANCHOR_MISMATCH")):
+        with pytest.raises(HistoryRewriteError) as exc:
+            await _truncate(env, anchor)
+        assert exc.value.code == code
+
+
+@pytest.mark.asyncio
+async def test_truncate_deletes_legacy_rows_by_derived_id(env) -> None:
+    for role, text in (("user", "old-u"), ("assistant", "old-a")):
+        await env.history._conn.execute(
+            "INSERT INTO conversation_history (thread_id, role, content, created_at, agent_scope)"
+            " VALUES (?, ?, ?, 1, 'a')",
+            (SESSION, role, json.dumps([Text(text=text).to_dict()])),
+        )
+    await env.history._conn.commit()
+    rows = await env.rows()
+    assert all(m.row_id.startswith("legacy:") for m in rows)  # type: ignore[union-attr]
+    await _truncate(env, rows[0].row_id)
+    assert await env.texts() == ["old-u"]
+
+
+@pytest.mark.asyncio
+async def test_truncate_refuses_to_strand_a_branch(env) -> None:
+    await env.turn("u1", "a1")
+    await env.turn("u2", "a2")
+    root_rows = await env.rows()
+    branch = await env.op("edit", root_rows[2].row_id)
+    await env.turn("v2", "b2")
+    branch_rows = await env.rows()
+
+    # The edit forked at a1; dropping it from either side loses the navigator.
+    with pytest.raises(HistoryRewriteError) as exc:
+        await _truncate(env, branch_rows[0].row_id)
+    assert exc.value.code == "BRANCHES_IN_TAIL"
+    await activate_branch(branches=env.branches, session_id=SESSION, branch_id=ROOT_BRANCH_ID)
+    with pytest.raises(HistoryRewriteError) as exc:
+        await _truncate(env, root_rows[0].row_id)
+    assert exc.value.code == "BRANCHES_IN_TAIL"
+
+    # Keeping the fork row keeps both versions reachable.
+    await _truncate(env, root_rows[1].row_id)
+    assert await env.texts() == ["u1", "a1"]
+    [point] = await env.points()
+    assert point["options"] == [ROOT_BRANCH_ID, branch.branch_id]
+    await activate_branch(branches=env.branches, session_id=SESSION, branch_id=branch.branch_id)
+    assert await env.texts() == ["u1", "a1", "v2", "b2"]
+    assert len(await env.points()) == 1
+
+
+@pytest.mark.asyncio
+async def test_fork_copies_active_prefix_and_its_attachments(env, tmp_path) -> None:
+    store = FilesystemAttachmentStore(tmp_path)
+    kept = store.save(SESSION, data=b"\x89PNG\r\n\x1a\nkept", mime_type="image/png", filename="k")
+    later = store.save(SESSION, data=b"\x89PNG\r\n\x1a\nlater", mime_type="image/png", filename="l")
+    descriptor = render_attachment_descriptor_text(
+        attachment_id=kept.attachment_id, filename="k", mime_type="image/png", description=""
+    )
+    await env.history.append(SESSION, Message(role="user", content=[Text(text=descriptor)]))
+    await env.history.append(SESSION, _text("assistant", "a1"))
+    await env.history.append(
+        SESSION,
+        Message(
+            role="user",
+            content=[
+                Text(text="and this"),
+                AttachmentRef(attachment_id=later.attachment_id, mime_type="image/png"),
+            ],
+        ),
+    )
+    await env.history.append(SESSION, _text("assistant", "a2"))
+    rows = await env.rows()
+
+    result = await fork_session(
+        history=env.history,
+        branches=env.branches,
+        attachments=store,
+        session_id=SESSION,
+        anchor_row_id=rows[1].row_id,
+    )
+    forked = await env.history.load(result.session_id)
+    assert [m.row_id for m in forked] == [m.row_id for m in rows[:2]]
+    assert result.attachments_copied == 1
+    assert store.read(result.session_id, kept.attachment_id)[0].endswith(b"kept")
+    assert not store.exists(result.session_id, later.attachment_id)
+    assert await env.rows() == rows
+    assert await env.branches.list(result.session_id) == []

@@ -265,6 +265,20 @@ class BranchOpResponse(BaseModel):
     request_id: str | None = None
 
 
+class HistoryAnchorRequest(BaseModel):
+    """POST /sessions/{id}/truncate and /fork — keep through the anchor's turn."""
+
+    anchor: HistoryAnchorBody
+
+
+class TruncateResponse(BaseModel):
+    branch_id: str
+
+
+class ForkResponse(BaseModel):
+    session_id: str
+
+
 class SetActiveBranchRequest(BaseModel):
     """PUT /sessions/{id}/branches/active body."""
 

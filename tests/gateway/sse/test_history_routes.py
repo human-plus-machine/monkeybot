@@ -235,3 +235,48 @@ async def test_continue_picks_the_session_with_newest_branch_activity(harness, b
     await _wait_turn(harness)
     threads = (await client.get("/api/chat-history")).json()["threads"]
     assert [t["session_id"] for t in threads] == [SESSION, "s0-newer"]
+
+
+@pytest.mark.asyncio
+async def test_truncate_shortens_the_active_branch_unless_it_strands_one(harness, backend) -> None:
+    client = harness["client"]
+    await _seed(backend, "u1", "a1", "u2", "a2", "u3", "a3")
+    rows = (await _detail(client))["messages"]
+    response = await client.post(
+        f"/sessions/{SESSION}/truncate", json={"anchor": rows[3]["anchor"]}
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"branch_id": "root"}
+    assert [m["text"] for m in (await _detail(client))["messages"]] == ["u1", "a1", "u2", "a2"]
+
+    edited = await client.post(
+        f"/sessions/{SESSION}/branches",
+        json={"op": "edit", "anchor": rows[2]["anchor"], "message": "v2"},
+    )
+    await _wait_turn(harness)
+    await client.put(f"/sessions/{SESSION}/branches/active", json={"branch_id": "root"})
+    stranding = await client.post(
+        f"/sessions/{SESSION}/truncate", json={"anchor": rows[0]["anchor"]}
+    )
+    assert stranding.status_code == 409
+    assert stranding.json()["error"]["code"] == "BRANCHES_IN_TAIL"
+    assert edited.json()["branch_id"] in (await _detail(client))["branch_points"][0]["options"]
+    assert await backend.session_turns().try_acquire(SESSION, "probe")
+
+
+@pytest.mark.asyncio
+async def test_fork_starts_a_new_session_from_the_active_branch(harness, backend) -> None:
+    client = harness["client"]
+    await _seed(backend, "u1", "a1", "u2", "a2")
+    rows = (await _detail(client))["messages"]
+    response = await client.post(f"/sessions/{SESSION}/fork", json={"anchor": rows[1]["anchor"]})
+    assert response.status_code == 200, response.text
+    forked = response.json()["session_id"]
+    assert forked != SESSION
+    assert [m["text"] for m in (await _detail(client, forked))["messages"]] == ["u1", "a1"]
+    assert len((await _detail(client))["messages"]) == 4
+    listed = {t["session_id"] for t in (await client.get("/api/chat-history")).json()["threads"]}
+    assert listed == {SESSION, forked}
+
+    stale = await client.post(f"/sessions/{SESSION}/fork", json={"anchor": {"row_id": "gone"}})
+    assert stale.status_code == 409

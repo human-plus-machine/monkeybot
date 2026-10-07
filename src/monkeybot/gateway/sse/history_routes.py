@@ -1,4 +1,4 @@
-"""Branch routes: edit, regenerate, rewind, list, and switch.
+"""History routes: edit, regenerate, rewind, list, switch, truncate, and fork.
 
 Every op needs an idle session: it takes the turn lock and blocks new voice
 calls. Edit and regenerate hand the lock to the reply scheduler, so the new
@@ -8,6 +8,7 @@ turn cannot race another admission.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -17,11 +18,26 @@ from fastapi import APIRouter, Depends, Request
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.branches import ROOT_BRANCH_ID, BranchRecord, root_record
 from monkeybot.core.runtime.events import HistoryRewritten, event_to_json
-from monkeybot.core.runtime.history_rewrite import HistoryRewriteError, activate_branch, branch_op
+from monkeybot.core.runtime.history_rewrite import (
+    HistoryRewriteError,
+    activate_branch,
+    branch_op,
+    fork_session,
+    truncate_active,
+)
 from monkeybot.core.types.content_blocks import ContentBlock
 
-from .models import APIError, BranchOpRequest, BranchOpResponse, SetActiveBranchRequest
+from .models import (
+    APIError,
+    BranchOpRequest,
+    BranchOpResponse,
+    ForkResponse,
+    HistoryAnchorRequest,
+    SetActiveBranchRequest,
+    TruncateResponse,
+)
 from .routes import (
+    _attachment_store,
     _block_voice_calls,
     _drain_follow_up,
     _parse_user_content,
@@ -207,3 +223,63 @@ def register_history_rewrite_routes(api: APIRouter) -> None:
             bus=bus, loop_ref=request.app.state.loop, storage=storage, session_id=session_id
         )
         return {"branch_id": record.branch_id}
+
+    @api.post("/sessions/{session_id}/truncate", response_model=TruncateResponse)
+    async def post_truncate(
+        session_id: str,
+        body: HistoryAnchorRequest,
+        request: Request,
+        reg_dep: SessionRegistry = Depends(get_registry),  # noqa: B008
+    ) -> TruncateResponse:
+        bus = _require_bus(reg_dep, session_id)
+        storage = _storage_backend(request)
+        async with _IdleLease(bus, request, storage, session_id, uuid.uuid4().hex):
+            try:
+                result = await truncate_active(
+                    history=storage.history(),
+                    branches=storage.branches(),
+                    session_id=session_id,
+                    anchor_row_id=body.anchor.row_id,
+                )
+            except HistoryRewriteError as exc:
+                raise _rewrite_error(exc) from exc
+        await _publish(bus, session_id=session_id, branch_id=result.branch_id, op="truncate")
+        await _drain_follow_up(
+            bus=bus, loop_ref=request.app.state.loop, storage=storage, session_id=session_id
+        )
+        return TruncateResponse(branch_id=result.branch_id)
+
+    @api.post("/sessions/{session_id}/fork", response_model=ForkResponse)
+    async def post_fork(
+        session_id: str,
+        body: HistoryAnchorRequest,
+        request: Request,
+        reg_dep: SessionRegistry = Depends(get_registry),  # noqa: B008
+    ) -> ForkResponse:
+        bus = _require_bus(reg_dep, session_id)
+        storage = _storage_backend(request)
+        # Fork only reads this session, but holds it idle so the copied prefix
+        # is never a turn caught halfway through writing its rows.
+        async with _IdleLease(bus, request, storage, session_id, uuid.uuid4().hex):
+            try:
+                result = await fork_session(
+                    history=storage.history(),
+                    branches=storage.branches(),
+                    attachments=_attachment_store(request),
+                    session_id=session_id,
+                    anchor_row_id=body.anchor.row_id,
+                )
+            except HistoryRewriteError as exc:
+                raise _rewrite_error(exc) from exc
+        # The fork keeps the source's model and instructions.
+        reg_dep.create(
+            result.session_id,
+            agent_md=bus.agent_md,
+            created_at_ms=int(time.time() * 1000),
+            provider=bus.provider,
+            model_name=bus.model_name,
+        )
+        await _drain_follow_up(
+            bus=bus, loop_ref=request.app.state.loop, storage=storage, session_id=session_id
+        )
+        return ForkResponse(session_id=result.session_id)

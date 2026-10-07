@@ -12,13 +12,14 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Collection
 from typing import Any, cast
 
 import aiosqlite
 
 from monkeybot.core.llm.provider import Message, Role
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.persistence.row_ids import loaded_row_id, row_id_for_insert
+from monkeybot.core.persistence.row_ids import loaded_row_id, row_id_for_insert, split_row_ids
 from monkeybot.core.persistence.sqlite import ConnLock, with_conn_lock
 from monkeybot.core.persistence.thread_summary import (
     BRANCH_THREAD_ID_PREFIX,
@@ -31,6 +32,8 @@ from monkeybot.core.types.content_blocks import ContentBlock
 logger = logging.getLogger("monkeybot.core.persistence.history")
 
 _VALID_ROLES: tuple[str, ...] = ("user", "assistant", "system")
+# Stays under SQLITE_MAX_VARIABLE_NUMBER (999 on older builds) with the scope params.
+_DELETE_CHUNK = 500
 
 
 def _validate_message(message: Message) -> None:
@@ -305,6 +308,40 @@ class SQLiteHistoryStore:
                 (thread_id, self._agent_scope),
             )
             await self._conn.commit()
+
+    @with_conn_lock
+    async def delete_rows(self, thread_id: str, row_ids: Collection[str]) -> int:
+        """Delete the rows whose loaded ``row_id`` is in ``row_ids`` in one transaction."""
+        stored, legacy_keys = split_row_ids(row_ids)
+        legacy_ids = [int(key) for key in legacy_keys if key.isdigit()]
+        has_row_id = "row_id" in await self._columns()
+        scope = "thread_id = ? AND agent_scope = ?"
+        deleted = 0
+        await self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            if has_row_id:
+                for start in range(0, len(stored), _DELETE_CHUNK):
+                    chunk = stored[start : start + _DELETE_CHUNK]
+                    cursor = await self._conn.execute(
+                        f"DELETE FROM conversation_history WHERE {scope} "
+                        f"AND row_id IN ({','.join('?' * len(chunk))})",
+                        (thread_id, self._agent_scope, *chunk),
+                    )
+                    deleted += cursor.rowcount
+            unstored = "(row_id IS NULL OR row_id = '')" if has_row_id else "1"
+            for start in range(0, len(legacy_ids), _DELETE_CHUNK):
+                id_chunk = legacy_ids[start : start + _DELETE_CHUNK]
+                cursor = await self._conn.execute(
+                    f"DELETE FROM conversation_history WHERE {scope} AND {unstored} "
+                    f"AND id IN ({','.join('?' * len(id_chunk))})",
+                    (thread_id, self._agent_scope, *id_chunk),
+                )
+                deleted += cursor.rowcount
+            await self._conn.commit()
+        except BaseException:
+            await self._conn.rollback()
+            raise
+        return deleted
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
         """Replace the thread transcript with ``messages`` (validated like ``append``).

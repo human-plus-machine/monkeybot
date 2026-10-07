@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import time
 import uuid
 from dataclasses import dataclass
@@ -88,6 +89,10 @@ class AttachmentStore(Protocol):
 
     def read(self, session_id: str, attachment_id: str) -> tuple[bytes, str, str]: ...
 
+    def copy(self, source_session_id: str, target_session_id: str, attachment_id: str) -> bool:
+        """Copy one attachment (bytes and metadata) between sessions; ``False`` if absent."""
+        ...
+
 
 class FilesystemAttachmentStore:
     def __init__(self, workspace_root: Path) -> None:
@@ -170,6 +175,20 @@ class FilesystemAttachmentStore:
         mime = str(meta.get("mime_type", "application/octet-stream"))
         filename = str(meta.get("filename", attachment_id))
         return path.read_bytes(), mime, filename
+
+    def copy(self, source_session_id: str, target_session_id: str, attachment_id: str) -> bool:
+        # Metadata (including created_at_ms) is copied verbatim, so the copy
+        # expires with the original rather than getting a fresh TTL.
+        source = self._path_for(source_session_id, attachment_id)
+        target = self._path_for(target_session_id, attachment_id)
+        if source is None or target is None or not source.is_file():
+            return False
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        source_meta = source.with_suffix(source.suffix + ".json")
+        if source_meta.is_file():
+            shutil.copy2(source_meta, target.with_suffix(target.suffix + ".json"))
+        return True
 
     def _read_meta(self, path: Path) -> dict[str, object]:
         meta_path = path.with_suffix(path.suffix + ".json")

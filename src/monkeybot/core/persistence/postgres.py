@@ -46,7 +46,7 @@ from monkeybot.core.persistence.durable_runs import (
     _tuple_to_run_row,
 )
 from monkeybot.core.persistence.errors import AmbiguousCommitError
-from monkeybot.core.persistence.row_ids import loaded_row_id, row_id_for_insert
+from monkeybot.core.persistence.row_ids import loaded_row_id, row_id_for_insert, split_row_ids
 from monkeybot.core.persistence.scheduled_loops import (
     _SCHEDULED_LOOP_COLUMNS,
     GOAL_MAX_CONSECUTIVE_ERRORS,
@@ -441,6 +441,30 @@ class PostgresHistoryStore:
             )
             for msg in messages:
                 await self._insert_message(conn, thread_id, msg)
+
+    async def delete_rows(self, thread_id: str, row_ids: Collection[str]) -> int:
+        """Delete the rows whose loaded ``row_id`` is in ``row_ids`` in one statement."""
+        stored, legacy_keys = split_row_ids(row_ids)
+        legacy_ids = [int(key) for key in legacy_keys if key.isdigit()]
+        if not stored and not legacy_ids:
+            return 0
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                DELETE FROM conversation_history
+                WHERE thread_id = $1 AND agent_scope = $2
+                  AND (
+                    row_id = ANY($3::text[])
+                    OR (COALESCE(row_id, '') = '' AND id = ANY($4::bigint[]))
+                  )
+                RETURNING id
+                """,
+                thread_id,
+                self._agent_scope,
+                stored,
+                legacy_ids,
+            )
+        return len(rows)
 
     async def last_row(self, thread_id: str) -> tuple[int, str] | None:
         """Message count and the newest row's content JSON, without loading the thread."""
