@@ -351,9 +351,10 @@ def messages_to_wire(
 
     ``thread_id`` is the chat session that owns attachments. ``include_anchors``
     stamps each wire row with ``anchor`` (the stored row's ``row_id``) and
-    ``editable``: the row's turn can be rewritten, i.e. its user message comes
-    after the newest compaction summary. Edit and restore still apply only to
-    user text rows.
+    two flags. ``rewritable``: the row's turn can be regenerated, rewound, or
+    truncated, i.e. its user message comes after the newest compaction summary.
+    ``editable``: a rewritable user text row, the only rows edit and restore take.
+    Fork applies to any anchored row.
     """
     responses = _tool_responses_by_id(messages)
     summary_at = last_summary_index(messages) if include_anchors else None
@@ -365,10 +366,12 @@ def messages_to_wire(
         start = len(out)
         _append_wire_rows(out, msg, responses, thread_id=thread_id)
         if include_anchors and msg.row_id is not None:
-            editable = turn_at is not None and (summary_at is None or turn_at > summary_at)
+            rewritable = turn_at is not None and (summary_at is None or turn_at > summary_at)
+            editable = rewritable and turn_at == index
             for row in out[start:]:
                 row["anchor"] = {"row_id": msg.row_id}
                 row["editable"] = editable
+                row["rewritable"] = rewritable
     return out
 
 

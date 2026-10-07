@@ -579,7 +579,7 @@ def test_messages_to_wire_task_elevates_from_pre_truncation_parse() -> None:
     assert row["subagent_type"] == "researcher"
 
 
-def test_messages_to_wire_editable_is_false_only_through_the_summary() -> None:
+def test_messages_to_wire_rewritable_is_false_only_through_the_summary() -> None:
     wire = messages_to_wire(
         [
             Message(role="user", content=[Text(text="old")], row_id="u1"),
@@ -598,13 +598,13 @@ def test_messages_to_wire_editable_is_false_only_through_the_summary() -> None:
         ],
         include_anchors=True,
     )
-    assert [(row["role"], row["editable"]) for row in wire] == [
-        ("user", False),
-        ("assistant", False),
-        ("assistant", False),
-        ("user", True),
-        ("thinking", True),
-        ("assistant", True),
+    assert [(row["role"], row["rewritable"], row["editable"]) for row in wire] == [
+        ("user", False, False),
+        ("assistant", False, False),
+        ("assistant", False, False),
+        ("user", True, True),
+        ("thinking", True, False),
+        ("assistant", True, False),
     ]
     assert wire[5]["anchor"] == {"row_id": "a2"}
 
@@ -622,4 +622,5 @@ def test_messages_to_wire_mid_turn_compaction_keeps_the_continuation_read_only()
         ],
         include_anchors=True,
     )
+    assert [row["rewritable"] for row in wire] == [False, False, False]
     assert [row["editable"] for row in wire] == [False, False, False]

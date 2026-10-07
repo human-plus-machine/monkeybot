@@ -192,10 +192,19 @@ _USER_ONLY_MESSAGES = {
 }
 
 
-def _assert_unsummarized(messages: list[Message], end: int) -> None:
-    """Reject a cut at ``end`` that would drop the newest compaction summary."""
+def _assert_unsummarized(messages: list[Message], index: int) -> None:
+    """Reject an op on a row whose turn starts at or before the newest summary.
+
+    Matches the wire ``rewritable`` flag, so every row a client offers is one
+    the server takes, and no cut can drop the summary.
+    """
     summary = last_summary_index(messages)
-    if summary is not None and end <= summary:
+    if summary is None:
+        return
+    turn = next(
+        (cursor for cursor in range(index, -1, -1) if is_user_text_row(messages[cursor])), None
+    )
+    if turn is None or turn <= summary:
         raise HistoryRewriteError(
             422, "SUMMARIZED", "That part of the chat was summarized and can't be changed."
         )
@@ -218,7 +227,7 @@ def prefix_end_for(messages: list[Message], index: int, op: BranchOp) -> int:
         end = _rewind_end(messages, index)
         if end >= len(messages):
             raise HistoryRewriteError(422, "NOTHING_TO_REWIND", "Nothing after that message.")
-    _assert_unsummarized(messages, end)
+    _assert_unsummarized(messages, index)
     assert_tool_pairs(messages, end)
     return end
 
@@ -281,9 +290,17 @@ async def branch_op(
     return RewriteResult(op=op, branch_id=branch_id, thread_id=thread_id, replay_content=replay)
 
 
-def _turn_cut(messages: list[Message], anchor_row_id: str, *, must_drop: bool) -> int:
-    """Exclusive end keeping the turn that holds ``anchor_row_id``."""
-    end = _rewind_end(messages, _row_index(messages, anchor_row_id))
+def _turn_cut(
+    messages: list[Message], anchor_row_id: str, *, must_drop: bool, keep_summary: bool
+) -> int:
+    """Exclusive end keeping the turn that holds ``anchor_row_id``.
+
+    ``keep_summary`` refuses summarized turns; an in-place cut must set it.
+    """
+    index = _row_index(messages, anchor_row_id)
+    end = _rewind_end(messages, index)
+    if keep_summary:
+        _assert_unsummarized(messages, index)
     if must_drop and end >= len(messages):
         raise HistoryRewriteError(422, "NOTHING_TO_TRUNCATE", "Nothing after that message.")
     assert_tool_pairs(messages, end)
@@ -332,9 +349,7 @@ async def truncate_active(
     records = await branches.list(session_id)
     active = _active_of(session_id, records)
     messages: list[Message] = await history.load(active.thread_id)
-    end = _turn_cut(messages, anchor_row_id, must_drop=True)
-    # In place, so unlike a branch or fork the cut must keep the summary.
-    _assert_unsummarized(messages, end)
+    end = _turn_cut(messages, anchor_row_id, must_drop=True, keep_summary=True)
     dropped = {message.row_id for message in messages[end:] if message.row_id}
     if _strands_a_branch(records, active.branch_id, messages, end, dropped):
         raise HistoryRewriteError(
@@ -375,7 +390,8 @@ async def fork_session(
     """
     active = _active_of(session_id, await branches.list(session_id))
     messages: list[Message] = await history.load(active.thread_id)
-    end = _turn_cut(messages, anchor_row_id, must_drop=False)
+    # A fork is a new session, so it may start inside the summarized part.
+    end = _turn_cut(messages, anchor_row_id, must_drop=False, keep_summary=False)
     prefix = messages[:end]
     forked_session_id = str(uuid.uuid4())
     copied = 0

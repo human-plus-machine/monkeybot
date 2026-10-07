@@ -2,8 +2,8 @@
 
 Every op needs an idle session: it takes the turn lock and blocks new voice
 calls. Edit and regenerate hand the lock to the reply scheduler, so the new
-turn cannot race another admission. Restore starts no turn and leaves queued
-follow-ups queued while the client lifts the dropped message into its composer.
+turn cannot race another admission. Restore starts no turn: like rewind, it
+drains queued follow-ups onto the new branch.
 """
 
 from __future__ import annotations
@@ -158,14 +158,9 @@ def register_history_rewrite_routes(api: APIRouter) -> None:
         storage = _storage_backend(request)
         if body.op == "edit" and body.message is None and not body.content:
             raise APIError(400, "BAD_REQUEST", "edit requires message or content", uuid.uuid4().hex)
-        if body.op == "restore" and (
-            body.message is not None or body.content or body.request_id is not None
-        ):
+        if body.op == "restore" and (body.message is not None or body.content):
             raise APIError(
-                400,
-                "BAD_REQUEST",
-                "restore does not take message, content, or request_id",
-                uuid.uuid4().hex,
+                400, "BAD_REQUEST", "restore does not take message or content", uuid.uuid4().hex
             )
         edited: list[ContentBlock] | None = None
         if body.op == "edit":
@@ -208,8 +203,6 @@ def register_history_rewrite_routes(api: APIRouter) -> None:
                 lease.hand_off()
                 return BranchOpResponse(branch_id=result.branch_id, request_id=request_id)
             await _publish(bus, session_id=session_id, branch_id=result.branch_id, op=body.op)
-        if body.op == "restore":
-            return BranchOpResponse(branch_id=result.branch_id)
         # Follow-ups queued while the lease held the turn lock run on the new branch.
         await _drain_follow_up(
             bus=bus, loop_ref=request.app.state.loop, storage=storage, session_id=session_id

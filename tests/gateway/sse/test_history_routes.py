@@ -12,6 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from monkeybot.core.config.realtime_config import RealtimeConfig
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
+from monkeybot.core.persistence.thread_summary import CONTEXT_SUMMARY_PREFIX
 from monkeybot.core.runtime.history_rewrite import resolve_active_thread_id
 from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.gateway.realtime.manager import RealtimeSessionManager
@@ -133,11 +134,51 @@ async def test_restore_drops_the_user_turn_without_replying(harness, backend) ->
         json={"op": "restore", "anchor": opened[2]["anchor"], "message": "lost"},
     )
     assert with_text.status_code == 400, with_text.text
+    assert len((await _detail(client))["messages"]) == 4
     with_id = await client.post(
         f"/sessions/{SESSION}/branches",
         json={"op": "restore", "anchor": opened[2]["anchor"], "request_id": "r1"},
     )
-    assert with_id.status_code == 400, with_id.text
+    assert with_id.status_code == 200, with_id.text
+    assert with_id.json()["request_id"] is None
+    assert harness["loop"].turns == []
+
+
+@pytest.mark.asyncio
+async def test_restore_drains_follow_ups_queued_during_the_op(harness, backend) -> None:
+    client = harness["client"]
+    await _seed(backend, "keep", "kept reply", "redo me", "redo reply")
+    rows = (await _detail(client))["messages"]
+    # The state POST /queue leaves when it meets the restore's lease.
+    harness["registry"].get(SESSION).admission.enqueue_follow_up("q1", [Text(text="queued")])
+    created = await client.post(
+        f"/sessions/{SESSION}/branches",
+        json={"op": "restore", "anchor": rows[2]["anchor"]},
+    )
+    assert created.status_code == 200, created.text
+    await _wait_turn(harness)
+    [(thread, content)] = harness["loop"].turns
+    assert thread.endswith(created.json()["branch_id"])
+    assert [b.text for b in content] == ["queued"]  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_summarized_rows_are_read_only_over_http(harness, backend) -> None:
+    client = harness["client"]
+    await _seed(backend, "u1", f"{CONTEXT_SUMMARY_PREFIX}\nfolded", "u2", "a2")
+    rows = (await _detail(client))["messages"]
+    assert [m["rewritable"] for m in rows] == [False, False, True, True]
+    for op in ("rewind", "regenerate"):
+        response = await client.post(
+            f"/sessions/{SESSION}/branches", json={"op": op, "anchor": rows[1]["anchor"]}
+        )
+        assert response.status_code == 422, response.text
+        assert response.json()["error"]["code"] == "SUMMARIZED"
+    truncated = await client.post(
+        f"/sessions/{SESSION}/truncate", json={"anchor": rows[0]["anchor"]}
+    )
+    assert truncated.status_code == 422, truncated.text
+    assert truncated.json()["error"]["code"] == "SUMMARIZED"
     assert len((await _detail(client))["messages"]) == 4
 
 
