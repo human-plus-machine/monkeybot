@@ -37,6 +37,7 @@ from monkeybot.core.persistence.durable_runs import (
     _tuple_to_run_row,
 )
 from monkeybot.core.persistence.errors import AmbiguousCommitError
+from monkeybot.core.persistence.row_ids import loaded_row_id, row_id_for_insert
 from monkeybot.core.persistence.scheduled_loops import (
     _SCHEDULED_LOOP_COLUMNS,
     GOAL_MAX_CONSECUTIVE_ERRORS,
@@ -183,6 +184,7 @@ async def _apply_schema(pool: asyncpg.Pool) -> None:
         await conn.execute(
             "ALTER TABLE conversation_history ADD COLUMN IF NOT EXISTS message_id TEXT"
         )
+        await conn.execute("ALTER TABLE conversation_history ADD COLUMN IF NOT EXISTS row_id TEXT")
         await conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_history_message_id "
             "ON conversation_history(message_id) "
@@ -293,9 +295,9 @@ class PostgresHistoryStore:
         await conn.execute(
             """
             INSERT INTO conversation_history(
-                thread_id, role, content, created_at, agent_scope, turn_id, message_id
+                thread_id, role, content, created_at, agent_scope, turn_id, message_id, row_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             """,
             thread_id,
             message.role,
@@ -304,6 +306,7 @@ class PostgresHistoryStore:
             self._agent_scope,
             turn_id,
             message_id,
+            row_id_for_insert(message),
         )
 
     async def append(
@@ -343,7 +346,7 @@ class PostgresHistoryStore:
             if limit is None:
                 rows = await conn.fetch(
                     """
-                    SELECT id, role, content
+                    SELECT id, role, content, row_id
                     FROM conversation_history
                     WHERE thread_id = $1 AND agent_scope = $2
                     ORDER BY created_at ASC, id ASC
@@ -355,7 +358,7 @@ class PostgresHistoryStore:
             else:
                 rows = await conn.fetch(
                     """
-                    SELECT id, role, content
+                    SELECT id, role, content, row_id
                     FROM conversation_history
                     WHERE thread_id = $1 AND agent_scope = $2
                     ORDER BY created_at DESC, id DESC
@@ -368,7 +371,7 @@ class PostgresHistoryStore:
                 rows_chrono = list(reversed(rows))
         out: list[Message] = []
         for row in rows_chrono:
-            row_id = int(row["id"])
+            db_id = int(row["id"])
             role = row["role"]
             content_blob = row["content"]
             try:
@@ -379,14 +382,20 @@ class PostgresHistoryStore:
             except (json.JSONDecodeError, ValueError, TypeError) as exc:
                 logger.error(
                     "Unparseable history row id=%s thread_id=%s",
-                    row_id,
+                    db_id,
                     thread_id,
                     exc_info=True,
                 )
-                raise ValueError(f"history row {row_id} unparseable: {exc}") from exc
+                raise ValueError(f"history row {db_id} unparseable: {exc}") from exc
             if role not in _VALID_ROLES:
-                raise ValueError(f"history row {row_id} has invalid role: {role!r}")
-            out.append(Message(role=cast(Role, role), content=blocks))
+                raise ValueError(f"history row {db_id} has invalid role: {role!r}")
+            out.append(
+                Message(
+                    role=cast(Role, role),
+                    content=blocks,
+                    row_id=loaded_row_id(row["row_id"], db_id),
+                )
+            )
         return out
 
     async def clear(self, thread_id: str) -> None:

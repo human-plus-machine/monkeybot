@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import cast
 
 from monkeybot.core.llm.provider import Message
@@ -86,7 +87,7 @@ def _repair_assistant_message(msg: Message) -> Message:
             new_blocks.append(block)
     if not changed:
         return msg
-    return Message(role=msg.role, content=new_blocks)
+    return replace(msg, content=new_blocks)
 
 
 def _tool_name_for_response(
@@ -208,7 +209,7 @@ def repair_tool_turn_integrity(messages: Sequence[Message]) -> list[Message]:
                             repaired_blocks.append(_synthetic_error_response(request_map[req_id]))
                         user_changed = True
 
-                    repaired_user = Message(role="user", content=repaired_blocks)
+                    repaired_user = replace(user_msg, content=repaired_blocks)
                     out.append(repaired)
                     synthetic_orphans = _synthetic_tool_requests(orphan_responses, request_map)
                     if synthetic_orphans:
@@ -267,7 +268,7 @@ def repair_tool_turn_integrity(messages: Sequence[Message]) -> list[Message]:
                     else:
                         user_blocks.append(block)
 
-                out.append(Message(role="user", content=user_blocks) if changed else msg)
+                out.append(replace(msg, content=user_blocks) if changed else msg)
                 i += 1
                 continue
 

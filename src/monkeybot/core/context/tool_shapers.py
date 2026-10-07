@@ -7,6 +7,7 @@ import logging
 import os
 import re
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any, Literal
 
 from monkeybot.core.context.common import ContextPressureTier, text_from_blocks
@@ -352,7 +353,7 @@ def shape_messages_tool_results(
                     is_error=block.is_error,
                 )
             )
-        out.append(Message(role=msg.role, content=new_content) if changed else msg)
+        out.append(replace(msg, content=new_content) if changed else msg)
     return out
 
 

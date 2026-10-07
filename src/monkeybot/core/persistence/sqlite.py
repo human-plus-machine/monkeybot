@@ -121,7 +121,8 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     created_at INTEGER NOT NULL,
     agent_scope TEXT NOT NULL DEFAULT '',
     turn_id TEXT,
-    message_id TEXT
+    message_id TEXT,
+    row_id TEXT
 )""",
     """CREATE TABLE IF NOT EXISTS subagent_runs (
     run_id TEXT PRIMARY KEY,
@@ -298,6 +299,7 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
     await _ensure_subagent_runs_claim_columns(conn)
     await _ensure_conversation_history_agent_scope_column(conn)
     await _ensure_history_memory_columns(conn)
+    await _ensure_history_row_id_column(conn)
     await _ensure_outbox_agent_id_column(conn)
     await _ensure_outbox_palace_id_column(conn)
     await _ensure_scheduled_loop_kind_columns(conn)
@@ -459,6 +461,22 @@ async def _ensure_history_memory_columns(conn: aiosqlite.Connection) -> None:
         await conn.execute("ALTER TABLE conversation_history ADD COLUMN message_id TEXT")
     await conn.execute(HISTORY_MESSAGE_ID_INDEX_DDL)
     await conn.commit()
+
+
+async def _ensure_history_row_id_column(conn: aiosqlite.Connection) -> None:
+    """Add ``row_id`` on conversation_history when upgrading an existing DB."""
+    cur = await conn.execute("PRAGMA table_info(conversation_history)")
+    rows = await cur.fetchall()
+    await cur.close()
+    names = {str(r[1]) for r in rows}
+    if not names or "row_id" in names:
+        return
+    try:
+        await conn.execute("ALTER TABLE conversation_history ADD COLUMN row_id TEXT")
+        await conn.commit()
+    except aiosqlite.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
+            raise
 
 
 async def _ensure_outbox_palace_id_column(conn: aiosqlite.Connection) -> None:
