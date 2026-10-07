@@ -157,6 +157,10 @@ def register_history_rewrite_routes(api: APIRouter) -> None:
         storage = _storage_backend(request)
         if body.op == "edit" and body.message is None and not body.content:
             raise APIError(400, "BAD_REQUEST", "edit requires message or content", uuid.uuid4().hex)
+        if body.op == "restore" and (body.message is not None or body.content):
+            raise APIError(
+                400, "BAD_REQUEST", "restore does not take message or content", uuid.uuid4().hex
+            )
         edited: list[ContentBlock] | None = None
         if body.op == "edit":
             edited = _parse_user_content(body=body, session_id=session_id, request=request)

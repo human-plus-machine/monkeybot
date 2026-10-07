@@ -218,6 +218,40 @@ async def test_rewind_keeps_turn_and_requires_a_drop(env) -> None:
     assert await env.texts() == ["u1", "a1"]
 
 
+@pytest.mark.asyncio
+async def test_ops_refuse_rows_at_or_before_the_summary(env) -> None:
+    await env.turn("u1", "a1")
+    rows = await env.rows()
+    summary = _text("assistant", f"{CONTEXT_SUMMARY_PREFIX}\nearlier")
+    # Compaction mid-turn: the continuation after the summary has no user row of its own.
+    await env.history.reset(await env.thread(), [rows[0], summary, _text("assistant", "continued")])
+    rows = await env.rows()
+    for op, row in [("regenerate", rows[2]), ("edit", rows[0]), ("rewind", rows[0])]:
+        with pytest.raises(HistoryRewriteError) as exc:
+            await env.op(op, row.row_id)
+        assert exc.value.code == "SUMMARIZED", op
+    with pytest.raises(HistoryRewriteError) as exc:
+        await _truncate(env, rows[0].row_id)
+    assert exc.value.code == "SUMMARIZED"
+    assert await env.branches.list(SESSION) == []
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_non_user_and_first_rows(env) -> None:
+    await env.turn("u1", "a1")
+    await env.turn("u2", "a2")
+    rows = await env.rows()
+    with pytest.raises(HistoryRewriteError) as exc:
+        await env.op("restore", rows[1].row_id)
+    assert exc.value.code == "TURN_BOUNDARY"
+    with pytest.raises(HistoryRewriteError) as exc:
+        await env.op("restore", rows[0].row_id)
+    assert exc.value.code == "NOTHING_TO_KEEP"
+    result = await env.op("restore", rows[2].row_id)
+    assert result.replay_content is None
+    assert await env.texts() == ["u1", "a1"]
+
+
 def test_cut_between_tool_pair_is_rejected_but_old_orphans_are_not() -> None:
     rows = [
         _text("user", "u1"),
@@ -428,6 +462,7 @@ async def test_random_ops_keep_every_branch_reachable(env, seed: int) -> None:
                 "NOTHING_TO_TRUNCATE",
                 "TURN_BOUNDARY",
                 "BRANCHES_IN_TAIL",
+                "SUMMARIZED",
             }
 
         records = await env.branches.list(SESSION)

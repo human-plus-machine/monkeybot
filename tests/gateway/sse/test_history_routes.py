@@ -123,12 +123,17 @@ async def test_restore_drops_the_user_turn_without_replying(harness, backend) ->
 
     await client.put(f"/sessions/{SESSION}/branches/active", json={"branch_id": "root"})
     opened = (await _detail(client))["messages"]
-    emptied = await client.post(
+    first = await client.post(
         f"/sessions/{SESSION}/branches",
         json={"op": "restore", "anchor": opened[0]["anchor"]},
     )
-    assert emptied.status_code == 200, emptied.text
-    assert (await _detail(client))["messages"] == []
+    assert first.status_code == 422, first.text
+    with_text = await client.post(
+        f"/sessions/{SESSION}/branches",
+        json={"op": "restore", "anchor": opened[2]["anchor"], "message": "lost"},
+    )
+    assert with_text.status_code == 400, with_text.text
+    assert len((await _detail(client))["messages"]) == 4
 
 
 @pytest.mark.asyncio

@@ -186,24 +186,42 @@ def _rewind_end(messages: list[Message], index: int) -> int:
     return end
 
 
+_USER_ONLY_MESSAGES = {
+    "edit": "Only a user message can be edited.",
+    "restore": "Only a user message can be redone.",
+}
+
+
+def _assert_unsummarized(messages: list[Message], index: int, end: int) -> None:
+    """Reject a cut touching rows at or before the newest compaction summary.
+
+    Those rows are read-only on the wire too; cutting there would drop the summary.
+    """
+    summary = last_summary_index(messages)
+    if summary is not None and min(index, end) <= summary:
+        raise HistoryRewriteError(
+            422, "SUMMARIZED", "That part of the chat was summarized and can't be changed."
+        )
+
+
 def prefix_end_for(messages: list[Message], index: int, op: BranchOp) -> int:
     """Exclusive end of the prefix ``op`` keeps, after boundary checks."""
     if op == "edit" or op == "restore":
         if not is_user_text_row(messages[index]):
-            raise HistoryRewriteError(
-                422,
-                "TURN_BOUNDARY",
-                "Only a user message can be edited."
-                if op == "edit"
-                else "Only a user message can be redone.",
-            )
+            raise HistoryRewriteError(422, "TURN_BOUNDARY", _USER_ONLY_MESSAGES[op])
         end = index
+        if op == "restore" and end == 0:
+            # An empty branch has no row to carry a navigator back to the parent.
+            raise HistoryRewriteError(
+                422, "NOTHING_TO_KEEP", "The first message can't be redone. Edit it instead."
+            )
     elif op == "regenerate":
         end = _owning_user_index(messages, index)
     else:
         end = _rewind_end(messages, index)
         if end >= len(messages):
             raise HistoryRewriteError(422, "NOTHING_TO_REWIND", "Nothing after that message.")
+    _assert_unsummarized(messages, index, end)
     assert_tool_pairs(messages, end)
     return end
 
@@ -268,9 +286,11 @@ async def branch_op(
 
 def _turn_cut(messages: list[Message], anchor_row_id: str, *, must_drop: bool) -> int:
     """Exclusive end keeping the turn that holds ``anchor_row_id``."""
-    end = _rewind_end(messages, _row_index(messages, anchor_row_id))
+    index = _row_index(messages, anchor_row_id)
+    end = _rewind_end(messages, index)
     if must_drop and end >= len(messages):
         raise HistoryRewriteError(422, "NOTHING_TO_TRUNCATE", "Nothing after that message.")
+    _assert_unsummarized(messages, index, end)
     assert_tool_pairs(messages, end)
     return end
 
