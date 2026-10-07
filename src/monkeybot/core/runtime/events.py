@@ -90,6 +90,22 @@ class Error:
 
 
 @dataclass(frozen=True)
+class HarnessIntervention:
+    """Transcript-only record of a harness guard. Not published on the SSE wire.
+
+    ``intervention`` is one of ``doom_loop``, ``truncated_batch``,
+    ``empty_completion``, ``post_tool_empty``, ``background_jobs_nudge``,
+    ``compaction_fallback``, ``max_turns``, ``verifier_replan``.
+    """
+
+    kind: Literal["HarnessIntervention"] = "HarnessIntervention"
+    request_id: str = ""
+    intervention: str = ""
+    inner_turn: int = 0
+    detail: str = ""
+
+
+@dataclass(frozen=True)
 class ContextSummarizing:
     kind: Literal["ContextSummarizing"] = "ContextSummarizing"
     request_id: str = ""
@@ -468,6 +484,7 @@ AgentEvent: TypeAlias = (
     | ToolCallResult
     | TurnComplete
     | Error
+    | HarnessIntervention
     | ContextSummarizing
     | ContextSummarized
     | ContextUsage
@@ -851,6 +868,13 @@ def event_to_json(event: AgentEvent) -> str:
             payload["trace_id"] = event.trace_id
     elif isinstance(event, Error):
         payload = {**base, "error": event.error}
+    elif isinstance(event, HarnessIntervention):
+        payload = {
+            **base,
+            "intervention": event.intervention,
+            "inner_turn": event.inner_turn,
+            "detail": event.detail,
+        }
     elif isinstance(event, (ContextSummarizing, ContextUsage)):
         payload = {
             **base,
@@ -1025,6 +1049,17 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         err_raw = payload.get("error", "")
         err = err_raw if isinstance(err_raw, str) else ""
         return Error(request_id=rid, error=err)
+    if t == "HarnessIntervention":
+        name_raw = payload.get("intervention", "")
+        detail_raw = payload.get("detail", "")
+        turn_raw = payload.get("inner_turn", 0)
+        inner_turn = int(turn_raw) if isinstance(turn_raw, (int, float)) else 0
+        return HarnessIntervention(
+            request_id=rid,
+            intervention=name_raw if isinstance(name_raw, str) else "",
+            inner_turn=inner_turn,
+            detail=detail_raw if isinstance(detail_raw, str) else "",
+        )
     if t == "ContextSummarizing":
         et, cwt = _context_token_fields(payload)
         return ContextSummarizing(request_id=rid, estimated_tokens=et, context_window_tokens=cwt)

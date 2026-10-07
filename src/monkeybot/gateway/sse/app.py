@@ -75,7 +75,13 @@ from monkeybot.core.persistence.transcript import (
     TranscriptWriter,
     runtime_manifest_fields,
 )
-from monkeybot.core.runtime.events import AgentEvent, TurnComplete, UsageTotals, event_to_json
+from monkeybot.core.runtime.events import (
+    AgentEvent,
+    HarnessIntervention,
+    TurnComplete,
+    UsageTotals,
+    event_to_json,
+)
 from monkeybot.core.runtime.events import Error as AgentError
 from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.loop import run as run_loop
@@ -1110,7 +1116,9 @@ class GatewayLoopPort:
                     )
                 if transcript_writer is not None:
                     await transcript_writer.write_event(evt)
-                await bus.publish_data(event_to_json(evt))
+                # Guard hits stay in the transcript. Clients keep the existing wire.
+                if not isinstance(evt, HarnessIntervention):
+                    await bus.publish_data(event_to_json(evt))
         finally:
             if in_flight:
                 end_in_flight_turn()

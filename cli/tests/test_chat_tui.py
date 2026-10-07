@@ -641,7 +641,7 @@ def test_slash_export_trace_no_session(tmp_path: Path) -> None:
         async with app.run_test() as pilot:
             app.query_one("#prompt", Composer).post_message(Composer.Submitted("/export-trace"))
             await pilot.pause()
-            assert not list((tmp_path / "data").glob("trace_export_*.ndjson"))
+            assert not list((tmp_path / "data").glob("trace_export_*"))
 
     asyncio.run(_run())
 
@@ -665,11 +665,20 @@ def test_slash_export_trace_copies_ndjson(tmp_path: Path) -> None:
             (session_dir / "transcript.ndjson").write_text(
                 '{"seq":1,"type":"SessionManifest"}\n', encoding="utf-8"
             )
+            child = session_dir / "subagents" / "child-1"
+            child.mkdir(parents=True)
+            (child / "transcript.ndjson").write_text(
+                '{"seq":1,"type":"UserMessage"}\n', encoding="utf-8"
+            )
             app.query_one("#prompt", Composer).post_message(Composer.Submitted("/export-trace"))
             await pilot.pause()
-            exports = list((tmp_path / "data").glob("trace_export_*.ndjson"))
+            exports = list((tmp_path / "data").glob("trace_export_*"))
             assert len(exports) == 1
-            assert exports[0].read_text(encoding="utf-8") == '{"seq":1,"type":"SessionManifest"}\n'
+            assert exports[0].is_dir()
+            assert (exports[0] / "transcript.ndjson").read_text(encoding="utf-8") == (
+                '{"seq":1,"type":"SessionManifest"}\n'
+            )
+            assert (exports[0] / "subagents" / "child-1" / "transcript.ndjson").is_file()
 
     asyncio.run(_run())
 

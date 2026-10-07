@@ -105,7 +105,7 @@ _SLASH_SPECS: tuple[tuple[str, str], ...] = (
     ("/timestamps", "Toggle turn timestamps"),
     ("/copy", "Copy last assistant reply"),
     ("/export", "Export transcript to a markdown file"),
-    ("/export-trace", "Export full debug trace (ndjson) for evals"),
+    ("/export-trace", "Export the debug trace directory (ndjson + subagents)"),
     ("/bye", "Exit chat"),
 )
 
@@ -1686,10 +1686,10 @@ class ChatApp(App[int]):
             )
             return
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        dest = self.agent_root / "data" / f"trace_export_{ts}.ndjson"
+        dest = self.agent_root / "data" / f"trace_export_{ts}"
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dest)
+            shutil.copytree(session_dir, dest)
         except OSError as exc:
             self._mount_system(f"Trace export failed: {exc}", error=True)
             return
