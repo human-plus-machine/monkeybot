@@ -20,6 +20,7 @@ from monkeybot.core.llm.provider import Message, Role
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.sqlite import ConnLock, with_conn_lock
 from monkeybot.core.persistence.thread_summary import (
+    BRANCH_THREAD_ID_PREFIX,
     SUBAGENT_THREAD_ID_PREFIX,
     ChatThreadSummary,
     preview_from_content_blob,
@@ -260,6 +261,31 @@ class SQLiteHistoryStore:
             out.append(Message(role=cast(Role, role), content=blocks))
         return out
 
+    @with_conn_lock
+    async def last_row(self, thread_id: str) -> tuple[int, str] | None:
+        """Message count and the newest content JSON, without hydrating the thread."""
+        cursor = await self._conn.execute(
+            """
+            SELECT
+                COUNT(*) AS message_count,
+                (
+                    SELECT h2.content
+                    FROM conversation_history h2
+                    WHERE h2.thread_id = ? AND h2.agent_scope = ?
+                    ORDER BY h2.created_at DESC, h2.id DESC
+                    LIMIT 1
+                ) AS last_content
+            FROM conversation_history h
+            WHERE h.thread_id = ? AND h.agent_scope = ?
+            """,
+            (thread_id, self._agent_scope, thread_id, self._agent_scope),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None or int(row[0] or 0) == 0:
+            return None
+        return int(row[0]), str(row[1] or "")
+
     async def clear(self, thread_id: str) -> None:
         """Delete every stored message for ``thread_id`` within this store's agent scope."""
         async with self._lock:
@@ -306,10 +332,10 @@ class SQLiteHistoryStore:
         """Return recent threads in this store's agent scope, ordered by last activity (newest first).
 
         Excludes subagent transcripts (``thread_id`` prefixed
-        ``SUBAGENT_THREAD_ID_PREFIX``) — otherwise a subagent that finishes
-        after its parent's last turn would outrank the parent as "newest,"
-        making ``--continue`` resume the subagent's transcript under the
-        main-agent prompt and tools instead of the actual previous chat.
+        ``SUBAGENT_THREAD_ID_PREFIX``) and conversation branches
+        (``BRANCH_THREAD_ID_PREFIX``) — otherwise a subagent or branch that
+        finishes after its parent's last turn would outrank the parent as
+        "newest," making ``--continue`` resume the wrong transcript.
         Uses ``GLOB``, not ``LIKE``: SQLite's ``LIKE`` ASCII-folds case by
         default, so ``NOT LIKE 'subagent:%'`` would also swallow an ordinary
         user session literally named e.g. ``Subagent:foo`` even though the
@@ -336,12 +362,14 @@ class SQLiteHistoryStore:
                     LIMIT 1
                 ) AS last_content
             FROM conversation_history h
-            WHERE h.agent_scope = ? AND h.thread_id NOT GLOB ? || '*'
+            WHERE h.agent_scope = ?
+              AND h.thread_id NOT GLOB ? || '*'
+              AND h.thread_id NOT GLOB ? || '*'
             GROUP BY h.thread_id
             ORDER BY last_message_at DESC
             LIMIT ?
             """,
-            (self._agent_scope, SUBAGENT_THREAD_ID_PREFIX, cap),
+            (self._agent_scope, SUBAGENT_THREAD_ID_PREFIX, BRANCH_THREAD_ID_PREFIX, cap),
         )
         rows = await cursor.fetchall()
         await cursor.close()

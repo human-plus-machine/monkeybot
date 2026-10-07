@@ -113,6 +113,57 @@ def new_entry_id() -> str:
     return str(uuid.uuid4())
 
 
+def match_verbatim_seq(entries: Sequence[GoalEntry], user_texts: Sequence[str]) -> int | None:
+    """Seq of the ledger row that lines up with the last kept user message.
+
+    Walks ``entries`` in seq order and consumes ``user_texts`` in order. Entries
+    whose verbatim does not match the next kept user text are skipped, so
+    classifier noise between two user messages stays inside the copied prefix
+    when it was recorded before the last match.
+    """
+    if not user_texts:
+        return None
+    index = 0
+    last: int | None = None
+    wanted = [text.strip() for text in user_texts]
+    for entry in entries:
+        if index >= len(wanted):
+            break
+        if entry.verbatim.strip() == wanted[index]:
+            last = entry.seq
+            index += 1
+    return last
+
+
+def retarget_entry(
+    entry: GoalEntry,
+    *,
+    thread_id: str,
+    seq: int,
+    id_map: Mapping[str, str],
+) -> GoalEntry:
+    """Copy ``entry`` onto ``thread_id`` with new ids. Drops relates_to that
+    point at a row outside the copied prefix.
+    """
+    new_id = id_map[entry.entry_id]
+    constraints = tuple(
+        replace(
+            constraint,
+            source_entry_id=id_map.get(constraint.source_entry_id, constraint.source_entry_id),
+        )
+        for constraint in entry.constraints
+    )
+    relates = id_map.get(entry.relates_to) if entry.relates_to else None
+    return replace(
+        entry,
+        entry_id=new_id,
+        thread_id=thread_id,
+        seq=seq,
+        relates_to=relates,
+        constraints=constraints,
+    )
+
+
 def now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -269,6 +320,10 @@ class GoalLedgerStore(Protocol):
 
     async def delete_entry(self, entry_id: str) -> None: ...
 
+    async def copy_prefix(self, src_thread: str, dst_thread: str, upto_seq: int) -> int: ...
+
+    async def drop_after(self, thread_id: str, upto_seq: int) -> int: ...
+
 
 GOAL_LEDGER_COLUMNS = (
     "entry_id",
@@ -339,6 +394,30 @@ class InMemoryGoalLedgerStore:
         self._entries[old.thread_id] = [
             row for row in self._entries[old.thread_id] if row.entry_id != entry_id
         ]
+
+    async def copy_prefix(self, src_thread: str, dst_thread: str, upto_seq: int) -> int:
+        source = [row for row in self._entries.get(src_thread) or [] if row.seq <= upto_seq]
+        id_map = {row.entry_id: new_entry_id() for row in source}
+        copied: list[GoalEntry] = []
+        for seq, row in enumerate(source, start=1):
+            copied.append(retarget_entry(row, thread_id=dst_thread, seq=seq, id_map=id_map))
+        for row in copied:
+            self._entries[dst_thread].append(row)
+            self._by_id[row.entry_id] = row
+        return len(copied)
+
+    async def drop_after(self, thread_id: str, upto_seq: int) -> int:
+        kept: list[GoalEntry] = []
+        dropped = 0
+        for row in self._entries.get(thread_id) or []:
+            if row.seq > upto_seq:
+                self._by_id.pop(row.entry_id, None)
+                dropped += 1
+            else:
+                kept.append(row)
+        if thread_id in self._entries:
+            self._entries[thread_id] = kept
+        return dropped
 
 
 class SQLiteGoalLedgerStore:
@@ -424,14 +503,7 @@ class SQLiteGoalLedgerStore:
 
     @with_conn_lock
     async def list_entries(self, thread_id: str) -> list[GoalEntry]:
-        columns = ", ".join(GOAL_LEDGER_COLUMNS)
-        cursor = await self._conn.execute(
-            f"SELECT {columns} FROM goal_ledger WHERE thread_id = ? ORDER BY seq ASC",
-            (thread_id,),
-        )
-        rows = await cursor.fetchall()
-        await cursor.close()
-        return [entry_from_row(tuple(r)) for r in rows]
+        return await self._list_entries_unlocked(thread_id)
 
     @with_conn_lock
     async def update_status(self, entry_id: str, status: Status) -> None:
@@ -445,3 +517,40 @@ class SQLiteGoalLedgerStore:
     async def delete_entry(self, entry_id: str) -> None:
         await self._conn.execute("DELETE FROM goal_ledger WHERE entry_id = ?", (entry_id,))
         await self._conn.commit()
+
+    @with_conn_lock
+    async def copy_prefix(self, src_thread: str, dst_thread: str, upto_seq: int) -> int:
+        source = [
+            row for row in await self._list_entries_unlocked(src_thread) if row.seq <= upto_seq
+        ]
+        id_map = {row.entry_id: new_entry_id() for row in source}
+        await self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            for seq, row in enumerate(source, start=1):
+                await self._insert_entry(
+                    retarget_entry(row, thread_id=dst_thread, seq=seq, id_map=id_map)
+                )
+            await self._conn.commit()
+        except Exception:
+            await self._conn.rollback()
+            raise
+        return len(source)
+
+    @with_conn_lock
+    async def drop_after(self, thread_id: str, upto_seq: int) -> int:
+        cursor = await self._conn.execute(
+            "DELETE FROM goal_ledger WHERE thread_id = ? AND seq > ?",
+            (thread_id, upto_seq),
+        )
+        await self._conn.commit()
+        return int(cursor.rowcount)
+
+    async def _list_entries_unlocked(self, thread_id: str) -> list[GoalEntry]:
+        columns = ", ".join(GOAL_LEDGER_COLUMNS)
+        cursor = await self._conn.execute(
+            f"SELECT {columns} FROM goal_ledger WHERE thread_id = ? ORDER BY seq ASC",
+            (thread_id,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [entry_from_row(tuple(r)) for r in rows]

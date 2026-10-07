@@ -11,6 +11,7 @@ from typing import Any
 
 import aiosqlite
 
+from monkeybot.core.persistence.branches import SQLiteBranchStore
 from monkeybot.core.persistence.durable_runs import SQLiteRunStore
 from monkeybot.core.persistence.goal_ledger import SQLiteGoalLedgerStore
 from monkeybot.core.persistence.history import SQLiteHistoryStore
@@ -44,6 +45,7 @@ class SQLiteStorageBackend:
         self._scheduled_loops_store: SQLiteScheduledLoopStore | None = None
         self._goal_ledger_store: SQLiteGoalLedgerStore | None = None
         self._session_turn_lock_store: SQLiteSessionTurnLockStore | None = None
+        self._branch_store: SQLiteBranchStore | None = None
         self._outbox_store: Any | None = None
 
     async def open(self, *, run_schema: bool = True) -> None:
@@ -63,6 +65,7 @@ class SQLiteStorageBackend:
         self._scheduled_loops_store = SQLiteScheduledLoopStore(self._conn, lock=self._tx_lock)
         self._goal_ledger_store = SQLiteGoalLedgerStore(self._conn, lock=self._tx_lock)
         self._session_turn_lock_store = SQLiteSessionTurnLockStore(self._conn, lock=self._tx_lock)
+        self._branch_store = SQLiteBranchStore(self._conn, lock=self._tx_lock)
         from monkeybot.core.memory.outbox import SqliteOutboxStore
 
         self._outbox_store = SqliteOutboxStore(
@@ -79,6 +82,7 @@ class SQLiteStorageBackend:
             self._scheduled_loops_store = None
             self._goal_ledger_store = None
             self._session_turn_lock_store = None
+            self._branch_store = None
             self._outbox_store = None
 
     def history(self) -> SQLiteHistoryStore:
@@ -110,6 +114,11 @@ class SQLiteStorageBackend:
         if self._session_turn_lock_store is None:
             raise RuntimeError("SQLiteStorageBackend.open() has not been called")
         return self._session_turn_lock_store
+
+    def branches(self) -> SQLiteBranchStore:
+        if self._branch_store is None:
+            raise RuntimeError("SQLiteStorageBackend.open() has not been called")
+        return self._branch_store
 
     def outbox(self) -> Any:
         if self._outbox_store is None:

@@ -241,6 +241,61 @@ class AgentUsageResponse(BaseModel):
     by_bucket_model: list[UsageSeriesPointResponse] = Field(default_factory=list)
 
 
+class HistoryAnchorBody(BaseModel):
+    """Stored-row address. ``fingerprint`` is the SHA-256 of role plus content."""
+
+    row_index: int = Field(ge=0)
+    fingerprint: str = Field(min_length=64, max_length=64)
+
+    @field_validator("fingerprint")
+    @classmethod
+    def _hex_fingerprint(cls, value: str) -> str:
+        if any(ch not in "0123456789abcdef" for ch in value):
+            raise ValueError("fingerprint must be a lowercase hex sha256")
+        return value
+
+
+class BranchOpRequest(BaseModel):
+    """POST /sessions/{id}/branches — edit, regenerate, or rewind."""
+
+    op: Literal["edit", "regenerate", "rewind"]
+    anchor: HistoryAnchorBody
+    message: str | None = Field(default=None, max_length=32000)
+    content: list[dict[str, Any]] | None = None
+    request_id: str | None = None
+
+
+class BranchOpResponse(BaseModel):
+    """POST /sessions/{id}/branches response."""
+
+    branch_id: str
+    request_id: str | None = None
+
+
+class SetActiveBranchRequest(BaseModel):
+    """PUT /sessions/{id}/branches/active body."""
+
+    branch_id: str = Field(min_length=1, max_length=64)
+
+
+class TruncateRequest(BaseModel):
+    """POST /sessions/{id}/truncate body."""
+
+    anchor: HistoryAnchorBody
+
+
+class ForkRequest(BaseModel):
+    """POST /sessions/{id}/fork body."""
+
+    anchor: HistoryAnchorBody
+
+
+class ForkResponse(BaseModel):
+    """POST /sessions/{id}/fork response."""
+
+    session_id: str
+
+
 def error_payload_dict(code: str, message: str, request_id: str) -> dict[str, Any]:
     """Build a JSON-serializable error body for JSONResponse."""
     return {"error": {"code": code, "message": message, "request_id": request_id}}

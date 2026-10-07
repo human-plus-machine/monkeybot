@@ -69,12 +69,16 @@ def _wire_start_turn_deps(
     gateway_app.gateway_runtime.hook_manager = None
     gateway_app.gateway_runtime.web_search_tool = None
 
+    async def _no_active_branch(_session_id: str) -> None:
+        return None
+
     mock_usage = AsyncMock()
     mock_history = MagicMock()
     mock_history.load = AsyncMock(return_value=[])
     mock_storage = MagicMock()
     mock_storage.history.return_value = mock_history
     mock_storage.usage.return_value = mock_usage
+    mock_storage.branches.return_value.get_active = _no_active_branch
     gateway_app.app.state.storage = mock_storage
 
 

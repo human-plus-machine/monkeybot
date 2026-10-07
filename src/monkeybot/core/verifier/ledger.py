@@ -22,6 +22,7 @@ from monkeybot.core.persistence.goal_ledger import (
     ResolvedIntent,
     Status,
     empty_resolved,
+    match_verbatim_seq,
     new_entry_id,
     now_ms,
     resolve_intent,
@@ -180,6 +181,32 @@ class GoalLedger:
         self._cache = OrderedDict(views)
         self._trim_cache()
         return len(self._cache)
+
+    def invalidate(self, thread_id: str) -> None:
+        """Drop the cached intent for ``thread_id`` so the next read reloads it."""
+        self._cache.pop(thread_id, None)
+
+    async def copy_matched_prefix(
+        self,
+        src_thread: str,
+        dst_thread: str,
+        user_texts: list[str],
+    ) -> None:
+        """Copy ledger rows up through the last user text kept in a branch prefix."""
+        entries = await self._store.list_entries(src_thread)
+        seq = match_verbatim_seq(entries, user_texts)
+        if seq is not None and seq > 0:
+            await self._store.copy_prefix(src_thread, dst_thread, seq)
+        self.invalidate(dst_thread)
+        await self._refresh_view(dst_thread)
+
+    async def drop_after_user_texts(self, thread_id: str, user_texts: list[str]) -> None:
+        """Drop ledger rows recorded after the last user text still in the thread."""
+        entries = await self._store.list_entries(thread_id)
+        seq = match_verbatim_seq(entries, user_texts)
+        await self._store.drop_after(thread_id, 0 if seq is None else seq)
+        self.invalidate(thread_id)
+        await self._refresh_view(thread_id)
 
     def close(self) -> None:
         self._closed = True

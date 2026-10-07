@@ -12,7 +12,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, Protocol, cast
 
 from fastapi import APIRouter, Depends, FastAPI, File, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
@@ -58,7 +58,6 @@ from .models import (
     FrontendToolResultPOST,
     HealthResponse,
     QueueRequest,
-    ReplyBodyFields,
     ReplyRequest,
     ReplyResponse,
     SessionUsageResponse,
@@ -115,9 +114,14 @@ def _require_bus(reg: SessionRegistry, session_id: str) -> SessionBus:
     return bus
 
 
+class _HasUserContent(Protocol):
+    message: str | None
+    content: list[dict[str, Any]] | None
+
+
 def _parse_user_content(
     *,
-    body: ReplyBodyFields,
+    body: _HasUserContent,
     session_id: str,
     request: Request,
 ) -> list[ContentBlock]:
@@ -643,6 +647,7 @@ def create_app(
     @api.delete("/sessions/{session_id}", response_model=DeleteSessionResponse)
     async def delete_session(
         session_id: str,
+        request: Request,
         reg_dep: SessionRegistry = Depends(get_registry),
     ) -> DeleteSessionResponse:
         """End a session: cancel pending work and free its in-process state.
@@ -652,6 +657,24 @@ def create_app(
         identical. When transcripts were enabled for the session, returns
         ``transcript_dir`` (the folder containing ``transcript.ndjson``).
         """
+        storage = getattr(request.app.state, "storage", None)
+        if storage is not None and getattr(storage, "branches", None) is not None:
+            from monkeybot.core.runtime.history_rewrite import purge_session_branches
+
+            try:
+                await purge_session_branches(
+                    storage.history(),
+                    storage.branches(),
+                    session_id,
+                    include_root=False,
+                )
+            except Exception:
+                logger.exception(
+                    "session branch purge failed %s",
+                    kv(session_id=session_id),
+                )
+                raise
+            logger.info("session branches purged %s", kv(session_id=session_id))
         result = await reg_dep.remove_async(session_id)
         return DeleteSessionResponse(
             deleted=result.deleted,
@@ -1293,10 +1316,23 @@ def create_app(
                 uuid.uuid4().hex,
             )
         from monkeybot.core.persistence.thread_summary import ChatThreadSummary
+        from monkeybot.core.runtime.history_rewrite import overlay_active_preview
 
         backend = _storage_backend(request)
         cap = max(1, min(limit, 200))
         rows: list[ChatThreadSummary] = await backend.history().list_threads(cap)
+        shown_rows: list[ChatThreadSummary] = []
+        for row in rows:
+            try:
+                shown = await overlay_active_preview(backend.history(), backend.branches(), row)
+            except Exception:
+                logger.warning(
+                    "active branch preview failed %s",
+                    kv(session_id=row.thread_id),
+                    exc_info=True,
+                )
+                continue
+            shown_rows.append(shown)
         return {
             "threads": [
                 {
@@ -1305,7 +1341,7 @@ def create_app(
                     "message_count": row.message_count,
                     "preview": row.preview,
                 }
-                for row in rows
+                for row in shown_rows
             ]
         }
 
@@ -1323,14 +1359,31 @@ def create_app(
                 "Chat history API is disabled",
                 uuid.uuid4().hex,
             )
-        from monkeybot.core.persistence.thread_summary import messages_to_wire
+        from monkeybot.core.persistence.thread_summary import last_summary_index, messages_to_wire
+        from monkeybot.core.runtime.history_rewrite import load_active_history
 
         backend = _storage_backend(request)
         cap = max(1, min(limit, 500))
-        messages = await backend.history().load(session_id.strip(), limit=cap)
+        thread_key = session_id.strip()
+        view = await load_active_history(backend.history(), backend.branches(), thread_key)
+        summary_at = last_summary_index(view.messages)
+        if len(view.messages) > cap:
+            offset = len(view.messages) - cap
+            shown = view.messages[offset:]
+        else:
+            offset = 0
+            shown = view.messages
         return {
-            "session_id": session_id,
-            "messages": messages_to_wire(messages, thread_id=session_id.strip()),
+            "session_id": thread_key,
+            "branch_id": view.branch_id,
+            "branch_points": view.branch_points,
+            "messages": messages_to_wire(
+                shown,
+                thread_id=view.thread_id,
+                include_anchors=True,
+                index_offset=offset,
+                summary_index=summary_at,
+            ),
         }
 
     @api.delete("/api/chat-history/{session_id}")
@@ -1350,10 +1403,17 @@ def create_app(
                 "Chat history API is disabled",
                 uuid.uuid4().hex,
             )
+        from monkeybot.core.runtime.history_rewrite import purge_session_branches
+
         backend = _storage_backend(request)
         thread_id = session_id.strip()
         try:
-            await backend.history().reset(thread_id, [])
+            await purge_session_branches(
+                backend.history(),
+                backend.branches(),
+                thread_id,
+                include_root=True,
+            )
         except Exception:
             logger.exception(
                 "chat history delete failed %s",
@@ -1363,6 +1423,9 @@ def create_app(
         logger.info("chat history deleted %s", kv(session_id=thread_id))
         return {"deleted": True}
 
+    from .history_routes import register_history_rewrite_routes
+
+    register_history_rewrite_routes(api, get_registry=get_registry)
     app.include_router(api)
     app.include_router(build_scheduler_router(loop_port=loop, registry=reg))
     app.include_router(build_goals_router())

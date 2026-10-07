@@ -696,11 +696,18 @@ async def test_chat_history_detail_includes_thinking(registry: SessionRegistry) 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             rd = await client.get("/api/chat-history/think-session")
             assert rd.status_code == 200
-            assert rd.json()["messages"] == [
-                {"role": "user", "text": "why?"},
-                {"role": "thinking", "text": "weigh options"},
-                {"role": "assistant", "text": "because"},
-            ]
+            body = rd.json()
+            assert body["branch_id"] == "root"
+            assert body["branch_points"] == []
+            messages = body["messages"]
+            assert [row["role"] for row in messages] == ["user", "thinking", "assistant"]
+            assert messages[0]["text"] == "why?"
+            assert messages[1]["text"] == "weigh options"
+            assert messages[2]["text"] == "because"
+            assert messages[0]["anchor"]["row_index"] == 0
+            assert messages[0]["editable"] is True
+            assert messages[1]["anchor"]["row_index"] == 1
+            assert messages[2]["anchor"] == messages[1]["anchor"]
     finally:
         await backend.close()
 

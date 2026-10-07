@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -61,11 +62,25 @@ _TASK_LINKAGE_KEYS: tuple[str, ...] = ("run_id", "child_thread_id", "subagent_ty
 # under the main-agent prompt and tools, instead of the actual previous conversation.
 SUBAGENT_THREAD_ID_PREFIX = "subagent:"
 
+# Child conversation branches persist a copied prefix under this prefix so
+# compaction of one branch cannot rewrite a sibling. Hidden from list_threads
+# the same way subagent transcripts are.
+BRANCH_THREAD_ID_PREFIX = "branch:"
+
+# Compaction writes this at the start of the summary assistant row.
+CONTEXT_SUMMARY_PREFIX = "[Context Summary]:"
+
+
+def is_hidden_thread_id(thread_id: str) -> bool:
+    """True for internal threads that must not appear in ``list_threads``."""
+    return thread_id.startswith(SUBAGENT_THREAD_ID_PREFIX) or thread_id.startswith(
+        BRANCH_THREAD_ID_PREFIX
+    )
+
 
 def reserved_thread_id_error(thread_id: str) -> str | None:
-    """Return an error message if ``thread_id`` collides with the reserved
-    subagent namespace (case-sensitive, matching the internal prefix exactly
-    — see ``SUBAGENT_THREAD_ID_PREFIX``), else ``None``.
+    """Return an error message if ``thread_id`` collides with a reserved
+    namespace (case-sensitive), else ``None``.
 
     Call this at every entry point that accepts a client-supplied session/
     thread id before it's persisted — a session that collides is not
@@ -80,7 +95,50 @@ def reserved_thread_id_error(thread_id: str) -> str | None:
             "transcripts) — a session with this id would be silently "
             "excluded from list_threads/--continue."
         )
+    if thread_id.startswith(BRANCH_THREAD_ID_PREFIX):
+        return (
+            f"session_id may not start with the reserved prefix "
+            f"{BRANCH_THREAD_ID_PREFIX!r} (used internally for conversation "
+            "branches) — a session with this id would be silently excluded "
+            "from list_threads/--continue."
+        )
     return None
+
+
+def message_fingerprint(message: Message) -> str:
+    """Stable id for a stored row. ``reset`` drops ``message_id``, so rewrites
+    address a row by this hash of role plus canonical content.
+    """
+    payload = json.dumps(
+        {"role": message.role, "content": [block.to_dict() for block in message.content]},
+        separators=(",", ":"),
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def is_user_text_row(message: Message) -> bool:
+    """True when ``message`` is a user turn that carries visible text.
+
+    Tool-result user rows (``ToolResponse`` only) are not turn boundaries.
+    """
+    if message.role != "user":
+        return False
+    return any(isinstance(block, Text) and block.text.strip() for block in message.content)
+
+
+def last_summary_index(messages: list[Message]) -> int | None:
+    """Index of the newest compaction summary row, or ``None`` if uncompacted."""
+    found: int | None = None
+    for index, message in enumerate(messages):
+        if message.role != "assistant":
+            continue
+        for block in message.content:
+            if isinstance(block, Text) and block.text.startswith(CONTEXT_SUMMARY_PREFIX):
+                found = index
+                break
+    return found
 
 
 @dataclass(frozen=True)
@@ -287,10 +345,69 @@ def _task_linkage_from_result(result_text: str) -> dict[str, str]:
     return out
 
 
+@dataclass(frozen=True)
+class _AnchorStamp:
+    include_anchors: bool
+    index_offset: int
+    summary_index: int | None
+    fingerprints: list[str]
+
+
+def _stamp_anchor(row: dict[str, Any], stored_index: int, stamp: _AnchorStamp) -> dict[str, Any]:
+    """Attach the stored-row anchor when the caller asked for rewrite addresses."""
+    if not stamp.include_anchors:
+        return row
+    absolute = stamp.index_offset + stored_index
+    editable = stamp.summary_index is None or absolute > stamp.summary_index
+    return {
+        **row,
+        "anchor": {
+            "row_index": absolute,
+            "fingerprint": stamp.fingerprints[stored_index],
+        },
+        "editable": editable,
+    }
+
+
+def _tool_wire_rows(
+    req: ToolRequest,
+    resp: ToolResponse | None,
+    *,
+    thread_id: str | None,
+) -> list[dict[str, Any]]:
+    """One tool row, plus image rows when the result still has a durable path."""
+    result_text = _text_from_blocks(resp.result, call_id=req.id) if resp is not None else ""
+    error: str | None = None
+    if resp is not None and resp.is_error:
+        error = result_text or "tool error"
+        result_text = ""
+    row: dict[str, Any] = {
+        "role": "tool",
+        "text": tool_collapsed_title(req.name, req.name, dict(req.args)),
+        "tool": req.name,
+        "call_id": req.id,
+        "args": truncate_wire_args(dict(req.args)),
+    }
+    # Elevate linkage from full result before truncating the stored string.
+    if req.name == "task" and result_text:
+        row.update(_task_linkage_from_result(result_text))
+    if result_text:
+        row["result"] = truncate_detail(result_text)
+    if error:
+        row["error"] = truncate_detail(error)
+    rows = [row]
+    if resp is not None and not resp.is_error:
+        rows.extend(_image_rows_for_tool_response(req, resp, thread_id=thread_id))
+    return rows
+
+
 def messages_to_wire(
     messages: list[Message],
     *,
     thread_id: str | None = None,
+    include_anchors: bool = False,
+    index_offset: int = 0,
+    summary_index: int | None = None,
 ) -> list[dict[str, Any]]:
     """Serialize turns for the chat-history API.
 
@@ -307,14 +424,28 @@ def messages_to_wire(
     Tool ``args`` / ``result`` / ``error`` strings are capped so a detail
     response cannot grow without bound (same limit as CLI expand bodies).
     Image rows never include inline base64 ``data``.
+
+    ``include_anchors`` stamps each wire row with the stored-message anchor
+    (``row_index`` + content fingerprint) and ``editable``. Rows at or before
+    ``summary_index`` (an absolute index into the full thread) are read-only.
+    ``index_offset`` is the absolute index of ``messages[0]`` when the caller
+    sliced a tail for the response limit.
     """
     responses = _tool_responses_by_id(messages)
+    stamp = _AnchorStamp(
+        include_anchors=include_anchors,
+        index_offset=index_offset,
+        summary_index=summary_index,
+        fingerprints=(
+            [message_fingerprint(message) for message in messages] if include_anchors else []
+        ),
+    )
     out: list[dict[str, Any]] = []
-    for msg in messages:
+    for stored_index, msg in enumerate(messages):
         if msg.role == "user":
             text = text_from_message(msg)
             if text:
-                out.append({"role": "user", "text": text})
+                out.append(_stamp_anchor({"role": "user", "text": text}, stored_index, stamp))
             continue
         if msg.role != "assistant":
             continue
@@ -333,34 +464,14 @@ def messages_to_wire(
                 tool_requests.append(block)
 
         for thinking in thinking_parts:
-            out.append({"role": "thinking", "text": thinking})
-
+            out.append(
+                _stamp_anchor({"role": "thinking", "text": thinking}, stored_index, stamp)
+            )
         text = "\n".join(text_parts).strip()
         if text:
-            out.append({"role": "assistant", "text": text})
-
+            out.append(_stamp_anchor({"role": "assistant", "text": text}, stored_index, stamp))
         for req in tool_requests:
             resp = responses.get(req.id)
-            result_text = _text_from_blocks(resp.result, call_id=req.id) if resp is not None else ""
-            error: str | None = None
-            if resp is not None and resp.is_error:
-                error = result_text or "tool error"
-                result_text = ""
-            row: dict[str, Any] = {
-                "role": "tool",
-                "text": tool_collapsed_title(req.name, req.name, dict(req.args)),
-                "tool": req.name,
-                "call_id": req.id,
-                "args": truncate_wire_args(dict(req.args)),
-            }
-            # Elevate linkage from full result before truncating the stored string.
-            if req.name == "task" and result_text:
-                row.update(_task_linkage_from_result(result_text))
-            if result_text:
-                row["result"] = truncate_detail(result_text)
-            if error:
-                row["error"] = truncate_detail(error)
-            out.append(row)
-            if resp is not None and not resp.is_error:
-                out.extend(_image_rows_for_tool_response(req, resp, thread_id=thread_id))
+            for row in _tool_wire_rows(req, resp, thread_id=thread_id):
+                out.append(_stamp_anchor(row, stored_index, stamp))
     return out
