@@ -21,6 +21,10 @@ from monkeybot.core.persistence.thread_summary import BRANCH_THREAD_ID_PREFIX
 
 ROOT_BRANCH_ID = "root"
 
+# ``fork_fingerprint`` of a branch that diverges before the first row (an edit
+# or regenerate of the first message). Its ``fork_row_index`` is -1.
+START_FORK_FINGERPRINT = "start"
+
 # Stays under SQLite's bound-parameter limit.
 _IN_CHUNK = 500
 
@@ -37,11 +41,6 @@ _COLUMNS = (
     "is_active",
     "inherited_forks",
 )
-
-
-def fork_key(parent_branch_id: str, fork_fingerprint: str) -> str:
-    """Id of a navigator point: the children of one parent forked at one row."""
-    return f"{parent_branch_id}:{fork_fingerprint}"
 
 
 def encode_fork_keys(keys: Sequence[str]) -> str | None:
@@ -77,8 +76,8 @@ class BranchRecord:
     created_at: int
     last_active_at: int
     is_active: bool
-    # Navigator points (see fork_key) on the parent that this branch's copied
-    # prefix kept. Fixed at creation, so later compaction cannot change it.
+    # Branches whose fork row this branch's copied prefix kept, so their
+    # navigator shows here. Fixed at creation; later compaction cannot change it.
     inherited_forks: tuple[str, ...] = ()
 
 

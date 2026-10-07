@@ -17,10 +17,10 @@ from monkeybot.core.llm.provider import Message
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.branches import (
     ROOT_BRANCH_ID,
+    START_FORK_FINGERPRINT,
     BranchRecord,
     BranchStore,
     branch_thread_id,
-    fork_key,
 )
 from monkeybot.core.persistence.runs import make_run_id
 from monkeybot.core.persistence.thread_summary import (
@@ -230,12 +230,45 @@ def prefix_end_for(messages: list[Message], index: int, op: RewriteOp) -> int:
     return end
 
 
-def _fork_anchor(messages: list[Message], prefix_end: int) -> tuple[int, str] | None:
-    """Last shared row, present on both the parent and the new branch."""
+def _fork_anchor(messages: list[Message], prefix_end: int) -> tuple[int, str]:
+    """Last shared row, present on both the parent and the new branch.
+
+    With nothing shared, the start-of-chat marker: its navigator sits on row 0.
+    """
     if prefix_end <= 0:
-        return None
+        return -1, START_FORK_FINGERPRINT
     row = prefix_end - 1
     return row, message_fingerprint(messages[row])
+
+
+def _fork_owner(
+    parent: BranchRecord,
+    by_id: dict[str, BranchRecord],
+    messages: list[Message],
+    fork: tuple[int, str],
+) -> tuple[BranchRecord, int]:
+    """Branch the new version hangs off, and the fork row on its thread.
+
+    Forking at the parent's own fork row (editing the same message again)
+    makes the new branch the parent's sibling, so every version of one row
+    shares one navigator. ``messages`` is the parent's thread.
+    """
+    local_row, fingerprint = fork
+    owner, stored_row = parent, local_row
+    while owner.parent_branch_id is not None and owner.fork_fingerprint == fingerprint:
+        own_row = owner.fork_row_index
+        if own_row is None:
+            break
+        if (
+            fingerprint != START_FORK_FINGERPRINT
+            and locate_anchor(messages, HistoryAnchor(own_row, fingerprint)) != local_row
+        ):
+            break
+        grand = by_id.get(owner.parent_branch_id)
+        if grand is None:
+            break
+        owner, stored_row = grand, own_row
+    return owner, stored_row
 
 
 def _user_texts(messages: list[Message]) -> list[str]:
@@ -357,18 +390,20 @@ async def branch_op(
     prefix = list(messages[:end])
     branch_id = make_run_id()
     thread_id = branch_thread_id(session_id, branch_id)
-    shared = _fork_anchor(messages, end)
-    inherited = _inherited_fork_keys(
-        await branches.list(session_id), parent.branch_id, messages, end
+    fork = _fork_anchor(messages, end)
+    records = await branches.list(session_id)
+    owner, fork_row = _fork_owner(
+        parent, {record.branch_id: record for record in records}, messages, fork
     )
+    inherited = _inherited_forks(records, parent.branch_id, messages, end)
     now = int(time.time() * 1000)
     created = BranchRecord(
         branch_id=branch_id,
         session_id=session_id,
         thread_id=thread_id,
-        parent_branch_id=parent.branch_id,
-        fork_row_index=shared[0] if shared is not None else None,
-        fork_fingerprint=shared[1] if shared is not None else None,
+        parent_branch_id=owner.branch_id,
+        fork_row_index=fork_row,
+        fork_fingerprint=fork[1],
         op=op,
         created_at=now,
         last_active_at=now,
@@ -544,74 +579,86 @@ def divergence_points(
     branch plus the children that forked there, and only when the active
     branch is one of them, or a descendant that inherited the fork row.
     """
-    return [
-        point
-        for _index, _key, point in _located_points(records, active_branch_id, messages, offset)
-    ]
+    by_id = {record.branch_id: record for record in records}
+    points: list[dict[str, Any]] = []
+    for index, children in _located_forks(records, active_branch_id, messages, offset):
+        options = list(
+            dict.fromkeys(
+                [
+                    *(child.parent_branch_id for child in children if child.parent_branch_id),
+                    *(child.branch_id for child in children),
+                ]
+            )
+        )
+        points.append(
+            {
+                "anchor": {
+                    "row_index": index,
+                    "fingerprint": message_fingerprint(messages[index - offset]),
+                },
+                "options": options,
+                "active_index": _active_option_index(options, active_branch_id, by_id),
+            }
+        )
+    return points
 
 
-def _inherited_fork_keys(
+def _inherited_forks(
     records: list[BranchRecord],
     parent_branch_id: str,
     messages: list[Message],
     prefix_end: int,
 ) -> tuple[str, ...]:
-    """Navigator points a branch copying ``messages[:prefix_end]`` keeps."""
+    """Branches whose navigator a branch copying ``messages[:prefix_end]`` keeps."""
     return tuple(
-        key
-        for index, key, _point in _located_points(records, parent_branch_id, messages, 0)
+        child.branch_id
+        for index, children in _located_forks(records, parent_branch_id, messages, 0)
         if index < prefix_end
+        for child in children
     )
 
 
-def _located_points(
+def _locate_fork(messages: list[Message], record: BranchRecord, offset: int) -> int | None:
+    """Local index on ``messages`` of the row ``record`` forked after."""
+    if record.fork_row_index is None or record.fork_fingerprint is None:
+        return None
+    if record.fork_fingerprint == START_FORK_FINGERPRINT:
+        return 0 if offset == 0 and messages else None
+    return locate_anchor(
+        messages, HistoryAnchor(record.fork_row_index - offset, record.fork_fingerprint)
+    )
+
+
+def _located_forks(
     records: list[BranchRecord],
     active_branch_id: str,
     messages: list[Message],
     offset: int,
-) -> list[tuple[int, str, dict[str, Any]]]:
+) -> list[tuple[int, list[BranchRecord]]]:
+    """Forks visible on the active branch, grouped by absolute row, oldest first.
+
+    Each fork is located on its own: two forks off one parent can share
+    content at different rows, and forks at one row can come from different
+    parents. Either way one row gets one navigator.
+    """
     by_id = {record.branch_id: record for record in records}
     active = by_id.get(active_branch_id)
     inherited = set(active.inherited_forks) if active is not None else set()
-    groups: dict[tuple[str, str], list[BranchRecord]] = {}
-    for record in records:
-        if record.parent_branch_id is None or record.fork_fingerprint is None:
+    at_row: dict[int, list[BranchRecord]] = {}
+    for child in sorted(records, key=lambda record: (record.created_at, record.branch_id)):
+        parent_id = child.parent_branch_id
+        if parent_id is None or child.fork_row_index is None:
             continue
-        if record.fork_row_index is None:
-            continue
-        key = (record.parent_branch_id, record.fork_fingerprint)
-        groups.setdefault(key, []).append(record)
-
-    points: list[tuple[int, str, dict[str, Any]]] = []
-    for (parent_id, fingerprint), children in groups.items():
-        children.sort(key=lambda record: (record.created_at, record.branch_id))
-        hint = children[0].fork_row_index
-        if hint is None:
-            continue
-        point_key = fork_key(parent_id, fingerprint)
-        relevant = {parent_id, *(child.branch_id for child in children)}
-        if active_branch_id not in relevant and point_key not in inherited:
-            limit = _inherited_limit(active_branch_id, relevant, by_id)
-            if limit is None or hint > limit:
+        own = active_branch_id in (parent_id, child.branch_id)
+        if not own and child.branch_id not in inherited:
+            limit = _inherited_limit(active_branch_id, {parent_id, child.branch_id}, by_id)
+            # A start fork (row -1) counts as inherited only with row 0.
+            if limit is None or max(child.fork_row_index, 0) > limit:
                 continue
-        local = locate_anchor(messages, HistoryAnchor(hint - offset, fingerprint))
-        if local is None:
-            continue
-        index = offset + local
-        options = [parent_id, *[child.branch_id for child in children]]
-        points.append(
-            (
-                index,
-                point_key,
-                {
-                    "anchor": {"row_index": index, "fingerprint": fingerprint},
-                    "options": options,
-                    "active_index": _active_option_index(options, active_branch_id, by_id),
-                },
-            )
-        )
-    points.sort(key=lambda item: item[0])
-    return points
+        local = _locate_fork(messages, child, offset)
+        if local is not None:
+            at_row.setdefault(offset + local, []).append(child)
+    return sorted(at_row.items())
 
 
 async def _load_tail(

@@ -856,3 +856,107 @@ async def test_nested_branch_skips_a_later_duplicate_of_an_uninherited_fork_row(
     )
     view = await load_active_history(history, branches, "s1")
     assert [p["options"][0] for p in view.branch_points] == [child.branch_id]
+
+
+async def _rewrite_and_reply(
+    backend: SQLiteStorageBackend,
+    op: str,
+    index: int,
+    reply: str,
+) -> str:
+    """Rewrite the active branch at ``index``, then append one exchange to it."""
+    history = backend.history()
+    active = await backend.branches().get_active("s1")
+    rows = await history.load(active.thread_id if active is not None else "s1")
+    result = await branch_op(
+        history=history,
+        branches=backend.branches(),
+        session_id="s1",
+        op=op,  # type: ignore[arg-type]
+        anchor=_anchor(rows, index),
+    )
+    if op == "edit":
+        await history.append(result.thread_id, _user(reply))
+    await history.append(result.thread_id, _assistant(f"ack {reply}"))
+    return result.branch_id
+
+
+async def _points_on(
+    backend: SQLiteStorageBackend,
+    branch_id: str,
+) -> list[tuple[int, list[str], int]]:
+    await activate_branch(branches=backend.branches(), session_id="s1", branch_id=branch_id)
+    view = await load_active_history(backend.history(), backend.branches(), "s1")
+    rows = view.messages
+    for point in view.branch_points:
+        row = point["anchor"]["row_index"]
+        assert point["anchor"]["fingerprint"] == message_fingerprint(rows[row])
+    return [(p["anchor"]["row_index"], p["options"], p["active_index"]) for p in view.branch_points]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["edit", "regenerate"])
+async def test_rewriting_the_first_turn_keeps_the_original_reachable(
+    backend: SQLiteStorageBackend,
+    op: str,
+) -> None:
+    await _seed(backend, "s1")
+    index = 0 if op == "edit" else 1
+    child = await _rewrite_and_reply(backend, op, index, "one again")
+
+    assert await _points_on(backend, child) == [(0, ["root", child], 1)]
+    assert await _points_on(backend, "root") == [(0, ["root", child], 0)]
+
+
+@pytest.mark.asyncio
+async def test_editing_the_same_message_again_adds_a_sibling(
+    backend: SQLiteStorageBackend,
+) -> None:
+    await _seed(backend, "s1")
+    first = await _rewrite_and_reply(backend, "edit", 2, "two b")
+    second = await _rewrite_and_reply(backend, "edit", 2, "two c")
+    options = ["root", first, second]
+
+    assert await _points_on(backend, second) == [(1, options, 2)]
+    assert await _points_on(backend, first) == [(1, options, 1)]
+    assert await _points_on(backend, "root") == [(1, options, 0)]
+
+
+@pytest.mark.asyncio
+async def test_editing_the_first_message_again_adds_a_sibling(
+    backend: SQLiteStorageBackend,
+) -> None:
+    await _seed(backend, "s1")
+    first = await _rewrite_and_reply(backend, "edit", 0, "one b")
+    second = await _rewrite_and_reply(backend, "edit", 0, "one c")
+
+    assert await _points_on(backend, "root") == [(0, ["root", first, second], 0)]
+
+
+@pytest.mark.asyncio
+async def test_forks_at_identical_rows_keep_their_own_navigators(
+    backend: SQLiteStorageBackend,
+) -> None:
+    for message in (_user("a"), _assistant("Done."), _user("b"), _assistant("Done."), _user("c")):
+        await backend.history().append("s1", message)
+    late = await _rewrite_and_reply(backend, "edit", 4, "c2")
+    await activate_branch(branches=backend.branches(), session_id="s1", branch_id="root")
+    early = await _rewrite_and_reply(backend, "edit", 2, "b2")
+
+    assert await _points_on(backend, "root") == [
+        (1, ["root", early], 0),
+        (3, ["root", late], 0),
+    ]
+
+
+def test_divergence_points_merge_forks_that_share_a_row() -> None:
+    root = [_user("a"), _assistant("x"), _user("b")]
+    records = [
+        _branch("root", None, None, root),
+        _branch("child", "root", 1, root),
+        _branch("grandchild", "child", 1, root),
+    ]
+    points = divergence_points(records, "grandchild", root)
+    assert [(p["anchor"]["row_index"], p["options"], p["active_index"]) for p in points] == [
+        (1, ["root", "child", "grandchild"], 2),
+    ]
