@@ -175,7 +175,8 @@ async def _try_acquire_turn(
 
 def _block_voice_calls(request: Request, session_id: str) -> None:
     """Refuse new voice calls until :func:`_unblock_voice_calls`, or 409
-    ``SESSION_BUSY`` when a call is already connecting or live.
+    ``SESSION_BUSY`` when a call is connecting or live or another history
+    change is running.
 
     A call writes history without the turn lock and keeps the thread it
     resolved at connect, so history changes need it out of the way.
@@ -185,7 +186,7 @@ def _block_voice_calls(request: Request, session_id: str) -> None:
         raise APIError(
             409,
             "SESSION_BUSY",
-            "End the voice session before changing chat history",
+            "Wait for the voice call or chat history change to finish",
             uuid.uuid4().hex,
         )
 

@@ -74,9 +74,14 @@ class RealtimeSessionManager:
     def begin_rewrite(self, session_id: str) -> bool:
         """Block new calls on ``session_id`` during a history rewrite.
 
-        False when a call is connecting or live.
+        False when a call is connecting or live, or another rewrite holds the
+        block: its :meth:`end_rewrite` must be the one that lifts it.
         """
-        if session_id in self._claimed or session_id in self._sessions:
+        if (
+            session_id in self._rewriting
+            or session_id in self._claimed
+            or session_id in self._sessions
+        ):
             return False
         self._rewriting.add(session_id)
         return True

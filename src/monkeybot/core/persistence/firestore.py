@@ -36,7 +36,11 @@ from monkeybot.core.memory.outbox import (
     is_permanent_error,
 )
 from monkeybot.core.persistence.backends import FirestoreConfig
-from monkeybot.core.persistence.branches import ROOT_BRANCH_ID, BranchRecord
+from monkeybot.core.persistence.branches import (
+    ROOT_BRANCH_ID,
+    BranchRecord,
+    decode_fork_keys,
+)
 from monkeybot.core.persistence.durable_runs import (
     SubagentEnvelope,
     SubagentRunRow,
@@ -1522,6 +1526,7 @@ def _branch_from_fs(data: dict[str, Any]) -> BranchRecord:
         created_at=int(data.get("created_at") or 0),
         last_active_at=int(data.get("last_active_at") or 0),
         is_active=bool(data.get("is_active")),
+        inherited_forks=decode_fork_keys(data.get("inherited_forks")),
     )
 
 
@@ -1537,6 +1542,7 @@ def _branch_to_fs(record: BranchRecord) -> dict[str, Any]:
         "created_at": record.created_at,
         "last_active_at": record.last_active_at,
         "is_active": record.is_active,
+        "inherited_forks": list(record.inherited_forks),
     }
 
 

@@ -38,6 +38,15 @@ async def test_release_slot_allows_new_sessions() -> None:
     assert await manager.acquire_slot("s2") is True
 
 
+def test_a_refused_second_rewrite_keeps_voice_calls_blocked() -> None:
+    manager = RealtimeSessionManager(_make_config(2))
+    assert manager.begin_rewrite("s1") is True
+    assert manager.begin_rewrite("s1") is False
+    assert manager.claim("s1") is False
+    manager.end_rewrite("s1")
+    assert manager.claim("s1") is True
+
+
 @pytest.mark.asyncio
 async def test_register_rejects_duplicate_active_session() -> None:
     manager = RealtimeSessionManager(_make_config(5))

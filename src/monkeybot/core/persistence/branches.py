@@ -8,6 +8,7 @@ Compaction and the verifier only ever see one linear thread.
 from __future__ import annotations
 
 import builtins
+import json
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -34,7 +35,27 @@ _COLUMNS = (
     "created_at",
     "last_active_at",
     "is_active",
+    "inherited_forks",
 )
+
+
+def fork_key(parent_branch_id: str, fork_fingerprint: str) -> str:
+    """Id of a navigator point: the children of one parent forked at one row."""
+    return f"{parent_branch_id}:{fork_fingerprint}"
+
+
+def encode_fork_keys(keys: Sequence[str]) -> str | None:
+    return json.dumps(list(keys)) if keys else None
+
+
+def decode_fork_keys(raw: Any) -> tuple[str, ...]:
+    if isinstance(raw, list):
+        values: Any = raw
+    elif isinstance(raw, str) and raw:
+        values = json.loads(raw)
+    else:
+        return ()
+    return tuple(str(value) for value in values if isinstance(value, str))
 
 
 def branch_thread_id(session_id: str, branch_id: str) -> str:
@@ -56,6 +77,9 @@ class BranchRecord:
     created_at: int
     last_active_at: int
     is_active: bool
+    # Navigator points (see fork_key) on the parent that this branch's copied
+    # prefix kept. Fixed at creation, so later compaction cannot change it.
+    inherited_forks: tuple[str, ...] = ()
 
 
 def _record_from_row(row: Any) -> BranchRecord:
@@ -74,6 +98,7 @@ def _record_from_row(row: Any) -> BranchRecord:
         created_at=int(row[7]),
         last_active_at=int(row[8]),
         is_active=bool(row[9]),
+        inherited_forks=decode_fork_keys(row[10]),
     )
 
 
@@ -153,8 +178,9 @@ class SQLiteBranchStore:
             """
             INSERT INTO session_branches(
                 branch_id, session_id, thread_id, parent_branch_id,
-                fork_row_index, fork_fingerprint, op, created_at, last_active_at, is_active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                fork_row_index, fork_fingerprint, op, created_at, last_active_at, is_active,
+                inherited_forks
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record.branch_id,
@@ -167,6 +193,7 @@ class SQLiteBranchStore:
                 record.created_at,
                 record.last_active_at,
                 1 if record.is_active else 0,
+                encode_fork_keys(record.inherited_forks),
             ),
         )
 

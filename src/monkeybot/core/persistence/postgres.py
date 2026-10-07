@@ -32,7 +32,12 @@ from monkeybot.core.memory.outbox import (
     backoff_iso,
     is_permanent_error,
 )
-from monkeybot.core.persistence.branches import ROOT_BRANCH_ID, BranchRecord
+from monkeybot.core.persistence.branches import (
+    ROOT_BRANCH_ID,
+    BranchRecord,
+    decode_fork_keys,
+    encode_fork_keys,
+)
 from monkeybot.core.persistence.durable_runs import (
     _SUBAGENT_COLUMNS,
     SubagentEnvelope,
@@ -159,8 +164,10 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     created_at BIGINT NOT NULL,
     last_active_at BIGINT NOT NULL,
     is_active INTEGER NOT NULL DEFAULT 0,
+    inherited_forks TEXT,
     PRIMARY KEY (session_id, branch_id)
 )""",
+    "ALTER TABLE session_branches ADD COLUMN IF NOT EXISTS inherited_forks TEXT",
     """CREATE INDEX IF NOT EXISTS idx_session_branches_session
     ON session_branches(session_id, created_at)""",
     """CREATE UNIQUE INDEX IF NOT EXISTS idx_session_branches_one_active
@@ -1750,12 +1757,13 @@ def _branch_from_pg(row: Any) -> BranchRecord:
         created_at=int(row["created_at"]),
         last_active_at=int(row["last_active_at"]),
         is_active=bool(row["is_active"]),
+        inherited_forks=decode_fork_keys(row["inherited_forks"]),
     )
 
 
 _BRANCH_COLUMNS = (
     "branch_id, session_id, thread_id, parent_branch_id, fork_row_index, "
-    "fork_fingerprint, op, created_at, last_active_at, is_active"
+    "fork_fingerprint, op, created_at, last_active_at, is_active, inherited_forks"
 )
 
 
@@ -1822,8 +1830,9 @@ class PostgresBranchStore:
                 """
                 INSERT INTO session_branches(
                     branch_id, session_id, thread_id, parent_branch_id,
-                    fork_row_index, fork_fingerprint, op, created_at, last_active_at, is_active
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    fork_row_index, fork_fingerprint, op, created_at, last_active_at, is_active,
+                    inherited_forks
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 """,
                 stored.branch_id,
                 stored.session_id,
@@ -1835,6 +1844,7 @@ class PostgresBranchStore:
                 stored.created_at,
                 stored.last_active_at,
                 1 if stored.is_active else 0,
+                encode_fork_keys(stored.inherited_forks),
             )
         return stored
 

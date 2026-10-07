@@ -20,6 +20,7 @@ from monkeybot.core.persistence.branches import (
     BranchRecord,
     BranchStore,
     branch_thread_id,
+    fork_key,
 )
 from monkeybot.core.persistence.runs import make_run_id
 from monkeybot.core.persistence.thread_summary import (
@@ -357,6 +358,9 @@ async def branch_op(
     branch_id = make_run_id()
     thread_id = branch_thread_id(session_id, branch_id)
     shared = _fork_anchor(messages, end)
+    inherited = _inherited_fork_keys(
+        await branches.list(session_id), parent.branch_id, messages, end
+    )
     now = int(time.time() * 1000)
     created = BranchRecord(
         branch_id=branch_id,
@@ -369,6 +373,7 @@ async def branch_op(
         created_at=now,
         last_active_at=now,
         is_active=False,
+        inherited_forks=inherited,
     )
     await history.reset(thread_id, prefix)
     try:
@@ -486,6 +491,10 @@ def _inherited_limit(
     Each hop keeps only the rows up to its fork row, so the limit is the
     smallest fork row on the path. ``None`` when no branch in ``ancestors``
     is an ancestor; ``-1`` when a hop forked before any row.
+
+    Fork rows are indexes from different moments, and compaction in between
+    only lowers later ones, so this can miss an inherited row but never
+    claims one that was not inherited.
     """
     limit: int | None = None
     seen: set[str] = set()
@@ -531,11 +540,39 @@ def divergence_points(
     """Navigator points whose fork row still exists on ``messages``.
 
     A point whose anchor was compacted away (or sits before a sliced tail
-    starting at absolute ``offset``) is omitted.     Options are the parent
+    starting at absolute ``offset``) is omitted. Options are the parent
     branch plus the children that forked there, and only when the active
     branch is one of them, or a descendant that inherited the fork row.
     """
+    return [
+        point
+        for _index, _key, point in _located_points(records, active_branch_id, messages, offset)
+    ]
+
+
+def _inherited_fork_keys(
+    records: list[BranchRecord],
+    parent_branch_id: str,
+    messages: list[Message],
+    prefix_end: int,
+) -> tuple[str, ...]:
+    """Navigator points a branch copying ``messages[:prefix_end]`` keeps."""
+    return tuple(
+        key
+        for index, key, _point in _located_points(records, parent_branch_id, messages, 0)
+        if index < prefix_end
+    )
+
+
+def _located_points(
+    records: list[BranchRecord],
+    active_branch_id: str,
+    messages: list[Message],
+    offset: int,
+) -> list[tuple[int, str, dict[str, Any]]]:
     by_id = {record.branch_id: record for record in records}
+    active = by_id.get(active_branch_id)
+    inherited = set(active.inherited_forks) if active is not None else set()
     groups: dict[tuple[str, str], list[BranchRecord]] = {}
     for record in records:
         if record.parent_branch_id is None or record.fork_fingerprint is None:
@@ -545,14 +582,15 @@ def divergence_points(
         key = (record.parent_branch_id, record.fork_fingerprint)
         groups.setdefault(key, []).append(record)
 
-    points: list[tuple[int, dict[str, Any]]] = []
+    points: list[tuple[int, str, dict[str, Any]]] = []
     for (parent_id, fingerprint), children in groups.items():
         children.sort(key=lambda record: (record.created_at, record.branch_id))
         hint = children[0].fork_row_index
         if hint is None:
             continue
+        point_key = fork_key(parent_id, fingerprint)
         relevant = {parent_id, *(child.branch_id for child in children)}
-        if active_branch_id not in relevant:
+        if active_branch_id not in relevant and point_key not in inherited:
             limit = _inherited_limit(active_branch_id, relevant, by_id)
             if limit is None or hint > limit:
                 continue
@@ -564,6 +602,7 @@ def divergence_points(
         points.append(
             (
                 index,
+                point_key,
                 {
                     "anchor": {"row_index": index, "fingerprint": fingerprint},
                     "options": options,
@@ -572,7 +611,7 @@ def divergence_points(
             )
         )
     points.sort(key=lambda item: item[0])
-    return [point for _index, point in points]
+    return points
 
 
 async def _load_tail(

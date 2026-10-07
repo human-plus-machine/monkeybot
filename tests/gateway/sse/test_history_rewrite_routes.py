@@ -228,6 +228,30 @@ async def test_rewrite_blocks_voice_calls_until_it_finishes(
 
 
 @pytest.mark.asyncio
+async def test_a_refused_rewrite_keeps_voice_blocked_for_the_running_one(
+    backend: SQLiteStorageBackend,
+) -> None:
+    registry = SessionRegistry()
+    app = _app(registry, backend, RecordingLoop(registry))
+    manager = _voice_manager()
+    app.state.realtime_manager = manager
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/sessions", json={"session_id": "sess-two"})
+        await _seed(backend, "sess-two")
+        anchor = await _anchor(client, "sess-two", "again")
+        assert manager.begin_rewrite("sess-two")
+        second = await client.post("/sessions/sess-two/truncate", json={"anchor": anchor})
+        assert second.status_code == 409
+        assert second.json()["error"]["code"] == "SESSION_BUSY"
+        deleted = await client.delete("/api/chat-history/sess-two")
+        assert deleted.status_code == 409
+        assert not manager.claim("sess-two")
+        manager.end_rewrite("sess-two")
+    assert manager.claim("sess-two")
+    assert len(await backend.history().load("sess-two")) == 4
+
+
+@pytest.mark.asyncio
 async def test_fork_creates_a_new_session(backend: SQLiteStorageBackend) -> None:
     registry = SessionRegistry()
     app = _app(registry, backend, RecordingLoop(registry))

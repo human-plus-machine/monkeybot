@@ -783,3 +783,76 @@ def test_divergence_points_keep_an_inherited_ancestor_fork_row() -> None:
         (5, ["root", "child"]),
         (6, ["child", "grandchild"]),
     ]
+
+
+@pytest.mark.asyncio
+async def test_nested_branch_keeps_ancestor_navigator_after_parent_compacts(
+    backend: SQLiteStorageBackend,
+) -> None:
+    history = backend.history()
+    branches = backend.branches()
+    for turn in range(10):
+        await history.append("s1", _user(f"u{turn}"))
+        await history.append("s1", _assistant(f"a{turn}"))
+    root = await history.load("s1")
+    child = await branch_op(
+        history=history,
+        branches=branches,
+        session_id="s1",
+        op="edit",
+        anchor=_anchor(root, 12),
+    )
+    for message in (_user("u6 edited"), _assistant("a6"), _user("u7"), _assistant("a7")):
+        await history.append(child.thread_id, message)
+    child_rows = await history.load(child.thread_id)
+    summary = _assistant("[Context Summary]:\nu0 to a4")
+    await history.reset(child.thread_id, [summary, *child_rows[10:]])
+    compacted = await history.load(child.thread_id)
+    assert message_fingerprint(compacted[2]) == message_fingerprint(root[11])
+
+    await branch_op(
+        history=history,
+        branches=branches,
+        session_id="s1",
+        op="edit",
+        anchor=_anchor(compacted, 5),
+    )
+    view = await load_active_history(history, branches, "s1")
+    assert [(p["anchor"]["row_index"], p["options"][0]) for p in view.branch_points] == [
+        (2, "root"),
+        (4, child.branch_id),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_nested_branch_skips_a_later_duplicate_of_an_uninherited_fork_row(
+    backend: SQLiteStorageBackend,
+) -> None:
+    history = backend.history()
+    branches = backend.branches()
+    for message in (
+        _user("a"),
+        _assistant("Done."),
+        _user("b"),
+        _assistant("Done."),
+        _user("c"),
+    ):
+        await history.append("s1", message)
+    root = await history.load("s1")
+    child = await branch_op(
+        history=history,
+        branches=branches,
+        session_id="s1",
+        op="edit",
+        anchor=_anchor(root, 4),
+    )
+    child_rows = await history.load(child.thread_id)
+    await branch_op(
+        history=history,
+        branches=branches,
+        session_id="s1",
+        op="edit",
+        anchor=_anchor(child_rows, 2),
+    )
+    view = await load_active_history(history, branches, "s1")
+    assert [p["options"][0] for p in view.branch_points] == [child.branch_id]
