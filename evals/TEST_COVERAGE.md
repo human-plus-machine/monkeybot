@@ -29,7 +29,6 @@ Tool/component list pulled from `src/monkeybot/core/tools/core_tool_executor.py`
 | Loops/scheduler: `start_loop`/`loop_status`/`pause_loop`/`resume_loop`/`stop_loop` | — | `tool_loops.yaml` (new) | Deterministic routing coverage added (subsystem behavior itself already well covered by `tests/core/test_scheduled_loops.py` etc.); no live scenario. |
 | `web_search` | — | `tool_web_search.yaml` (new) | Deterministic routing coverage added (tool logic itself covered by `tests/web_search/test_web_search.py`); no live scenario. |
 | Todo list tool | — | `tool_todo_list.yaml` (new) | Deterministic routing coverage added (tool logic itself covered by `tests/todo_list/test_todo_list.py`); no live scenario. |
-| Knowledge index / codebase `search` tool | — | `test_memory_knowledge_routing.py` (routing heuristic only), `tool_search_knowledge.yaml` (new) | New scenario actually drives the `search` tool call through the loop (routing heuristic test still only checks which tool *should* be picked in principle). |
 | Attachments | — | `tool_load_file.yaml` (new) | Deterministic routing coverage for `load_file`; the upload/multipart HTTP leg is out of eval scope and already covered by `tests/gateway/sse/test_attachments.py`. |
 | Sandbox executor | `tools/core_run_command_sandbox.yaml` (new, `local-only`) | — | Unit coverage (`tests/core/test_sandbox_executor.py`, 43 tests) was already comprehensive at the mocked-`opensandbox`-SDK level — the doc's old "zero coverage" framing was stale, same as the tool-integrity-repair gap. Added one targeted unit test for a real hole (`cwd` forwarding in shared-filesystem mode). The live scenario requires a real OpenSandbox/Docker backend (`SANDBOX_ENABLED=true`); CI has no such backend wired up yet (`.github/workflows/live-eval-smoke.yml` runs `SANDBOX_ENABLED=false`), and this dev environment has no running Docker daemon either, so the scenario is written but not runnable here — tagged `local-only`, not added to `evals/suites/smoke.yaml`. |
 | Tool-integrity repair (`repair_tool_turn_integrity`) | — | `tests/core/test_tool_integrity.py` (10 unit tests, pre-existing) + `test_run_replays_repaired_history_to_provider` (new, `tests/core/test_loop.py`) | **Corrected — this doc's old claim was stale.** Unit-level repair coverage already existed (missing-result synthesis, orphan handling, empty-tool-name backfill, provider round-trips) and runs under plain pytest. The real gap was narrower: nothing proved repair actually runs *inside* the turn loop before a provider replay. Closed with one integration test that seeds a corrupted `FakeHistory` and asserts the provider sees a repaired transcript while the stored rows stay untouched. |
@@ -52,8 +51,8 @@ Tool/component list pulled from `src/monkeybot/core/tools/core_tool_executor.py`
 5. ~~Sandbox executor~~ — mostly a documentation error, same pattern as #3: unit coverage was
    already comprehensive. Added the one real missing unit test plus a `local-only` live scenario
    for when a Docker/OpenSandbox backend is available in CI (not yet).
-6. ~~Loops/scheduler, web_search, todo_list, attachments, knowledge `search`, `glob`/`grep`,
-   `replace_in_file`/`apply_patch`~~ — routing coverage added at the deterministic level (all 7).
+6. ~~Loops/scheduler, web_search, todo_list, attachments, `glob`/`grep`,
+   `replace_in_file`/`apply_patch`~~ — routing coverage added at the deterministic level.
    These are FakeProvider-scripted scenarios that assert `tool_categories_used`, i.e. they prove
    the harness wires the right tool category to the right prompt, not live tool behavior against
    a real model — live is still deferred for these lower-traffic surfaces, and each already has

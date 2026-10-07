@@ -3,7 +3,7 @@
 **Status:** Phase 6 done on `feat/verifier-agent`. Escalation ladder through `block` is in tree; `steer` remains optional.  
 **Branch:** `feat/verifier-agent` — all phases commit here; no phase gets its own branch; do not push unless asked  
 **Audience:** MonkeyBot harness maintainers  
-**Related:** [Features & Design Reference](features.md) · `core/hooks/` · `core/runtime/turn_loop.py` · `core/knowledge/evidence_guard.py` · [live-evals.md](live-evals.md) · [smoke baseline](../evals/baselines/smoke.md)  
+**Related:** [Features & Design Reference](features.md) · `core/hooks/` · `core/runtime/turn_loop.py` · `core/hooks/evidence_guard.py` · [live-evals.md](live-evals.md) · [smoke baseline](../evals/baselines/smoke.md)  
 **Depends on:** goal ledger (landed), `SystemNotification` wire type extension (frontend contract — Phase 3)  
 **Spiked:** 2026-09-04 — compaction split accounting; `role="system"` persistence across HistoryStore backends (see Part 4)  
 **Reviewed:** 2026-09-04 — line references re-verified against `develop`; fixes folded in for the end-of-turn commit boundary, the steer tap, provenance of follow-ups/steers, the structured constraint schema, `USER_MESSAGE` settlement latency, config gating, and realtime-loop scope; Phase 0 (measurement harness) added to the build order  
@@ -170,7 +170,7 @@ Inspectors are the only truly **synchronous** gate, running before tool executio
 
 ### Prior art in-tree
 
-`core/knowledge/evidence_guard.py` is a working single-purpose verifier and the structural template for this feature. It observes `AFTER_PROVIDER_RESPONSE` and `POST_TOOL`, keeps per-thread state in a bounded `OrderedDict` (`_THREAD_STATE_CAP = 256`, because one gateway process shares one guard across concurrent SSE sessions), queues a pending correction, and injects on `PRE_TURN` / `PRE_TOOL`. **Follow this shape.**
+`core/hooks/evidence_guard.py` is a working single-purpose verifier and the structural template for this feature. It observes `AFTER_PROVIDER_RESPONSE` and `POST_TOOL`, keeps per-thread state in a bounded `OrderedDict` (`_THREAD_STATE_CAP = 256`, because one gateway process shares one guard across concurrent SSE sessions), queues a pending correction, and injects on `PRE_TURN` / `PRE_TOOL`. **Follow this shape.**
 
 ---
 

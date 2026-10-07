@@ -22,7 +22,6 @@ _TOOL_KIND: dict[str, str] = {
     "apply_patch": "Edit",
     "str_replace": "Edit",
     "grep": "Search",
-    "search": "Search",
     "web_search": "Search",
     "glob": "Glob",
     "list_dir": "List",

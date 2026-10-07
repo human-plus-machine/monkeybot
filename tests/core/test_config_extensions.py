@@ -33,7 +33,7 @@ from monkeybot.core.config.runtime_env import (
     ENV_SPEC,
     RETIRED_TOOLS_KEYS,
     YAML_ONLY_ENV_KEYS,
-    warn_retired_curation_keys,
+    warn_retired_sections,
     warn_retired_tools_keys,
 )
 from monkeybot.core.config.settings import ollama_options_from_config
@@ -796,10 +796,24 @@ class TestRetiredContextCuration:
             }
         }
         with caplog.at_level("WARNING", logger="monkeybot.core.config.runtime_env"):
-            warn_retired_curation_keys(leftover)
-            warn_retired_curation_keys(leftover)
-            warn_retired_curation_keys({})
+            warn_retired_sections(leftover)
+            warn_retired_sections(leftover)
+            warn_retired_sections({})
         assert caplog.text.count("context_curation is retired and ignored") == 1
+
+
+class TestRetiredKnowledge:
+    def test_section_absent_from_env_map(self) -> None:
+        assert not any(section == "knowledge" for section, _ in ENV_MAP)
+
+    def test_yaml_section_warns_once_and_is_ignored(self, caplog: pytest.LogCaptureFixture) -> None:
+        reset_runtime_env_state_for_tests()
+        leftover = {"knowledge": {"enabled": True, "embeddings": {"enabled": False}}}
+        with caplog.at_level("WARNING", logger="monkeybot.core.config.runtime_env"):
+            warn_retired_sections(leftover)
+            warn_retired_sections(leftover)
+        assert caplog.text.count("knowledge is retired and ignored") == 1
+        assert "context_curation" not in caplog.text
 
 
 class TestRealtimeConfig:

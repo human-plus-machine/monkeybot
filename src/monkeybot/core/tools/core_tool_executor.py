@@ -53,7 +53,6 @@ from monkeybot.core.goals.service import (
     GoalNotFoundError,
     goal_to_json,
 )
-from monkeybot.core.knowledge.subsystem import KnowledgeSubsystem
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.mcp.mcp_client import (
@@ -152,7 +151,6 @@ _CORE_TOOL_NAMES = frozenset(
         "glob",
         "grep",
         "apply_patch",
-        "search",
         "list_skills",
         "task",
         "run_command",
@@ -952,7 +950,6 @@ class CoreToolExecutor(ToolExecutorPort):
         scheduled_loop_store: ScheduledLoopStore | None = None,
         subagent_registry: dict[str, SubagentConfig] | None = None,
         loops_registry: LoopsToolRegistry | None = None,
-        knowledge: KnowledgeSubsystem | None = None,
         config: RuntimeConfig | None = None,
         grants_path: Path | None = None,
     ) -> None:
@@ -968,7 +965,6 @@ class CoreToolExecutor(ToolExecutorPort):
             artifacts_root=self._artifacts_path,
         )
         self._memory = memory
-        self._knowledge = knowledge
         self._mcp = mcp
         self._attachment_store = attachment_store
         self._run_store = run_store
@@ -1191,8 +1187,6 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = self._tool_grep(args)
             elif name == "apply_patch":
                 result_text, err_text = self._tool_apply_patch(args)
-            elif name == "search":
-                result_text, err_text = await self._tool_search(args)
             elif name == "list_skills":
                 result_text, err_text = self._tool_list_skills(ctx)
             elif name == "task":
@@ -1703,62 +1697,6 @@ class CoreToolExecutor(ToolExecutorPort):
             )
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
-
-    async def _tool_search(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        query = _str_arg(args, "query", "q")
-        if not query:
-            return (
-                None,
-                _built_in_tool_error(
-                    "validation",
-                    "search requires a non-empty query.",
-                    'Use query, e.g. {"query": "refund policy"}.',
-                    {"field": "query", "example": {"query": "refund policy"}},
-                ),
-            )
-        if self._knowledge is None:
-            return (
-                None,
-                _built_in_tool_error(
-                    "validation",
-                    "search requires the knowledge layer to be configured.",
-                    "Set knowledge.enabled: true in monkeybot.yaml.",
-                    {"field": "knowledge"},
-                ),
-            )
-        limit = _coerce_int(args.get("limit"), None)
-        if limit is None:
-            limit = _coerce_int(args.get("max_hits"), self._knowledge.settings.default_limit) or (
-                self._knowledge.settings.default_limit
-            )
-        path_prefix = args.get("path_prefix")
-        if not isinstance(path_prefix, str) or not path_prefix.strip():
-            path_prefix = None
-        else:
-            path_prefix = path_prefix.strip()
-        source_raw = args.get("source")
-        source = "any"
-        if isinstance(source_raw, str) and source_raw.strip() in {
-            "any",
-            "note",
-            "workspace_file",
-        }:
-            source = source_raw.strip()
-        payload = await self._knowledge.search(
-            query,
-            limit=limit,
-            path_prefix=path_prefix,
-            source=source,  # type: ignore[arg-type]
-        )
-        hits = payload.get("hits") if isinstance(payload, dict) else None
-        if isinstance(payload, dict) and not hits:
-            note = payload.get("note") or ""
-            cross = (
-                "no knowledge matches — if this is about past sessions or preferences, "
-                "use `mempalace search` via `run_command`"
-            )
-            payload["note"] = f"{note}; {cross}".strip("; ") if note else cross
-        return (_j(payload), None)
 
     def _tool_list_skills(self, ctx: TurnContext) -> tuple[str | None, str | None]:
         rows = [{"name": s.name, "description": s.description} for s in ctx.skills]

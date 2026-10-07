@@ -5,8 +5,8 @@ notice on the next model step (``PRE_TURN`` / ``PRE_TOOL``) when:
 
 * a cited path does not exist under the workspace root (fabrication), or
 * a cited path exists but was never opened with ``read_file`` (or located via
-  ``glob``) this session — i.e. the answer came from a ``search`` snippet
-  alone, which is the dominant residual miss mode (F22).
+  ``glob``) this session — e.g. the answer came from a ``grep`` match line
+  alone (F22).
 """
 
 from __future__ import annotations
@@ -23,9 +23,7 @@ from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 logger = logging.getLogger(__name__)
 
 # Lines like: Evidence: path  |  **Evidence:** `path`  |  - Evidence: a; b
-_EVIDENCE_LINE_RE = re.compile(
-    r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?Evidence(?:\*\*)?\s*:\s*(.+?)\s*$"
-)
+_EVIDENCE_LINE_RE = re.compile(r"(?im)^\s*(?:[-*]\s*)?(?:\*\*)?Evidence(?:\*\*)?\s*:\s*(.+?)\s*$")
 # Path tokens: backtick-wrapped or bare (stop at ; , or whitespace-run before next)
 _PATH_TOKEN_RE = re.compile(r"`([^`]+)`|([^\s;`,]+)")
 # Strip optional :L12 / :12-34 / :lines suffixes from path citations.
@@ -91,22 +89,22 @@ def format_evidence_correction(missing: list[str]) -> str:
         "The previous assistant message cited Evidence paths that do **not** "
         "exist in the workspace:\n"
         f"{bullets}\n"
-        "Do not reuse those paths. Locate the real files with `glob` / `search` / "
+        "Do not reuse those paths. Locate the real files with `glob` / `grep` / "
         "`read_file`, then restate answers with verified Evidence lines "
         "(or `Evidence: unknown`)."
     )
 
 
 def format_verification_notice(unread: list[str]) -> str:
-    """System-injection text telling the model to read snippet-only citations."""
+    """System-injection text telling the model to read unopened citations."""
     bullets = "\n".join(f"- `{p}`" for p in unread)
     return (
         f"{_VERIFICATION_HEADING}\n"
         "The previous assistant message cited Evidence paths that were never "
         "opened with `read_file` this session:\n"
         f"{bullets}\n"
-        "A `search` snippet is **not** verification — snippets truncate and can "
-        "mislead. `read_file` each file above, check the answer against the "
+        "A `grep` match line is **not** verification — match lines lack context "
+        "and can mislead. `read_file` each file above, check the answer against the "
         "actual source lines, and restate any answer that changes."
     )
 
@@ -129,7 +127,7 @@ class EvidencePathGuard:
     """Scan assistant Evidence citations; inject corrections on the next step.
 
     Tracks ``read_file`` / ``glob`` confirmations so citations sourced only
-    from ``search`` snippets trigger a one-shot read-and-verify notice (F22).
+    from ``grep`` match lines trigger a one-shot read-and-verify notice (F22).
 
     State is scoped per ``thread_id`` because one gateway process shares a
     single guard instance across concurrent SSE sessions.
@@ -190,9 +188,7 @@ class EvidencePathGuard:
             return
         self._scan_citations(self._state(payload.thread_id), text, Path(root))
 
-    def _scan_citations(
-        self, state: _ThreadEvidenceState, text: str, root: Path
-    ) -> None:
+    def _scan_citations(self, state: _ThreadEvidenceState, text: str, root: Path) -> None:
         """Queue missing / unread notices for ``Evidence:`` citations in ``text``."""
         cited = extract_evidence_paths(text)
         if not cited:
