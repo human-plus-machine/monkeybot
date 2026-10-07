@@ -29,6 +29,8 @@ class RealtimeSessionManager:
     config: RealtimeConfig
     _sessions: dict[str, RealtimeConnectionState] = field(default_factory=dict)
     _todo_stores: dict[str, TodoListStore] = field(default_factory=dict)
+    _claimed: set[str] = field(default_factory=set)
+    _rewriting: set[str] = field(default_factory=set)
     _sem: asyncio.Semaphore = field(init=False)
 
     def __post_init__(self) -> None:
@@ -54,6 +56,33 @@ class RealtimeSessionManager:
             "realtime concurrency slot released %s",
             kv(session_id=session_id),
         )
+
+    def claim(self, session_id: str) -> bool:
+        """Claim ``session_id`` for a connecting call before it reads history.
+
+        Held until :meth:`unclaim`, so a history rewrite cannot slip in while
+        the provider connects. False while a rewrite runs or another call holds it.
+        """
+        if session_id in self._rewriting or session_id in self._claimed:
+            return False
+        self._claimed.add(session_id)
+        return True
+
+    def unclaim(self, session_id: str) -> None:
+        self._claimed.discard(session_id)
+
+    def begin_rewrite(self, session_id: str) -> bool:
+        """Block new calls on ``session_id`` during a history rewrite.
+
+        False when a call is connecting or live.
+        """
+        if session_id in self._claimed or session_id in self._sessions:
+            return False
+        self._rewriting.add(session_id)
+        return True
+
+    def end_rewrite(self, session_id: str) -> None:
+        self._rewriting.discard(session_id)
 
     def register(self, session_id: str, state: RealtimeConnectionState) -> None:
         """Register a live connection. Raises if ``session_id`` is already active."""

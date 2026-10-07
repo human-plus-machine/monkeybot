@@ -474,16 +474,31 @@ async def activate_branch(
     return updated
 
 
-def _is_ancestor(branch_id: str, ancestors: set[str], by_id: dict[str, BranchRecord]) -> bool:
+def _inherited_limit(
+    branch_id: str,
+    ancestors: set[str],
+    by_id: dict[str, BranchRecord],
+) -> int | None:
+    """Last row ``branch_id`` inherited from the nearest branch in ``ancestors``.
+
+    Each hop keeps only the rows up to its fork row, so the limit is the
+    smallest fork row on the path. ``None`` when no branch in ``ancestors``
+    is an ancestor; ``-1`` when a hop forked before any row.
+    """
+    limit: int | None = None
     seen: set[str] = set()
     current = by_id.get(branch_id)
     while current is not None and current.branch_id not in seen:
         seen.add(current.branch_id)
         parent = current.parent_branch_id
-        if parent is not None and parent in ancestors:
-            return True
-        current = by_id.get(parent) if parent is not None else None
-    return False
+        if parent is None:
+            return None
+        fork = current.fork_row_index if current.fork_row_index is not None else -1
+        limit = fork if limit is None else min(limit, fork)
+        if parent in ancestors:
+            return limit
+        current = by_id.get(parent)
+    return None
 
 
 def _active_option_index(
@@ -514,9 +529,9 @@ def divergence_points(
     """Navigator points whose fork row still exists on ``messages``.
 
     A point whose anchor was compacted away (or sits before a sliced tail
-    starting at absolute ``offset``) is omitted. Options are the parent
+    starting at absolute ``offset``) is omitted.     Options are the parent
     branch plus the children that forked there, and only when the active
-    branch is one of them or a descendant.
+    branch is one of them, or a descendant that inherited the fork row.
     """
     by_id = {record.branch_id: record for record in records}
     groups: dict[tuple[str, str], list[BranchRecord]] = {}
@@ -534,14 +549,15 @@ def divergence_points(
         hint = children[0].fork_row_index
         if hint is None:
             continue
+        relevant = {parent_id, *(child.branch_id for child in children)}
+        if active_branch_id not in relevant:
+            limit = _inherited_limit(active_branch_id, relevant, by_id)
+            if limit is None or hint > limit:
+                continue
         local = locate_anchor(messages, HistoryAnchor(hint - offset, fingerprint))
         if local is None:
             continue
         index = offset + local
-        child_ids = {child.branch_id for child in children}
-        relevant = {parent_id, *child_ids}
-        if active_branch_id not in relevant and not _is_ancestor(active_branch_id, relevant, by_id):
-            continue
         options = [parent_id, *[child.branch_id for child in children]]
         points.append(
             (

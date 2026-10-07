@@ -9,9 +9,11 @@ from collections.abc import AsyncIterator
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from monkeybot.core.config.realtime_config import RealtimeConfig
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
 from monkeybot.core.types.content_blocks import ContentBlock, Text
+from monkeybot.gateway.realtime.manager import RealtimeSessionManager
 from monkeybot.gateway.sse.routes import create_app
 from monkeybot.gateway.sse.session_bus import SessionRegistry
 
@@ -164,19 +166,17 @@ async def test_branch_op_rejects_busy_session(backend: SQLiteStorageBackend) -> 
                 await task
 
 
-class _LiveVoice:
-    def __init__(self, session_id: str) -> None:
-        self._session_id = session_id
-
-    def get(self, session_id: str) -> object | None:
-        return object() if session_id == self._session_id else None
+def _voice_manager() -> RealtimeSessionManager:
+    return RealtimeSessionManager(RealtimeConfig())
 
 
 @pytest.mark.asyncio
 async def test_rewrites_reject_a_live_voice_session(backend: SQLiteStorageBackend) -> None:
     registry = SessionRegistry()
     app = _app(registry, backend, RecordingLoop(registry))
-    app.state.realtime_manager = _LiveVoice("sess-voice")
+    manager = _voice_manager()
+    assert manager.claim("sess-voice")
+    app.state.realtime_manager = manager
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         await client.post("/sessions", json={"session_id": "sess-voice"})
         await _seed(backend, "sess-voice")
@@ -194,6 +194,37 @@ async def test_rewrites_reject_a_live_voice_session(backend: SQLiteStorageBacken
         assert await backend.branches().list("sess-voice") == []
         assert len(await backend.history().load("sess-voice")) == 4
         assert await backend.session_turns().try_acquire("sess-voice", "after")
+
+
+@pytest.mark.asyncio
+async def test_rewrite_blocks_voice_calls_until_it_finishes(
+    backend: SQLiteStorageBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = SessionRegistry()
+    app = _app(registry, backend, RecordingLoop(registry))
+    manager = _voice_manager()
+    app.state.realtime_manager = manager
+    history = backend.history()
+    load = history.load
+    claims_during_rewrite: list[bool] = []
+
+    async def load_while_claiming(thread_id: str, **kwargs: object) -> list[Message]:
+        claims_during_rewrite.append(manager.claim("sess-race"))
+        return await load(thread_id, **kwargs)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/sessions", json={"session_id": "sess-race"})
+        await _seed(backend, "sess-race")
+        anchor = await _anchor(client, "sess-race", "again")
+        monkeypatch.setattr(history, "load", load_while_claiming)
+        stale = {**anchor, "fingerprint": "0" * 64}
+        refused = await client.post("/sessions/sess-race/truncate", json={"anchor": stale})
+        assert refused.status_code == 409
+        truncated = await client.post("/sessions/sess-race/truncate", json={"anchor": anchor})
+        assert truncated.status_code == 200
+    assert claims_during_rewrite == [False, False]
+    assert manager.claim("sess-race")
 
 
 @pytest.mark.asyncio

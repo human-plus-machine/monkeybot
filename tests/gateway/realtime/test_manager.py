@@ -131,3 +131,16 @@ async def test_get_or_create_todo_store_is_per_session(tmp_path: Path) -> None:
     store1 = await manager.get_or_create_todo_store("s1", workspace_root=tmp_path)
     store2 = await manager.get_or_create_todo_store("s2", workspace_root=tmp_path)
     assert store1 is not store2
+
+
+def test_claim_and_rewrite_exclude_each_other() -> None:
+    manager = RealtimeSessionManager(_make_config())
+    assert manager.claim("s1") is True
+    assert manager.claim("s1") is False
+    assert manager.begin_rewrite("s1") is False
+    assert manager.begin_rewrite("s2") is True
+    assert manager.claim("s2") is False
+    manager.end_rewrite("s2")
+    assert manager.claim("s2") is True
+    manager.unclaim("s1")
+    assert manager.begin_rewrite("s1") is True

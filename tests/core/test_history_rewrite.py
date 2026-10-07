@@ -9,6 +9,7 @@ import pytest
 
 from monkeybot.core.config.settings import VerifierTrackerConfig
 from monkeybot.core.llm.provider import Message
+from monkeybot.core.persistence.branches import BranchRecord
 from monkeybot.core.persistence.goal_ledger import (
     Channel,
     GoalEntry,
@@ -32,6 +33,7 @@ from monkeybot.core.runtime.history_rewrite import (
     activate_branch,
     assert_tool_pairs,
     branch_op,
+    divergence_points,
     fork_session,
     load_active_history,
     locate_anchor,
@@ -669,3 +671,68 @@ async def test_late_verdict_after_rewrite_is_dropped(backend: SQLiteStorageBacke
         VerifierVerdict(request_id="req-1", verdict_id="v1", checkpoint_id="req-1:1"),
     )
     assert accepted is False
+
+
+def _branch(
+    branch_id: str,
+    parent: str | None,
+    fork_row: int | None,
+    thread: list[Message],
+) -> BranchRecord:
+    return BranchRecord(
+        branch_id=branch_id,
+        session_id="s1",
+        thread_id=f"t-{branch_id}",
+        parent_branch_id=parent,
+        fork_row_index=fork_row,
+        fork_fingerprint=None if fork_row is None else message_fingerprint(thread[fork_row]),
+        op=None if parent is None else "edit",
+        created_at=len(branch_id),
+        last_active_at=0,
+        is_active=False,
+    )
+
+
+def _nested_branches(
+    grandchild_fork_row: int,
+) -> tuple[list[BranchRecord], list[Message]]:
+    """Root, child forked at row 5, grandchild forked from the child.
+
+    Rows 1 and 5 have identical content, so a fork fingerprint alone cannot
+    tell them apart.
+    """
+    root = [
+        _user("a"),
+        _assistant("Done."),
+        _user("b"),
+        _assistant("x"),
+        _user("c"),
+        _assistant("Done."),
+        _user("d"),
+        _assistant("y"),
+    ]
+    child = [*root[:6], _user("d2"), _assistant("z")]
+    grandchild = [*child[: grandchild_fork_row + 1], _user("new"), _assistant("w")]
+    records = [
+        _branch("root", None, None, root),
+        _branch("child", "root", 5, root),
+        _branch("grandchild", "child", grandchild_fork_row, child),
+    ]
+    return records, grandchild
+
+
+def test_divergence_points_skip_a_fork_row_the_branch_never_inherited() -> None:
+    records, grandchild = _nested_branches(grandchild_fork_row=1)
+    points = divergence_points(records, "grandchild", grandchild)
+    assert [(p["anchor"]["row_index"], p["options"]) for p in points] == [
+        (1, ["child", "grandchild"]),
+    ]
+
+
+def test_divergence_points_keep_an_inherited_ancestor_fork_row() -> None:
+    records, grandchild = _nested_branches(grandchild_fork_row=6)
+    points = divergence_points(records, "grandchild", grandchild)
+    assert [(p["anchor"]["row_index"], p["options"]) for p in points] == [
+        (5, ["root", "child"]),
+        (6, ["child", "grandchild"]),
+    ]

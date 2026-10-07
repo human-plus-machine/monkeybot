@@ -848,6 +848,7 @@ def create_realtime_router(
         state: RealtimeConnectionState | None = None
         ctx: TurnContext | None = None
         close_reason = "connection_closed"
+        claimed = False
         try:
             provider = deps.realtime_provider
             if provider is None:
@@ -857,6 +858,12 @@ def create_realtime_router(
             if storage is None:
                 raise GatewayInternalError("Storage backend not initialized")
 
+            claimed = manager.claim(session_id)
+            if not claimed:
+                raise SessionConflictError(
+                    "Session is busy with another call or a chat history change",
+                    details="session_busy",
+                )
             history = storage.history()
             thread_id = await resolve_active_thread_id(storage, session_id)
             workspace_root, _skills_path = _resolved_workspace_paths()
@@ -997,10 +1004,14 @@ def create_realtime_router(
         finally:
             if ctx is not None and ctx.verdict_mailbox is not None:
                 ctx.verdict_mailbox.clear_request(session_id, request_id)
-            if state is not None:
-                await _close_session(state, manager, reason=close_reason)
-            else:
-                manager.release_slot(session_id)
+            try:
+                if state is not None:
+                    await _close_session(state, manager, reason=close_reason)
+                else:
+                    manager.release_slot(session_id)
+            finally:
+                if claimed:
+                    manager.unclaim(session_id)
             logger.info(
                 "realtime websocket closed %s",
                 kv(

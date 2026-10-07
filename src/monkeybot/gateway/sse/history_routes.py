@@ -94,26 +94,37 @@ async def _acquire_idle(
     session_id: str,
     request_id: str,
 ) -> None:
-    """Take the turn lock, or 409 ``SESSION_BUSY``.
+    """Take the turn lock and block new voice calls, or 409 ``SESSION_BUSY``.
 
-    A live voice session writes history without the turn lock and keeps the
-    thread it resolved at connect, so it counts as busy too.
+    A voice call writes history without the turn lock and keeps the thread it
+    resolved at connect, so a connecting or live call counts as busy too.
+    Pair with :func:`_end_rewrite`.
     """
     realtime = getattr(request.app.state, "realtime_manager", None)
-    if realtime is not None and realtime.get(session_id) is not None:
+    if realtime is not None and not realtime.begin_rewrite(session_id):
         raise APIError(
             409,
             "SESSION_BUSY",
             "End the voice session before changing chat history",
             uuid.uuid4().hex,
         )
-    await _try_acquire_turn(
-        bus=bus,
-        storage=storage,
-        session_id=session_id,
-        request_id=request_id,
-        busy_is_error=True,
-    )
+    try:
+        await _try_acquire_turn(
+            bus=bus,
+            storage=storage,
+            session_id=session_id,
+            request_id=request_id,
+            busy_is_error=True,
+        )
+    except BaseException:
+        _end_rewrite(request, session_id)
+        raise
+
+
+def _end_rewrite(request: Request, session_id: str) -> None:
+    realtime = getattr(request.app.state, "realtime_manager", None)
+    if realtime is not None:
+        realtime.end_rewrite(session_id)
 
 
 async def _publish(
@@ -267,6 +278,7 @@ async def post_branch(
             handed_off=handed_off,
         )
     finally:
+        _end_rewrite(request, session_id)
         if not handed_off[0]:
             await _release_turn(storage, session_id, request_id, bus)
 
@@ -302,6 +314,7 @@ async def put_active_branch(
     except HistoryRewriteError as exc:
         raise _rewrite_error(exc) from exc
     finally:
+        _end_rewrite(request, session_id)
         await _release_turn(storage, session_id, request_id, bus)
     await _publish(
         bus,
@@ -341,6 +354,7 @@ async def post_truncate(
     except HistoryRewriteError as exc:
         raise _rewrite_error(exc) from exc
     finally:
+        _end_rewrite(request, session_id)
         await _release_turn(storage, session_id, request_id, bus)
     await _publish(
         bus,
@@ -379,6 +393,7 @@ async def post_fork(
     except HistoryRewriteError as exc:
         raise _rewrite_error(exc) from exc
     finally:
+        _end_rewrite(request, session_id)
         await _release_turn(storage, session_id, request_id, bus)
     if result.forked_session_id is None:
         raise APIError(500, "INTERNAL", "Fork did not create a session", uuid.uuid4().hex)
