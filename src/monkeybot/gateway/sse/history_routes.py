@@ -40,6 +40,7 @@ from .routes import (
     _block_voice_calls,
     _parse_user_content,
     _require_bus,
+    _rewrite_effects,
     _schedule_turn,
     _storage_backend,
     _try_acquire_turn,
@@ -166,6 +167,7 @@ def register_history_rewrite_routes(api: APIRouter) -> None:
                     session_id=session_id,
                     op=body.op,
                     anchor_row_id=body.anchor.row_id,
+                    effects=_rewrite_effects(),
                 )
             except HistoryRewriteError as exc:
                 raise _rewrite_error(exc) from exc
@@ -232,6 +234,7 @@ def register_history_rewrite_routes(api: APIRouter) -> None:
                     branches=storage.branches(),
                     session_id=session_id,
                     anchor_row_id=body.anchor.row_id,
+                    effects=_rewrite_effects(),
                 )
             except HistoryRewriteError as exc:
                 raise _rewrite_error(exc) from exc
@@ -258,6 +261,7 @@ def register_history_rewrite_routes(api: APIRouter) -> None:
                     attachments=_attachment_store(request),
                     session_id=session_id,
                     anchor_row_id=body.anchor.row_id,
+                    effects=_rewrite_effects(),
                 )
             except HistoryRewriteError as exc:
                 raise _rewrite_error(exc) from exc

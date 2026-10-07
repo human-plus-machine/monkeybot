@@ -204,7 +204,8 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     relates_to TEXT,
     constraints_json TEXT NOT NULL,
     done_when_json TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL
+    created_at_ms INTEGER NOT NULL,
+    source_row_id TEXT
 )""",
     """CREATE UNIQUE INDEX IF NOT EXISTS idx_goal_ledger_thread_seq
     ON goal_ledger(thread_id, seq)""",
@@ -315,6 +316,7 @@ async def apply_schema(conn: aiosqlite.Connection) -> None:
     await _ensure_conversation_history_agent_scope_column(conn)
     await _ensure_history_memory_columns(conn)
     await _ensure_history_row_id_column(conn)
+    await _ensure_goal_ledger_source_row_column(conn)
     await _ensure_outbox_agent_id_column(conn)
     await _ensure_outbox_palace_id_column(conn)
     await _ensure_scheduled_loop_kind_columns(conn)
@@ -488,6 +490,22 @@ async def _ensure_history_row_id_column(conn: aiosqlite.Connection) -> None:
         return
     try:
         await conn.execute("ALTER TABLE conversation_history ADD COLUMN row_id TEXT")
+        await conn.commit()
+    except aiosqlite.OperationalError as exc:
+        if "duplicate column name" not in str(exc):
+            raise
+
+
+async def _ensure_goal_ledger_source_row_column(conn: aiosqlite.Connection) -> None:
+    """Add ``source_row_id`` on goal_ledger when upgrading an existing DB."""
+    cur = await conn.execute("PRAGMA table_info(goal_ledger)")
+    rows = await cur.fetchall()
+    await cur.close()
+    names = {str(r[1]) for r in rows}
+    if not names or "source_row_id" in names:
+        return
+    try:
+        await conn.execute("ALTER TABLE goal_ledger ADD COLUMN source_row_id TEXT")
         await conn.commit()
     except aiosqlite.OperationalError as exc:
         if "duplicate column name" not in str(exc):

@@ -84,6 +84,9 @@ class GoalEntry:
     constraints: tuple[Constraint, ...]
     done_when: tuple[str, ...]
     created_at_ms: int
+    # History row the entry was classified from; None for rows written before
+    # the column existed.
+    source_row_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +114,34 @@ class Classification:
 
 def new_entry_id() -> str:
     return str(uuid.uuid4())
+
+
+def retargeted_copies(entries: Sequence[GoalEntry], thread_id: str) -> list[GoalEntry]:
+    """``entries`` (in seq order) as new rows on ``thread_id``, numbered from 1.
+
+    Entry ids are fresh, and ``relates_to`` / constraint sources follow the
+    copies. A reference outside ``entries`` is dropped (``relates_to``) or
+    points at the copy itself (a constraint source).
+    """
+    id_map = {entry.entry_id: new_entry_id() for entry in entries}
+    copies: list[GoalEntry] = []
+    for seq, entry in enumerate(sorted(entries, key=lambda row: row.seq), start=1):
+        new_id = id_map[entry.entry_id]
+        constraints = tuple(
+            replace(c, source_entry_id=id_map.get(c.source_entry_id, new_id))
+            for c in entry.constraints
+        )
+        copies.append(
+            replace(
+                entry,
+                entry_id=new_id,
+                thread_id=thread_id,
+                seq=seq,
+                relates_to=id_map.get(entry.relates_to) if entry.relates_to else None,
+                constraints=constraints,
+            )
+        )
+    return copies
 
 
 def now_ms() -> int:
@@ -230,6 +261,7 @@ def entry_from_row(row: tuple[Any, ...]) -> GoalEntry:
         constraints_json,
         done_when_json,
         created_at_ms,
+        source_row_id,
     ) = row
     ch = Channel(channel) if channel else None
     return GoalEntry(
@@ -245,6 +277,7 @@ def entry_from_row(row: tuple[Any, ...]) -> GoalEntry:
         constraints=_constraints_from_json(str(constraints_json or "[]"), str(entry_id)),
         done_when=_done_when_from_json(str(done_when_json or "[]")),
         created_at_ms=int(created_at_ms),
+        source_row_id=str(source_row_id) if source_row_id else None,
     )
 
 
@@ -269,6 +302,22 @@ class GoalLedgerStore(Protocol):
 
     async def delete_entry(self, entry_id: str) -> None: ...
 
+    async def insert_entries(self, entries: Sequence[GoalEntry]) -> None:
+        """Insert fully stamped rows (ids and seqs already set) in one transaction."""
+        ...
+
+    async def truncate_entries(
+        self,
+        thread_id: str,
+        from_seq: int,
+        *,
+        status_updates: Sequence[tuple[str, Status]] = (),
+    ) -> int:
+        """Delete ``thread_id`` rows with ``seq >= from_seq`` and apply
+        ``status_updates`` in one transaction; return the deleted count.
+        """
+        ...
+
 
 GOAL_LEDGER_COLUMNS = (
     "entry_id",
@@ -283,6 +332,7 @@ GOAL_LEDGER_COLUMNS = (
     "constraints_json",
     "done_when_json",
     "created_at_ms",
+    "source_row_id",
 )
 
 
@@ -340,6 +390,25 @@ class InMemoryGoalLedgerStore:
             row for row in self._entries[old.thread_id] if row.entry_id != entry_id
         ]
 
+    async def insert_entries(self, entries: Sequence[GoalEntry]) -> None:
+        for entry in entries:
+            await self.append(entry)
+
+    async def truncate_entries(
+        self,
+        thread_id: str,
+        from_seq: int,
+        *,
+        status_updates: Sequence[tuple[str, Status]] = (),
+    ) -> int:
+        rows = self._entries.get(thread_id) or []
+        dropped = [row for row in rows if row.seq >= from_seq]
+        for row in dropped:
+            await self.delete_entry(row.entry_id)
+        for entry_id, status in status_updates:
+            self._apply_status(entry_id, status)
+        return len(dropped)
+
 
 class SQLiteGoalLedgerStore:
     """SQLite persistence for goal-ledger entries."""
@@ -368,9 +437,10 @@ class SQLiteGoalLedgerStore:
         await self._conn.execute(
             """
             INSERT INTO goal_ledger(
-                entry_id, thread_id, seq, verbatim, provenance, channel,
-                intent, status, relates_to, constraints_json, done_when_json, created_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                entry_id, thread_id, seq, verbatim, provenance, channel, intent,
+                status, relates_to, constraints_json, done_when_json, created_at_ms,
+                source_row_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 entry.entry_id,
@@ -385,6 +455,7 @@ class SQLiteGoalLedgerStore:
                 _constraints_to_json(entry.constraints),
                 json.dumps(list(entry.done_when), ensure_ascii=False),
                 entry.created_at_ms,
+                entry.source_row_id,
             ),
         )
 
@@ -445,3 +516,40 @@ class SQLiteGoalLedgerStore:
     async def delete_entry(self, entry_id: str) -> None:
         await self._conn.execute("DELETE FROM goal_ledger WHERE entry_id = ?", (entry_id,))
         await self._conn.commit()
+
+    @with_conn_lock
+    async def insert_entries(self, entries: Sequence[GoalEntry]) -> None:
+        await self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            for entry in entries:
+                await self._insert_entry(entry)
+            await self._conn.commit()
+        except BaseException:
+            await self._conn.rollback()
+            raise
+
+    @with_conn_lock
+    async def truncate_entries(
+        self,
+        thread_id: str,
+        from_seq: int,
+        *,
+        status_updates: Sequence[tuple[str, Status]] = (),
+    ) -> int:
+        await self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await self._conn.execute(
+                "DELETE FROM goal_ledger WHERE thread_id = ? AND seq >= ?",
+                (thread_id, from_seq),
+            )
+            deleted = int(cursor.rowcount)
+            for entry_id, status in status_updates:
+                await self._conn.execute(
+                    "UPDATE goal_ledger SET status = ? WHERE entry_id = ?",
+                    (status.value, entry_id),
+                )
+            await self._conn.commit()
+        except BaseException:
+            await self._conn.rollback()
+            raise
+        return deleted
