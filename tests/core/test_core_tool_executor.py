@@ -3266,6 +3266,44 @@ async def test_load_file_from_attachment_id_returns_image_block(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_load_file_reads_session_attachment_on_branch_thread(tmp_path: Path) -> None:
+    from monkeybot.core.attachments.store import FilesystemAttachmentStore
+    from monkeybot.core.types.content_blocks import Image
+
+    png = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+        b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc"
+        b"\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    ctx = dataclasses.replace(_ctx(), thread_id="branch:t:b1", session="t")
+    store = FilesystemAttachmentStore(tmp_path)
+    stored = store.save("t", data=png, mime_type="image/png", filename="up.png")
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        attachment_store=store,
+    )
+
+    result = await ex.execute(
+        call=ToolCall(
+            call_id="lf5",
+            name="load_file",
+            args={"attachment_id": stored.attachment_id},
+        ),
+        ctx=ctx,
+    )
+
+    assert result.error is None
+    img = next(b for b in result.blocks if isinstance(b, Image))
+    assert img.metadata is not None
+    assert img.metadata["path"] == f".monkeybot/attachments/t/{stored.attachment_id}"
+
+
+@pytest.mark.asyncio
 async def test_load_file_from_attachment_id_unknown_id_errors(tmp_path: Path) -> None:
     from monkeybot.core.attachments.store import FilesystemAttachmentStore
 

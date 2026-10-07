@@ -592,7 +592,7 @@ async def _prepare_turn_context(
     state.resolved_messages = convert_to_provider(
         state.chat_messages,
         attachment_store=attachment_store,
-        session_id=state.ctx.thread_id,
+        session_id=state.ctx.session_id,
     )
     system_msg, admit = _require_prompt(state)
     state.provider_messages = _messages_for_provider(
@@ -632,7 +632,7 @@ async def _refresh_prompt_after_history_change(
     state.resolved_messages = convert_to_provider(
         state.chat_messages,
         attachment_store=attachment_store,
-        session_id=state.ctx.thread_id,
+        session_id=state.ctx.session_id,
     )
     system_msg, admit = _require_prompt(state)
     state.provider_messages = _messages_for_provider(
@@ -853,7 +853,7 @@ async def _apply_pressure_and_before_provider(
         state.resolved_messages = convert_to_provider(
             state.chat_messages,
             attachment_store=attachment_store,
-            session_id=state.ctx.thread_id,
+            session_id=state.ctx.session_id,
             pressure_tier=pressure_tier,
             protect_recent=protect_recent_count(
                 state.chat_messages,

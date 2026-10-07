@@ -165,6 +165,15 @@ class TurnContext:
     """Optional verdict mailbox (Phase 2). None when verifier.tracker is off."""
     invoked_skill: SkillRef | None = None
     """Installed skill the user explicitly invoked with a leading `/slug` this turn."""
+    session: str | None = None
+    """Chat session when it differs from ``thread_id`` (a conversation branch's
+    history thread); read it through :attr:`session_id`."""
+
+    @property
+    def session_id(self) -> str:
+        """Chat session this turn belongs to. Attachments, spill files, goals,
+        scheduled loops, and MCP attribution are keyed by it; history by ``thread_id``."""
+        return self.session or self.thread_id
 
 
 _log = logging.getLogger(__name__)
@@ -1006,11 +1015,12 @@ async def build_context(
     config: RuntimeConfig | None = None,
     goal_ledger: GoalLedger | None = None,
     verdict_mailbox: VerdictMailbox | None = None,
+    session_id: str | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
     Args:
-        thread_id: Conversation thread id.
+        thread_id: History thread id.
         request_id: Per-request correlation id.
         agent_md_path: Path to AGENT.md (must be non-empty).
         memory: Optional memory subsystem; when set, L0+L1 wake-up is loaded.
@@ -1043,6 +1053,8 @@ async def build_context(
         config: Optional pinned ``RuntimeConfig`` for this turn. When omitted the
             turn is not snapshot-aware (tests / callers that only need env).
         goal_ledger: Optional goal ledger for intent capture and compaction facts.
+        session_id: Chat session when it differs from ``thread_id``; see
+            ``TurnContext.session_id``.
 
     Returns:
         Frozen :class:`TurnContext`.
@@ -1099,6 +1111,7 @@ async def build_context(
         config=config,
         goal_ledger=goal_ledger,
         verdict_mailbox=verdict_mailbox,
+        session=session_id,
     )
 
 
