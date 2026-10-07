@@ -8,6 +8,7 @@ turn cannot race another admission.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -270,4 +271,15 @@ def register_history_rewrite_routes(api: APIRouter) -> None:
                 )
             except HistoryRewriteError as exc:
                 raise _rewrite_error(exc) from exc
+        # The fork keeps the source's model and instructions.
+        reg_dep.create(
+            result.session_id,
+            agent_md=bus.agent_md,
+            created_at_ms=int(time.time() * 1000),
+            provider=bus.provider,
+            model_name=bus.model_name,
+        )
+        await _drain_follow_up(
+            bus=bus, loop_ref=request.app.state.loop, storage=storage, session_id=session_id
+        )
         return ForkResponse(session_id=result.session_id)
