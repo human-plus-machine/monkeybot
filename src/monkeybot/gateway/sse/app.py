@@ -427,7 +427,7 @@ class GatewayRuntime:
             kept.append(VerifierInspector(self.verdict_mailbox))
         self.inspectors = kept
 
-    def rebuild_memory_hooks(self, cfg: RuntimeConfig | None, fastapi_app: FastAPI | None) -> None:
+    def rebuild_hooks(self, cfg: RuntimeConfig | None, fastapi_app: FastAPI | None) -> None:
         """Re-bind memory, evidence, and verifier hooks without reopening storage."""
         enabled = env_flag(cfg, "MONKEYBOT_MEMORY_HOOK_ENABLED", default=True)
         mgr = HookManager()
@@ -537,7 +537,7 @@ class GatewayRuntime:
                 )
                 return applied, error
         if "MONKEYBOT_MEMORY_HOOK_ENABLED" in diff.changed_env_keys:
-            self.rebuild_memory_hooks(cfg, fastapi_app)
+            self.rebuild_hooks(cfg, fastapi_app)
             applied.append("MONKEYBOT_MEMORY_HOOK_ENABLED")
             logger.info(
                 "config slice rebuilt %s",
@@ -548,7 +548,7 @@ class GatewayRuntime:
                 getattr(fastapi_app.state, "storage", None) if fastapi_app is not None else None
             )
             self.build_verifier(cfg, storage=storage)
-            self.rebuild_memory_hooks(cfg, fastapi_app)
+            self.rebuild_hooks(cfg, fastapi_app)
             applied.append(VERIFIER_DIFF_KEY)
             logger.info(
                 "config slice rebuilt %s",
@@ -1265,7 +1265,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
 
     gateway_runtime.close_verifier()
     gateway_runtime.build_verifier(cfg, storage=fastapi_app.state.storage)
-    gateway_runtime.rebuild_memory_hooks(cfg, fastapi_app)
+    gateway_runtime.rebuild_hooks(cfg, fastapi_app)
 
     fastapi_app.state.gateway_runtime = gateway_runtime
 

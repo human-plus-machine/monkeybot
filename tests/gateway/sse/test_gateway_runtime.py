@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from monkeybot.core.hooks import HookEvent
+from monkeybot.core.context import TurnContext
+from monkeybot.core.hooks import HookEvent, HookPayload
 from monkeybot.core.layout import AgentLayout
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector
 from monkeybot.core.tools.loop_inspector import LoopStartInspector
@@ -688,7 +689,7 @@ async def test_memory_hook_reload_does_not_take_verifier_path(
     app = SimpleNamespace(state=SimpleNamespace(storage=_LedgerStorage(), memory=None))
     try:
         runtime.build_verifier(get_config_store().current(), storage=app.state.storage)
-        runtime.rebuild_memory_hooks(get_config_store().current(), app)  # type: ignore[arg-type]
+        runtime.rebuild_hooks(get_config_store().current(), app)  # type: ignore[arg-type]
         live_ledger = runtime.goal_ledger
         live_judge = runtime.judge_worker
         live_mailbox = runtime.verdict_mailbox
@@ -818,15 +819,40 @@ async def test_staged_verifier_reload_keeps_sticky_nudge_and_drains_judge(
         reset_runtime_env_state_for_tests()
 
 
-def test_rebuild_memory_hooks_registers_evidence_guard_without_memory() -> None:
+def _hook_payload(event: HookEvent, workspace_root: Path, **kw: object) -> HookPayload:
+    ctx = TurnContext(
+        thread_id="t1",
+        request_id="r1",
+        agent_md="agent",
+        memory_index=[],
+        skills=[],
+        tools=[],
+        user_id=None,
+        parent_run_id=None,
+        model="m",
+        workspace_root=workspace_root,
+    )
+    return HookPayload(event=event, thread_id="t1", request_id="r1", ctx=ctx, **kw)
+
+
+@pytest.mark.asyncio
+async def test_rebuild_hooks_registers_evidence_guard_without_memory(tmp_path: Path) -> None:
     runtime = GatewayRuntime()
-    guard = runtime.evidence_guard
-    runtime.rebuild_memory_hooks(None, None)
+    runtime.rebuild_hooks(None, None)
     first = runtime.hook_manager
     assert first is not None
-    assert guard.on_after_provider in first._handlers[HookEvent.AFTER_PROVIDER_RESPONSE]
-    assert guard.on_pre_tool in first._handlers[HookEvent.PRE_TOOL]
+    await first.fire(
+        _hook_payload(
+            HookEvent.AFTER_PROVIDER_RESPONSE,
+            tmp_path,
+            assistant_text="Answer.\nEvidence: src/missing.ts",
+        )
+    )
 
-    runtime.rebuild_memory_hooks(None, None)
-    assert runtime.hook_manager is not first
-    assert runtime.evidence_guard is guard
+    runtime.rebuild_hooks(None, None)
+    second = runtime.hook_manager
+    assert second is not None and second is not first
+    turn = await second.fire(_hook_payload(HookEvent.PRE_TURN, tmp_path))
+    assert turn.inject_text is not None
+    assert "Evidence path correction" in turn.inject_text
+    assert "src/missing.ts" in turn.inject_text
