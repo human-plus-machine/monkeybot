@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, TypeAlias, cast
 
 from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
@@ -18,6 +18,10 @@ class Message:
 
     role: Role
     content: list[ContentBlock]
+    row_id: str | None = field(default=None, compare=False)
+    """Stable id of the stored history row; ``None`` until persisted. Kept when the
+    row is rewritten in place or copied to another thread, so derive edited rows
+    with ``dataclasses.replace`` rather than building a new ``Message``."""
 
     def __post_init__(self) -> None:
         if self.role not in ("user", "assistant", "system"):

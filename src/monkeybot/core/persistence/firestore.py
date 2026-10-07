@@ -40,6 +40,7 @@ from monkeybot.core.persistence.durable_runs import (
 )
 from monkeybot.core.persistence.errors import AmbiguousCommitError
 from monkeybot.core.persistence.firestore_scheduled_loops import FirestoreScheduledLoopStore
+from monkeybot.core.persistence.row_ids import loaded_row_id, row_id_for_insert
 from monkeybot.core.persistence.thread_summary import (
     SUBAGENT_THREAD_ID_PREFIX,
     ChatThreadSummary,
@@ -116,6 +117,7 @@ def _history_row(
     agent_scope: str,
     turn_id: str | None,
     message_id: str | None,
+    row_id: str,
 ) -> dict[str, Any]:
     return {
         "thread_id": thread_id,
@@ -125,6 +127,7 @@ def _history_row(
         "agent_scope": agent_scope,
         "turn_id": turn_id,
         "message_id": message_id,
+        "row_id": row_id,
     }
 
 
@@ -234,7 +237,14 @@ class FirestoreHistoryStore:
         )
         created_at = int(time.time() * 1000)
         history_data = _history_row(
-            thread_id, role, payload, created_at, self._agent_scope, turn_id, message_id
+            thread_id,
+            role,
+            payload,
+            created_at,
+            self._agent_scope,
+            turn_id,
+            message_id,
+            row_id_for_insert(message),
         )
         # Subagent transcripts (thread_id prefixed SUBAGENT_THREAD_ID_PREFIX) skip
         # the summary doc entirely: list_threads() reads only threads_collection,
@@ -296,17 +306,24 @@ class FirestoreHistoryStore:
             ensure_ascii=False,
         )
         created_at = int(time.time() * 1000)
-        row_id = outbox_id(
+        outbox_row_id = outbox_id(
             agent_id=str(outbox.get("agent_id") or ""),
             thread_id=str(outbox.get("thread_id") or thread_id),
             message_id=str(outbox.get("message_id") or message_id),
             role=str(outbox.get("role") or role),
         )
         history_data = _history_row(
-            thread_id, role, payload, created_at, self._agent_scope, turn_id, message_id
+            thread_id,
+            role,
+            payload,
+            created_at,
+            self._agent_scope,
+            turn_id,
+            message_id,
+            row_id_for_insert(message),
         )
         outbox_data = {
-            "id": row_id,
+            "id": outbox_row_id,
             "agent_id": str(outbox.get("agent_id") or ""),
             "thread_id": thread_id,
             "turn_id": turn_id,
@@ -341,7 +358,7 @@ class FirestoreHistoryStore:
         )
         thread_ref = self._client.collection(self._threads_collection).document(thread_id)
         summary_fields = _thread_summary_update(thread_id, created_at, payload, self._agent_scope)
-        outbox_ref = _memory_outbox_collection(self._client, self._prefix).document(row_id)
+        outbox_ref = _memory_outbox_collection(self._client, self._prefix).document(outbox_row_id)
 
         async def _append_body(txn: firestore.AsyncTransaction) -> None:
             history_snapshot = await hist_ref.get(transaction=txn)
@@ -394,7 +411,7 @@ class FirestoreHistoryStore:
         out: list[Message] = []
         for doc in rows_chrono:
             data = doc.to_dict() or {}
-            row_id = doc.id
+            doc_id = doc.id
             role = str(data.get("role", ""))
             content_blob = str(data.get("content", ""))
             try:
@@ -405,7 +422,7 @@ class FirestoreHistoryStore:
             except (json.JSONDecodeError, ValueError, TypeError) as exc:
                 logger.error(
                     "Skipping unparseable history row id=%s thread_id=%s: %s",
-                    row_id,
+                    doc_id,
                     thread_id,
                     exc,
                     exc_info=True,
@@ -414,12 +431,18 @@ class FirestoreHistoryStore:
             if role not in _VALID_ROLES:
                 logger.error(
                     "Skipping history row id=%s thread_id=%s with invalid role=%r",
-                    row_id,
+                    doc_id,
                     thread_id,
                     role,
                 )
                 continue
-            out.append(Message(role=cast(Role, role), content=blocks))
+            out.append(
+                Message(
+                    role=cast(Role, role),
+                    content=blocks,
+                    row_id=loaded_row_id(data.get("row_id"), doc_id),
+                )
+            )
         return out
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:

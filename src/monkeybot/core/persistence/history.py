@@ -18,6 +18,7 @@ import aiosqlite
 
 from monkeybot.core.llm.provider import Message, Role
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.persistence.row_ids import loaded_row_id, row_id_for_insert
 from monkeybot.core.persistence.sqlite import ConnLock, with_conn_lock
 from monkeybot.core.persistence.thread_summary import (
     SUBAGENT_THREAD_ID_PREFIX,
@@ -58,16 +59,19 @@ class SQLiteHistoryStore:
         self._conn = conn
         self._agent_scope = agent_scope
         self._lock = lock or asyncio.Lock()
-        self._memory_columns: bool | None = None
+        self._column_names: frozenset[str] | None = None
 
-    async def _has_memory_columns(self) -> bool:
-        if self._memory_columns is None:
+    async def _columns(self) -> frozenset[str]:
+        if self._column_names is None:
             cur = await self._conn.execute("PRAGMA table_info(conversation_history)")
             rows = await cur.fetchall()
             await cur.close()
-            names = {str(r[1]) for r in rows}
-            self._memory_columns = "turn_id" in names and "message_id" in names
-        return self._memory_columns
+            self._column_names = frozenset(str(r[1]) for r in rows)
+        return self._column_names
+
+    async def _has_memory_columns(self) -> bool:
+        columns = await self._columns()
+        return "turn_id" in columns and "message_id" in columns
 
     async def _insert_history_row(
         self,
@@ -76,10 +80,17 @@ class SQLiteHistoryStore:
         payload: str,
         created_at: int,
         *,
+        row_id: str,
         turn_id: str | None,
         message_id: str | None,
     ) -> None:
-        if await self._has_memory_columns():
+        names = ["thread_id", "role", "content", "created_at", "agent_scope"]
+        values: list[object] = [thread_id, role, payload, created_at, self._agent_scope]
+        if "row_id" in await self._columns():
+            names.append("row_id")
+            values.append(row_id)
+        memory = await self._has_memory_columns()
+        if memory:
             if message_id:
                 cur = await self._conn.execute(
                     """
@@ -92,26 +103,17 @@ class SQLiteHistoryStore:
                 await cur.close()
                 if exists is not None:
                     return
-            try:
-                await self._conn.execute(
-                    """
-                    INSERT INTO conversation_history(
-                        thread_id, role, content, created_at, agent_scope, turn_id, message_id
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (thread_id, role, payload, created_at, self._agent_scope, turn_id, message_id),
-                )
-            except aiosqlite.IntegrityError:
-                return
-            return
-        await self._conn.execute(
-            """
-            INSERT INTO conversation_history(thread_id, role, content, created_at, agent_scope)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            (thread_id, role, payload, created_at, self._agent_scope),
-        )
+            names.extend(("turn_id", "message_id"))
+            values.extend((turn_id, message_id))
+        placeholders = ", ".join("?" for _ in names)
+        try:
+            await self._conn.execute(
+                f"INSERT INTO conversation_history({', '.join(names)}) VALUES ({placeholders})",
+                tuple(values),
+            )
+        except aiosqlite.IntegrityError:
+            if not memory:
+                raise
 
     async def append(
         self,
@@ -152,6 +154,7 @@ class SQLiteHistoryStore:
             message.role,
             payload,
             created_at,
+            row_id=row_id_for_insert(message),
             turn_id=turn_id,
             message_id=message_id,
         )
@@ -188,6 +191,7 @@ class SQLiteHistoryStore:
                     message.role,
                     payload,
                     created_at,
+                    row_id=row_id_for_insert(message),
                     turn_id=turn_id,
                     message_id=message_id,
                 )
@@ -210,10 +214,11 @@ class SQLiteHistoryStore:
         When ``limit`` is set, returns the newest ``limit`` rows. When ``None``,
         returns the full thread (compaction owns size — do not silently slide).
         """
+        row_id_column = "row_id" if "row_id" in await self._columns() else "NULL"
         if limit is None:
             cursor = await self._conn.execute(
-                """
-                SELECT id, role, content, created_at
+                f"""
+                SELECT id, role, content, created_at, {row_id_column}
                 FROM conversation_history
                 WHERE thread_id = ? AND agent_scope = ?
                 ORDER BY created_at ASC, id ASC
@@ -225,8 +230,8 @@ class SQLiteHistoryStore:
             rows_chrono = list(rows)
         else:
             cursor = await self._conn.execute(
-                """
-                SELECT id, role, content, created_at
+                f"""
+                SELECT id, role, content, created_at, {row_id_column}
                 FROM conversation_history
                 WHERE thread_id = ? AND agent_scope = ?
                 ORDER BY created_at DESC, id DESC
@@ -239,7 +244,7 @@ class SQLiteHistoryStore:
             rows_chrono = list(reversed(list(rows)))
         out: list[Message] = []
         for row in rows_chrono:
-            row_id = int(row[0])
+            db_id = int(row[0])
             role = row[1]
             content_blob = row[2]
             try:
@@ -250,14 +255,20 @@ class SQLiteHistoryStore:
             except (json.JSONDecodeError, ValueError, TypeError) as exc:
                 logger.error(
                     "Unparseable history row id=%s thread_id=%s",
-                    row_id,
+                    db_id,
                     thread_id,
                     exc_info=True,
                 )
-                raise ValueError(f"history row {row_id} unparseable: {exc}") from exc
+                raise ValueError(f"history row {db_id} unparseable: {exc}") from exc
             if role not in _VALID_ROLES:
-                raise ValueError(f"history row {row_id} has invalid role: {role!r}")
-            out.append(Message(role=cast(Role, role), content=blocks))
+                raise ValueError(f"history row {db_id} has invalid role: {role!r}")
+            out.append(
+                Message(
+                    role=cast(Role, role),
+                    content=blocks,
+                    row_id=loaded_row_id(row[4], db_id),
+                )
+            )
         return out
 
     async def clear(self, thread_id: str) -> None:

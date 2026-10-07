@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.persistence.backends import HistoryStore
@@ -72,7 +73,7 @@ def _freeze_user_row(
                     storage_path=attachment_workspace_path(catalog.session_id, block.attachment_id),
                 )
             )
-    return Message(role=msg.role, content=new_content)
+    return replace(msg, content=new_content)
 
 
 def _freeze_tool_responses(msg: Message) -> Message:
@@ -121,7 +122,7 @@ def _freeze_tool_responses(msg: Message) -> Message:
         )
     if not changed:
         return msg
-    return Message(role=msg.role, content=new_content)
+    return replace(msg, content=new_content)
 
 
 async def freeze_attachments_in_history(

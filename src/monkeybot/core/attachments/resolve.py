@@ -8,6 +8,7 @@ import threading
 import weakref
 from collections import OrderedDict
 from collections.abc import Sequence
+from dataclasses import replace
 
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.types.content_blocks import (
@@ -152,5 +153,5 @@ def resolve_messages_for_provider(
             resolved.append(msg)
             continue
         new_content = _resolve_user_content(list(msg.content), attachment_store, session_id)
-        resolved.append(Message(role=msg.role, content=new_content))
+        resolved.append(replace(msg, content=new_content))
     return resolved
