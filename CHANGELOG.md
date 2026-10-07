@@ -6,7 +6,13 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Core
+### CLI
+
+### Added
+
+- `monkeybot trace list` and `monkeybot trace digest` turn a session transcript into a resolved timeline, with each subagent run shown under the `task` call that started it. In chat, `/export-trace` copies the whole session directory. The `mb-retro` skill proposes environment fixes from one hard session and does not edit anything until you pick a candidate.
+
+## [core v3.8.0] - 2026-10-07
 
 ### Added
 
@@ -28,12 +34,6 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 - A leftover `knowledge:` section in `monkeybot.yaml` is warned once and ignored. Old index files (`index.sqlite`, `.monkeybot/knowledge/`) are no longer read and can be deleted.
 - The `Evidence:` path guard moved to `core/hooks/evidence_guard.py` and is always registered by the gateway. Before, it ran only when `knowledge.enabled` was on.
-
-### CLI
-
-### Added
-
-- `monkeybot trace list` and `monkeybot trace digest` turn a session transcript into a resolved timeline, with each subagent run shown under the `task` call that started it. In chat, `/export-trace` copies the whole session directory. The `mb-retro` skill proposes environment fixes from one hard session and does not edit anything until you pick a candidate.
 
 ## [core v3.7.0] - 2026-09-30
 
