@@ -242,8 +242,10 @@ def register_history_rewrite_routes(api: APIRouter) -> None:
                 )
             except HistoryRewriteError as exc:
                 raise _rewrite_error(exc) from exc
-            bus.admission.clear_all()
         await _publish(bus, session_id=session_id, branch_id=result.branch_id, op="truncate")
+        await _drain_follow_up(
+            bus=bus, loop_ref=request.app.state.loop, storage=storage, session_id=session_id
+        )
         return TruncateResponse(branch_id=result.branch_id)
 
     @api.post("/sessions/{session_id}/fork", response_model=ForkResponse)
