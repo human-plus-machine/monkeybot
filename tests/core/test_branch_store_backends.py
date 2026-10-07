@@ -160,3 +160,26 @@ async def test_reset_preserves_row_order_and_ids(backend: Any) -> None:
     assert [m.row_id for m in await history.load(copy)] == [m.row_id for m in loaded[:5]]
     await history.reset(thread, [])
     await history.reset(copy, [])
+
+
+@pytest.mark.asyncio
+async def test_delete_rows_removes_only_named_rows_and_refreshes_summary(backend: Any) -> None:
+    history = backend.history()
+    thread = f"t-{uuid.uuid4().hex}"
+    for i in range(6):
+        role = "user" if i % 2 == 0 else "assistant"
+        await history.append(thread, Message(role=role, content=[Text(text=f"m{i}")]))  # type: ignore[arg-type]
+    loaded = await history.load(thread)
+
+    dropped = [m.row_id for m in loaded[3:]]
+    assert await history.delete_rows(thread, [*dropped, "not-a-row"]) == 3
+    kept = await history.load(thread)
+    assert [m.row_id for m in kept] == [m.row_id for m in loaded[:3]]
+    [summary] = [t for t in await history.list_threads(200) if t.thread_id == thread]
+    assert summary.message_count == 3
+    assert summary.preview == "m2"
+    assert await history.delete_rows(thread, []) == 0
+
+    assert await history.delete_rows(thread, [m.row_id for m in kept]) == 3
+    assert await history.load(thread) == []
+    assert thread not in [t.thread_id for t in await history.list_threads(200)]

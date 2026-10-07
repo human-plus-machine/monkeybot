@@ -6,10 +6,24 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from monkeybot.core.llm.provider import Message
-from monkeybot.core.types.content_blocks import Text
+from monkeybot.core.types.content_blocks import AttachmentRef, Text
 
 from .store import attachment_workspace_path
 from .text import parse_attachment_descriptor_text
+
+
+def referenced_attachment_ids(messages: Sequence[Message]) -> list[str]:
+    """Attachment ids a transcript points at: frozen descriptors and unfrozen refs."""
+    ids: dict[str, None] = {}
+    for msg in messages:
+        for block in msg.content:
+            if isinstance(block, AttachmentRef):
+                ids[block.attachment_id] = None
+            elif isinstance(block, Text):
+                parsed = parse_attachment_descriptor_text(block.text)
+                if parsed is not None:
+                    ids[parsed.attachment_id] = None
+    return list(ids)
 
 
 @dataclass(frozen=True)

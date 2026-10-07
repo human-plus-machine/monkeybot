@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
@@ -497,6 +497,62 @@ class FirestoreHistoryStore:
         await self._delete_thread_summary(thread_id)
         for msg in messages:
             await self.append(thread_id, msg)
+
+    async def delete_rows(self, thread_id: str, row_ids: Collection[str]) -> int:
+        """Delete the rows whose loaded ``row_id`` is in ``row_ids``, then refresh the summary.
+
+        Batched, not transactional: a crash mid-delete leaves a shorter prefix
+        of the deletion applied, never rows outside ``row_ids`` removed.
+        """
+        targets = set(row_ids)
+        if not targets:
+            return 0
+        query = (
+            self._client.collection(self._collection)
+            .where(filter=FieldFilter("thread_id", "==", thread_id))
+            .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
+            .order_by("created_at", direction=firestore.Query.ASCENDING)
+        )
+        kept: list[dict[str, Any]] = []
+        batch = self._client.batch()
+        pending = 0
+        deleted = 0
+        async for doc in query.stream():
+            data = doc.to_dict() or {}
+            if loaded_row_id(data.get("row_id"), doc.id) not in targets:
+                kept.append(data)
+                continue
+            batch.delete(doc.reference)
+            pending += 1
+            deleted += 1
+            if pending >= _FIRESTORE_BATCH_LIMIT:
+                await batch.commit()
+                batch = self._client.batch()
+                pending = 0
+        if pending:
+            await batch.commit()
+        if deleted and not is_hidden_thread_id(thread_id):
+            await self._refresh_thread_summary(thread_id, kept)
+        return deleted
+
+    async def _refresh_thread_summary(self, thread_id: str, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            await self._delete_thread_summary(thread_id)
+            return
+        last = rows[-1]
+        await (
+            self._client.collection(self._threads_collection)
+            .document(self._summary_doc_id(thread_id))
+            .set(
+                {
+                    "thread_id": thread_id,
+                    "last_message_at": int(last.get("created_at") or 0),
+                    "message_count": len(rows),
+                    "last_content": str(last.get("content") or ""),
+                    "agent_scope": self._agent_scope,
+                }
+            )
+        )
 
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
         """Return recent threads, newest first, excluding hidden threads.
