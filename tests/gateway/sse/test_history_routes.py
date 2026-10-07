@@ -133,6 +133,11 @@ async def test_restore_drops_the_user_turn_without_replying(harness, backend) ->
         json={"op": "restore", "anchor": opened[2]["anchor"], "message": "lost"},
     )
     assert with_text.status_code == 400, with_text.text
+    with_id = await client.post(
+        f"/sessions/{SESSION}/branches",
+        json={"op": "restore", "anchor": opened[2]["anchor"], "request_id": "r1"},
+    )
+    assert with_id.status_code == 400, with_id.text
     assert len((await _detail(client))["messages"]) == 4
 
 

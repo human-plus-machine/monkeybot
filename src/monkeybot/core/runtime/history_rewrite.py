@@ -192,13 +192,10 @@ _USER_ONLY_MESSAGES = {
 }
 
 
-def _assert_unsummarized(messages: list[Message], index: int, end: int) -> None:
-    """Reject a cut touching rows at or before the newest compaction summary.
-
-    Those rows are read-only on the wire too; cutting there would drop the summary.
-    """
+def _assert_unsummarized(messages: list[Message], end: int) -> None:
+    """Reject a cut at ``end`` that would drop the newest compaction summary."""
     summary = last_summary_index(messages)
-    if summary is not None and min(index, end) <= summary:
+    if summary is not None and end <= summary:
         raise HistoryRewriteError(
             422, "SUMMARIZED", "That part of the chat was summarized and can't be changed."
         )
@@ -221,7 +218,7 @@ def prefix_end_for(messages: list[Message], index: int, op: BranchOp) -> int:
         end = _rewind_end(messages, index)
         if end >= len(messages):
             raise HistoryRewriteError(422, "NOTHING_TO_REWIND", "Nothing after that message.")
-    _assert_unsummarized(messages, index, end)
+    _assert_unsummarized(messages, end)
     assert_tool_pairs(messages, end)
     return end
 
@@ -286,11 +283,9 @@ async def branch_op(
 
 def _turn_cut(messages: list[Message], anchor_row_id: str, *, must_drop: bool) -> int:
     """Exclusive end keeping the turn that holds ``anchor_row_id``."""
-    index = _row_index(messages, anchor_row_id)
-    end = _rewind_end(messages, index)
+    end = _rewind_end(messages, _row_index(messages, anchor_row_id))
     if must_drop and end >= len(messages):
         raise HistoryRewriteError(422, "NOTHING_TO_TRUNCATE", "Nothing after that message.")
-    _assert_unsummarized(messages, index, end)
     assert_tool_pairs(messages, end)
     return end
 
@@ -338,6 +333,8 @@ async def truncate_active(
     active = _active_of(session_id, records)
     messages: list[Message] = await history.load(active.thread_id)
     end = _turn_cut(messages, anchor_row_id, must_drop=True)
+    # In place, so unlike a branch or fork the cut must keep the summary.
+    _assert_unsummarized(messages, end)
     dropped = {message.row_id for message in messages[end:] if message.row_id}
     if _strands_a_branch(records, active.branch_id, messages, end, dropped):
         raise HistoryRewriteError(

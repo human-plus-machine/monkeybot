@@ -607,3 +607,19 @@ def test_messages_to_wire_editable_is_false_only_through_the_summary() -> None:
         ("assistant", True),
     ]
     assert wire[5]["anchor"] == {"row_id": "a2"}
+
+
+def test_messages_to_wire_mid_turn_compaction_keeps_the_continuation_read_only() -> None:
+    wire = messages_to_wire(
+        [
+            Message(role="user", content=[Text(text="old")], row_id="u1"),
+            Message(
+                role="assistant",
+                content=[Text(text=f"{CONTEXT_SUMMARY_PREFIX}\nfolded")],
+                row_id="s1",
+            ),
+            Message(role="assistant", content=[Text(text="continued")], row_id="a1"),
+        ],
+        include_anchors=True,
+    )
+    assert [row["editable"] for row in wire] == [False, False, False]

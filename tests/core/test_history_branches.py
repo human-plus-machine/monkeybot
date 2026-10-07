@@ -237,6 +237,37 @@ async def test_ops_refuse_rows_at_or_before_the_summary(env) -> None:
 
 
 @pytest.mark.asyncio
+async def test_cuts_that_keep_the_summary_and_forks_are_allowed(env) -> None:
+    await env.turn("u1", "a1")
+    await env.turn("u2", "a2")
+    rows = await env.rows()
+    summary = _text("assistant", f"{CONTEXT_SUMMARY_PREFIX}\nearlier")
+    await env.history.reset(
+        await env.thread(), [*rows, summary, _text("user", "u3"), _text("assistant", "a3")]
+    )
+    rows = await env.rows()
+    folded = ["u1", "a1", "u2", "a2", f"{CONTEXT_SUMMARY_PREFIX}\nearlier"]
+    with pytest.raises(HistoryRewriteError) as exc:
+        await env.op("restore", rows[2].row_id)
+    assert exc.value.code == "SUMMARIZED"
+    forked = await fork_session(
+        history=env.history,
+        branches=env.branches,
+        attachments=None,
+        session_id=SESSION,
+        anchor_row_id=rows[0].row_id,
+    )
+    assert [m.row_id for m in await env.history.load(forked.session_id)] == [rows[0].row_id]
+    # The summary row's turn runs to u3, so rewinding there keeps the summary.
+    await env.op("rewind", rows[4].row_id)
+    assert await env.texts() == folded
+    await activate_branch(branches=env.branches, session_id=SESSION, branch_id=ROOT_BRANCH_ID)
+    result = await env.op("restore", rows[5].row_id)
+    assert result.replay_content is None
+    assert await env.texts() == folded
+
+
+@pytest.mark.asyncio
 async def test_restore_rejects_non_user_and_first_rows(env) -> None:
     await env.turn("u1", "a1")
     await env.turn("u2", "a2")
