@@ -38,6 +38,7 @@ from .models import (
 from .routes import (
     _attachment_store,
     _block_voice_calls,
+    _drain_follow_up,
     _parse_user_content,
     _require_bus,
     _schedule_turn,
@@ -172,29 +173,33 @@ def register_history_rewrite_routes(api: APIRouter) -> None:
             except Exception:
                 logger.exception("branch op failed %s", kv(session_id=session_id, op=body.op))
                 raise
-            bus.admission.clear_all()
             replay = edited if body.op == "edit" else result.replay_content
-            if replay is None:
-                await _publish(bus, session_id=session_id, branch_id=result.branch_id, op=body.op)
-                return BranchOpResponse(branch_id=result.branch_id)
-            await _publish(
-                bus,
-                session_id=session_id,
-                branch_id=result.branch_id,
-                op=body.op,
-                request_id=request_id,
-            )
-            bus.current_request_id = request_id
-            _schedule_turn(
-                bus=bus,
-                loop_ref=request.app.state.loop,
-                storage=storage,
-                session_id=session_id,
-                request_id=request_id,
-                user_content=replay,
-            )
-            lease.hand_off()
-            return BranchOpResponse(branch_id=result.branch_id, request_id=request_id)
+            if replay is not None:
+                await _publish(
+                    bus,
+                    session_id=session_id,
+                    branch_id=result.branch_id,
+                    op=body.op,
+                    request_id=request_id,
+                )
+                bus.current_request_id = request_id
+                # Follow-ups queued during the op drain when the replay ends.
+                _schedule_turn(
+                    bus=bus,
+                    loop_ref=request.app.state.loop,
+                    storage=storage,
+                    session_id=session_id,
+                    request_id=request_id,
+                    user_content=replay,
+                )
+                lease.hand_off()
+                return BranchOpResponse(branch_id=result.branch_id, request_id=request_id)
+            await _publish(bus, session_id=session_id, branch_id=result.branch_id, op=body.op)
+        # Follow-ups queued while the lease held the turn lock run on the new branch.
+        await _drain_follow_up(
+            bus=bus, loop_ref=request.app.state.loop, storage=storage, session_id=session_id
+        )
+        return BranchOpResponse(branch_id=result.branch_id)
 
     @api.put("/sessions/{session_id}/branches/active")
     async def put_active_branch(
@@ -212,8 +217,10 @@ def register_history_rewrite_routes(api: APIRouter) -> None:
                 )
             except HistoryRewriteError as exc:
                 raise _rewrite_error(exc) from exc
-            bus.admission.clear_all()
         await _publish(bus, session_id=session_id, branch_id=record.branch_id, op="switch")
+        await _drain_follow_up(
+            bus=bus, loop_ref=request.app.state.loop, storage=storage, session_id=session_id
+        )
         return {"branch_id": record.branch_id}
 
     @api.post("/sessions/{session_id}/truncate", response_model=TruncateResponse)
