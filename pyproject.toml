@@ -77,6 +77,9 @@ dev = [
     "pre-commit>=4.0.0",
     "ruff>=0.8.0",
     "tiktoken>=0.7.0",
+    # PDF extraction tests import pypdf directly. It used to arrive through the
+    # knowledge-media extra; the openai-family extras still ship it at runtime.
+    "pypdf>=6.14.2",
     "types-pyyaml>=6.0.12",
     "asgi-lifespan>=2.1.0",
     "anthropic[vertex,bedrock]>=0.40.0",
