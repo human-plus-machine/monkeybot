@@ -69,9 +69,12 @@ logger = logging.getLogger(__name__)
 _ABSOLUTE_PATH_FRAGMENT = re.compile(r"(?<![\w.-])/(?:[^\s'\"`;()]+)")
 
 # SDK contract checked against OpenSandbox ``Commands`` (opensandbox 1.x):
-# ``commands.run(..., RunCommandOpts(background=True))`` returns ``Execution.id``;
-# ``get_command_status``, ``get_background_command_logs(cursor=)``, and
-# ``interrupt`` poll and stop it; ``sandbox.renew(timedelta)`` extends lifetime.
+# ``commands.run(..., RunCommandOpts(background=True))`` returns ``Execution.id``.
+# execd emits ``execution_complete`` as soon as a background process starts, and
+# the SDK stores that on ``Execution.complete`` with ``exit_code`` left unset.
+# That is launch acknowledgement, not process exit. ``get_command_status``,
+# ``get_background_command_logs(cursor=)``, and ``interrupt`` poll and stop it;
+# ``sandbox.renew(timedelta)`` extends lifetime.
 # Live execd v1.0.22 on dev-internal is not reachable from this repo. If those
 # endpoints are missing, status refresh marks the job ``lost`` and returns the
 # server error instead of holding the turn open.
@@ -558,15 +561,9 @@ class SandboxExecutor:
             self._log_job(job, "sandbox background job lost", failed=True)
             raise OSError(job.error)
         job.remote_id = str(remote_id)
+        # ``complete`` is set at launch. Leave the job running so status and
+        # logs are read later; do not invent exit code 0 from a missing one.
         self._capture_execution_logs(job, execution)
-        finished = (
-            execution.exit_code is not None or getattr(execution, "complete", None) is not None
-        )
-        if finished:
-            job.status = JobStatus.EXITED
-            job.exit_code = execution.exit_code if execution.exit_code is not None else 0
-            self._log_job(job, "sandbox background job exited")
-            return job
         self._ensure_renew_loop()
         self._timeout_tasks[job.job_id] = asyncio.create_task(
             self._enforce_timeout(job.job_id),
