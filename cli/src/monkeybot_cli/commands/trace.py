@@ -8,13 +8,15 @@ import sys
 from pathlib import Path
 
 from monkeybot.core.layout import resolve_workspace_root
-from monkeybot.core.persistence.transcript import resolve_session_artifact_dir
-from monkeybot.core.persistence.transcript_reader import (
+from monkeybot.core.persistence.transcript import (
     TRANSCRIPT_FILENAME,
+    resolve_session_artifact_dir,
+)
+from monkeybot.core.persistence.transcript_reader import (
     build_digest,
     digest_to_json,
     iter_session_dirs,
-    record_by_seq,
+    records_by_seq,
     render_digest_markdown,
     scan_session_signals,
 )
@@ -107,9 +109,10 @@ def run_trace_digest(args: argparse.Namespace) -> int:
     try:
         seqs = args.seq or []
         if seqs:
+            found = records_by_seq(session_dir, seqs)
             missing = False
             for seq in seqs:
-                record = record_by_seq(session_dir, seq)
+                record = found.get(seq)
                 if record is None:
                     print(f"No record with seq {seq} in {session_dir}", file=sys.stderr)
                     missing = True

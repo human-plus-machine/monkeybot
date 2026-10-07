@@ -52,8 +52,8 @@ from monkeybot.core.runtime.events import (
 logger = logging.getLogger(__name__)
 
 _TRANSCRIPT_REL_DIR = Path(".monkeybot") / "transcripts"
-_TRANSCRIPT_FILENAME = "transcript.ndjson"
-_SUBAGENTS_DIRNAME = "subagents"
+TRANSCRIPT_FILENAME = "transcript.ndjson"
+SUBAGENTS_DIRNAME = "subagents"
 _TRANSCRIPT_EXTRA_KINDS: frozenset[str] = frozenset(
     {"SystemPromptSnapshot", "ContextUsage", "HarnessIntervention"}
 )
@@ -139,7 +139,7 @@ def _find_existing_session_dir(transcripts_root: Path, session_id: str) -> Path 
 
 def subagent_transcript_dir(parent_session_dir: Path, child_thread_id: str) -> Path:
     """Child transcript directory: ``{parent}/subagents/{sanitized child id}/``."""
-    return parent_session_dir / _SUBAGENTS_DIRNAME / sanitize_path_component(child_thread_id)
+    return parent_session_dir / SUBAGENTS_DIRNAME / sanitize_path_component(child_thread_id)
 
 
 def child_transcript_dir(
@@ -201,7 +201,9 @@ def _text_diff(base: str, text: str) -> list[str] | None:
             n=_DIFF_CONTEXT_LINES,
         )
     )
-    body = [line for line in hunks if not line.startswith(("---", "+++"))]
+    # Slice the two file-header lines rather than filtering by prefix: a removed
+    # "--x" or added "++x" body line also starts with "---" / "+++".
+    body = hunks[2:]
     if not body:
         return None
     if sum(len(line) + 1 for line in body) >= len(text) * _DIFF_MAX_RATIO:
@@ -414,7 +416,7 @@ class TranscriptWriter:
             self._session_dir = resolve_session_artifact_dir(
                 workspace_root, session_id, started_at=self._started_at
             )
-        self._path = self._session_dir / _TRANSCRIPT_FILENAME
+        self._path = self._session_dir / TRANSCRIPT_FILENAME
         self._lock = asyncio.Lock()
         self._provider_records = provider_records
         scanned = _scan_transcript(self._path) if self._path.is_file() else _ScanState()
@@ -788,6 +790,8 @@ async def start_child_transcript(
 
 
 __all__ = [
+    "SUBAGENTS_DIRNAME",
+    "TRANSCRIPT_FILENAME",
     "TranscriptWriter",
     "child_transcript_dir",
     "now_iso",

@@ -32,7 +32,8 @@ If the user does not name a session, run `trace list` and suggest the session wi
 
 1. Run `uv run monkeybot trace digest <id>`. That output is already resolved. Do not hand-expand `text_seq`, `result_seq`, `schema_seq`, `content_seq`, or `base_seq` diffs.
 2. Open one record only when the digest line is not enough: `uv run monkeybot trace digest <id> --seq N`. Repeat `--seq` for a few records, not the whole file.
-3. Subagent work is inlined from `{session}/subagents/`. If a line says `no child transcript`, say so and do not invent what the child did.
+3. Subagent work is inlined under the `task` call that started it, from `{session}/subagents/`. Runs the digest cannot tie to a call appear under `Unlinked subagent runs`. If a line says `no child transcript`, say so and do not invent what the child did.
+4. A `--seq` record with `text_error: diff_mismatch` was written by an older harness whose prompt diff cannot be rebuilt. Do not quote its text.
 
 A smooth digest (score 0, short timeline, no interventions) has little to teach. Say that and stop.
 

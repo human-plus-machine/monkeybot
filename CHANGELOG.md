@@ -8,7 +8,11 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Session transcripts record harness guard hits as `HarnessIntervention` (not sent on SSE) and write each subagent run under the parent session's `subagents/` directory when `runtime.transcript_enabled` is on. `monkeybot trace list` and `monkeybot trace digest` turn that log into a resolved timeline. `/export-trace` copies the whole session directory. The `mb-retro` skill proposes environment fixes from one hard session and does not edit anything until you pick a candidate.
+- Session transcripts record harness guard hits as `HarnessIntervention` (not sent on SSE) and write each subagent run under the parent session's `subagents/` directory when `runtime.transcript_enabled` is on. `monkeybot trace list` and `monkeybot trace digest` turn that log into a resolved timeline, with each subagent run shown under the `task` call that started it. `/export-trace` copies the whole session directory. The `mb-retro` skill proposes environment fixes from one hard session and does not edit anything until you pick a candidate.
+
+### Fixed
+
+- Transcript prompt diffs no longer drop changed lines that start with `--` or `++`, such as a removed `---` rule. Diffs already written that way are flagged as `text_error: diff_mismatch` when read instead of being rebuilt wrong.
 
 ### Removed
 
