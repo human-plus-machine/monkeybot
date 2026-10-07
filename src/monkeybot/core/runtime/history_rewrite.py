@@ -297,20 +297,23 @@ def _replay_content(messages: list[Message], index: int) -> list[ContentBlock]:
     return replay
 
 
-def _assert_no_children_in_tail(
+def _assert_fork_points_kept(
     records: list[BranchRecord],
     branch_id: str,
     messages: list[Message],
     end: int,
 ) -> None:
-    """Truncate must not cut away the row a child branch forked from.
+    """Truncate must not cut away a row where this branch meets another version.
 
-    The child would survive but its navigator point would vanish, leaving it
-    unreachable from the chat. Rewind keeps both versions instead.
+    That is a child's fork row, or this branch's own fork row from its parent.
+    The other version would survive but its navigator point would vanish,
+    leaving it unreachable from the chat. Rewind keeps both versions instead.
     """
     kept = messages[:end]
     for record in records:
-        if record.parent_branch_id != branch_id:
+        is_child = record.parent_branch_id == branch_id
+        is_own_fork = record.branch_id == branch_id and record.parent_branch_id is not None
+        if not (is_child or is_own_fork):
             continue
         if record.fork_row_index is None or record.fork_fingerprint is None:
             continue
@@ -321,7 +324,7 @@ def _assert_no_children_in_tail(
             raise HistoryRewriteError(
                 409,
                 "BRANCHES_IN_TAIL",
-                "Another version of this chat starts after that message. "
+                "Another version of this chat branches off at a message this would remove. "
                 "Rewind instead to keep both.",
             )
 
@@ -375,7 +378,14 @@ async def branch_op(
         await branches.create(created, make_active=True)
     except Exception:
         # No branch row points at the copy, so nothing else would ever purge it.
-        await history.reset(thread_id, [])
+        try:
+            await history.reset(thread_id, [])
+        except Exception:
+            logger.warning(
+                "history rewrite cleanup failed %s",
+                kv(session_id=session_id, thread_id=thread_id),
+                exc_info=True,
+            )
         raise
     await _copy_side_effects(effects, parent.thread_id, thread_id, messages[end:])
     logger.info(
@@ -400,7 +410,7 @@ async def truncate_active(
     messages = await history.load(thread_id)
     index = resolve_anchor(messages, anchor)
     end = prefix_end_for(messages, index, "truncate")
-    _assert_no_children_in_tail(await branches.list(session_id), branch_id, messages, end)
+    _assert_fork_points_kept(await branches.list(session_id), branch_id, messages, end)
     await history.truncate_tail(thread_id, end)
     await _truncate_side_effects(effects, thread_id, messages[end:])
     logger.info(

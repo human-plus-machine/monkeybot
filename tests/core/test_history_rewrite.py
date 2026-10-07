@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
+
 import pytest
 
 from monkeybot.core.config.settings import VerifierTrackerConfig
@@ -37,7 +40,7 @@ from monkeybot.core.runtime.history_rewrite import (
     truncate_active,
 )
 from monkeybot.core.types.content_blocks import SystemNotification, Text, ToolRequest, ToolResponse
-from monkeybot.core.verifier.ledger import GoalLedger
+from monkeybot.core.verifier.ledger import GoalLedger, statuses_without_dropped
 from monkeybot.core.verifier.mailbox import VerdictMailbox
 from monkeybot.core.verifier.tracker import ProgressTracker
 
@@ -220,16 +223,18 @@ async def test_truncate_drops_tail_on_active_thread_only(backend: SQLiteStorageB
         op="rewind",
         anchor=_anchor(messages, 3),
     )
-    # Rewind of the last row keeps the whole thread, then truncate the source
-    # via the new active branch back to the first user message.
+    # Rewind of the last row keeps the whole thread; grow the branch past its
+    # fork row, then truncate back to the new user message.
+    for message in (_user("three"), _assistant("ack three")):
+        await backend.history().append(branched.thread_id, message)
     active = await backend.history().load(branched.thread_id)
     await truncate_active(
         history=backend.history(),
         branches=backend.branches(),
         session_id="s1",
-        anchor=_anchor(active, 0),
+        anchor=_anchor(active, 4),
     )
-    assert await backend.history().load(branched.thread_id) == [active[0]]
+    assert await backend.history().load(branched.thread_id) == active[:5]
     assert len(await backend.history().load("s1")) == 4
 
 
@@ -400,6 +405,105 @@ async def test_truncate_refuses_to_cut_a_child_fork_point(
     assert exc.value.code == "BRANCHES_IN_TAIL"
     assert len(await backend.history().load("s1")) == 4
     assert await backend.history().load(branched.thread_id) == messages
+
+
+@pytest.mark.asyncio
+async def test_truncate_refuses_to_cut_own_fork_point(backend: SQLiteStorageBackend) -> None:
+    await _seed(backend, "s1")
+    messages = await backend.history().load("s1")
+    branched = await branch_op(
+        history=backend.history(),
+        branches=backend.branches(),
+        session_id="s1",
+        op="edit",
+        anchor=_anchor(messages, 2),
+    )
+    child = await backend.history().load(branched.thread_id)
+    with pytest.raises(HistoryRewriteError) as exc:
+        await truncate_active(
+            history=backend.history(),
+            branches=backend.branches(),
+            session_id="s1",
+            anchor=_anchor(child, 0),
+        )
+    assert exc.value.code == "BRANCHES_IN_TAIL"
+    view = await load_active_history(backend.history(), backend.branches(), "s1")
+    assert [point["options"] for point in view.branch_points] == [["root", branched.branch_id]]
+
+
+def _superseding_pair(thread_id: str) -> list[GoalEntry]:
+    goal = replace(_ledger_entry("g1", 1, "build x", thread_id), status=Status.SUPERSEDED)
+    pivot = replace(
+        _ledger_entry("g2", 2, "actually do y", thread_id),
+        intent=Intent.SCOPE_CHANGE,
+        relates_to="g1",
+    )
+    return [goal, pivot]
+
+
+@pytest.mark.asyncio
+async def test_truncate_restores_goal_superseded_by_dropped_message() -> None:
+    store = InMemoryGoalLedgerStore()
+    for row in _superseding_pair("t"):
+        await store.append(row)
+    ledger = GoalLedger(store, classifier=object())  # type: ignore[arg-type]
+    await ledger.drop_truncated("t", ["actually do y"])
+    rows = await store.list_entries("t")
+    assert [(row.verbatim, row.status) for row in rows] == [("build x", Status.ACTIVE)]
+
+
+@pytest.mark.asyncio
+async def test_branch_copy_restores_goal_without_touching_source() -> None:
+    store = InMemoryGoalLedgerStore()
+    for row in _superseding_pair("src"):
+        await store.append(row)
+    ledger = GoalLedger(store, classifier=object())  # type: ignore[arg-type]
+    await ledger.copy_branch_prefix("src", "dst", ["actually do y"])
+    copied = await store.list_entries("dst")
+    assert [(row.verbatim, row.status) for row in copied] == [("build x", Status.ACTIVE)]
+    source = await store.list_entries("src")
+    assert [row.status for row in source] == [Status.SUPERSEDED, Status.ACTIVE]
+
+
+def test_status_restore_keeps_a_kept_rows_change() -> None:
+    goal, pivot = _superseding_pair("t")
+    preempt = replace(
+        _ledger_entry("g3", 3, "wait, first z", "t"),
+        intent=Intent.PREEMPT,
+        relates_to="g1",
+    )
+    deferred = replace(goal, status=Status.DEFERRED)
+    assert statuses_without_dropped([deferred, pivot], [preempt]) == {"g1": Status.SUPERSEDED}
+
+
+class _BlockedClassifier:
+    def __init__(self) -> None:
+        self.release = asyncio.Event()
+
+    async def classify(self, *_args: object, **_kwargs: object) -> object:
+        await self.release.wait()
+        raise RuntimeError("classifier unavailable")
+
+
+@pytest.mark.asyncio
+async def test_truncate_with_pending_classification_keeps_matching_kept_row() -> None:
+    store = InMemoryGoalLedgerStore()
+    await store.append(_ledger_entry("e1", 1, "yes"))
+    await store.append(_ledger_entry("e2", 2, "do x"))
+    classifier = _BlockedClassifier()
+    ledger = GoalLedger(store, classifier=classifier)  # type: ignore[arg-type]
+    ledger.admit("t", "yes", provenance=Provenance.HUMAN, channel=Channel.MESSAGE)
+
+    async def _timeout(*_args: object, **_kwargs: object) -> None:
+        raise TimeoutError
+
+    ledger.wait_idle = _timeout  # type: ignore[method-assign]
+    await ledger.drop_truncated("t", ["yes"])
+    assert [row.entry_id for row in await store.list_entries("t")] == ["e1", "e2"]
+    classifier.release.set()
+    await asyncio.wait_for(ledger._queues["t"].join(), timeout=1)
+    assert [row.entry_id for row in await store.list_entries("t")] == ["e1", "e2"]
+    ledger.close()
 
 
 @pytest.mark.asyncio

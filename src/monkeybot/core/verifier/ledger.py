@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
@@ -41,6 +42,12 @@ _IDLE_SLOT_S = 16.0
 _IDLE_CEILING_S = 64.0
 _RECORD_INTENTS = (Intent.CORRECTION, Intent.ANSWER, Intent.NOISE)
 _TERMINAL_STATUSES = (Status.SATISFIED, Status.SUPERSEDED, Status.ABANDONED)
+# Status a classified row stamps onto the row it relates to (see _apply_classification).
+_RELATED_STATUS = {
+    Intent.PREEMPT: Status.DEFERRED,
+    Intent.SCOPE_CHANGE: Status.SUPERSEDED,
+    Intent.NEW_GOAL: Status.SUPERSEDED,
+}
 
 
 def _queue_unfinished(queue: asyncio.Queue[_Job]) -> int:
@@ -54,6 +61,30 @@ def _all_idle_timeout_s(queues: tuple[asyncio.Queue[_Job], ...]) -> float:
     return min(_IDLE_CEILING_S, max(1, depth) * _IDLE_SLOT_S)
 
 
+def statuses_without_dropped(
+    kept: Sequence[GoalEntry],
+    dropped: Sequence[GoalEntry],
+) -> dict[str, Status]:
+    """Kept rows whose status a dropped row changed, mapped to the status the
+    kept rows alone imply. Statuses only change through ``_RELATED_STATUS``.
+    """
+    touched = {
+        row.relates_to for row in dropped if row.relates_to and row.intent in _RELATED_STATUS
+    }
+    ordered = sorted(kept, key=lambda row: row.seq)
+    out: dict[str, Status] = {}
+    for row in ordered:
+        if row.entry_id not in touched:
+            continue
+        status = Status.SATISFIED if row.intent in _RECORD_INTENTS else Status.ACTIVE
+        for later in ordered:
+            if later.relates_to == row.entry_id and later.intent in _RELATED_STATUS:
+                status = _RELATED_STATUS[later.intent]
+        if status != row.status:
+            out[row.entry_id] = status
+    return out
+
+
 @dataclass(frozen=True)
 class _Job:
     thread_id: str
@@ -62,6 +93,7 @@ class _Job:
     channel: Channel | None
     model: str = ""
     provider: Provider | None = None
+    ticket: int = 0
 
 
 class GoalLedger:
@@ -82,6 +114,8 @@ class GoalLedger:
         self._queues: dict[str, asyncio.Queue[_Job]] = {}
         self._workers: dict[str, asyncio.Task[None]] = {}
         self._pending: dict[str, int] = {}
+        self._tickets: dict[str, int] = {}
+        self._discarded: dict[str, set[int]] = {}
         self._cache: OrderedDict[str, ResolvedIntent] = OrderedDict()
         self._closed = False
 
@@ -112,6 +146,8 @@ class GoalLedger:
             return
         binding = current_verifier_binding()
         queue = self._ensure_worker(thread_id)
+        ticket = self._tickets.get(thread_id, 0) + 1
+        self._tickets[thread_id] = ticket
         self._pending[thread_id] = self._pending.get(thread_id, 0) + 1
         self._touch_pending_view(thread_id)
         queue.put_nowait(
@@ -122,6 +158,7 @@ class GoalLedger:
                 channel=channel,
                 model=binding.model,
                 provider=binding.provider,
+                ticket=ticket,
             )
         )
 
@@ -186,12 +223,38 @@ class GoalLedger:
         """Drop the cached intent for ``thread_id`` so the next read reloads it."""
         self._cache.pop(thread_id, None)
 
-    async def _drain_before_rewrite(self, thread_id: str) -> None:
-        """Let queued classifications land so a dropped message is not written back later."""
+    async def _settle_before_rewrite(
+        self,
+        thread_id: str,
+        dropped_texts: list[str],
+        *,
+        discard_pending: bool,
+    ) -> list[str]:
+        """Wait for queued classifications; return the dropped texts that can have a row.
+
+        Jobs run in admit order, so on timeout the pending ones belong to the
+        newest user messages and have no row yet. Leaving those texts out keeps
+        them from matching an older kept message with the same text. A truncate
+        also discards those jobs so a removed message is not written back later.
+        """
         try:
             await self.wait_idle(thread_id)
+            return dropped_texts
         except TimeoutError:
-            logger.warning("goal_ledger drain timed out %s", kv(thread_id=thread_id))
+            pending = min(self._pending.get(thread_id, 0), len(dropped_texts))
+        logger.warning(
+            "goal_ledger drain timed out %s",
+            kv(thread_id=thread_id, pending=pending, discard=discard_pending),
+        )
+        if discard_pending and pending:
+            newest = self._tickets.get(thread_id, 0)
+            self._discarded.setdefault(thread_id, set()).update(
+                range(newest - pending + 1, newest + 1)
+            )
+        return dropped_texts[: len(dropped_texts) - pending]
+
+    def _is_discarded(self, job: _Job) -> bool:
+        return job.ticket in self._discarded.get(job.thread_id, ())
 
     async def copy_branch_prefix(
         self,
@@ -199,24 +262,45 @@ class GoalLedger:
         dst_thread: str,
         dropped_texts: list[str],
     ) -> None:
-        """Copy ledger rows recorded before the first user message the branch drops."""
-        await self._drain_before_rewrite(src_thread)
+        """Copy ledger rows recorded before the first user message the branch drops.
+
+        Status changes the dropped rows made to copied rows are undone on the copy.
+        """
+        matchable = await self._settle_before_rewrite(
+            src_thread, dropped_texts, discard_pending=False
+        )
         entries = await self._store.list_entries(src_thread)
-        first = first_dropped_seq(entries, dropped_texts)
+        first = first_dropped_seq(entries, matchable)
         last_seq = max((entry.seq for entry in entries), default=0)
         upto = last_seq if first is None else first - 1
         if upto > 0:
             await self._store.copy_prefix(src_thread, dst_thread, upto)
+            kept = sorted((e for e in entries if e.seq <= upto), key=lambda e: e.seq)
+            restored = statuses_without_dropped(kept, [e for e in entries if e.seq > upto])
+            if restored:
+                # copy_prefix renumbers the copied rows 1..n in seq order.
+                copied = sorted(await self._store.list_entries(dst_thread), key=lambda e: e.seq)
+                id_map = {src.entry_id: dst.entry_id for src, dst in zip(kept, copied, strict=True)}
+                for entry_id, status in restored.items():
+                    await self._store.update_status(id_map[entry_id], status)
         self.invalidate(dst_thread)
         await self._refresh_view(dst_thread)
 
     async def drop_truncated(self, thread_id: str, dropped_texts: list[str]) -> None:
-        """Drop ledger rows recorded for user messages a truncate removed."""
-        await self._drain_before_rewrite(thread_id)
+        """Drop ledger rows recorded for user messages a truncate removed, and
+        undo the status changes those rows made to earlier rows.
+        """
+        matchable = await self._settle_before_rewrite(
+            thread_id, dropped_texts, discard_pending=True
+        )
         entries = await self._store.list_entries(thread_id)
-        first = first_dropped_seq(entries, dropped_texts)
+        first = first_dropped_seq(entries, matchable)
         if first is not None:
+            kept = [e for e in entries if e.seq < first]
+            dropped = [e for e in entries if e.seq >= first]
             await self._store.drop_after(thread_id, first - 1)
+            for entry_id, status in statuses_without_dropped(kept, dropped).items():
+                await self._store.update_status(entry_id, status)
         self.invalidate(thread_id)
         await self._refresh_view(thread_id)
 
@@ -227,6 +311,7 @@ class GoalLedger:
         self._workers.clear()
         self._queues.clear()
         self._pending.clear()
+        self._discarded.clear()
 
     def _ensure_worker(self, thread_id: str) -> asyncio.Queue[_Job]:
         existing = self._queues.get(thread_id)
@@ -262,6 +347,11 @@ class GoalLedger:
                     exc_info=True,
                 )
             finally:
+                discarded = self._discarded.get(thread_id)
+                if discarded is not None:
+                    discarded.discard(job.ticket)
+                    if not discarded:
+                        self._discarded.pop(thread_id, None)
                 pending = self._pending.get(thread_id, 0) - 1
                 if pending <= 0:
                     self._pending.pop(thread_id, None)
@@ -282,6 +372,8 @@ class GoalLedger:
                     queue.task_done()
 
     async def _classify_job(self, job: _Job) -> None:
+        if self._is_discarded(job):
+            return
         token = bind_verifier_session(job.provider, job.model)
         try:
             if job.provenance != Provenance.HUMAN:
@@ -302,6 +394,8 @@ class GoalLedger:
                     exc_info=True,
                 )
                 result = fail_open_classification(open_entries)
+            if self._is_discarded(job):
+                return
             await self._apply_classification(job, result, entries)
         finally:
             reset_verifier_session(token)
