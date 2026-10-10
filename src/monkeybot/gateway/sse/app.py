@@ -53,6 +53,7 @@ from monkeybot.core.hooks.evidence_guard import EvidencePathGuard
 from monkeybot.core.layout import AgentLayout, resolve_agent_path
 from monkeybot.core.llm.provider import (
     Done,
+    Message,
     Provider,
     ProviderEvent,
     TextDelta,
@@ -65,12 +66,14 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.mcp.mcp_client import MCPClient, mcp_file_env_refs
 from monkeybot.core.mcp.ports_mcp import MCPCatalogApplyResult
 from monkeybot.core.memory.config import memory_enabled_from_config
+from monkeybot.core.memory.ingest import persist_message
 from monkeybot.core.memory.subsystem import MemoryConfigurationError, MemorySubsystem
 from monkeybot.core.persistence.backends import (
     StorageBackend,
     UsageStore,
     create_storage_backend,
 )
+from monkeybot.core.persistence.row_ids import new_row_id
 from monkeybot.core.persistence.transcript import (
     TranscriptWriter,
     runtime_manifest_fields,
@@ -1017,6 +1020,7 @@ class GatewayLoopPort:
             loops_advertised = loops_available and loops_registry.advertised
             summarization_model = env_value(cfg, "CONTEXT_SUMMARIZATION_MODEL", "").strip() or None
 
+            thread_id: str | None = None
             try:
                 thread_id = await resolve_active_thread_id(backend, session_id)
                 if bus.attachment_catalog is not None:
@@ -1050,6 +1054,24 @@ class GatewayLoopPort:
                 )
             except Exception as exc:
                 logger.exception("build_context failed")
+                # run_loop never starts, so it will not persist the prompt. Keep
+                # it so a client that missed the error still finds its message.
+                if thread_id is not None:
+                    try:
+                        await persist_message(
+                            history,
+                            Message(
+                                role="user",
+                                content=list(user_content),
+                                row_id=new_row_id(),
+                            ),
+                            thread_id=thread_id,
+                            turn_id=request_id,
+                            memory=getattr(serving.state, "memory", None),
+                            ingest=False,
+                        )
+                    except Exception:
+                        logger.exception("persisting user message after setup failure failed")
                 await bus.publish_data(
                     event_to_json(AgentError(request_id=request_id, error=str(exc)))
                 )
