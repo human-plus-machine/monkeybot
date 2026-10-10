@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `fireworks` model provider (`monkeybot[fireworks]`) for Fireworks AI's OpenAI-compatible API. Set `model.provider: fireworks` and `FIREWORKS_API_KEY`; `FIREWORKS_BASE_URL` overrides the default `https://api.fireworks.ai/inference/v1`. Model ids are passed through unchanged, e.g. `accounts/fireworks/models/llama-v3p3-70b-instruct`.
+
 ## [cli v0.9.0] - 2026-10-07
 
 ### Added

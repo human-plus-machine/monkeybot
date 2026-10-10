@@ -7,6 +7,7 @@ import pytest
 from monkeybot.core.config.settings import normalize_model_provider
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.gateway.sse import app as gateway_app
+from monkeybot.providers.fireworks import FireworksProvider
 from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.providers.huggingface import HuggingFaceProvider
 from monkeybot.providers.ollama import (
@@ -100,3 +101,18 @@ def test_openrouter_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
         OpenRouterProvider()
+
+
+def test_resolve_provider_fireworks(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODEL_PROVIDER", "fireworks")
+    monkeypatch.setenv("FIREWORKS_API_KEY", "fw-test")
+    provider = gateway_app._resolve_provider()
+    assert isinstance(provider, FireworksProvider)
+    assert provider._base_url == "https://api.fireworks.ai/inference/v1"
+
+
+def test_resolve_provider_fireworks_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODEL_PROVIDER", "fireworks")
+    monkeypatch.delenv("FIREWORKS_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="FIREWORKS_API_KEY"):
+        gateway_app._resolve_provider()
