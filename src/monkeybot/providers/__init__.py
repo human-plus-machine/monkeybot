@@ -1,6 +1,7 @@
 """Optional LLM providers (lazy-import heavy SDKs inside ``stream()``)."""
 
 from monkeybot.providers.claude import ClaudeProvider
+from monkeybot.providers.fireworks import FireworksProvider
 from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.providers.huggingface import HuggingFaceProvider
 from monkeybot.providers.nvidia import NvidiaProvider
@@ -11,6 +12,7 @@ from monkeybot.providers.vertex_claude import VertexClaudeProvider
 
 __all__ = [
     "ClaudeProvider",
+    "FireworksProvider",
     "GeminiProvider",
     "HuggingFaceProvider",
     "NvidiaProvider",
