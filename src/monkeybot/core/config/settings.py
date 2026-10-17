@@ -13,6 +13,7 @@ from monkeybot.core.config.yaml_loader import (
 )
 from monkeybot.core.llm.provider import Provider
 from monkeybot.providers.claude import ClaudeProvider
+from monkeybot.providers.fireworks import FireworksProvider
 from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.providers.huggingface import HuggingFaceProvider
 from monkeybot.providers.nvidia import NvidiaProvider
@@ -346,6 +347,14 @@ def get_provider_config(
             ),
             resolved_model,
         )
+    if provider_key == "fireworks":
+        return ProviderConfig(
+            FireworksProvider(
+                temperature=sampling.temperature,
+                max_tokens=sampling.max_tokens,
+            ),
+            resolved_model,
+        )
     if provider_key == "aws_bedrock":
         from monkeybot.providers.bedrock import BedrockProvider  # noqa: PLC0415
 
@@ -361,7 +370,7 @@ def get_provider_config(
     raise ValueError(
         f"Unsupported model provider: {provider_key}. "
         "Supported providers: google_vertexai, openai, anthropic, vertex_anthropic, "
-        "huggingface, ollama, ollama-cloud, ollama-local, nvidia, openrouter, aws_bedrock"
+        "huggingface, ollama, ollama-cloud, ollama-local, nvidia, openrouter, fireworks, aws_bedrock"
     )
 
 

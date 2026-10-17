@@ -50,6 +50,7 @@ PROVIDER_SPECS: dict[str, ProviderSpec] = {
     ),
     "nvidia": ProviderSpec(("nvidia",), "nvidia", ("NVIDIA_API_KEY",)),
     "openrouter": ProviderSpec(("openrouter",), "openrouter", ("OPENROUTER_API_KEY",)),
+    "fireworks": ProviderSpec(("fireworks",), "fireworks", ("FIREWORKS_API_KEY",)),
     "ollama": ProviderSpec(
         # credential_env_vars is empty: credentials_optional=True short-circuits
         # credentials_present() before these are ever read, and OLLAMA_BASE_URL
@@ -96,6 +97,7 @@ def extra_module(extra: str) -> str:
         "ollama": "openai",
         "nvidia": "openai",
         "openrouter": "openai",
+        "fireworks": "openai",
         "postgres": "asyncpg",
         "firestore": "google.cloud.firestore",
         "gcs": "google.cloud.storage",
