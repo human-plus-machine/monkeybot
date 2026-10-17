@@ -38,12 +38,14 @@ def _wire(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> MagicMock:
         "_resolved_workspace_paths",
         lambda *_a, **_k: (tmp_path, tmp_path / "skills", tmp_path / "artifacts"),
     )
-    gateway_app.gateway_runtime.mcp = MagicMock()
-    gateway_app.gateway_runtime.mcp.catalog_names.return_value = []
-    gateway_app.gateway_runtime.provider = _NamedProvider()  # type: ignore[assignment]
-    gateway_app.gateway_runtime.inspectors = []
-    gateway_app.gateway_runtime.hook_manager = None
-    gateway_app.gateway_runtime.web_search_tool = None
+    runtime = gateway_app.gateway_runtime
+    mcp = MagicMock()
+    mcp.catalog_names.return_value = []
+    monkeypatch.setattr(runtime, "mcp", mcp)
+    monkeypatch.setattr(runtime, "provider", _NamedProvider())
+    monkeypatch.setattr(runtime, "inspectors", [])
+    monkeypatch.setattr(runtime, "hook_manager", None)
+    monkeypatch.setattr(runtime, "web_search_tool", None)
 
     history = MagicMock()
     history.load = AsyncMock(return_value=[])
@@ -52,7 +54,7 @@ def _wire(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> MagicMock:
     storage.history.return_value = history
     storage.branches.return_value.get_active = AsyncMock(return_value=None)
     storage.usage.return_value = AsyncMock()
-    gateway_app.app.state.storage = storage
+    monkeypatch.setattr(gateway_app.app.state, "storage", storage, raising=False)
     return history
 
 
@@ -116,7 +118,7 @@ async def test_setup_failure_records_transcript_and_user_hook(
 
     manager = HookManager()
     manager.register(HookEvent.USER_MESSAGE, _on_user_message)
-    gateway_app.gateway_runtime.hook_manager = manager
+    monkeypatch.setattr(gateway_app.gateway_runtime, "hook_manager", manager)
     writer = MagicMock()
     writer.ensure_manifest = AsyncMock()
     writer.write_user_message = AsyncMock()
@@ -126,6 +128,7 @@ async def test_setup_failure_records_transcript_and_user_hook(
     registry.create("s1", agent_md=None, created_at_ms=0)
 
     await GatewayLoopPort(registry).start_turn("s1", "req-1", [Text(text="my long prompt")])
+    await manager.drain_settlement()
 
     message = history.append.await_args.args[1]
     writer.write_user_message.assert_awaited_once_with(
@@ -162,11 +165,12 @@ async def test_setup_failure_publishes_when_persist_fails(
 
     manager = HookManager()
     manager.register(HookEvent.USER_MESSAGE, _on_user_message)
-    gateway_app.gateway_runtime.hook_manager = manager
+    monkeypatch.setattr(gateway_app.gateway_runtime, "hook_manager", manager)
     registry = SessionRegistry()
     registry.create("s1", agent_md=None, created_at_ms=0)
 
     await GatewayLoopPort(registry).start_turn("s1", "req-1", [Text(text="my long prompt")])
+    await manager.drain_settlement()
 
     assert history.append.await_count == 1
     assert seen == []

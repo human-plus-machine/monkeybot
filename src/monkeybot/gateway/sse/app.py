@@ -48,7 +48,7 @@ from monkeybot.core.config.snapshot import (
 from monkeybot.core.context import LoopsToolRegistry, TurnContext, build_context
 from monkeybot.core.context.common import text_from_blocks
 from monkeybot.core.context.slash_skills import apply_invoked_skill
-from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
+from monkeybot.core.hooks import HookEvent, HookManager
 from monkeybot.core.hooks.evidence_guard import EvidencePathGuard
 from monkeybot.core.layout import AgentLayout, resolve_agent_path
 from monkeybot.core.llm.provider import (
@@ -89,6 +89,8 @@ from monkeybot.core.runtime.events import Error as AgentError
 from monkeybot.core.runtime.history_rewrite import resolve_active_thread_id
 from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.loop import run as run_loop
+from monkeybot.core.runtime.loop_hooks import _fire_hook
+from monkeybot.core.runtime.loop_messages import _user_text_from_content
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.background_jobs import jobs_killed_at_turn_end_error
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
@@ -832,13 +834,6 @@ def _content_blocks_to_text(blocks: list[ContentBlock]) -> str:
     return "\n".join(parts)
 
 
-def _user_message_text(blocks: list[ContentBlock]) -> str:
-    """Visible text the turn loop passes to the ``USER_MESSAGE`` hook."""
-    return " ".join(
-        block.text.strip() for block in blocks if isinstance(block, Text) and block.text.strip()
-    )
-
-
 async def _record_user_prompt_after_setup_failure(
     *,
     history: Any,
@@ -881,30 +876,26 @@ async def _record_user_prompt_after_setup_failure(
         except Exception:
             logger.exception("writing user message to transcript after setup failure failed")
 
-    if hook_manager is None:
-        return
     try:
-        await hook_manager.fire(
-            HookPayload(
-                event=HookEvent.USER_MESSAGE,
+        await _fire_hook(
+            hook_manager,
+            event=HookEvent.USER_MESSAGE,
+            ctx=TurnContext(
                 thread_id=thread_id,
                 request_id=request_id,
-                ctx=TurnContext(
-                    thread_id=thread_id,
-                    request_id=request_id,
-                    agent_md="",
-                    memory_index=[],
-                    skills=[],
-                    tools=[],
-                    user_id=None,
-                    parent_run_id=None,
-                    model=model,
-                    memory=memory,
-                    session=session_id,
-                ),
-                user_message=_user_message_text(user_content),
-                user_row_id=row_id,
-            )
+                agent_md="",
+                memory_index=[],
+                skills=[],
+                tools=[],
+                user_id=None,
+                parent_run_id=None,
+                model=model,
+                memory=memory,
+                session=session_id,
+            ),
+            timeout_s=0,
+            user_message=_user_text_from_content(user_content),
+            user_row_id=row_id,
         )
     except Exception:
         logger.exception("user-message hook after setup failure failed")
