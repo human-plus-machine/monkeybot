@@ -45,10 +45,10 @@ from monkeybot.core.config.snapshot import (
     env_value,
     get_config_store,
 )
-from monkeybot.core.context import LoopsToolRegistry, build_context
+from monkeybot.core.context import LoopsToolRegistry, TurnContext, build_context
 from monkeybot.core.context.common import text_from_blocks
 from monkeybot.core.context.slash_skills import apply_invoked_skill
-from monkeybot.core.hooks import HookManager
+from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.hooks.evidence_guard import EvidencePathGuard
 from monkeybot.core.layout import AgentLayout, resolve_agent_path
 from monkeybot.core.llm.provider import (
@@ -832,6 +832,84 @@ def _content_blocks_to_text(blocks: list[ContentBlock]) -> str:
     return "\n".join(parts)
 
 
+def _user_message_text(blocks: list[ContentBlock]) -> str:
+    """Visible text the turn loop passes to the ``USER_MESSAGE`` hook."""
+    return " ".join(
+        block.text.strip() for block in blocks if isinstance(block, Text) and block.text.strip()
+    )
+
+
+async def _record_user_prompt_after_setup_failure(
+    *,
+    history: Any,
+    user_content: list[ContentBlock],
+    thread_id: str,
+    request_id: str,
+    memory: Any | None,
+    transcript_writer: TranscriptWriter | None,
+    hook_manager: HookManager | None,
+    session_id: str,
+    model: str,
+) -> None:
+    """Keep a prompt that never reached ``run_loop``.
+
+    History is committed first, with the same memory ingest as a normal turn.
+    The transcript write and ``USER_MESSAGE`` hook then run best-effort. The
+    hook context is empty because ``build_context`` did not succeed; subscribers
+    use the payload's thread, text, and row id.
+    """
+    row_id = new_row_id()
+    try:
+        await persist_message(
+            history,
+            Message(role="user", content=list(user_content), row_id=row_id),
+            thread_id=thread_id,
+            turn_id=request_id,
+            memory=memory,
+            ingest=True,
+        )
+    except Exception:
+        logger.exception("persisting user message after setup failure failed")
+        return
+
+    if transcript_writer is not None:
+        try:
+            await transcript_writer.write_user_message(
+                request_id=request_id,
+                content=_content_blocks_to_text(user_content),
+            )
+        except Exception:
+            logger.exception("writing user message to transcript after setup failure failed")
+
+    if hook_manager is None:
+        return
+    try:
+        await hook_manager.fire(
+            HookPayload(
+                event=HookEvent.USER_MESSAGE,
+                thread_id=thread_id,
+                request_id=request_id,
+                ctx=TurnContext(
+                    thread_id=thread_id,
+                    request_id=request_id,
+                    agent_md="",
+                    memory_index=[],
+                    skills=[],
+                    tools=[],
+                    user_id=None,
+                    parent_run_id=None,
+                    model=model,
+                    memory=memory,
+                    session=session_id,
+                ),
+                user_message=_user_message_text(user_content),
+                user_row_id=row_id,
+            )
+        )
+    except Exception:
+        logger.exception("user-message hook after setup failure failed")
+
+
 def _default_agent_path(bus: SessionBus) -> Path:
     if bus.agent_md:
         return Path(bus.agent_md)
@@ -1057,21 +1135,17 @@ class GatewayLoopPort:
                 # run_loop never starts, so it will not persist the prompt. Keep
                 # it so a client that missed the error still finds its message.
                 if thread_id is not None:
-                    try:
-                        await persist_message(
-                            history,
-                            Message(
-                                role="user",
-                                content=list(user_content),
-                                row_id=new_row_id(),
-                            ),
-                            thread_id=thread_id,
-                            turn_id=request_id,
-                            memory=getattr(serving.state, "memory", None),
-                            ingest=False,
-                        )
-                    except Exception:
-                        logger.exception("persisting user message after setup failure failed")
+                    await _record_user_prompt_after_setup_failure(
+                        history=history,
+                        user_content=user_content,
+                        thread_id=thread_id,
+                        request_id=request_id,
+                        memory=getattr(serving.state, "memory", None),
+                        transcript_writer=transcript_writer,
+                        hook_manager=hook_manager,
+                        session_id=session_id,
+                        model=model_name,
+                    )
                 await bus.publish_data(
                     event_to_json(AgentError(request_id=request_id, error=str(exc)))
                 )
