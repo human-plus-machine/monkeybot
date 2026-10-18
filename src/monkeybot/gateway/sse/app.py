@@ -490,6 +490,7 @@ class GatewayRuntime:
             "MODEL_TEMPERATURE",
             "MODEL_MAX_TOKENS",
             "MODEL_THINKING_BUDGET",
+            "MODEL_REASONING_EFFORT",
             "VERTEX_AI_PROJECT_ID",
             "VERTEX_AI_LOCATION",
             "ANTHROPIC_VERTEX_PROJECT_ID",

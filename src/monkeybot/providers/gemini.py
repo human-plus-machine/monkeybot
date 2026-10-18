@@ -6,7 +6,7 @@ import base64
 import binascii
 import json
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any
 
 from monkeybot.core.llm.provider import (
@@ -31,8 +31,18 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.interfaces import LLMError
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.providers._utils import suppress_thinking_for_auxiliary_call
+from monkeybot.providers.rejected_sampling import (
+    is_status_400,
+    remember_rejected_sampling,
+    was_rejected,
+)
 from monkeybot.providers.request_budget import trim_message_media_for_byte_budget
-from monkeybot.providers.sampling import resolve_model_sampling
+from monkeybot.providers.sampling import (
+    REASONING_EFFORT_NONE,
+    normalize_reasoning_effort,
+    resolve_model_sampling,
+)
 
 THOUGHT_SIGNATURE_KEY = "thoughtSignature"
 SYNTHETIC_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
@@ -120,28 +130,6 @@ not to think rather than leaving it to the server's default for the model.
 """
 
 
-def _suppress_thinking_for_auxiliary_call(
-    messages: Sequence[Message],
-    tools: Sequence[ToolDef],
-) -> bool:
-    """True when this call is a known auxiliary job that must not use extended thinking.
-
-    Context curation and history summarization use ``tools=()`` and a fixed 2-message
-    shape. Extended thinking on preview models can stall the stream for 10s+ with no
-    visible output, burning the curator timeout before ``Done`` is received.
-    """
-    if tools:
-        return False
-    if len(messages) != 2 or messages[0].role != "system":
-        return False
-    sys_txt = "".join(b.text for b in messages[0].content if isinstance(b, Text))
-    markers = (
-        "You narrow context for another assistant",
-        "You compress prior agent conversation turns",
-    )
-    return any(m in sys_txt for m in markers)
-
-
 def _resolve_thinking_budget(
     configured: int | None,
     *,
@@ -157,9 +145,112 @@ def _resolve_thinking_budget(
         from monkeybot.core.config.snapshot import current_env
 
         thinking_budget = int(current_env("MODEL_THINKING_BUDGET", "-1"))
-    if _suppress_thinking_for_auxiliary_call(messages, tools):
+    if suppress_thinking_for_auxiliary_call(messages, tools):
         return _THINKING_DISABLED
     return thinking_budget
+
+
+_UNKNOWN_GEMINI_LEVELS: set[str] = set()
+
+
+def _known_thinking_level(types: Any, effort: str) -> Any | None:
+    """Return a real ``ThinkingLevel`` member, or None when the SDK does not list it.
+
+    The SDK's enum accepts unknown strings with only a warning and then sends them.
+    Callers must not pass those through.
+    """
+    level_enum = getattr(types, "ThinkingLevel", None)
+    members = getattr(level_enum, "__members__", None)
+    if not isinstance(members, Mapping):
+        return None
+    member = members.get(effort.strip().upper())
+    if member is None:
+        return None
+    name = getattr(member, "name", str(member))
+    if name == "THINKING_LEVEL_UNSPECIFIED":
+        return None
+    return member
+
+
+def _warn_unknown_gemini_level(effort: str) -> None:
+    if effort in _UNKNOWN_GEMINI_LEVELS:
+        return
+    _UNKNOWN_GEMINI_LEVELS.add(effort)
+    _log.warning(
+        "reasoning_effort %r is not a Gemini thinking level "
+        "(minimal, low, medium, high); using thinking_budget",
+        effort,
+    )
+
+
+def _gemini_blames_thinking(exc: BaseException) -> bool:
+    """True when a 400 names Gemini's thinking config as the rejected field."""
+    if not is_status_400(exc):
+        return False
+    compact = str(exc).lower().replace("_", "")
+    # Thinking-only models reject budget 0 with "Budget 0 is invalid. This model
+    # only works in thinking mode." without naming the field.
+    return any(
+        token in compact
+        for token in ("thinkinglevel", "thinkingconfig", "thinkingbudget", "thinking mode")
+    )
+
+
+def _apply_thinking_config(
+    types: Any,
+    cfg_kwargs: dict[str, Any],
+    *,
+    effort: str | None,
+    budget: int,
+    model: str = "",
+) -> dict[str, object]:
+    """Set ``thinking_config``. Effort wins over a token budget; they must not both be sent.
+
+    ``off`` / ``none`` / ``disabled`` disable thinking with budget 0. A level the
+    installed SDK lists is sent as ``thinking_level``. Anything else, including any
+    level on an SDK without ``ThinkingLevel``, falls back to the token budget so an
+    unsupported string cannot fail the request. A level or budget 0 that ``model``
+    already rejected is not sent again.
+
+    Returns the level or budget 0 that was sent, so a 400 against it can be
+    remembered and retried without it. Empty otherwise.
+    """
+    effort = normalize_reasoning_effort(effort)
+    if effort == REASONING_EFFORT_NONE:
+        if not was_rejected("gemini", model, "thinking_budget", _THINKING_DISABLED):
+            budget = _THINKING_DISABLED
+    elif effort and not was_rejected("gemini", model, "thinking_level", effort):
+        level = _known_thinking_level(types, effort)
+        if level is None:
+            _warn_unknown_gemini_level(effort)
+        else:
+            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=level)
+            return {"thinking_level": effort}
+    if budget == _THINKING_DISABLED and was_rejected(
+        "gemini", model, "thinking_budget", _THINKING_DISABLED
+    ):
+        # This model only works in thinking mode, so use its default.
+        budget = -1
+    if budget != -1:
+        cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
+    if budget == _THINKING_DISABLED:
+        return {"thinking_budget": _THINKING_DISABLED}
+    return {}
+
+
+def _remember_rejected_thinking(
+    model: str,
+    sent: Mapping[str, object],
+    exc: BaseException,
+) -> bool:
+    """Remember ``sent`` when a 400 blames the thinking config. True when worth retrying.
+
+    Only True once the memory holds ``sent``, so the retry cannot resend it.
+    """
+    if not sent or not _gemini_blames_thinking(exc):
+        return False
+    remember_rejected_sampling("gemini", model, sent)
+    return all(was_rejected("gemini", model, name, value) for name, value in sent.items())
 
 
 def _split_system_and_rest(messages: Sequence[Message]) -> tuple[str, list[Message]]:
@@ -519,6 +610,7 @@ class GeminiProvider:
         max_tokens: int | None = None,
         max_output_tokens: int | None = None,
         thinking_budget: int | None = None,
+        reasoning_effort: str | None = None,
         api_key: str | None = None,
     ) -> None:
         """Gemini streaming provider (Vertex AI or Google AI Studio).
@@ -542,10 +634,15 @@ class GeminiProvider:
             raise ValueError("pass only one of max_tokens or max_output_tokens")
         effective_max_tokens = max_tokens if max_tokens is not None else max_output_tokens
         self._supports_streaming = supports_streaming
-        sampling = resolve_model_sampling(temperature=temperature, max_tokens=effective_max_tokens)
+        sampling = resolve_model_sampling(
+            temperature=temperature,
+            max_tokens=effective_max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
         self._thinking_budget = thinking_budget
+        self._reasoning_effort = sampling.reasoning_effort
         self._api_key = api_key
 
     def _client(self, model_param: str) -> Any:
@@ -608,6 +705,9 @@ class GeminiProvider:
         contents = _messages_to_contents(rest)
         # Developer API CountTokensConfig rejects system_instruction/tools/gen_cfg; fold system into contents.
         count_cfg_kwargs: dict[str, Any] = {}
+        gen_cfg_kwargs: dict[str, Any] | None = None
+        effort: str | None = None
+        budget = -1
         if self._api_key:
             if system_instruction:
                 contents = [
@@ -631,31 +731,62 @@ class GeminiProvider:
                 messages=messages,
                 tools=tools,
             )
-            gen_cfg_kwargs: dict[str, Any] = {
+            gen_cfg_kwargs = {
                 "temperature": float(self._temperature),
                 "max_output_tokens": int(self._max_tokens),
             }
-            if budget != -1:
-                gen_cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
-            count_cfg_kwargs["generation_config"] = types.GenerationConfig(**gen_cfg_kwargs)
+            effort = (
+                None
+                if suppress_thinking_for_auxiliary_call(messages, tools)
+                else self._reasoning_effort
+            )
 
-        ct_cfg = types.CountTokensConfig(**count_cfg_kwargs) if count_cfg_kwargs else None
         client = self._client(model_param)
-        try:
-            resp = await client.aio.models.count_tokens(
-                model=model_param,
-                contents=contents,
-                config=ct_cfg,
-            )
-        except LLMError:
-            raise
-        except Exception as exc:
-            _log.warning(
-                "Gemini count_tokens error %s",
-                kv(provider="gemini", model=model, n_messages=len(messages), n_tools=len(tools)),
-                exc_info=True,
-            )
-            raise LLMError(str(exc)) from exc
+        with_thinking = True
+        while True:
+            sent: dict[str, object] = {}
+            if gen_cfg_kwargs is not None:
+                thinking_kwargs = dict(gen_cfg_kwargs)
+                if with_thinking:
+                    sent = _apply_thinking_config(
+                        types,
+                        thinking_kwargs,
+                        effort=effort,
+                        budget=budget,
+                        model=model_param,
+                    )
+                count_cfg_kwargs["generation_config"] = types.GenerationConfig(**thinking_kwargs)
+            ct_cfg = types.CountTokensConfig(**count_cfg_kwargs) if count_cfg_kwargs else None
+            try:
+                resp = await client.aio.models.count_tokens(
+                    model=model_param,
+                    contents=contents,
+                    config=ct_cfg,
+                )
+            except LLMError:
+                raise
+            except Exception as exc:
+                # Retry the count without thinking but do not remember the rejection:
+                # count_tokens may check it more strictly than generate_content.
+                if sent and _gemini_blames_thinking(exc):
+                    with_thinking = False
+                    _log.warning(
+                        "gemini count_tokens rejected thinking config, retrying without it %s",
+                        kv(provider="gemini", model=model, dropped=sorted(sent)),
+                    )
+                    continue
+                _log.warning(
+                    "Gemini count_tokens error %s",
+                    kv(
+                        provider="gemini",
+                        model=model,
+                        n_messages=len(messages),
+                        n_tools=len(tools),
+                    ),
+                    exc_info=True,
+                )
+                raise LLMError(str(exc)) from exc
+            break
         total = int(resp.total_tokens or 0)
         if self._api_key:
             # Developer API cannot count tool schemas; add a local estimate so
@@ -695,30 +826,21 @@ class GeminiProvider:
         system_instruction, rest = _split_system_and_rest(messages)
         contents = _messages_to_contents(rest)
 
-        cfg_kwargs: dict[str, Any] = {
-            "temperature": temperature,
-            "max_output_tokens": max_tokens,
-        }
-        if system_instruction:
-            cfg_kwargs["system_instruction"] = system_instruction
-        # -1 means "omit ThinkingConfig entirely" (model default).
-        # 0 means explicitly disable thinking (sent to API).
-        # Any other positive value sets a token budget.
-        if thinking_budget != -1:
-            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
-
         decls = _tool_defs_to_declarations(tools)
         stream_tools: list[Any] = []
         if decls:
             stream_tools.append(types.Tool(function_declarations=decls))
         if vertex_google_search:
             stream_tools.append(types.Tool(google_search=types.GoogleSearch()))
-        if stream_tools:
-            cfg_kwargs["tools"] = stream_tools
-
-        config = types.GenerateContentConfig(**cfg_kwargs)
 
         client = self._client(model_param)
+        # Effort wins over the token budget. Auxiliary calls still force budget 0
+        # via ``_resolve_thinking_budget`` and skip the configured effort.
+        effort = (
+            None
+            if suppress_thinking_for_auxiliary_call(messages, tools)
+            else self._reasoning_effort
+        )
 
         pending_tools: dict[str, ToolCall] = {}
         last_usage: Any = None
@@ -726,86 +848,128 @@ class GeminiProvider:
         grounding_meta: dict[str, Any] | None = None
         truncated = False
 
-        try:
-            stream_it = await client.aio.models.generate_content_stream(
+        while True:
+            cfg_kwargs: dict[str, Any] = {
+                "temperature": temperature,
+                "max_output_tokens": max_tokens,
+            }
+            if system_instruction:
+                cfg_kwargs["system_instruction"] = system_instruction
+            sent = _apply_thinking_config(
+                types,
+                cfg_kwargs,
+                effort=effort,
+                budget=thinking_budget,
                 model=model_param,
-                contents=contents,
-                config=config,
             )
-            async for resp in stream_it:
-                if getattr(resp, "usage_metadata", None) is not None:
-                    last_usage = resp.usage_metadata
+            if stream_tools:
+                cfg_kwargs["tools"] = stream_tools
 
-                for cand in resp.candidates or []:
-                    fr = getattr(cand, "finish_reason", None)
-                    if fr is not None:
-                        fr_name = str(getattr(fr, "name", fr)).upper()
-                        if "MAX_TOKEN" in fr_name:
-                            truncated = True
-                    cand_gm = _grounding_metadata_to_dict(getattr(cand, "grounding_metadata", None))
-                    if cand_gm is not None:
-                        if grounding_meta is not None and cand_gm != grounding_meta:
-                            _log.debug(
-                                "grounding metadata replaced by later candidate %s",
-                                kv(provider="gemini", model=model),
-                            )
-                        grounding_meta = cand_gm
-                    content = getattr(cand, "content", None)
-                    if content is None or not content.parts:
-                        continue
-                    for part in content.parts:
-                        part_sig = _normalize_signature(getattr(part, "thought_signature", None))
-                        if part_sig:
-                            last_signature = part_sig
+            config = types.GenerateContentConfig(**cfg_kwargs)
+            pending_tools = {}
+            last_usage = None
+            last_signature = None
+            grounding_meta = None
+            truncated = False
+            yielded = False
+            try:
+                stream_it = await client.aio.models.generate_content_stream(
+                    model=model_param,
+                    contents=contents,
+                    config=config,
+                )
+                async for resp in stream_it:
+                    if getattr(resp, "usage_metadata", None) is not None:
+                        last_usage = resp.usage_metadata
 
-                        is_thought = bool(getattr(part, "thought", False))
-                        if is_thought:
-                            txt = getattr(part, "text", None) or ""
-                            if txt:
-                                yield ThinkingDelta(
-                                    text=txt,
-                                    signature=last_signature,
-                                )
-                            continue
-
-                        if part.text:
-                            yield TextDelta(text=part.text)
-
-                        fc = part.function_call
-                        if fc is None:
-                            continue
-                        name = str(getattr(fc, "name", "") or "")
-                        if not name:
-                            continue
-                        fid = str(getattr(fc, "id", "") or "")
-                        key = fid if fid else f"anon:{name}"
-                        prev = pending_tools.get(key)
-                        prev_args: dict[str, Any] = dict(prev.args) if prev else {}
-                        merged_args = _merge_function_call_args(prev_args, fc)
-                        call_id = fid if fid else key
-
-                        # Per Goose: prefer the part's own signature, else carry forward
-                        # from the most recent signed part in this stream.
-                        effective_sig = part_sig or last_signature
-                        prev_meta = dict(prev.metadata) if prev and prev.metadata else {}
-                        if effective_sig:
-                            prev_meta[THOUGHT_SIGNATURE_KEY] = effective_sig
-
-                        pending_tools[key] = ToolCall(
-                            call_id=call_id,
-                            name=name,
-                            args=merged_args,
-                            metadata=prev_meta or None,
+                    for cand in resp.candidates or []:
+                        fr = getattr(cand, "finish_reason", None)
+                        if fr is not None:
+                            fr_name = str(getattr(fr, "name", fr)).upper()
+                            if "MAX_TOKEN" in fr_name:
+                                truncated = True
+                        cand_gm = _grounding_metadata_to_dict(
+                            getattr(cand, "grounding_metadata", None)
                         )
-        except LLMError:
-            raise
-        except Exception as exc:
-            _log.warning(
-                "Gemini stream error %s",
-                kv(provider="gemini", model=model, n_messages=len(messages), n_tools=len(tools)),
-                exc_info=True,
-            )
-            raise LLMError(str(exc)) from exc
+                        if cand_gm is not None:
+                            if grounding_meta is not None and cand_gm != grounding_meta:
+                                _log.debug(
+                                    "grounding metadata replaced by later candidate %s",
+                                    kv(provider="gemini", model=model),
+                                )
+                            grounding_meta = cand_gm
+                        content = getattr(cand, "content", None)
+                        if content is None or not content.parts:
+                            continue
+                        for part in content.parts:
+                            part_sig = _normalize_signature(
+                                getattr(part, "thought_signature", None)
+                            )
+                            if part_sig:
+                                last_signature = part_sig
+
+                            is_thought = bool(getattr(part, "thought", False))
+                            if is_thought:
+                                txt = getattr(part, "text", None) or ""
+                                if txt:
+                                    yielded = True
+                                    yield ThinkingDelta(
+                                        text=txt,
+                                        signature=last_signature,
+                                    )
+                                continue
+
+                            if part.text:
+                                yielded = True
+                                yield TextDelta(text=part.text)
+
+                            fc = part.function_call
+                            if fc is None:
+                                continue
+                            name = str(getattr(fc, "name", "") or "")
+                            if not name:
+                                continue
+                            fid = str(getattr(fc, "id", "") or "")
+                            key = fid if fid else f"anon:{name}"
+                            prev = pending_tools.get(key)
+                            prev_args: dict[str, Any] = dict(prev.args) if prev else {}
+                            merged_args = _merge_function_call_args(prev_args, fc)
+                            call_id = fid if fid else key
+
+                            # Per Goose: prefer the part's own signature, else carry forward
+                            # from the most recent signed part in this stream.
+                            effective_sig = part_sig or last_signature
+                            prev_meta = dict(prev.metadata) if prev and prev.metadata else {}
+                            if effective_sig:
+                                prev_meta[THOUGHT_SIGNATURE_KEY] = effective_sig
+
+                            pending_tools[key] = ToolCall(
+                                call_id=call_id,
+                                name=name,
+                                args=merged_args,
+                                metadata=prev_meta or None,
+                            )
+            except LLMError:
+                raise
+            except Exception as exc:
+                if not yielded and _remember_rejected_thinking(model_param, sent, exc):
+                    _log.warning(
+                        "gemini rejected thinking config, retrying without it %s",
+                        kv(provider="gemini", model=model, dropped=sorted(sent)),
+                    )
+                    continue
+                _log.warning(
+                    "Gemini stream error %s",
+                    kv(
+                        provider="gemini",
+                        model=model,
+                        n_messages=len(messages),
+                        n_tools=len(tools),
+                    ),
+                    exc_info=True,
+                )
+                raise LLMError(str(exc)) from exc
+            break
 
         if grounding_meta is not None:
             yield GroundingEvent(

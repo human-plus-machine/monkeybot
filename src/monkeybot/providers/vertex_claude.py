@@ -10,6 +10,7 @@ from monkeybot.core.llm.provider import Message, ProviderCallHints, ProviderEven
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import (
+    anthropic_sampling_kwargs,
     anthropic_tool_defs,
     build_anthropic_messages,
     count_anthropic_input_tokens,
@@ -17,8 +18,8 @@ from monkeybot.providers._utils import (
     iter_anthropic_sdk_stream,
     prepare_anthropic_cached_payload,
     split_leading_system,
+    suppress_thinking_for_auxiliary_call,
 )
-from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.request_budget import trim_message_media_for_byte_budget
 from monkeybot.providers.sampling import resolve_model_sampling
 
@@ -43,6 +44,7 @@ class VertexClaudeProvider:
         region: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         from monkeybot.core.config.snapshot import current_env
 
@@ -54,9 +56,14 @@ class VertexClaudeProvider:
         )
         if not self._project_id:
             raise ValueError("ANTHROPIC_VERTEX_PROJECT_ID is not set (or pass project_id=)")
-        sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
+        sampling = resolve_model_sampling(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
+        self._reasoning_effort = sampling.reasoning_effort
 
     async def count_input_tokens(
         self,
@@ -129,15 +136,21 @@ class VertexClaudeProvider:
             not_given=anthropic.NOT_GIVEN,
         )
 
+        auxiliary = suppress_thinking_for_auxiliary_call(messages, tools)
         stream_kwargs: dict[str, Any] = {
             "model": model,
             "system": system_param,
             "messages": cast(Any, converted_messages),
             "tools": tools_param,
             "max_tokens": self._max_tokens,
+            **anthropic_sampling_kwargs(
+                model=model,
+                temperature=self._temperature,
+                thinking_budget=None,
+                reasoning_effort=None if auxiliary else self._reasoning_effort,
+                provider="vertex_claude",
+            ),
         }
-        if supports_param(model, "temperature"):
-            stream_kwargs["temperature"] = self._temperature
         async for event in iter_anthropic_sdk_stream(
             client,
             stream_kwargs,
@@ -145,6 +158,7 @@ class VertexClaudeProvider:
             error_message="Vertex Claude stream error: %s",
             n_messages=len(messages),
             n_tools=len(tools),
+            fallback_temperature=self._temperature,
         ):
             yield event
 

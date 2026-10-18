@@ -15,7 +15,7 @@ from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._openai_compat import (
     count_openai_compat_input_tokens,
     enforce_openai_request_byte_budget,
-    iter_openai_compat_stream,
+    iter_openai_compat_stream_with_sampling_retry,
     messages_to_openai,
     openai_messages_token_count,
     openai_tools,
@@ -26,11 +26,14 @@ from monkeybot.providers._sdk_client import (
     sdk_env,
     session_affinity_headers,
 )
+from monkeybot.providers._utils import suppress_thinking_for_auxiliary_call
+from monkeybot.providers.model_capabilities import supports_param
+from monkeybot.providers.rejected_sampling import omit_known_rejected
 from monkeybot.providers.request_budget import (
     configured_request_byte_budget,
     trim_message_media_for_byte_budget,
 )
-from monkeybot.providers.sampling import resolve_model_sampling
+from monkeybot.providers.sampling import REASONING_EFFORT_NONE, resolve_model_sampling
 
 # Re-export private names that existing tests import directly from this module.
 _messages_to_openai = messages_to_openai
@@ -64,12 +67,18 @@ class OpenAIProvider:
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         if not os.environ.get("OPENAI_API_KEY"):
             raise ValueError("OPENAI_API_KEY is not set")
-        sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
+        sampling = resolve_model_sampling(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
+        self._reasoning_effort = sampling.reasoning_effort
 
     async def count_input_tokens(
         self,
@@ -133,9 +142,18 @@ class OpenAIProvider:
             "model": model,
             "messages": oai_messages,
             "stream": True,
-            "temperature": self._temperature,
             "max_tokens": self._max_tokens,
         }
+        if supports_param(model, "temperature"):
+            kwargs["temperature"] = self._temperature
+        if self._reasoning_effort:
+            # Curator and summarizer calls send an off effort instead of the configured one.
+            kwargs["reasoning_effort"] = (
+                REASONING_EFFORT_NONE
+                if suppress_thinking_for_auxiliary_call(messages, tools)
+                else self._reasoning_effort
+            )
+        omit_known_rejected("openai", model, kwargs)
         if tools:
             kwargs["tools"] = openai_tools(tools)
             kwargs["parallel_" + "tool" + "_calls"] = True
@@ -151,7 +169,7 @@ class OpenAIProvider:
         if headers:
             kwargs["extra_headers"] = headers
 
-        async for event in iter_openai_compat_stream(
+        async for event in iter_openai_compat_stream_with_sampling_retry(
             client,
             kwargs,
             provider="openai",

@@ -129,22 +129,26 @@ def test_normalize_vertex_model_strips_models_prefix() -> None:
 def test_suppress_thinking_curator_and_summarize_shapes() -> None:
     cur_sys = Message(
         role="system",
-        content=[Text(text="You narrow context for another assistant. Reply with ONLY a JSON object.")],
+        content=[
+            Text(text="You narrow context for another assistant. Reply with ONLY a JSON object.")
+        ],
     )
     cur_user = Message(role="user", content=[Text(text="x")])
-    assert gemini_mod._suppress_thinking_for_auxiliary_call([cur_sys, cur_user], []) is True
+    assert gemini_mod.suppress_thinking_for_auxiliary_call([cur_sys, cur_user], []) is True
 
     sum_sys = Message(
         role="system",
-        content=[Text(text="You compress prior agent conversation turns into one dense factual summary.")],
+        content=[
+            Text(text="You compress prior agent conversation turns into one dense factual summary.")
+        ],
     )
     sum_user = Message(role="user", content=[Text(text="blob")])
-    assert gemini_mod._suppress_thinking_for_auxiliary_call([sum_sys, sum_user], []) is True
+    assert gemini_mod.suppress_thinking_for_auxiliary_call([sum_sys, sum_user], []) is True
 
     tool = ToolDef(name="t", description="d", input_schema={})
-    assert gemini_mod._suppress_thinking_for_auxiliary_call([cur_sys, cur_user], [tool]) is False
+    assert gemini_mod.suppress_thinking_for_auxiliary_call([cur_sys, cur_user], [tool]) is False
 
-    assert gemini_mod._suppress_thinking_for_auxiliary_call([cur_user], []) is False
+    assert gemini_mod.suppress_thinking_for_auxiliary_call([cur_user], []) is False
 
 
 def test_vertex_location_preview_defaults_to_global(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -181,9 +185,7 @@ def test_vertex_location_embedded_in_full_resource_name(
     monkeypatch.delenv("VERTEX_AI_LOCATION", raising=False)
     monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
     monkeypatch.setenv("GCP_PROJECT_ID", "p")
-    full = (
-        "projects/p/locations/us-east1/publishers/google/models/gemini-2.5-flash"
-    )
+    full = "projects/p/locations/us-east1/publishers/google/models/gemini-2.5-flash"
     _project, loc = gemini_mod._vertex_project_and_location(full)
     assert loc == "us-east1"
 
@@ -196,7 +198,9 @@ async def test_gemini_stream_requires_vertex_project_env() -> None:
     keys = ("GCP_PROJECT_ID", "VERTEX_AI_PROJECT_ID", "GOOGLE_CLOUD_PROJECT")
     saved = {k: os.environ.pop(k, None) for k in keys}
     try:
-        with pytest.raises(LLMError, match="VERTEX_AI_PROJECT_ID|GOOGLE_CLOUD_PROJECT|GCP_PROJECT_ID"):
+        with pytest.raises(
+            LLMError, match="VERTEX_AI_PROJECT_ID|GOOGLE_CLOUD_PROJECT|GCP_PROJECT_ID"
+        ):
             async for _ in p.stream(
                 [Message(role="user", content=[Text(text="hi")])],
                 [tool],
@@ -219,7 +223,9 @@ async def test_gemini_stream_smoke_integration() -> None:
     p = GeminiProvider()
     tool = ToolDef(name="noop", description="noop", input_schema={})
     chunks: list[ProviderEvent] = []
-    async for ev in p.stream([Message(role="user", content="Say only: ok.")], [tool], model="gemini-2.5-flash"):
+    async for ev in p.stream(
+        [Message(role="user", content="Say only: ok.")], [tool], model="gemini-2.5-flash"
+    ):
         chunks.append(ev)
     assert chunks
     assert isinstance(chunks[-1], Done)
