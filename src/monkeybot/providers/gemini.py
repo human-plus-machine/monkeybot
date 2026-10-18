@@ -561,8 +561,9 @@ class GeminiProvider:
         if self._api_key:
             api_key = self._api_key
             return cached_sdk_client(
-                ("gemini-api", api_key),
+                ("gemini-api",),
                 lambda: genai.Client(api_key=api_key),
+                secrets=(api_key,),
             )
         project, location = _vertex_project_and_location(model_param)
         return cached_sdk_client(

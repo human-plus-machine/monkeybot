@@ -1192,8 +1192,9 @@ async def stream_chat_completions_with_tool_fallback(
         oai_messages = [{"role": "system", "content": system}, *oai_messages]
 
     client = cached_sdk_client(
-        ("openai-compat", base_url, api_key),
+        ("openai-compat", base_url),
         lambda: AsyncOpenAI(base_url=base_url, api_key=api_key),
+        secrets=(api_key,),
     )
     kwargs: dict[str, Any] = {
         "model": model,

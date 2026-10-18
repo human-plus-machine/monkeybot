@@ -118,9 +118,19 @@ class OpenAIProvider:
             oai_messages = [{"role": "system", "content": system}, *oai_messages]
 
         retention = hints.cache_retention if hints is not None else "short"
-        # Credentials identify the connection. The model id is a request field.
+        # Credentials and endpoint identify the connection. The model id is a
+        # request field. AsyncOpenAI reads these env vars in its constructor.
         api_key = os.environ.get("OPENAI_API_KEY", "")
-        client = cached_sdk_client(("openai", api_key), lambda: AsyncOpenAI())
+        client = cached_sdk_client(
+            (
+                "openai",
+                os.environ.get("OPENAI_BASE_URL"),
+                os.environ.get("OPENAI_ORG_ID"),
+                os.environ.get("OPENAI_PROJECT_ID"),
+            ),
+            lambda: AsyncOpenAI(),
+            secrets=(api_key,),
+        )
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": oai_messages,

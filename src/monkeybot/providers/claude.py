@@ -136,6 +136,16 @@ class ClaudeProvider:
 
 
 def _anthropic_client(anthropic: Any) -> Any:
-    """One ``AsyncAnthropic`` for this process and API key."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    return cached_sdk_client(("anthropic", api_key), lambda: anthropic.AsyncAnthropic())
+    """One ``AsyncAnthropic`` for this loop, API key, and endpoint.
+
+    ``AsyncAnthropic`` reads ``ANTHROPIC_BASE_URL`` and ``ANTHROPIC_AUTH_TOKEN``
+    when they are not passed in, so both are part of the cache key.
+    """
+    return cached_sdk_client(
+        ("anthropic", os.environ.get("ANTHROPIC_BASE_URL")),
+        lambda: anthropic.AsyncAnthropic(),
+        secrets=(
+            os.environ.get("ANTHROPIC_API_KEY", ""),
+            os.environ.get("ANTHROPIC_AUTH_TOKEN", ""),
+        ),
+    )

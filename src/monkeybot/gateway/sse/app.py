@@ -1466,6 +1466,10 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
     if storage is not None:
         await storage.close()
 
+    from monkeybot.providers._sdk_client import aclose_sdk_clients
+
+    await aclose_sdk_clients()
+
 
 @contextlib.asynccontextmanager
 async def _gateway_lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
