@@ -1407,6 +1407,16 @@ async def _startup(fastapi_app: FastAPI) -> None:
 
 
 async def _shutdown(fastapi_app: FastAPI) -> None:
+    """Tear down the gateway, then close SDK HTTP clients even if a step failed."""
+    from monkeybot.providers._sdk_client import aclose_sdk_clients
+
+    try:
+        await _teardown_runtime(fastapi_app)
+    finally:
+        await aclose_sdk_clients()
+
+
+async def _teardown_runtime(fastapi_app: FastAPI) -> None:
     """Tear down MCP sessions and storage backend."""
     fastapi_app.state.gateway_runtime = None
     from monkeybot.observability import shutdown_observability
@@ -1465,10 +1475,6 @@ async def _shutdown(fastapi_app: FastAPI) -> None:
     storage: StorageBackend | None = getattr(fastapi_app.state, "storage", None)
     if storage is not None:
         await storage.close()
-
-    from monkeybot.providers._sdk_client import aclose_sdk_clients
-
-    await aclose_sdk_clients()
 
 
 @contextlib.asynccontextmanager

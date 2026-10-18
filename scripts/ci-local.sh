@@ -31,9 +31,10 @@ fi
 
 export CI=true
 
-# Hooks export GIT_DIR. Left set, `git init` and `git -C` in tests operate on
-# this checkout instead of the temp workspace they create.
-unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_PREFIX GIT_OBJECT_DIRECTORY GIT_NAMESPACE
+# Hooks export GIT_DIR and other repo-local vars. Left set, `git init` and
+# `git -C` in tests operate on this checkout instead of the temp workspace they
+# create. Git lists those vars itself; SSH and auth vars stay set.
+unset $(git rev-parse --local-env-vars)
 
 # uv sync refreshes the editable package version in lockfiles. pre-commit
 # rejects the push if this hook leaves those files changed, so restore them.

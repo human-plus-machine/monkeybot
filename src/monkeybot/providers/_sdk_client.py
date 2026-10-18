@@ -94,7 +94,7 @@ def cached_sdk_client(
         live = [slot for slot in _clients.get(key, ()) if slot.loop() is not None]
         others = [slot for slot in live if slot.loop() is not current]
         mine = [slot for slot in live if slot.loop() is current]
-        recent = mine[-(_MAX_CLIENTS_PER_KEY - 1) :]
+        recent = mine[max(0, len(mine) - _MAX_CLIENTS_PER_KEY + 1) :]
         _clients[key] = [*others, *recent, _Slot(current, digest, client)]
     return client
 

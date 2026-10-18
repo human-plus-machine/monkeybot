@@ -580,22 +580,31 @@ class TestMacJailBootstrap:
         assert proc.returncode == 0
         assert "jail-ok" in proc.stdout
 
-    def test_git_commit_works_inside_jail(self, tmp_path):
+    @pytest.mark.parametrize("inherited_git_env", [None, "GIT_OBJECT_DIRECTORY", "GIT_DIR"])
+    def test_git_commit_works_inside_jail(self, tmp_path, monkeypatch, inherited_git_env):
         """Regression test: git reads ~/.gitconfig unconditionally on
         startup; without the narrow _HOME_DOTFILE_READ_EXCEPTIONS carve-out
-        this fails even for `git --version`."""
+        this fails even for `git --version`.
+
+        Hooks can export any GIT_* variable, not only GIT_DIR. One pointing
+        outside the workspace must not leak into the jailed git."""
         if subprocess.run(["which", "git"], capture_output=True).returncode != 0:
             pytest.skip("git not installed")
         home = tmp_path / "home"
         workspace = home / "agent" / "workspace"
         workspace.mkdir(parents=True)
         (workspace / "in.txt").write_text("x", encoding="utf-8")
+        if inherited_git_env is not None:
+            outer = home / "outer-repo-objects"
+            outer.mkdir()
+            monkeypatch.setenv(inherited_git_env, str(outer))
 
         roots = JailRoots(deny=(home,), read_write=(workspace,))
-        # A pre-push hook exports GIT_DIR. Left set, git init rewrites that
-        # repo instead of the temp workspace, and the jail correctly denies it.
+        # Hooks export GIT_DIR and other repo-local vars (git lists them).
+        # Left set, git writes to that repo instead of the temp workspace, and
+        # the jail correctly denies it.
         script = (
-            "unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE && "
+            "unset $(git rev-parse --local-env-vars) && "
             "git init -q && "
             "git -c user.email=a@b.c -c user.name=a add in.txt && "
             "git -c user.email=a@b.c -c user.name=a commit -q -m test && "

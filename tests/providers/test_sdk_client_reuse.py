@@ -506,6 +506,16 @@ async def test_rotated_credentials_do_not_grow_the_cache(
 
 
 @pytest.mark.asyncio
+async def test_a_limit_of_one_still_evicts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``mine[-0:]`` is the whole list, so a limit of 1 must not use that slice."""
+    monkeypatch.setattr(_sdk_client, "_MAX_CLIENTS_PER_KEY", 1)
+    for n in range(3):
+        cached_sdk_client(("limit-one",), object, fingerprint=(f"key-{n}",))
+
+    assert _cached_slot_count() == 1
+
+
+@pytest.mark.asyncio
 async def test_bedrock_client_follows_the_bearer_token_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
