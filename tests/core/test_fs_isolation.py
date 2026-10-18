@@ -592,7 +592,10 @@ class TestMacJailBootstrap:
         (workspace / "in.txt").write_text("x", encoding="utf-8")
 
         roots = JailRoots(deny=(home,), read_write=(workspace,))
+        # A pre-push hook exports GIT_DIR. Left set, git init rewrites that
+        # repo instead of the temp workspace, and the jail correctly denies it.
         script = (
+            "unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE && "
             "git init -q && "
             "git -c user.email=a@b.c -c user.name=a add in.txt && "
             "git -c user.email=a@b.c -c user.name=a commit -q -m test && "
