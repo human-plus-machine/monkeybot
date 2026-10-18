@@ -15,13 +15,10 @@ class DuckDuckGoBackend:
             from ddgs import DDGS
         except ImportError as exc:
             raise ImportError(
-                "ddgs is required for the DuckDuckGo backend. "
-                "Install with: uv add ddgs"
+                "ddgs is required for the DuckDuckGo backend. Install with: uv add ddgs"
             ) from exc
 
-        raw = await asyncio.to_thread(
-            lambda: list(DDGS().text(query, max_results=max_results))
-        )
+        raw = await asyncio.to_thread(lambda: list(DDGS().text(query, max_results=max_results)))
         return [
             SearchResult(
                 title=r.get("title", ""),

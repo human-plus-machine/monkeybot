@@ -284,9 +284,7 @@ def _scan_request_body_bytes(texts: Sequence[str]) -> int:
     return len(_scan_request_body(texts))
 
 
-def _chunk_by_bytes(
-    items: list[tuple[int, str]], max_bytes: int
-) -> list[list[tuple[int, str]]]:
+def _chunk_by_bytes(items: list[tuple[int, str]], max_bytes: int) -> list[list[tuple[int, str]]]:
     """Splits `items` into batches whose JSON request body stays under `max_bytes`.
 
     Callers must already have filtered out any single item whose own body
@@ -351,7 +349,9 @@ def extract_scan_units(messages: Sequence[Message]) -> list[ScanUnit]:
                 elif isinstance(block, Thinking) and block.thinking:
                     units.append(ScanUnit(m_idx, (b_idx,), block.thinking))
                 elif isinstance(block, ToolRequest) and block.args:
-                    units.append(ScanUnit(m_idx, (b_idx,), json.dumps(block.args, ensure_ascii=False)))
+                    units.append(
+                        ScanUnit(m_idx, (b_idx,), json.dumps(block.args, ensure_ascii=False))
+                    )
         else:
             for b_idx, block in enumerate(message.content):
                 if isinstance(block, ToolResponse):
@@ -422,7 +422,9 @@ class ScanOutcome:
     hit_message_indices: frozenset[int]
 
 
-def scan_and_redact(messages: Sequence[Message], scanner: SecretScanner | None = None) -> ScanOutcome:
+def scan_and_redact(
+    messages: Sequence[Message], scanner: SecretScanner | None = None
+) -> ScanOutcome:
     """Scans `messages` (the delta since the last provider call) and redacts hits.
 
     `messages` should be exactly the new messages since the last call to this

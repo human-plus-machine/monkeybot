@@ -28,7 +28,9 @@ def test_packages_order_core_and_browser_before_cli(release) -> None:
     assert list(release.PACKAGES) == ["core", "browser", "cli"]
 
 
-def test_write_github_output_appends(release, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_write_github_output_appends(
+    release, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     out = tmp_path / "github_output"
     out.write_text("prior=1\n", encoding="utf-8")
     monkeypatch.setenv("GITHUB_OUTPUT", str(out))

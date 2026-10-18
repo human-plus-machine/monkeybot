@@ -24,9 +24,7 @@ def observe_error(value: object, allowed: frozenset[str]) -> str:
     return json_text({"ok": False, "error": f"unknown observe {value!r}; expected {names}"})
 
 
-def with_observation(
-    payload: dict[str, Any], wrapped: dict[str, Any] | None
-) -> dict[str, Any]:
+def with_observation(payload: dict[str, Any], wrapped: dict[str, Any] | None) -> dict[str, Any]:
     if wrapped is None:
         return payload
     return {**payload, **wrapped}

@@ -216,8 +216,12 @@ def test_run_gateway_process_does_not_double_signal_on_popen_race() -> None:
         signal_calls.append(signum)
         os.killpg(proc.pid, signum)
 
-    with patch("monkeybot_cli.commands.run_cmd.subprocess.Popen", side_effect=popen_with_immediate_sigterm):
-        with patch("monkeybot_cli.commands.run_cmd._signal_process_group", side_effect=counting_signal):
+    with patch(
+        "monkeybot_cli.commands.run_cmd.subprocess.Popen", side_effect=popen_with_immediate_sigterm
+    ):
+        with patch(
+            "monkeybot_cli.commands.run_cmd._signal_process_group", side_effect=counting_signal
+        ):
             run_gateway_process(
                 [sys.executable, "-c", inner],
                 env=os.environ.copy(),

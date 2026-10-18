@@ -57,7 +57,9 @@ def resolve_judge_provider_model() -> tuple[str, str]:
     """Judge provider/model precedence: ``JUDGE_PROVIDER``/``JUDGE_MODEL`` env (CI pin) >
     ``eval_config.yaml`` > the agent's own model config (local default)."""
     if os.environ.get("JUDGE_PROVIDER"):
-        return os.environ["JUDGE_PROVIDER"].strip().lower(), os.environ.get("JUDGE_MODEL", "").strip()
+        return os.environ["JUDGE_PROVIDER"].strip().lower(), os.environ.get(
+            "JUDGE_MODEL", ""
+        ).strip()
     cfg = _load_eval_config()
     if cfg.get("judge_provider"):
         return str(cfg["judge_provider"]).strip().lower(), str(cfg.get("judge_model", "")).strip()
@@ -96,13 +98,25 @@ def _build_judge_model() -> Any | None:
         # deepeval GeminiModel only knows a fixed set of model names; preview / custom names
         # fall back to the default-capability bucket which is fine for scoring.  Force a known
         # flash model for the judge — the agent model and scoring model are independent.
-        judge_model = model if model in (
-            "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash",
-            "gemini-2.0-flash-lite", "gemini-1.5-pro", "gemini-1.5-flash",
-        ) else "gemini-2.5-flash"
+        judge_model = (
+            model
+            if model
+            in (
+                "gemini-2.5-flash",
+                "gemini-2.5-pro",
+                "gemini-2.0-flash",
+                "gemini-2.0-flash-lite",
+                "gemini-1.5-pro",
+                "gemini-1.5-flash",
+            )
+            else "gemini-2.5-flash"
+        )
         _log.info(
             "Building GeminiModel judge: model=%s project=%s location=%s vertexai=%s",
-            judge_model, project, location, bool(project),
+            judge_model,
+            project,
+            location,
+            bool(project),
         )
         return GeminiModel(
             model=judge_model,
@@ -118,7 +132,9 @@ def _build_judge_model() -> Any | None:
         if not api_key:
             _log.warning("JUDGE_PROVIDER=nvidia requires NVIDIA_API_KEY; skipping judge")
             return None
-        base_url = (os.environ.get("NVIDIA_BASE_URL") or "https://integrate.api.nvidia.com/v1").rstrip("/")
+        base_url = (
+            os.environ.get("NVIDIA_BASE_URL") or "https://integrate.api.nvidia.com/v1"
+        ).rstrip("/")
         return GPTModel(model=model, api_key=api_key, base_url=base_url, temperature=0)
     if provider in ("ollama-cloud", "ollama_cloud"):
         api_key = (os.environ.get("OLLAMA_API_KEY") or "").strip()

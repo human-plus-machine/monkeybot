@@ -23,7 +23,9 @@ def _run_cli(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess
 
 
 def test_new_scaffolds(tmp_path: Path) -> None:
-    result = _run_cli("new", "--dest", str(tmp_path), "--yes", "--provider", "gemini", "--model", "test-model")
+    result = _run_cli(
+        "new", "--dest", str(tmp_path), "--yes", "--provider", "gemini", "--model", "test-model"
+    )
     assert result.returncode == 0
     assert (tmp_path / "monkeybot_config" / "monkeybot.yaml").is_file()
     assert (tmp_path / ".env.example").is_file()
@@ -298,13 +300,17 @@ def test_doctor_reports_layout_browser_sandbox_and_legacy_migration(tmp_path: Pa
     (workspace / "skills").mkdir(parents=True)
     (tmp_path / "skills").mkdir()
     (tmp_path / "skills" / "existing.md").write_text("trusted skill\n", encoding="utf-8")
-    (cfg / "mcp.json").write_text('{"mcpServers": {"browser": {"enabled": false}}}', encoding="utf-8")
+    (cfg / "mcp.json").write_text(
+        '{"mcpServers": {"browser": {"enabled": false}}}', encoding="utf-8"
+    )
 
     result = _run_cli("doctor", "--json", "--cwd", str(tmp_path))
     assert result.returncode == 0, result.stderr
     checks = {item["id"]: item for item in json.loads(result.stdout)["checks"]}
     assert checks["layout.resolved"]["status"] == "pass"
-    assert checks["layout.resolved"]["value"]["workspace"] == str(workspace.resolve()), result.stdout
+    assert checks["layout.resolved"]["value"]["workspace"] == str(workspace.resolve()), (
+        result.stdout
+    )
     assert checks["layout.legacy_nested_skills"]["status"] == "fail"
     assert checks["layout.legacy_nested_skills"]["value"] == {
         "source": str((workspace / "skills").resolve()),

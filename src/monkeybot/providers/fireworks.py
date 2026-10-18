@@ -27,6 +27,7 @@ from collections.abc import AsyncIterator, Sequence
 
 from monkeybot.core.llm.provider import (
     Message,
+    ProviderCallHints,
     ProviderEvent,
 )
 from monkeybot.core.types.types_tools import ToolDef
@@ -85,6 +86,7 @@ class FireworksProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        hints: ProviderCallHints | None = None,
     ) -> int:
         # ponytail: tiktoken estimate, models here aren't GPT — swap for the
         # usage echo on /chat/completions if the drift matters.
@@ -95,6 +97,7 @@ class FireworksProvider:
             provider=self.name,
             max_request_bytes=configured_request_byte_budget(provider=self.name),
             thinking_budget=thinking_budget,
+            hints=hints,
         )
 
     async def stream(
@@ -104,6 +107,7 @@ class FireworksProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        hints: ProviderCallHints | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         del thinking_budget
         async for event in stream_chat_completions_with_tool_fallback(
@@ -117,5 +121,6 @@ class FireworksProvider:
             max_tokens=self._max_tokens,
             reasoning_effort=self._reasoning_effort,
             max_request_bytes=configured_request_byte_budget(provider=self.name),
+            hints=hints,
         ):
             yield event

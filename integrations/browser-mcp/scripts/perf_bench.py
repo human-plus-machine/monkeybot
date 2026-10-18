@@ -64,9 +64,7 @@ def _parse(result: str) -> dict[str, Any]:
     return payload
 
 
-def _tree_index(
-    tree: str, contains: str, *, prefer_tags: tuple[str, ...] = ()
-) -> int:
+def _tree_index(tree: str, contains: str, *, prefer_tags: tuple[str, ...] = ()) -> int:
     needle = contains.lower()
     fallback: int | None = None
     for line in tree.splitlines():
@@ -232,9 +230,7 @@ def _print_scenario(name: str, runs: list[tuple[list[dict[str, Any]], float]]) -
             slot["result_chars"].append(float(rec["result_chars"]))
 
     print(f"=== {name} ===")
-    print(
-        f"{'tool':<28} {'median_wall_ms':>14} {'harness_calls':>14} {'result_chars':>14}"
-    )
+    print(f"{'tool':<28} {'median_wall_ms':>14} {'harness_calls':>14} {'result_chars':>14}")
     for tool, slot in by_tool.items():
         print(
             f"{tool:<28} {_median(slot['wall_ms']):>14.1f} "
@@ -290,9 +286,7 @@ def main() -> int:
                 jpg_b = _shot_bytes.get("jpeg") or 0
                 pct = (1 - jpg_b / png_b) * 100 if png_b else 0
                 print(f"screenshot_png_bytes (max_dim=1800): {png_b}")
-                print(
-                    f"screenshot_jpeg_bytes (max_dim=1200, q=60): {jpg_b}  (−{pct:.0f} %)"
-                )
+                print(f"screenshot_jpeg_bytes (max_dim=1200, q=60): {jpg_b}  (−{pct:.0f} %)")
                 print()
     finally:
         httpd.shutdown()

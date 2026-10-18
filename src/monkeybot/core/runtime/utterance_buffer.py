@@ -20,9 +20,7 @@ def _chunk_duration_ms(chunk: bytes, fmt: AudioFormat) -> int:
 
 
 def _user_text_from_content(blocks: Sequence[ContentBlock]) -> str:
-    return " ".join(
-        b.text.strip() for b in blocks if isinstance(b, Text) and b.text.strip()
-    )
+    return " ".join(b.text.strip() for b in blocks if isinstance(b, Text) and b.text.strip())
 
 
 @dataclass

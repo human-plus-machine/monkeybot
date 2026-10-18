@@ -146,9 +146,7 @@ def test_tool_result_and_user_transcript_and_usage_map() -> None:
     async def _body() -> None:
         await ctrl._handle_server_frame(
             encode_server_frame(
-                ServerToolResultFrame(
-                    call_id="c1", name="read_file", result="data", error=None
-                )
+                ServerToolResultFrame(call_id="c1", name="read_file", result="data", error=None)
             )
         )
         await ctrl._handle_server_frame(

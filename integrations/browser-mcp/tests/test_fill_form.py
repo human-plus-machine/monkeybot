@@ -77,9 +77,7 @@ def test_click_text_near_miss_shape() -> None:
             return_value={
                 "ok": False,
                 "error": "no matching element for 'Nope'",
-                "did_you_mean": [
-                    {"text": "Submit", "role": "button", "tagName": "button"}
-                ],
+                "did_you_mean": [{"text": "Submit", "role": "button", "tagName": "button"}],
             },
         ),
     ):
@@ -103,9 +101,7 @@ def test_extract_href_attribute() -> None:
         ) as extract_rows,
     ):
         json.loads(server.browser_tabs())
-        result = json.loads(
-            server.browser_extract(".card", {"title": "h2", "href": "a@href"})
-        )
+        result = json.loads(server.browser_extract(".card", {"title": "h2", "href": "a@href"}))
     assert result == {
         "ok": True,
         "rows": [{"title": "Oak desk", "href": "/desk"}],

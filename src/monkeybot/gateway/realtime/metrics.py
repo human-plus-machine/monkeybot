@@ -86,9 +86,7 @@ class RealtimeMetrics:
             return
         now = now or time.monotonic()
         self._current_turn_first_output_at = now
-        self.turn_latencies_ms.append(
-            round((now - self._current_turn_started_at) * 1000, 2)
-        )
+        self.turn_latencies_ms.append(round((now - self._current_turn_started_at) * 1000, 2))
 
     def mark_tool_in_turn(self) -> None:
         self._current_turn_tool_count += 1
@@ -130,7 +128,9 @@ class RealtimeMetrics:
             "realtime_session_input_tokens": self.input_tokens,
             "realtime_session_output_tokens": self.output_tokens,
             "realtime_session_close_reason": self.close_reason,
-            "realtime_turn_latency_ms_avg": round(sum(self.turn_latencies_ms) / len(self.turn_latencies_ms), 2)
+            "realtime_turn_latency_ms_avg": round(
+                sum(self.turn_latencies_ms) / len(self.turn_latencies_ms), 2
+            )
             if self.turn_latencies_ms
             else 0.0,
             "realtime_turn_model_duration_ms_avg": round(

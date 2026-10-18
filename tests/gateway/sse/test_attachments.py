@@ -130,7 +130,9 @@ async def test_reply_with_attachment_ref_normalizes_content(
 
     await asyncio.sleep(0.05)
     assert loop_port.last_user_content is not None
-    assert any(isinstance(b, Text) and b.text == "what is this?" for b in loop_port.last_user_content)
+    assert any(
+        isinstance(b, Text) and b.text == "what is this?" for b in loop_port.last_user_content
+    )
     assert any(
         isinstance(b, AttachmentRef) and b.attachment_id == att_id
         for b in loop_port.last_user_content
@@ -203,3 +205,16 @@ async def test_post_attachment_accepts_plain_text(client: AsyncClient) -> None:
     body = res.json()
     assert body["mime_type"] == "text/plain"
     assert body["filename"] == "message.txt"
+
+
+@pytest.mark.asyncio
+async def test_post_attachment_accepts_markdown(client: AsyncClient) -> None:
+    sid = await _create_session(client)
+    res = await client.post(
+        f"/sessions/{sid}/attachments",
+        files={"file": ("notes.md", b"# Agenda\n\n- ship it", "text/markdown; charset=utf-8")},
+    )
+    assert res.status_code == 201
+    body = res.json()
+    assert body["mime_type"] == "text/markdown"
+    assert body["filename"] == "notes.md"

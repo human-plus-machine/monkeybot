@@ -715,7 +715,9 @@ def test_managed_runtime_retires_existing_dir_instead_of_rmtree(
     monkeypatch.setattr(
         "monkeybot_cli.runtime_python.run_probe",
         # First probe (cache reuse) fails; staged probe after install passes.
-        lambda runtime, code, **kwargs: Path(runtime.argv[0]).resolve() != old_interpreter.resolve(),
+        lambda runtime, code, **kwargs: (
+            Path(runtime.argv[0]).resolve() != old_interpreter.resolve()
+        ),
     )
 
     runtime = provision_managed_memory_runtime(tmp_path)

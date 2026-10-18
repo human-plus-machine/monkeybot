@@ -203,6 +203,7 @@ async def test_storage_outbox_used_for_postgres_url(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("MONKEYBOT_MEMORY_ALLOW_EPHEMERAL", "1")
+
     class _Store:
         def __init__(self) -> None:
             self.claimed_for: list[str] = []

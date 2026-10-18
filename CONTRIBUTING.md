@@ -20,11 +20,12 @@ For live eval smoke runs against a local gateway, use [`evals/smoke_agent/`](eva
 CI runs `mypy` on `src/monkeybot` and pytest (root, `cli/`, `integrations/browser-mcp/`), plus standalone eval self-checks. Before submitting:
 
 ```bash
+uv run ruff format --check .
 uv run pytest
 uv run mypy src/monkeybot
 ```
 
-`ruff` is useful locally but is not a CI gate today.
+`ruff format --check` is part of the local pre-commit and pre-push CI suite. Run `uv run ruff format .` to fix formatting.
 
 > [!NOTE]
 > Do not run the root pytest suite with a scaffolded `monkeybot_config/` + `workspace/` at the repo root — that layout can make a couple of workspace-resolution tests fail. CI uses a clean tree.

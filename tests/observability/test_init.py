@@ -122,9 +122,7 @@ def test_init_observability_sqlite_enabled(
     with caplog.at_level("INFO"):
         assert init_observability() is True
     assert is_observability_enabled() is True
-    assert any(
-        f"sqlite span exporter db={db_path}" in r.getMessage() for r in caplog.records
-    )
+    assert any(f"sqlite span exporter db={db_path}" in r.getMessage() for r in caplog.records)
     shutdown_observability()
 
 

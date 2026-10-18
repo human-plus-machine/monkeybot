@@ -42,9 +42,7 @@ def browser_get_elements(
             return results.json_text(
                 {
                     "ok": False,
-                    "error": (
-                        f"unknown kind {kind!r}; expected inputs, buttons, links, or all"
-                    ),
+                    "error": (f"unknown kind {kind!r}; expected inputs, buttons, links, or all"),
                 }
             )
         if kind_norm == "all":
@@ -75,6 +73,7 @@ def browser_get_elements(
     if observe_norm != "diff":
         payload.pop("mode", None)
     return results.json_text(payload)
+
 
 @mcp.tool()
 @_public_tool
@@ -112,6 +111,7 @@ def browser_get_text(
         }
     )
 
+
 @mcp.tool()
 @_public_tool
 def browser_js(expression: str, tab: str | None = None) -> str:
@@ -122,6 +122,7 @@ def browser_js(expression: str, tab: str | None = None) -> str:
     handle = prep.handle
     result = handle.evaluate(expression)
     return results.json_text({"ok": True, "result": result})
+
 
 @mcp.tool()
 @_public_tool
@@ -138,7 +139,9 @@ def browser_extract(
     null. Use this instead of ad-hoc ``browser_js`` scraping.
     """
     if not isinstance(fields, dict) or not fields:
-        return results.json_text({"ok": False, "error": "fields must be a non-empty object of name → selector"})
+        return results.json_text(
+            {"ok": False, "error": "fields must be a non-empty object of name → selector"}
+        )
     try:
         cap = max(1, int(limit))
     except (TypeError, ValueError):
@@ -157,6 +160,7 @@ def browser_extract(
             "truncated": bool(result.get("truncated")),
         }
     )
+
 
 @mcp.tool()
 @_public_tool

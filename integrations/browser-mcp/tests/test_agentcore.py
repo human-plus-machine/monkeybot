@@ -196,7 +196,9 @@ def test_browser_harness_dispatches_to_agentcore(monkeypatch: pytest.MonkeyPatch
     assert helpers is fake_playwright_helpers
     assert admin is fake_admin
     fake_admin.ensure_session.assert_called_once()
-    fake_playwright_helpers.connect.assert_called_once_with("wss://example/ws", {"Authorization": "sig"})
+    fake_playwright_helpers.connect.assert_called_once_with(
+        "wss://example/ws", {"Authorization": "sig"}
+    )
     assert chat_context.shared().bound_cdp == "agentcore"
 
 
@@ -213,7 +215,9 @@ def test_browser_harness_reuses_bound_agentcore_session(monkeypatch: pytest.Monk
     fake_admin.ensure_session.assert_not_called()
 
 
-def test_explicit_cdp_still_wins_with_backend_agentcore_set(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_explicit_cdp_still_wins_with_backend_agentcore_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """BROWSER_BACKEND=agentcore is set, but an explicit BU_CDP_URL must still
     route through the existing browser_harness path, not AgentCore."""
     monkeypatch.setenv("BROWSER_BACKEND", "agentcore")
@@ -345,7 +349,9 @@ def test_reconnect_agentcore_stops_and_restarts_session() -> None:
     assert result == ("wss://fresh/ws", {"Authorization": "sig2"})
 
 
-def test_agentcore_browser_harness_registers_reconnect_hook(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_agentcore_browser_harness_registers_reconnect_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("BROWSER_BACKEND", "agentcore")
     fake_admin = MagicMock()
     fake_admin.ensure_session.return_value = ("wss://example/ws", {"Authorization": "sig"})

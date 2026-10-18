@@ -953,7 +953,8 @@ def create_app(
         if store is None:
             raise APIError(404, "NOT_FOUND", "Attachments are disabled", uuid.uuid4().hex)
         filename = (file.filename or "upload").strip() or "upload"
-        mime_type = (file.content_type or "application/octet-stream").strip()
+        raw_type = (file.content_type or "application/octet-stream").strip()
+        mime_type = raw_type.split(";", 1)[0].strip().lower() or "application/octet-stream"
         if mime_type not in ALLOWED_MIME_TYPES:
             raise APIError(
                 415,

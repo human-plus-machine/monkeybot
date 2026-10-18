@@ -154,10 +154,12 @@ async def test_tool_task_stdin_contains_traceparent_when_parent_span_active(
         request_id=ctx.request_id,
         args={"task": "do work"},
     ):
-        out, err = unwrap_tool_execution_result(await ex.execute(
-            call=ToolCall(call_id="c1", name="task", args={"task": "do work", "context": ""}),
-            ctx=ctx,
-        ))
+        out, err = unwrap_tool_execution_result(
+            await ex.execute(
+                call=ToolCall(call_id="c1", name="task", args={"task": "do work", "context": ""}),
+                ctx=ctx,
+            )
+        )
 
     assert err is None and out is not None
     raw = captured["stdin_json"]
@@ -224,10 +226,12 @@ async def test_tool_task_sets_subagent_otel_service_name_in_child_env(
         request_id=ctx.request_id,
         args={"task": "do work"},
     ):
-        out, err = unwrap_tool_execution_result(await ex.execute(
-            call=ToolCall(call_id="c1", name="task", args={"task": "do work", "context": ""}),
-            ctx=ctx,
-        ))
+        out, err = unwrap_tool_execution_result(
+            await ex.execute(
+                call=ToolCall(call_id="c1", name="task", args={"task": "do work", "context": ""}),
+                ctx=ctx,
+            )
+        )
 
     assert err is None and out is not None
     assert captured_env.get("OTEL_SERVICE_NAME") == "monkeybot-subagent"
@@ -334,10 +338,12 @@ async def test_tool_task_stdin_omits_traceparent_without_active_span(
     monkeypatch.setattr("monkeybot.core.tools.core_tool_executor.spawn_subagent", fake_spawn)
     ex = _make_executor(tmp_path, monkeypatch)
     ctx = _ctx()
-    out, err = unwrap_tool_execution_result(await ex.execute(
-        call=ToolCall(call_id="c1", name="task", args={"task": "do work", "context": ""}),
-        ctx=ctx,
-    ))
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="c1", name="task", args={"task": "do work", "context": ""}),
+            ctx=ctx,
+        )
+    )
     assert err is None and out is not None
     parsed = json.loads(str(captured["stdin_json"]))
     assert "traceparent" not in parsed
@@ -483,7 +489,9 @@ async def test_worker_linked_trace_fixture_or_harness(
         traceparent=traceparent,
     )
     (tmp_path / "mem").mkdir()
-    _install_worker_mocks(monkeypatch, tmp_path, envelope=envelope, otel_memory_exporter=otel_memory_exporter)
+    _install_worker_mocks(
+        monkeypatch, tmp_path, envelope=envelope, otel_memory_exporter=otel_memory_exporter
+    )
 
     await subagent_worker._async_main()
     assert isinstance(subagent_worker._resolve_provider(), ScriptedFakeProvider)
@@ -515,7 +523,9 @@ async def test_malformed_traceparent_worker_starts_new_trace(
         traceparent="not-a-valid-traceparent",
     )
     (tmp_path / "mem").mkdir()
-    _install_worker_mocks(monkeypatch, tmp_path, envelope=envelope, otel_memory_exporter=otel_memory_exporter)
+    _install_worker_mocks(
+        monkeypatch, tmp_path, envelope=envelope, otel_memory_exporter=otel_memory_exporter
+    )
 
     await subagent_worker._async_main()
     assert isinstance(subagent_worker._resolve_provider(), ScriptedFakeProvider)
@@ -545,7 +555,9 @@ async def test_legacy_envelope_without_traceparent_starts_disjoint_trace(
         parent_run_id="parent-3",
     )
     (tmp_path / "mem").mkdir()
-    _install_worker_mocks(monkeypatch, tmp_path, envelope=envelope, otel_memory_exporter=otel_memory_exporter)
+    _install_worker_mocks(
+        monkeypatch, tmp_path, envelope=envelope, otel_memory_exporter=otel_memory_exporter
+    )
 
     await subagent_worker._async_main()
     assert isinstance(subagent_worker._resolve_provider(), ScriptedFakeProvider)

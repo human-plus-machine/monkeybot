@@ -72,7 +72,11 @@ def test_assert_under_root_rejects_escape(_isolated_playbooks_dir: Path) -> None
 
 def test_write_and_read_playbook_round_trip(_isolated_playbooks_dir: Path) -> None:
     result = playbooks.write_playbook("example.com", "# Notes\n")
-    assert result == {"ok": True, "path": str(_isolated_playbooks_dir / "example.com.md"), "host": "example.com"}
+    assert result == {
+        "ok": True,
+        "path": str(_isolated_playbooks_dir / "example.com.md"),
+        "host": "example.com",
+    }
     assert playbooks.read_playbook("https://www.example.com/page") == "# Notes\n"
 
 
@@ -96,14 +100,18 @@ def test_read_playbook_missing_raises(_isolated_playbooks_dir: Path) -> None:
         playbooks.read_playbook("missing.example")
 
 
-def test_list_playbook_names_empty_when_dir_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_list_playbook_names_empty_when_dir_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     missing = tmp_path / "not-created"
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("BROWSER_MCP_PLAYBOOKS_DIR", str(missing))
     assert playbooks.list_playbook_names() == []
 
 
-def test_playbooks_default_to_workspace_browser_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_playbooks_default_to_workspace_browser_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     workspace = tmp_path / "agent" / "workspace"
     monkeypatch.delenv("BROWSER_MCP_PLAYBOOKS_DIR", raising=False)
     monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(workspace))

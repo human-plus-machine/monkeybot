@@ -16,16 +16,24 @@ def _clear_screenshot_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
 
 
-def test_screenshots_dir_defaults_under_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_screenshots_dir_defaults_under_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.chdir(tmp_path)
     (tmp_path / "workspace").mkdir()
-    assert screenshots.screenshots_dir() == (tmp_path / "workspace" / "browser" / "Screenshots").resolve()
+    assert (
+        screenshots.screenshots_dir()
+        == (tmp_path / "workspace" / "browser" / "Screenshots").resolve()
+    )
 
 
 def test_screenshots_dir_from_env_relative(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("BROWSER_MCP_SCREENSHOTS_DIR", "./workspace/browser/Screenshots")
-    assert screenshots.screenshots_dir() == (tmp_path / "workspace" / "browser" / "Screenshots").resolve()
+    assert (
+        screenshots.screenshots_dir()
+        == (tmp_path / "workspace" / "browser" / "Screenshots").resolve()
+    )
 
 
 def test_workspace_relative_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -83,9 +91,7 @@ def test_draw_index_labels_paints_badges() -> None:
         "1": {"x": 10, "y": 10, "width": 40, "height": 20},
         "2": {"x": 200, "y": 100, "width": 40, "height": 20},
     }
-    out, labeled = screenshots.draw_index_labels(
-        img, rects, css_width=400, css_height=300
-    )
+    out, labeled = screenshots.draw_index_labels(img, rects, css_width=400, css_height=300)
     assert labeled == 2
     assert out.getpixel((10, 10)) == screenshots.LABEL_FILL
     assert out.getpixel((200, 100)) == screenshots.LABEL_FILL
@@ -96,16 +102,14 @@ def test_draw_index_labels_caps_at_150() -> None:
     from PIL import Image
 
     img = Image.new("RGB", (400, 300), (255, 255, 255))
-    rects = {
-        str(i): {"x": i % 20, "y": i % 15, "width": 4, "height": 4} for i in range(200)
-    }
-    _out, labeled = screenshots.draw_index_labels(
-        img, rects, css_width=400, css_height=300
-    )
+    rects = {str(i): {"x": i % 20, "y": i % 15, "width": 4, "height": 4} for i in range(200)}
+    _out, labeled = screenshots.draw_index_labels(img, rects, css_width=400, css_height=300)
     assert labeled == 150
 
 
-def test_env_paths_remain_stable_after_cwd_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_env_paths_remain_stable_after_cwd_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     workspace = tmp_path / "agent" / "workspace"
     shots = workspace / "browser" / "Screenshots"
     monkeypatch.setenv("MONKEYBOT_WORKSPACE_ROOT", str(workspace))

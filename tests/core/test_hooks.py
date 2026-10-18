@@ -173,8 +173,7 @@ async def test_background_exception_is_swallowed(
 
     await asyncio.sleep(0.05)
     assert any(
-        "background hook error" in r.message and "bg-fail" in r.message
-        for r in caplog.records
+        "background hook error" in r.message and "bg-fail" in r.message for r in caplog.records
     )
 
 

@@ -29,6 +29,7 @@ def create_realtime_app(*args: object, **kwargs: object) -> FastAPI:
 
     return factory(*args, **kwargs)
 
+
 __all__ = [
     "RealtimeConnectionState",
     "RealtimeDependencies",

@@ -261,7 +261,9 @@ def ensure_opensandbox_for_agent(
         )
         return False
 
-    container = os.environ.get("SANDBOX_CONTAINER", _DEFAULT_CONTAINER).strip() or _DEFAULT_CONTAINER
+    container = (
+        os.environ.get("SANDBOX_CONTAINER", _DEFAULT_CONTAINER).strip() or _DEFAULT_CONTAINER
+    )
     image = _server_image()
     if health_wait_secs is None:
         health_wait_secs = float(
@@ -312,8 +314,7 @@ def ensure_opensandbox_for_agent(
 
     if _container_exists(container) and not _container_running(container):
         print(
-            "monkeybot: OpenSandbox container exited before becoming healthy "
-            f"(image={image}).",
+            f"monkeybot: OpenSandbox container exited before becoming healthy (image={image}).",
             flush=True,
         )
     else:

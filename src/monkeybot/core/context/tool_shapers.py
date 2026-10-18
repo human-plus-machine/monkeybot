@@ -206,7 +206,9 @@ def _shape_json_value(value: Any, *, max_array_items: int, depth: int = 0) -> An
         anomalies: list[Any] = []
         for item in value:
             if _json_row_is_anomaly(item):
-                anomalies.append(_shape_json_value(item, max_array_items=max_array_items, depth=depth + 1))
+                anomalies.append(
+                    _shape_json_value(item, max_array_items=max_array_items, depth=depth + 1)
+                )
                 continue
             key = _json_dedup_key(item)
             if key in seen:

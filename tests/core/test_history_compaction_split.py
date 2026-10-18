@@ -146,24 +146,16 @@ def test_split_ignores_pinned_notification_for_tail_floor() -> None:
     assert verdict not in head + middle + tail
     assert len(tail) >= SUMMARY_KEEP_TAIL_MIN
     summary = Message(role="assistant", content=[Text(text="[Context Summary]: x")])
-    rebuilt = rebuild_compacted_history(
-        with_verdict, head=head, summary=summary, tail=tail
-    )
+    rebuilt = rebuild_compacted_history(with_verdict, head=head, summary=summary, tail=tail)
     assert rebuilt[-1] is verdict
-    assert any(
-        isinstance(block, SystemNotification)
-        for msg in rebuilt
-        for block in msg.content
-    )
+    assert any(isinstance(block, SystemNotification) for msg in rebuilt for block in msg.content)
 
 
 def test_rebuild_keeps_middle_notification_typed() -> None:
     messages = _msgs(12, chars=40)
     verdict = Message(
         role="system",
-        content=[
-            SystemNotification(notification_type="verifierVerdict", msg="done_unmet")
-        ],
+        content=[SystemNotification(notification_type="verifierVerdict", msg="done_unmet")],
     )
     original = [*messages[:5], verdict, *messages[5:]]
     head, middle, tail = split_messages_for_compaction(original, window_tokens=100)

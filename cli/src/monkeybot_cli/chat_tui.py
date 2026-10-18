@@ -93,6 +93,7 @@ def cycle_approval_mode(mode: str) -> str:
         idx = 0
     return _APPROVAL_MODES[(idx + 1) % len(_APPROVAL_MODES)]
 
+
 _SLASH_SPECS: tuple[tuple[str, str], ...] = (
     ("/help", "Show commands and key hints"),
     ("/new", "Start a fresh session"),
@@ -327,11 +328,7 @@ class ChatApp(App[int]):
         self.theme = resolve_theme_name(theme_choice)
         self.base = base
         self.agent_root = agent_root
-        self.config_path = (
-            config_path.expanduser().resolve()
-            if config_path is not None
-            else None
-        )
+        self.config_path = config_path.expanduser().resolve() if config_path is not None else None
         self.provider = provider
         self.model = model
         self.spawned_gateway = spawned_gateway
@@ -443,9 +440,7 @@ class ChatApp(App[int]):
             else:
                 parts.append("y approve · n deny · Ctrl-C cancel")
         elif self.show_hints:
-            parts.append(
-                "Enter send · Ctrl+J newline · ↑ history · / commands · Ctrl+U usage"
-            )
+            parts.append("Enter send · Ctrl+J newline · ↑ history · / commands · Ctrl+U usage")
         else:
             parts.append("F1 hints")
         return "  ·  ".join(parts)
@@ -495,8 +490,7 @@ class ChatApp(App[int]):
             self._session_cost_text = f"${usage.cost_usd:.4f}"
         if self.show_usage:
             self._usage_text = (
-                f"in={usage.input_tokens} out={usage.output_tokens} "
-                f"${usage.cost_usd:.4f}"
+                f"in={usage.input_tokens} out={usage.output_tokens} ${usage.cost_usd:.4f}"
             )
 
     def _hide_empty_hint(self) -> None:
@@ -556,6 +550,7 @@ class ChatApp(App[int]):
             if transcript.is_anchored and not transcript._anchor_released:
                 transcript.release_anchor()
         self._refresh_jump_button()
+
     def _refresh_jump_button(self) -> None:
         with contextlib.suppress(NoMatches):
             btn = self.query_one("#jump-bottom", Button)
@@ -627,7 +622,12 @@ class ChatApp(App[int]):
                 if isinstance(child, EarlierTurns):
                     earlier = child
                     continue
-                if child is self._assistant or child is self._thinking or child is self._thinking_trace or child is self._hitl_card:
+                if (
+                    child is self._assistant
+                    or child is self._thinking
+                    or child is self._thinking_trace
+                    or child is self._hitl_card
+                ):
                     continue
                 if isinstance(child, ToolCallBlock) and (
                     child in self._open_tools.values() or child in self._anon_tools
@@ -683,6 +683,7 @@ class ChatApp(App[int]):
     def _seal_thinking_trace(self) -> None:
         """Finish the current thinking block and start fresh on the next delta."""
         self._finish_thinking_trace(clear=True)
+
     def _mount_user(self, body: str) -> None:
         self._mount(UserTurn(body, show_timestamp=self.show_timestamps))
 
@@ -768,9 +769,7 @@ class ChatApp(App[int]):
             palette.display = False
             palette.clear_options()
             return
-        palette.set_options(
-            [Option(f"{cmd}  {desc}", id=cmd) for cmd, desc in matches]
-        )
+        palette.set_options([Option(f"{cmd}  {desc}", id=cmd) for cmd, desc in matches])
         palette.highlighted = 0
         palette.display = True
 
@@ -945,9 +944,7 @@ class ChatApp(App[int]):
         if state == "reconnecting":
             attempt = p.get("attempt")
             self._conn_text = (
-                f"[yellow]reconnecting…[/] ({attempt})"
-                if attempt
-                else "[yellow]reconnecting…[/]"
+                f"[yellow]reconnecting…[/] ({attempt})" if attempt else "[yellow]reconnecting…[/]"
             )
         elif state == "connected":
             self._conn_text = ""
@@ -1508,7 +1505,9 @@ class ChatApp(App[int]):
         self.model = name
         self._refresh_topbar()
         await self._reset_transcript_ui()
-        self._mount_system(f"Model set to {provider}/{name} — new session started (context cleared)")
+        self._mount_system(
+            f"Model set to {provider}/{name} — new session started (context cleared)"
+        )
         self._refresh_status()
         self.query_one("#prompt", Composer).focus()
 
@@ -1566,6 +1565,7 @@ class ChatApp(App[int]):
         except Exception as exc:  # noqa: BLE001 - surface any YAML/parse error to the user
             self._mount_system(f"Could not read config: {exc}", error=True)
             return
+
         def _section(key: str) -> dict[str, object]:
             value = doc.get(key)
             return value if isinstance(value, dict) else {}
@@ -1755,7 +1755,6 @@ class ChatApp(App[int]):
     def action_toggle_usage(self) -> None:
         self._cmd_usage()
 
-
     def action_toggle_ptt(self) -> None:
         """Space toggles in-TUI PTT when composer is empty (realtime / SSH)."""
         with contextlib.suppress(NoMatches):
@@ -1786,10 +1785,7 @@ class ChatApp(App[int]):
             self._controller.abort_turn()
             return
         now = time.monotonic()
-        if (
-            self._last_esc is not None
-            and now - self._last_esc <= _ESC_RECALL_WINDOW
-        ):
+        if self._last_esc is not None and now - self._last_esc <= _ESC_RECALL_WINDOW:
             self._last_esc = None
             composer.recall_last()
             return
@@ -1815,11 +1811,7 @@ class ChatApp(App[int]):
         self._goodbye_and_exit()
 
     def _goodbye_and_exit(self) -> None:
-        msg = (
-            "Goodbye — shutting down gateway…"
-            if self.spawned_gateway
-            else "Goodbye."
-        )
+        msg = "Goodbye — shutting down gateway…" if self.spawned_gateway else "Goodbye."
         self._mount_system(msg)
         if self._session_id:
             self._mount_system("To continue this conversation, run: monkeybot chat --continue")

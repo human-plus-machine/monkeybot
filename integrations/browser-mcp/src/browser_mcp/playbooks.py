@@ -109,7 +109,9 @@ def read_playbook(host_or_url: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def write_playbook(host_or_url: str, content: str, *, append: bool = False) -> dict[str, str | bool]:
+def write_playbook(
+    host_or_url: str, content: str, *, append: bool = False
+) -> dict[str, str | bool]:
     root = playbooks_dir()
     root.mkdir(parents=True, exist_ok=True)
     path = playbook_path(host_or_url)
@@ -166,15 +168,11 @@ def _parse_flow_mapping(raw: Any, *, host: str | None, index: int) -> Flow:
         kind = step.get("do")
         if not isinstance(kind, str) or kind not in actions.STEP_KINDS:
             known = ", ".join(sorted(actions.STEP_KINDS))
-            raise PlaybookError(
-                f"flow {name!r} unknown do {kind!r}; expected {known}"
-            )
+            raise PlaybookError(f"flow {name!r} unknown do {kind!r}; expected {known}")
         normalized.append(dict(step))
     validated = actions.validate_steps(normalized)
     if isinstance(validated, dict):
-        raise PlaybookError(
-            f"flow {name!r} {validated.get('error') or 'invalid steps'}"
-        )
+        raise PlaybookError(f"flow {name!r} {validated.get('error') or 'invalid steps'}")
     expect = raw.get("expect") or {}
     if expect is None:
         expect = {}
@@ -253,6 +251,7 @@ def load_flow(host_or_url: str, name: str) -> Flow:
 
 def _subst_value(value: Any, *, declared: set[str], params: dict[str, str]) -> Any:
     if isinstance(value, str):
+
         def _replace(match: re.Match[str]) -> str:
             key = match.group(1)
             if key not in declared:

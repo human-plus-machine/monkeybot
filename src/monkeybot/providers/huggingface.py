@@ -28,6 +28,7 @@ from collections.abc import AsyncIterator, Sequence
 
 from monkeybot.core.llm.provider import (
     Message,
+    ProviderCallHints,
     ProviderEvent,
 )
 from monkeybot.core.types.types_tools import ToolDef
@@ -109,6 +110,7 @@ class HuggingFaceProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        hints: ProviderCallHints | None = None,
     ) -> int:
         return await count_input_tokens_tiktoken(
             messages,
@@ -117,6 +119,7 @@ class HuggingFaceProvider:
             provider=self.name,
             max_request_bytes=configured_request_byte_budget(provider=self.name),
             thinking_budget=thinking_budget,
+            hints=hints,
         )
 
     async def stream(
@@ -126,6 +129,7 @@ class HuggingFaceProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        hints: ProviderCallHints | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         del thinking_budget
         async for event in stream_chat_completions_with_tool_fallback(
@@ -139,5 +143,6 @@ class HuggingFaceProvider:
             max_tokens=self._max_tokens,
             reasoning_effort=self._reasoning_effort,
             max_request_bytes=configured_request_byte_budget(provider=self.name),
+            hints=hints,
         ):
             yield event

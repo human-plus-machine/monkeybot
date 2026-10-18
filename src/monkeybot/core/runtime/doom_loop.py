@@ -40,10 +40,7 @@ def _tool_call_fingerprint(name: str, args: dict[str, Any]) -> str:
 
 def _doom_loop_texts(tool_name: str, threshold: int) -> tuple[str, str]:
     """Return ``(error_event_text, recovery_system_note)``."""
-    error = (
-        f"Doom loop detected: tool {tool_name!r} called identically "
-        f"{threshold} times"
-    )
+    error = f"Doom loop detected: tool {tool_name!r} called identically {threshold} times"
     note = (
         f"[Harness] {error}. Do not repeat the same call. Explain the situation "
         "to the user and take a different approach (different tool or args)."

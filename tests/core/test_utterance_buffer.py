@@ -43,7 +43,9 @@ class TestUtteranceBuffer:
         buf = UtteranceBuffer()
         buf.add_assistant_text("The answer is ")
         buf.add_assistant_text("42")
-        buf.add_assistant_tool_call(RealtimeToolCall(call_id="c1", name="read_file", args={"path": "x"}))
+        buf.add_assistant_tool_call(
+            RealtimeToolCall(call_id="c1", name="read_file", args={"path": "x"})
+        )
         turn = buf.mark_assistant_turn_boundary()
         assert turn.text == "The answer is 42"
         assert len(turn.tool_calls) == 1

@@ -20,9 +20,7 @@ logger = logging.getLogger(__name__)
 
 MAX_ACT_STEPS = 25
 FILL_MODES = frozenset({"auto", "keys", "fast"})
-CLICK_TEXT_ROLES = frozenset(
-    {"button", "link", "tab", "menuitem", "checkbox", "radio", "option"}
-)
+CLICK_TEXT_ROLES = frozenset({"button", "link", "tab", "menuitem", "checkbox", "radio", "option"})
 STEP_KINDS = frozenset(
     {
         "click",
@@ -49,9 +47,7 @@ LOAD_WAIT_JS = (
     "addEventListener('load', () => { clearTimeout(t); resolve(true); }, {once:true});"
     "})"
 )
-WAIT_IDLE_NOTE = (
-    "network idle is only available on the focused tab; DOM settle was used"
-)
+WAIT_IDLE_NOTE = "network idle is only available on the focused tab; DOM settle was used"
 
 
 @dataclass
@@ -172,9 +168,7 @@ def do_scroll(
 def do_wait_for(
     handle: TabHandle, selector: str, *, visible: bool = False, timeout: float = 10.0
 ) -> dict[str, Any]:
-    result = dom_indexing.wait_for_selector(
-        handle, selector, visible=visible, timeout=timeout
-    )
+    result = dom_indexing.wait_for_selector(handle, selector, visible=visible, timeout=timeout)
     found = bool(result.get("found"))
     return {"ok": found, "found": found}
 
@@ -285,9 +279,7 @@ def do_settle(handle: TabHandle) -> dict[str, Any]:
     }
 
 
-def _fill_one_field(
-    handle: TabHandle, label: str, value: str, mode: str
-) -> dict[str, Any] | None:
+def _fill_one_field(handle: TabHandle, label: str, value: str, mode: str) -> dict[str, Any] | None:
     resolved = dom_indexing.resolve_field(handle, label)
     index = resolved.get("index")
     if index is None:
@@ -372,9 +364,7 @@ def validate_steps(steps: Any) -> dict[str, Any] | list[dict[str, Any]]:
     if not isinstance(steps, list):
         return _step_error(0, "steps must be a list of objects")
     if len(steps) > MAX_ACT_STEPS:
-        return _step_error(
-            MAX_ACT_STEPS, f"too many steps ({len(steps)}); cap is {MAX_ACT_STEPS}"
-        )
+        return _step_error(MAX_ACT_STEPS, f"too many steps ({len(steps)}); cap is {MAX_ACT_STEPS}")
     if not steps:
         return _step_error(0, "steps must not be empty")
     out: list[dict[str, Any]] = []
@@ -574,7 +564,11 @@ def _validate_login(step: dict[str, Any]) -> str | None:
     origin = step.get("expected_origin")
     if not _is_str(origin) or not origin.strip():
         return "login requires string expected_origin"
-    if "username" in step and step.get("username") is not None and not _is_str(step.get("username")):
+    if (
+        "username" in step
+        and step.get("username") is not None
+        and not _is_str(step.get("username"))
+    ):
         return "login username must be a string"
     return None
 
@@ -589,8 +583,10 @@ _STEP_VALIDATORS: dict[str, Callable[[dict[str, Any]], str | None]] = {
     ),
     "press": _validate_press,
     "click_text": _validate_click_text,
-    "wait_for": lambda s: _req_str(s, "selector", "wait_for requires string selector")
-    or _opt_num(s, "timeout", "wait_for timeout must be a number"),
+    "wait_for": lambda s: (
+        _req_str(s, "selector", "wait_for requires string selector")
+        or _opt_num(s, "timeout", "wait_for timeout must be a number")
+    ),
     "wait_idle": lambda s: _opt_num(s, "timeout", "wait_idle timeout must be a number"),
     "goto": lambda s: _req_str(s, "url", "goto requires string url"),
     "scroll": _validate_scroll,
@@ -607,9 +603,7 @@ _STEP_RUNNERS: dict[str, Callable[[ActContext, dict[str, Any]], dict[str, Any]]]
         ctx.handle, int(s["index"]), str(s["text"]), mode=str(s.get("mode") or "auto")
     ),
     "select": lambda ctx, s: do_select_by_index(ctx.handle, int(s["index"]), str(s["text"])),
-    "press": lambda ctx, s: do_press(
-        ctx.handle, str(s["key"]), int(s.get("modifiers") or 0)
-    ),
+    "press": lambda ctx, s: do_press(ctx.handle, str(s["key"]), int(s.get("modifiers") or 0)),
     "click_text": lambda ctx, s: do_click_text(
         ctx.handle,
         str(s["text"]),

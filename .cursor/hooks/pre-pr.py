@@ -37,7 +37,9 @@ def deny(message: str) -> None:
 
 def in_repo(path: str) -> bool:
     try:
-        return os.path.commonpath([os.path.realpath(path), os.path.realpath(ROOT)]) == os.path.realpath(ROOT)
+        return os.path.commonpath(
+            [os.path.realpath(path), os.path.realpath(ROOT)]
+        ) == os.path.realpath(ROOT)
     except ValueError:
         return False
 
@@ -112,7 +114,9 @@ def gate_mcp(data: dict) -> None:
         payload = {}
     repo = str(payload.get("repo") or "")
     if not repo:
-        deny("create_pull_request is missing a repo, so local CI cannot tell which project to test.")
+        deny(
+            "create_pull_request is missing a repo, so local CI cannot tell which project to test."
+        )
     if not is_this_repo(repo):
         allow()
     if run_ci() != 0:

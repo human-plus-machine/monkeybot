@@ -126,9 +126,9 @@ def _process_identity(pid: int) -> str | None:
             starttime = fields[19]
             boot_id = ""
             try:
-                boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(
-                    encoding="utf-8"
-                ).strip()
+                boot_id = (
+                    Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+                )
             except OSError:
                 pass
             return f"linux:{boot_id}:{starttime}"
@@ -197,8 +197,7 @@ def _kill_scratch_subagent(scratch: Path) -> None:
     current = _process_identity(pid)
     if current is not None and current != expected_identity:
         logger.warning(
-            "skipping reclaim kill for pid=%s under %s: identity mismatch "
-            "(possible PID reuse)",
+            "skipping reclaim kill for pid=%s under %s: identity mismatch (possible PID reuse)",
             pid,
             scratch,
         )
@@ -280,9 +279,7 @@ async def execute_claimed_run(
         return ok
 
     async def _record_completed_if_owner(result_json: str) -> bool:
-        ok = await run_store.record_completed(
-            row.run_id, result_json, worker_id=worker_id
-        )
+        ok = await run_store.record_completed(row.run_id, result_json, worker_id=worker_id)
         if not ok:
             logger.warning(
                 "skipping completed outcome for run_id=%s worker_id=%s: claim lost",
@@ -334,10 +331,7 @@ async def execute_claimed_run(
             await asyncio.wait_for(consume_task, timeout=budget)
         except TimeoutError:
             progress = scratch / "progress.jsonl"
-            msg = (
-                f"exit_reason=timeout: subagent exceeded {budget:g}s; "
-                f"inspect {progress}"
-            )
+            msg = f"exit_reason=timeout: subagent exceeded {budget:g}s; inspect {progress}"
             logger.warning(
                 "worker subagent timeout %s",
                 kv(run_id=row.run_id, timeout_sec=budget, progress=str(progress)),

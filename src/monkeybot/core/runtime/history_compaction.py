@@ -55,6 +55,7 @@ def _intent_facts_from_ctx(ctx: TurnContext) -> str | None:
         )
         return None
 
+
 # Fixed harness policy — not env/YAML tunable.
 # Pure bug guard, not a normal-flow limit: row count is otherwise unbounded and
 # only the token-pressure trigger (SUMMARY_TRIGGER_RATIO) should ever compact
@@ -469,9 +470,7 @@ async def _summarize_history(
     intent_facts: str | None = None,
 ) -> int:
     """Compress middle history into one assistant summary row. Returns middle row count."""
-    head, middle, tail = split_messages_for_compaction(
-        messages, window_tokens=window_tokens
-    )
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=window_tokens)
     if not middle:
         return 0
     logger.debug(
@@ -501,9 +500,7 @@ async def _summarize_history(
         ),
     ]
     summary_text = ""
-    async with aclosing(
-        cast(Any, provider.stream(summarize_messages, [], model=model))
-    ) as stream:
+    async with aclosing(cast(Any, provider.stream(summarize_messages, [], model=model))) as stream:
         async for ev in stream:
             if isinstance(ev, TextDelta):
                 summary_text += ev.text
@@ -518,9 +515,7 @@ async def _summarize_history(
         role="assistant",
         content=[Text(text=summary_body)],
     )
-    merged = rebuild_compacted_history(
-        messages, head=head, summary=summary_row, tail=tail
-    )
+    merged = rebuild_compacted_history(messages, head=head, summary=summary_row, tail=tail)
     await history.reset(thread_id, merged)
     logger.debug(
         "history compaction reset %s",

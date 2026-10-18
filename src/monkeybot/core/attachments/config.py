@@ -12,6 +12,7 @@ ALLOWED_MIME_TYPES: frozenset[str] = frozenset(
         "image/webp",
         "application/pdf",
         "text/html",
+        "text/markdown",
         "text/plain",
     }
 )
@@ -19,6 +20,9 @@ ALLOWED_MIME_TYPES: frozenset[str] = frozenset(
 IMAGE_MIME_TYPES: frozenset[str] = frozenset(
     t for t in ALLOWED_MIME_TYPES if t.startswith("image/")
 )
+
+# Decoded to Text at resolve. HTML stays a File so the Files preview can render it.
+INLINE_TEXT_MIME_TYPES: frozenset[str] = frozenset({"text/plain", "text/markdown"})
 
 
 def attachments_enabled_from_env() -> bool:

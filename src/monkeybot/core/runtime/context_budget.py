@@ -113,7 +113,9 @@ def _trim_text_to_token_budget(text: str, token_budget: int) -> str:
             return note
         trimmed_body = body[:head_budget]
         if len(body) > head_budget:
-            trimmed_body += "\n[... truncated for context budget — use read_file on spill path to page ...]"
+            trimmed_body += (
+                "\n[... truncated for context budget — use read_file on spill path to page ...]"
+            )
         return f"{trimmed_body}\n{note}"
     trimmed = text[:max_chars]
     if len(text) > max_chars:

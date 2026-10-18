@@ -14,9 +14,7 @@ _TODO_LIST_SCHEMA: dict[str, object] = {
         "action": {
             "type": "string",
             "enum": ["add", "complete", "remove"],
-            "description": (
-                "add one or more pending items, mark one done, or remove one by id."
-            ),
+            "description": ("add one or more pending items, mark one done, or remove one by id."),
         },
         "text": {
             "description": (
