@@ -1614,6 +1614,8 @@ async def test_run_command_points_toolchain_caches_at_the_granted_directory(
     from monkeybot.core.tools.terminal import ExecutionResult, TerminalExecutor
 
     monkeypatch.setenv("MONKEYBOT_HOME", str(tmp_path / "app"))
+    for key in ("XDG_CACHE_HOME", "UV_CACHE_DIR", "PLAYWRIGHT_BROWSERS_PATH", "MPLCONFIGDIR"):
+        monkeypatch.delenv(key, raising=False)
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     skills = workspace / "skills"
@@ -1654,7 +1656,7 @@ async def test_run_command_points_toolchain_caches_at_the_granted_directory(
         )
     )
     assert err is None and out is not None
-    cache = (tmp_path / "app" / "tool-cache").resolve()
+    cache = (workspace / ".monkeybot" / "tool-cache").resolve()
     roots = seen["roots"]
     assert roots is not None
     assert cache in roots.read_write

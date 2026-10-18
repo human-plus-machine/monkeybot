@@ -468,10 +468,15 @@ def test_seatbelt_profile_allows_headless_browser_and_child_signals():
         assert line in profile
 
 
-def test_toolchain_cache_follows_monkeybot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_toolchain_cache_lives_in_the_workspace_even_with_monkeybot_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # A cache shared through MONKEYBOT_HOME would let one agent plant
+    # executables (uv Pythons, the Playwright browser) that another runs.
     monkeypatch.setenv("MONKEYBOT_HOME", str(tmp_path / "app"))
-    env = fs_isolation.toolchain_cache_env(tmp_path / "workspace")
-    root = (tmp_path / "app" / "tool-cache").resolve()
+    workspace = tmp_path / "workspace"
+    env = fs_isolation.toolchain_cache_env(workspace, environ={})
+    root = (workspace / ".monkeybot" / "tool-cache").resolve()
     assert env["XDG_CACHE_HOME"] == str(root / "xdg")
     assert env["UV_CACHE_DIR"] == str(root / "uv")
     assert env["UV_TOOL_DIR"] == str(root / "uv-tools")
@@ -479,15 +484,35 @@ def test_toolchain_cache_follows_monkeybot_home(tmp_path: Path, monkeypatch: pyt
     assert env["MPLCONFIGDIR"] == str(root / "matplotlib")
     assert (root / "playwright").is_dir()
     assert (root / "uv-python").is_dir()
+    assert not (tmp_path / "app").exists()
 
 
-def test_toolchain_cache_defaults_inside_the_workspace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
-    monkeypatch.delenv("MONKEYBOT_HOME", raising=False)
+def test_toolchain_cache_keeps_host_values_the_jail_can_read(tmp_path: Path):
+    home = tmp_path / "home"
+    workspace = home / "ws"
+    granted = home / "bundle" / "browsers"
+    roots = JailRoots(deny=(home,), read_write=(workspace,), read_only=(granted,))
+    environ = {
+        "PLAYWRIGHT_BROWSERS_PATH": str(granted),
+        "UV_CACHE_DIR": str(tmp_path / "opt" / "uv"),
+        "MPLCONFIGDIR": str(home / ".matplotlib"),
+        "XDG_CACHE_HOME": "relative-cache",
+    }
+    env = fs_isolation.toolchain_cache_env(workspace, roots, environ=environ)
+    # Readable host values stay; the one aimed into the denied home is redirected.
+    assert "PLAYWRIGHT_BROWSERS_PATH" not in env
+    assert "UV_CACHE_DIR" not in env
+    assert "XDG_CACHE_HOME" not in env
+    root = (workspace / ".monkeybot" / "tool-cache").resolve()
+    assert env["MPLCONFIGDIR"] == str(root / "matplotlib")
+
+
+def test_toolchain_cache_skips_dirs_it_cannot_create(tmp_path: Path):
     workspace = tmp_path / "workspace"
-    env = fs_isolation.toolchain_cache_env(workspace)
-    assert env["UV_CACHE_DIR"].startswith(str((workspace / ".monkeybot" / "tool-cache").resolve()))
+    workspace.mkdir()
+    # A file where the cache root should be makes every mkdir fail.
+    (workspace / ".monkeybot").write_text("not a dir", encoding="utf-8")
+    assert fs_isolation.toolchain_cache_env(workspace, environ={}) == {}
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="seatbelt jail is macOS-only")

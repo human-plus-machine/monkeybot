@@ -1918,10 +1918,10 @@ class CoreToolExecutor(ToolExecutorPort):
         actually matters here (see `computer/safety.py::_allowed_roots`'s
         identical convention). Everything a command legitimately needs is
         named explicitly on top of that: the workspace and artifacts root
-        (read+write), the shared toolchain cache (read+write — uv, Playwright,
-        and matplotlib must not write ``~/.cache``), the memory palace when
-        memory is on (read+write, it's a sibling of the workspace, not under
-        it), OS temp dirs (read+write, many toolchains stage there), skills
+        (read+write), the per-workspace toolchain cache (read+write — uv,
+        Playwright, and matplotlib must not write ``~/.cache``), the memory
+        palace when memory is on (read+write, it's a sibling of the
+        workspace, not under it), OS temp dirs (read+write, many toolchains stage there), skills
         and the interpreter's own install prefix (read-only — the interpreter
         can live under $HOME for a bundled desktop app), PATH ``bin``
         directories that sit inside the denied home (read-only — onefile tools
@@ -2025,10 +2025,11 @@ class CoreToolExecutor(ToolExecutorPort):
             if isinstance(executor, TerminalExecutor):
                 # jail_roots is a TerminalExecutor-only concept — SandboxExecutor
                 # runs in a container that already isolates the host filesystem.
-                execute_kwargs["jail_roots"] = self._jail_roots(ctx)
+                jail_roots = self._jail_roots(ctx)
+                execute_kwargs["jail_roots"] = jail_roots
                 # Same boundary: default caches live under the denied home.
                 # The container path keeps the host environment instead.
-                env_overrides = toolchain_cache_env(self._workspace.repo_root)
+                env_overrides = toolchain_cache_env(self._workspace.repo_root, jail_roots)
                 if cmd == "mempalace" and self._memory is not None:
                     env_overrides["MEMPALACE_PALACE_PATH"] = str(self._memory.palace_path)
                     env_overrides["MEMPALACE_BACKEND"] = self._memory.backend

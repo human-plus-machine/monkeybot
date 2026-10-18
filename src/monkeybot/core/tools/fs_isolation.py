@@ -844,26 +844,63 @@ _TOOLCHAIN_CACHE_DIRS: tuple[tuple[str, str], ...] = (
 def toolchain_cache_directory(workspace: Path) -> Path:
     """One writable cache root for toolchains the home-directory deny would block.
 
-    Lives under ``MONKEYBOT_HOME`` when the app set one, so every agent shares
-    the uv install and the Playwright browser. Otherwise it sits in the
-    workspace, which is already a read-write root.
+    Always inside the workspace, which is already a read-write root. It is
+    deliberately not shared across agents: the cache holds executables (uv
+    Pythons, uv tool bins, the Playwright browser) that later commands run,
+    so a shared writable copy would let one agent plant code in another's jail.
     """
-    raw = os.environ.get("MONKEYBOT_HOME", "").strip()
-    base = Path(raw).expanduser() if raw else Path(workspace) / ".monkeybot"
-    return (base / "tool-cache").resolve()
+    return (Path(workspace) / ".monkeybot" / "tool-cache").resolve()
 
 
-def toolchain_cache_env(workspace: Path) -> dict[str, str]:
+def _jail_can_read(value: str, roots: JailRoots) -> bool:
+    """True when a host-configured cache path stays reachable inside ``roots``.
+
+    Relative values (Playwright's ``0`` sentinel, a cwd-relative dir) are not
+    aimed at the denied home, so they are left alone.
+    """
+    raw = Path(value).expanduser()
+    if not raw.is_absolute():
+        return True
+    try:
+        path = raw.resolve()
+    except (OSError, RuntimeError):
+        return False
+    if any(path.is_relative_to(r) for r in _resolved_deny_roots(roots.always_deny)):
+        return False
+    granted = _resolved_deny_roots((*roots.read_write, *roots.read_only))
+    if any(path.is_relative_to(r) for r in granted):
+        return True
+    return not any(path.is_relative_to(r) for r in _resolved_deny_roots(roots.deny))
+
+
+def toolchain_cache_env(
+    workspace: Path,
+    roots: JailRoots | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     """Point uv, Playwright, matplotlib, and XDG caches at :func:`toolchain_cache_directory`.
 
-    Host values are replaced. A command can still override them in its own
-    shell, but the defaults no longer aim at ``~/.cache`` or ``~/Library/Caches``.
+    A host value the jail can still read (e.g. a bundled app's
+    ``PLAYWRIGHT_BROWSERS_PATH``) is kept; only values aimed into a denied
+    root, or unset ones, are redirected. A directory that cannot be created
+    is skipped and the host value left in place rather than failing the
+    command.
     """
+    if environ is None:
+        environ = os.environ
     root = toolchain_cache_directory(workspace)
     env: dict[str, str] = {}
     for key, name in _TOOLCHAIN_CACHE_DIRS:
+        host = (environ.get(key) or "").strip()
+        if host and roots is not None and _jail_can_read(host, roots):
+            continue
         path = root / name
-        path.mkdir(parents=True, exist_ok=True)
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning("toolchain cache dir %s unavailable for %s: %s", path, key, exc)
+            continue
         env[key] = str(path)
     return env
 
