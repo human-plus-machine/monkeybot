@@ -45,11 +45,19 @@ from monkeybot.core.types.content_blocks import (
     ToolResponse,
 )
 from monkeybot.core.types.types_tools import ToolDef
-from monkeybot.providers._utils import safe_parse_tool_args
+from monkeybot.providers._utils import safe_parse_tool_args, suppress_thinking_for_auxiliary_call
+from monkeybot.providers.model_capabilities import supports_param
+from monkeybot.providers.rejected_sampling import (
+    blames_sampling_param,
+    is_status_400,
+    omit_known_rejected,
+    remember_rejected_sampling,
+)
 from monkeybot.providers.request_budget import (
     RequestByteBudgetError,
     trim_message_media_for_byte_budget,
 )
+from monkeybot.providers.sampling import REASONING_EFFORT_NONE
 
 _log = logging.getLogger(__name__)
 
@@ -1145,6 +1153,75 @@ def is_ollama_request_body_read_error(exc: BaseException) -> bool:
     return True
 
 
+_OPENAI_STRIPPABLE = ("temperature", "reasoning_effort")
+
+
+def drop_rejected_sampling(
+    kwargs: dict[str, Any],
+    exc: BaseException,
+    *,
+    provider: str = "",
+    model: str = "",
+) -> list[str]:
+    """Remove sampling kwargs a 400 blames. Returns the names that were removed.
+
+    When ``provider`` and ``model`` are set, the names are remembered so later
+    turns omit them instead of paying for another rejected request.
+    """
+    if not is_status_400(exc):
+        return []
+    msg = str(exc)
+    dropped = {
+        name: kwargs[name]
+        for name in _OPENAI_STRIPPABLE
+        if name in kwargs and blames_sampling_param(msg, name)
+    }
+    for name in dropped:
+        del kwargs[name]
+    if dropped:
+        remember_rejected_sampling(provider, model, dropped)
+    return list(dropped)
+
+
+async def iter_openai_compat_stream_with_sampling_retry(
+    client: Any,
+    kwargs: dict[str, Any],
+    *,
+    provider: str,
+    n_messages: int,
+    n_tools: int,
+) -> AsyncIterator[ProviderEvent]:
+    """``iter_openai_compat_stream`` that retries once per sampling kwarg a 400 blames.
+
+    Only retries before the first event, so callers never see duplicated output.
+    """
+    model = str(kwargs.get("model") or "")
+    while True:
+        yielded = False
+        try:
+            async for event in iter_openai_compat_stream(
+                client,
+                kwargs,
+                provider=provider,
+                n_messages=n_messages,
+                n_tools=n_tools,
+            ):
+                yielded = True
+                yield event
+            return
+        except Exception as exc:
+            if yielded:
+                raise
+            dropped = drop_rejected_sampling(kwargs, exc, provider=provider, model=model)
+            if not dropped:
+                raise
+            _log.warning(
+                "%s stream rejected sampling params, retrying without them %s",
+                provider,
+                kv(provider=provider, model=model, dropped=dropped),
+            )
+
+
 async def stream_chat_completions_with_tool_fallback(
     *,
     base_url: str,
@@ -1194,13 +1271,20 @@ async def stream_chat_completions_with_tool_fallback(
         "model": model,
         "messages": oai_messages,
         "stream": True,
-        "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if supports_param(model, "temperature"):
+        kwargs["temperature"] = temperature
     if tools:
         kwargs["tools"] = openai_tools(tools)
     if reasoning_effort is not None:
-        kwargs["reasoning_effort"] = reasoning_effort
+        if not suppress_thinking_for_auxiliary_call(messages, tools):
+            kwargs["reasoning_effort"] = reasoning_effort
+        elif reasoning_effort == REASONING_EFFORT_NONE or provider.startswith("ollama"):
+            # Curator and summarizer calls: Ollama accepts ``none``. Other providers
+            # may reject it, so they omit the configured effort instead.
+            kwargs["reasoning_effort"] = REASONING_EFFORT_NONE
+    omit_known_rejected(provider, model, kwargs)
     if extra_body:
         kwargs["extra_body"] = extra_body
     if max_request_bytes is not None and max_request_bytes > 0:
@@ -1224,7 +1308,7 @@ async def stream_chat_completions_with_tool_fallback(
         retry_delay: float | None = None
         async with sem if sem is not None else contextlib.nullcontext():
             try:
-                async for event in iter_openai_compat_stream(
+                async for event in iter_openai_compat_stream_with_sampling_retry(
                     client,
                     kwargs,
                     provider=provider,
@@ -1341,6 +1425,8 @@ __all__ = [
     "ProviderRateLimitError",
     "ProviderServerError",
     "count_input_tokens_tiktoken",
+    "drop_rejected_sampling",
+    "iter_openai_compat_stream_with_sampling_retry",
     "count_openai_compat_input_tokens",
     "is_rate_limit_error",
     "is_server_error",

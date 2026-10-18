@@ -2,11 +2,24 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from unittest.mock import MagicMock
+
+import pytest
 
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.types.content_blocks import Image, Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
+
+
+@pytest.fixture(autouse=True)
+def _reset_rejected_sampling() -> Iterator[None]:
+    from monkeybot.providers.rejected_sampling import clear_rejected_sampling
+
+    clear_rejected_sampling()
+    yield
+    clear_rejected_sampling()
+
 
 CANONICAL_TOOL_DEFS: tuple[ToolDef, ...] = (
     ToolDef(

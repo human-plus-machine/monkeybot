@@ -9,14 +9,15 @@ from typing import Any, cast
 from monkeybot.core.llm.provider import Message, ProviderCallHints, ProviderEvent
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import (
+    anthropic_sampling_kwargs,
     anthropic_tool_defs,
     build_anthropic_messages,
     count_anthropic_input_tokens,
     iter_anthropic_sdk_stream,
     prepare_anthropic_cached_payload,
     split_leading_system,
+    suppress_thinking_for_auxiliary_call,
 )
-from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.request_budget import trim_message_media_for_byte_budget
 from monkeybot.providers.sampling import resolve_model_sampling
 
@@ -37,12 +38,18 @@ class ClaudeProvider:
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         if not os.environ.get("ANTHROPIC_API_KEY"):
             raise ValueError("ANTHROPIC_API_KEY is not set")
-        sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
+        sampling = resolve_model_sampling(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
+        self._reasoning_effort = sampling.reasoning_effort
 
     async def count_input_tokens(
         self,
@@ -97,28 +104,21 @@ class ClaudeProvider:
             not_given=anthropic.NOT_GIVEN,
         )
 
+        auxiliary = suppress_thinking_for_auxiliary_call(messages, tools)
         stream_kwargs: dict[str, Any] = {
             "model": model,
             "system": system_param,
             "messages": cast(Any, converted_messages),
             "tools": tools_param,
             "max_tokens": self._max_tokens,
+            **anthropic_sampling_kwargs(
+                model=model,
+                temperature=self._temperature,
+                thinking_budget=None if auxiliary else thinking_budget,
+                reasoning_effort=None if auxiliary else self._reasoning_effort,
+                provider="claude",
+            ),
         }
-        if supports_param(model, "temperature"):
-            stream_kwargs["temperature"] = self._temperature
-        if (
-            thinking_budget is not None
-            and thinking_budget > 0
-            and supports_param(model, "thinking")
-        ):
-            stream_kwargs["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": thinking_budget,
-            }
-            # Anthropic requires temperature=1 when extended thinking is enabled —
-            # but only send it to models that accept a temperature at all.
-            if supports_param(model, "temperature"):
-                stream_kwargs["temperature"] = 1
 
         client_kwargs: dict[str, Any] = {}
         if session_id and retention != "none":
@@ -131,5 +131,6 @@ class ClaudeProvider:
             error_message="Claude stream error: %s",
             n_messages=len(messages),
             n_tools=len(tools),
+            fallback_temperature=self._temperature,
         ):
             yield event

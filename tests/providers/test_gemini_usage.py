@@ -90,7 +90,9 @@ def test_grounding_metadata_to_dict_empty_returns_none() -> None:
 
 
 def test_grounding_metadata_to_dict_extracts_sources_and_queries() -> None:
-    chunk = types.SimpleNamespace(web=types.SimpleNamespace(title="Example", uri="https://example.com"))
+    chunk = types.SimpleNamespace(
+        web=types.SimpleNamespace(title="Example", uri="https://example.com")
+    )
     gm = types.SimpleNamespace(
         grounding_chunks=[chunk],
         web_search_queries=["weather today"],
@@ -107,12 +109,19 @@ def _install_fake_google_genai(
     *,
     stream_chunks: list[Any] | None = None,
     count_tokens_error: BaseException | None = None,
+    stream_errors: list[BaseException] | None = None,
+    count_tokens_errors: list[BaseException] | None = None,
 ) -> dict[str, Any]:
     captured: dict[str, Any] = {}
+    pending_errors = list(stream_errors or [])
+    pending_count_errors = list(count_tokens_errors or [])
 
     class FakeModels:
         async def generate_content_stream(self, **kwargs: Any) -> Any:
+            captured.setdefault("configs", []).append(kwargs["config"])
             captured["config"] = kwargs["config"]
+            if pending_errors:
+                raise pending_errors.pop(0)
 
             async def _gen() -> AsyncIterator[Any]:
                 if stream_chunks is None:
@@ -126,6 +135,9 @@ def _install_fake_google_genai(
         async def count_tokens(self, **kwargs: Any) -> Any:
             if count_tokens_error is not None:
                 raise count_tokens_error
+            captured.setdefault("count_configs", []).append(kwargs.get("config"))
+            if pending_count_errors:
+                raise pending_count_errors.pop(0)
             captured["model"] = kwargs["model"]
             captured["contents"] = kwargs["contents"]
             captured["config"] = kwargs.get("config")
@@ -159,7 +171,9 @@ def _install_fake_google_genai(
 
 
 @pytest.mark.asyncio
-async def test_stream_adds_google_search_tool_when_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_stream_adds_google_search_tool_when_opted_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     cand = types.SimpleNamespace(
         content=types.SimpleNamespace(parts=[types.SimpleNamespace(text="hi", function_call=None)]),
         grounding_metadata=None,
@@ -172,9 +186,7 @@ async def test_stream_adds_google_search_tool_when_opted_in(monkeypatch: pytest.
     provider = GeminiProvider()
     events = [
         ev
-        async for ev in provider.stream(
-            [], [], model="gemini-2.5-flash", vertex_google_search=True
-        )
+        async for ev in provider.stream([], [], model="gemini-2.5-flash", vertex_google_search=True)
     ]
 
     assert {"google_search": {}} in captured_config["config"]["tools"]
@@ -219,7 +231,9 @@ async def test_stream_combines_google_search_with_function_declarations(
 
 
 @pytest.mark.asyncio
-async def test_stream_omits_google_search_tool_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_stream_omits_google_search_tool_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     captured_config = _install_fake_google_genai(monkeypatch, stream_chunks=[])
 
     provider = GeminiProvider()
@@ -353,3 +367,249 @@ async def test_stream_error_logs_before_wrapping(
     assert "Gemini stream error" in caplog.text
     assert "provider=gemini" in caplog.text
     assert "model=gemini-2.5-flash" in caplog.text
+
+
+def test_apply_thinking_config_uses_sdk_levels_and_falls_back() -> None:
+    from google.genai import types
+
+    from monkeybot.providers.gemini import _UNKNOWN_GEMINI_LEVELS, _apply_thinking_config
+
+    _UNKNOWN_GEMINI_LEVELS.clear()
+    cfg: dict[str, Any] = {}
+    _apply_thinking_config(types, cfg, effort="high", budget=12)
+    assert cfg["thinking_config"].thinking_level == types.ThinkingLevel.HIGH
+    assert cfg["thinking_config"].thinking_budget is None
+
+    cfg = {}
+    _apply_thinking_config(types, cfg, effort="max", budget=12)
+    assert cfg["thinking_config"].thinking_budget == 12
+    assert cfg["thinking_config"].thinking_level is None
+
+    cfg = {}
+    _apply_thinking_config(types, cfg, effort="none", budget=12)
+    assert cfg["thinking_config"].thinking_budget == 0
+
+
+class _ThinkingRejectedError(Exception):
+    status_code = 400
+
+    def __str__(self) -> str:
+        return "Error code: 400 - thinking_level is not supported for this model"
+
+
+@pytest.mark.asyncio
+async def test_gemini_retries_without_rejected_thinking_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cand = types.SimpleNamespace(
+        content=types.SimpleNamespace(
+            parts=[types.SimpleNamespace(text="hi", function_call=None, thought=False)]
+        ),
+        grounding_metadata=None,
+        finish_reason=None,
+    )
+    captured = _install_fake_google_genai(
+        monkeypatch,
+        stream_chunks=[types.SimpleNamespace(candidates=[cand], usage_metadata=None)],
+        stream_errors=[_ThinkingRejectedError()],
+    )
+
+    class _Levels:
+        __members__ = {
+            "MINIMAL": "MINIMAL",
+            "LOW": "LOW",
+            "MEDIUM": "MEDIUM",
+            "HIGH": "HIGH",
+        }
+
+    sys.modules["google.genai.types"].ThinkingLevel = _Levels  # type: ignore[attr-defined]
+    monkeypatch.delenv("MODEL_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("MODEL_THINKING_BUDGET", raising=False)
+
+    provider = GeminiProvider(reasoning_effort="high")
+    events = [ev async for ev in provider.stream([], [], model="gemini-2.5-flash")]
+    configs = captured["configs"]
+    assert len(configs) == 2
+    assert configs[0]["thinking_config"]["thinking_level"] == "HIGH"
+    assert "thinking_config" not in configs[1]
+    assert any(getattr(ev, "text", None) == "hi" for ev in events)
+
+    captured["configs"].clear()
+    _ = [ev async for ev in provider.stream([], [], model="gemini-2.5-flash")]
+    assert len(captured["configs"]) == 1
+    assert "thinking_config" not in captured["configs"][0]
+
+
+def test_gemini_client_error_counts_as_400() -> None:
+    from google.genai import errors
+
+    from monkeybot.providers.gemini import _gemini_blames_thinking
+
+    exc = errors.ClientError(
+        400,
+        {
+            "error": {
+                "code": 400,
+                "message": "thinking_level is not supported for this model.",
+                "status": "INVALID_ARGUMENT",
+            }
+        },
+    )
+    assert _gemini_blames_thinking(exc)
+
+
+def test_apply_thinking_config_without_sdk_levels_uses_budget() -> None:
+    from monkeybot.providers.gemini import _UNKNOWN_GEMINI_LEVELS, _apply_thinking_config
+
+    class _Cfg:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    fake_types = types.SimpleNamespace(ThinkingConfig=_Cfg)
+    _UNKNOWN_GEMINI_LEVELS.clear()
+    cfg: dict[str, Any] = {}
+    assert _apply_thinking_config(fake_types, cfg, effort="high", budget=12) == {}
+    assert cfg["thinking_config"].kwargs == {"thinking_budget": 12}
+
+
+@pytest.mark.asyncio
+async def test_gemini_does_not_retry_budget_only_thinking_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from monkeybot.providers.rejected_sampling import was_rejected
+
+    captured = _install_fake_google_genai(
+        monkeypatch,
+        stream_errors=[_ThinkingRejectedError()],
+    )
+    monkeypatch.delenv("MODEL_REASONING_EFFORT", raising=False)
+
+    provider = GeminiProvider(thinking_budget=32768)
+    with pytest.raises(LLMError):
+        [ev async for ev in provider.stream([], [], model="gemini-2.5-flash")]
+    assert len(captured["configs"]) == 1
+    assert not was_rejected("gemini", "gemini-2.5-flash", "thinking_level")
+
+
+# Real google-genai text for a thinking-only model (gemini-2.5-pro) asked for budget 0.
+_BUDGET_ZERO_REJECTED = (
+    "400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': "
+    "'Budget 0 is invalid. This model only works in thinking mode.', "
+    "'status': 'INVALID_ARGUMENT'}}"
+)
+
+
+class _BudgetZeroRejectedError(Exception):
+    code = 400
+
+    def __str__(self) -> str:
+        return _BUDGET_ZERO_REJECTED
+
+
+def _hi_chunk() -> Any:
+    cand = types.SimpleNamespace(
+        content=types.SimpleNamespace(
+            parts=[types.SimpleNamespace(text="hi", function_call=None, thought=False)]
+        ),
+        grounding_metadata=None,
+        finish_reason=None,
+    )
+    return types.SimpleNamespace(candidates=[cand], usage_metadata=None)
+
+
+def test_gemini_blames_thinking_on_real_budget_zero_error() -> None:
+    from monkeybot.providers.gemini import _gemini_blames_thinking
+
+    assert _gemini_blames_thinking(_BudgetZeroRejectedError())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured_budget", [-1, 0])
+async def test_gemini_off_retries_without_thinking_on_thinking_only_model(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_budget: int,
+) -> None:
+    captured = _install_fake_google_genai(
+        monkeypatch,
+        stream_chunks=[_hi_chunk()],
+        stream_errors=[_BudgetZeroRejectedError()],
+    )
+    monkeypatch.delenv("MODEL_REASONING_EFFORT", raising=False)
+
+    provider = GeminiProvider(reasoning_effort="off", thinking_budget=configured_budget)
+    events = [ev async for ev in provider.stream([], [], model="gemini-2.5-pro")]
+    configs = captured["configs"]
+    assert len(configs) == 2
+    assert configs[0]["thinking_config"] == {"thinking_budget": 0}
+    # The retry must not resend the budget 0 the model just rejected.
+    assert "thinking_config" not in configs[1]
+    assert any(getattr(ev, "text", None) == "hi" for ev in events)
+
+    # Next turn goes straight to the request that works.
+    captured["configs"].clear()
+    _ = [ev async for ev in provider.stream([], [], model="gemini-2.5-pro")]
+    assert len(captured["configs"]) == 1
+    assert "thinking_config" not in captured["configs"][0]
+
+
+def _curator_messages() -> list[Message]:
+    from monkeybot.core.types.content_blocks import Text
+
+    return [
+        Message(role="system", content=[Text(text="You narrow context for another assistant.")]),
+        Message.text("user", "history"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_auxiliary_budget_zero_retries_on_thinking_only_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No effort configured: the curator's forced budget 0 must not fail every call."""
+    captured = _install_fake_google_genai(
+        monkeypatch,
+        stream_chunks=[_hi_chunk()],
+        stream_errors=[_BudgetZeroRejectedError()],
+    )
+    monkeypatch.delenv("MODEL_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("MODEL_THINKING_BUDGET", raising=False)
+
+    provider = GeminiProvider()
+    events = [ev async for ev in provider.stream(_curator_messages(), [], model="gemini-2.5-pro")]
+    configs = captured["configs"]
+    assert len(configs) == 2
+    assert configs[0]["thinking_config"] == {"thinking_budget": 0}
+    assert "thinking_config" not in configs[1]
+    assert any(getattr(ev, "text", None) == "hi" for ev in events)
+
+    captured["configs"].clear()
+    _ = [ev async for ev in provider.stream(_curator_messages(), [], model="gemini-2.5-pro")]
+    assert len(captured["configs"]) == 1
+    assert "thinking_config" not in captured["configs"][0]
+
+
+@pytest.mark.asyncio
+async def test_gemini_count_tokens_retries_rejected_off_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Assumed wording: Vertex count_tokens is taken to reject budget 0 with the
+    same text generate_content uses on a thinking-only model."""
+    captured = _install_fake_google_genai(
+        monkeypatch,
+        stream_chunks=[_hi_chunk()],
+        count_tokens_errors=[_BudgetZeroRejectedError()],
+    )
+    monkeypatch.delenv("MODEL_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("MODEL_THINKING_BUDGET", raising=False)
+
+    provider = GeminiProvider(reasoning_effort="off")
+    n = await provider.count_input_tokens([Message.text("user", "hi")], [], model="gemini-2.5-pro")
+    assert n == 42
+    count_configs = captured["count_configs"]
+    assert len(count_configs) == 2
+    assert count_configs[0]["generation_config"]["thinking_config"] == {"thinking_budget": 0}
+    assert "thinking_config" not in count_configs[1]["generation_config"]
+
+    # A count rejection is not remembered, so the stream still tries the effort.
+    _ = [ev async for ev in provider.stream([], [], model="gemini-2.5-pro")]
+    assert captured["configs"][0]["thinking_config"] == {"thinking_budget": 0}

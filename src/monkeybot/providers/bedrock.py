@@ -18,6 +18,7 @@ from monkeybot.providers._bedrock_converse import (
     uses_anthropic_bedrock,
 )
 from monkeybot.providers._utils import (
+    anthropic_sampling_kwargs,
     anthropic_tool_defs,
     build_anthropic_messages,
     count_anthropic_input_tokens,
@@ -25,12 +26,13 @@ from monkeybot.providers._utils import (
     iter_anthropic_sdk_stream,
     prepare_anthropic_cached_payload,
     split_leading_system,
+    suppress_thinking_for_auxiliary_call,
 )
-from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.request_budget import trim_message_media_for_byte_budget
 from monkeybot.providers.sampling import resolve_model_sampling
 
 _log = logging.getLogger(__name__)
+_CONVERSE_EFFORT_WARNED: set[str] = set()
 
 
 class BedrockProvider:
@@ -50,6 +52,7 @@ class BedrockProvider:
         aws_region: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         self._aws_region = (
             (aws_region or "").strip()
@@ -57,9 +60,14 @@ class BedrockProvider:
             or os.environ.get("AWS_DEFAULT_REGION", "").strip()
             or "us-east-1"
         )
-        sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
+        sampling = resolve_model_sampling(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
+        self._reasoning_effort = sampling.reasoning_effort
         self._runtime: Any = None
         self._runtime_lock = asyncio.Lock()
 
@@ -144,10 +152,21 @@ class BedrockProvider:
         thinking_budget: int | None = None,
         hints: ProviderCallHints | None = None,
     ) -> AsyncIterator[ProviderEvent]:
-        # Converse path does not request reasoning yet; see converse_request_kwargs.
+        # thinking_budget is not forwarded: Converse has no budget field, and the
+        # Claude path sends reasoning_effort instead of a manual budget.
         del thinking_budget
         messages = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
         if not uses_anthropic_bedrock(model):
+            if self._reasoning_effort and model not in _CONVERSE_EFFORT_WARNED:
+                _CONVERSE_EFFORT_WARNED.add(model)
+                _log.warning(
+                    "reasoning_effort is ignored on the Bedrock Converse path %s",
+                    kv(
+                        provider="bedrock",
+                        model=model,
+                        reasoning_effort=self._reasoning_effort,
+                    ),
+                )
             _log.info(
                 "Bedrock dispatch %s",
                 kv(provider="bedrock", model=model, path="converse"),
@@ -194,9 +213,18 @@ class BedrockProvider:
             "messages": converted_messages,
             "tools": tools_param,
             "max_tokens": self._max_tokens,
+            **anthropic_sampling_kwargs(
+                model=model,
+                temperature=self._temperature,
+                thinking_budget=None,
+                reasoning_effort=(
+                    None
+                    if suppress_thinking_for_auxiliary_call(messages, tools)
+                    else self._reasoning_effort
+                ),
+                provider="bedrock",
+            ),
         }
-        if supports_param(model, "temperature"):
-            stream_kwargs["temperature"] = self._temperature
         async for event in iter_anthropic_sdk_stream(
             client,
             stream_kwargs,
@@ -204,6 +232,7 @@ class BedrockProvider:
             error_message="Bedrock Claude stream error: %s",
             n_messages=len(messages),
             n_tools=len(tools),
+            fallback_temperature=self._temperature,
         ):
             yield event
 

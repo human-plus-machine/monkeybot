@@ -84,6 +84,7 @@ def test_get_provider_config_builds_openai_provider() -> None:
         mock_cls.assert_called_once_with(
             temperature=DEFAULT_MODEL_TEMPERATURE,
             max_tokens=DEFAULT_MODEL_MAX_TOKENS,
+            reasoning_effort="",
         )
 
 
