@@ -646,13 +646,29 @@ class GeminiProvider:
         self._api_key = api_key
 
     def _client(self, model_param: str) -> Any:
-        """Create a google-genai client for Vertex AI or Google AI Studio."""
+        """Reuse a google-genai client for this API key or Vertex project and location.
+
+        Location can follow the model (a global preview id versus ``us-central1``),
+        so the cache key is the endpoint, not the model id.
+        """
         from google import genai
 
+        from monkeybot.providers._sdk_client import cached_sdk_client, sdk_env
+
         if self._api_key:
-            return genai.Client(api_key=self._api_key)
+            api_key = self._api_key
+            return cached_sdk_client(
+                ("gemini-api",),
+                lambda: genai.Client(api_key=api_key),
+                # google-genai reads GOOGLE_* and GEMINI_* env in Client.__init__.
+                fingerprint=(api_key, sdk_env("GOOGLE_", "GEMINI_")),
+            )
         project, location = _vertex_project_and_location(model_param)
-        return genai.Client(vertexai=True, project=project, location=location)
+        return cached_sdk_client(
+            ("gemini-vertex", project, location),
+            lambda: genai.Client(vertexai=True, project=project, location=location),
+            fingerprint=sdk_env("GOOGLE_", "GEMINI_"),
+        )
 
     @property
     def name(self) -> str:

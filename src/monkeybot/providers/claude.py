@@ -8,6 +8,11 @@ from typing import Any, cast
 
 from monkeybot.core.llm.provider import Message, ProviderCallHints, ProviderEvent
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.providers._sdk_client import (
+    cached_sdk_client,
+    sdk_env,
+    session_affinity_headers,
+)
 from monkeybot.providers._utils import (
     anthropic_sampling_kwargs,
     anthropic_tool_defs,
@@ -72,7 +77,7 @@ class ClaudeProvider:
         system, msgs = split_leading_system(messages)
         converted_messages = build_anthropic_messages(msgs)
         return await count_anthropic_input_tokens(
-            anthropic.AsyncAnthropic(),
+            _anthropic_client(anthropic),
             anthropic_module=anthropic,
             model=model,
             system=system,
@@ -92,7 +97,6 @@ class ClaudeProvider:
         import anthropic  # noqa: PLC0415
 
         retention = hints.cache_retention if hints is not None else "short"
-        session_id = hints.session_id if hints is not None else None
 
         messages = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
         system, msgs = split_leading_system(messages)
@@ -120,10 +124,10 @@ class ClaudeProvider:
             ),
         }
 
-        client_kwargs: dict[str, Any] = {}
-        if session_id and retention != "none":
-            client_kwargs["default_headers"] = {"x-session-affinity": session_id}
-        client = anthropic.AsyncAnthropic(**client_kwargs)
+        headers = session_affinity_headers(hints)
+        if headers:
+            stream_kwargs["extra_headers"] = headers
+        client = _anthropic_client(anthropic)
         async for event in iter_anthropic_sdk_stream(
             client,
             stream_kwargs,
@@ -134,3 +138,16 @@ class ClaudeProvider:
             fallback_temperature=self._temperature,
         ):
             yield event
+
+
+def _anthropic_client(anthropic: Any) -> Any:
+    """One ``AsyncAnthropic`` for this loop.
+
+    ``AsyncAnthropic`` reads ANTHROPIC_* env vars in its constructor, so those
+    identify the client.
+    """
+    return cached_sdk_client(
+        ("anthropic",),
+        lambda: anthropic.AsyncAnthropic(),
+        fingerprint=sdk_env("ANTHROPIC_"),
+    )

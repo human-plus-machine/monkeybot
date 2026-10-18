@@ -76,7 +76,6 @@ class VertexClaudeProvider:
     ) -> int:
         del thinking_budget, hints
         import anthropic  # noqa: PLC0415
-        from anthropic import AsyncAnthropicVertex  # noqa: PLC0415
 
         messages = trim_message_media_for_byte_budget(
             messages,
@@ -86,7 +85,7 @@ class VertexClaudeProvider:
         )
         system, msgs = split_leading_system(messages)
         converted_messages = build_anthropic_messages(msgs)
-        client = AsyncAnthropicVertex(project_id=self._project_id, region=self._region)
+        client = self._sdk_client()
         converted_tools = anthropic_tool_defs(tools) if tools else None
         try:
             return await count_anthropic_input_tokens(
@@ -124,12 +123,11 @@ class VertexClaudeProvider:
     ) -> AsyncIterator[ProviderEvent]:
         del thinking_budget
         import anthropic  # noqa: PLC0415
-        from anthropic import AsyncAnthropicVertex  # noqa: PLC0415
 
         retention = hints.cache_retention if hints is not None else "short"
         messages = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
         system, msgs = split_leading_system(messages)
-        client = AsyncAnthropicVertex(project_id=self._project_id, region=self._region)
+        client = self._sdk_client()
         system_param, converted_messages, tools_param = prepare_anthropic_cached_payload(
             system=system,
             messages=msgs,
@@ -163,3 +161,18 @@ class VertexClaudeProvider:
             fallback_temperature=self._temperature,
         ):
             yield event
+
+    def _sdk_client(self) -> Any:
+        """One Vertex Claude client for this project and region."""
+        from anthropic import AsyncAnthropicVertex  # noqa: PLC0415
+
+        from monkeybot.providers._sdk_client import cached_sdk_client, sdk_env
+
+        project_id = self._project_id
+        region = self._region
+        return cached_sdk_client(
+            ("vertex-claude", project_id, region),
+            lambda: AsyncAnthropicVertex(project_id=project_id, region=region),
+            # ANTHROPIC_VERTEX_BASE_URL is read by the constructor.
+            fingerprint=sdk_env("ANTHROPIC_VERTEX_"),
+        )

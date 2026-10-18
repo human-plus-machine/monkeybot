@@ -74,7 +74,15 @@ class BedrockProvider:
     def _client(self) -> Any:
         from anthropic import AsyncAnthropicBedrock  # noqa: PLC0415
 
-        return AsyncAnthropicBedrock(aws_region=self._aws_region)
+        from monkeybot.providers._sdk_client import cached_sdk_client, sdk_env
+
+        region = self._aws_region
+        return cached_sdk_client(
+            ("bedrock-anthropic", region),
+            lambda: AsyncAnthropicBedrock(aws_region=region),
+            # Read by the constructor when not passed in.
+            fingerprint=sdk_env("ANTHROPIC_BEDROCK_", "AWS_BEARER_TOKEN_BEDROCK"),
+        )
 
     def _new_runtime_client(self) -> Any:
         import boto3  # noqa: PLC0415
