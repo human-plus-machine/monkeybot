@@ -25,6 +25,7 @@ from monkeybot.providers._openai_compat import (
     openai_tools_token_count,
 )
 from monkeybot.providers.model_capabilities import supports_param
+from monkeybot.providers.rejected_sampling import omit_known_rejected
 from monkeybot.providers.request_budget import (
     configured_request_byte_budget,
     trim_message_media_for_byte_budget,
@@ -144,6 +145,7 @@ class OpenAIProvider:
             kwargs["temperature"] = self._temperature
         if self._reasoning_effort:
             kwargs["reasoning_effort"] = self._reasoning_effort
+        omit_known_rejected("openai", model, kwargs)
         if tools:
             kwargs["tools"] = openai_tools(tools)
             kwargs["parallel_" + "tool" + "_calls"] = True
@@ -172,7 +174,7 @@ class OpenAIProvider:
             except Exception as exc:
                 if yielded:
                     raise
-                dropped = drop_rejected_sampling(kwargs, exc)
+                dropped = drop_rejected_sampling(kwargs, exc, provider="openai", model=model)
                 if not dropped:
                     raise
                 _log.warning(

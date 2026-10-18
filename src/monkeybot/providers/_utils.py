@@ -31,8 +31,15 @@ from monkeybot.core.types.content_blocks import (
     ToolRequest,
     ToolResponse,
 )
+from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.pricing import estimate_cost
+from monkeybot.providers.rejected_sampling import (
+    is_status_400,
+    omit_known_rejected,
+    remember_rejected_sampling,
+)
+from monkeybot.providers.sampling import REASONING_EFFORT_OFF
 
 _log = logging.getLogger(__name__)
 
@@ -107,6 +114,27 @@ async def count_anthropic_input_tokens(
 _STRIPPABLE_PARAMS = ("temperature", "thinking", "output_config")
 
 
+def suppress_thinking_for_auxiliary_call(
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+) -> bool:
+    """True when this call is a known auxiliary job that must not use extended thinking.
+
+    Context curation and history summarization use ``tools=()`` and a fixed 2-message
+    shape. Extended thinking on those calls can stall the stream past the curator timeout.
+    """
+    if tools:
+        return False
+    if len(messages) != 2 or messages[0].role != "system":
+        return False
+    sys_txt = "".join(b.text for b in messages[0].content if isinstance(b, Text))
+    markers = (
+        "You narrow context for another assistant",
+        "You compress prior agent conversation turns",
+    )
+    return any(marker in sys_txt for marker in markers)
+
+
 def anthropic_sampling_kwargs(
     *,
     model: str,
@@ -117,10 +145,14 @@ def anthropic_sampling_kwargs(
     """Sampling fields for an Anthropic Messages request.
 
     A set ``reasoning_effort`` uses adaptive thinking plus ``output_config.effort``
-    and omits temperature and ``budget_tokens``. Otherwise temperature and a
-    manual thinking budget are sent only when the model is known to accept them.
+    and omits temperature and ``budget_tokens``. ``off`` / ``none`` / ``disabled``
+    send neither. Otherwise temperature and a manual thinking budget are sent only
+    when the model is known to accept them.
     """
     effort = (reasoning_effort or "").strip().lower()
+    if effort in REASONING_EFFORT_OFF:
+        effort = ""
+        thinking_budget = None
     if effort:
         return {
             "thinking": {"type": "adaptive"},
@@ -189,9 +221,9 @@ def _strip_rejected_params(kwargs: dict[str, Any], exc: Exception) -> list[str]:
                 del kwargs[param]
                 return [param]
             return []
-    msg = str(exc).lower()
-    if "400" not in msg:
+    if not is_status_400(exc):
         return []
+    msg = str(exc).lower()
     dropped = [p for p in _STRIPPABLE_PARAMS if p in kwargs and _rejects_param(msg, p)]
     for p in dropped:
         del kwargs[p]
@@ -225,6 +257,7 @@ async def iter_stream_with_param_retry(
             if not started:
                 dropped = strip_rejected(kwargs, exc)
                 if dropped:
+                    remember_rejected_sampling(provider, str(model or ""), dropped)
                     _log.warning(
                         retry_message,
                         kv(provider=provider, model=model, dropped=dropped),
@@ -267,6 +300,7 @@ async def iter_anthropic_sdk_stream(
     already received deltas.
     """
     kwargs = dict(stream_kwargs)  # never mutate the caller's dict
+    omit_known_rejected(provider, str(kwargs.get("model") or ""), kwargs)
     async for event in iter_stream_with_param_retry(
         lambda kw: _stream_anthropic_once(client, kw, provider=provider),
         kwargs,

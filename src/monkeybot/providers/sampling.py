@@ -17,6 +17,9 @@ if TYPE_CHECKING:
 DEFAULT_MODEL_TEMPERATURE = 0.7
 DEFAULT_MODEL_MAX_TOKENS = 60_000
 
+# Shared "do not think" words. Ollama's wire value for these is ``none``.
+REASONING_EFFORT_OFF = frozenset({"off", "none", "disabled"})
+
 
 @dataclass(frozen=True, slots=True)
 class ModelSamplingConfig:

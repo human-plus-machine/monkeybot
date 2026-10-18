@@ -30,7 +30,7 @@ Configuration (environment variables or ``monkeybot.yaml``):
   ``-1`` = Ollama default (thinking on when supported), ``0`` = off via
   ``reasoning_effort: none``, ``N > 0`` = on (no token budget on Ollama).
 - ``model.reasoning_effort`` — when set, sent as ``reasoning_effort`` and wins
-  over ``thinking_budget``. ``off`` / ``disabled`` map to ``none``.
+  over ``thinking_budget``. ``off`` / ``none`` / ``disabled`` map to ``none``.
 - ``model.keep_alive`` (YAML only) — local only. How long Ollama keeps the model
   (and its KV prefix cache) loaded after a request. Default ``24h``. Set ``"0"``
   (or empty) to omit the field. Cloud mode never sends it. Distinct from the
@@ -65,7 +65,7 @@ from monkeybot.providers._openai_compat import (
     stream_chat_completions_with_tool_fallback,
 )
 from monkeybot.providers.request_budget import configured_request_byte_budget
-from monkeybot.providers.sampling import resolve_model_sampling
+from monkeybot.providers.sampling import REASONING_EFFORT_OFF, resolve_model_sampling
 
 OllamaMode = Literal["auto", "cloud", "local"]
 
@@ -182,9 +182,9 @@ def reasoning_effort_for_thinking_budget(budget: int) -> str | None:
 
 
 def ollama_reasoning_effort(configured: str | None, budget: int) -> str | None:
-    """Prefer an explicit effort. ``off`` / ``disabled`` become Ollama's ``none``."""
+    """Prefer an explicit effort. ``off`` / ``none`` / ``disabled`` become ``none``."""
     if configured:
-        if configured in {"off", "disabled"}:
+        if configured in REASONING_EFFORT_OFF:
             return "none"
         return configured
     return reasoning_effort_for_thinking_budget(budget)

@@ -230,3 +230,27 @@ def test_reasoning_effort_check_passes_when_set() -> None:
     result = _doctor_by_id(report)["model.reasoning_effort"]
     assert result.status == "pass"
     assert "high" in result.message
+
+
+def test_reasoning_effort_check_fails_for_bedrock_converse() -> None:
+    report = CommandReport(command="doctor", ok=True, config_path=None)
+    _add_reasoning_effort_check(
+        report,
+        reasoning_effort="high",
+        provider="aws_bedrock",
+        model_name="amazon.nova-pro-v1:0",
+    )
+    result = _doctor_by_id(report)["model.reasoning_effort"]
+    assert result.status == "fail"
+    assert result.severity == "warning"
+
+
+def test_reasoning_effort_check_passes_for_bedrock_claude() -> None:
+    report = CommandReport(command="doctor", ok=True, config_path=None)
+    _add_reasoning_effort_check(
+        report,
+        reasoning_effort="high",
+        provider="aws_bedrock",
+        model_name="anthropic.claude-sonnet-4-5",
+    )
+    assert _doctor_by_id(report)["model.reasoning_effort"].status == "pass"

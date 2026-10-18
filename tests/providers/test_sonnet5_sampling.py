@@ -9,9 +9,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from monkeybot.core.llm.provider import Message, UsageEvent
+from monkeybot.core.types.content_blocks import Text
 from monkeybot.providers import model_capabilities
 from monkeybot.providers._utils import iter_anthropic_sdk_stream
 from monkeybot.providers.claude import ClaudeProvider
+from monkeybot.providers.vertex_claude import VertexClaudeProvider
 from tests.providers.conftest import CANONICAL_TOOL_DEFS, make_anthropic_stream_mock
 
 _SONNET_5 = "claude-sonnet-5-20260101"
@@ -90,6 +92,56 @@ async def test_reasoning_effort_sends_adaptive_and_omits_temperature(
     provider = ClaudeProvider(temperature=0.9, reasoning_effort="High")
     with patch("anthropic.AsyncAnthropic", return_value=client):
         await _drain(provider, model=_OLDER, thinking_budget=4000)
+    kwargs = client.messages.stream.call_args.kwargs
+    assert kwargs["thinking"] == {"type": "adaptive"}
+    assert kwargs["output_config"] == {"effort": "high"}
+    assert "temperature" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_skipped_for_summarizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.delenv("MODEL_REASONING_EFFORT", raising=False)
+    client = make_anthropic_stream_mock(_minimal_events())
+    provider = ClaudeProvider(temperature=0.9, reasoning_effort="high")
+    messages = [
+        Message(
+            role="system",
+            content=[
+                Text(
+                    text=(
+                        "You compress prior agent conversation turns into one "
+                        "dense factual summary."
+                    )
+                )
+            ],
+        ),
+        Message.text("user", "blob"),
+    ]
+    with patch("anthropic.AsyncAnthropic", return_value=client):
+        async for _ in provider.stream(messages, [], model=_OLDER, thinking_budget=4000):
+            pass
+    kwargs = client.messages.stream.call_args.kwargs
+    assert "output_config" not in kwargs
+    assert "thinking" not in kwargs
+    assert kwargs["temperature"] == 0.9
+
+
+@pytest.mark.asyncio
+async def test_vertex_claude_sends_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("MODEL_REASONING_EFFORT", raising=False)
+    client = make_anthropic_stream_mock(_minimal_events())
+    provider = VertexClaudeProvider(
+        project_id="p",
+        region="us-east5",
+        temperature=0.9,
+        reasoning_effort="high",
+    )
+    with patch("anthropic.AsyncAnthropicVertex", return_value=client):
+        async for _ in provider.stream(_messages(), [], model=_OLDER):
+            pass
     kwargs = client.messages.stream.call_args.kwargs
     assert kwargs["thinking"] == {"type": "adaptive"}
     assert kwargs["output_config"] == {"effort": "high"}
@@ -361,6 +413,24 @@ async def test_strips_rejected_output_config_effort() -> None:
     assert len(calls) == 2
     assert "output_config" not in calls[1]
     assert calls[1]["thinking"] == {"type": "adaptive"}
+
+    calls.clear()
+
+    async for _ in iter_anthropic_sdk_stream(
+        client,
+        {
+            "model": "claude-sonnet-6-hypothetical",
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "max"},
+            "max_tokens": 100,
+        },
+        provider="claude",
+        error_message="Claude stream error: %s",
+    ):
+        pass
+
+    assert len(calls) == 1
+    assert "output_config" not in calls[0]
 
 
 @pytest.mark.asyncio

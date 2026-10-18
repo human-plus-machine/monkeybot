@@ -18,6 +18,7 @@ from monkeybot.providers._utils import (
     iter_anthropic_sdk_stream,
     prepare_anthropic_cached_payload,
     split_leading_system,
+    suppress_thinking_for_auxiliary_call,
 )
 from monkeybot.providers.request_budget import trim_message_media_for_byte_budget
 from monkeybot.providers.sampling import resolve_model_sampling
@@ -137,6 +138,7 @@ class VertexClaudeProvider:
             not_given=anthropic.NOT_GIVEN,
         )
 
+        auxiliary = suppress_thinking_for_auxiliary_call(messages, tools)
         stream_kwargs: dict[str, Any] = {
             "model": model,
             "system": system_param,
@@ -147,7 +149,7 @@ class VertexClaudeProvider:
                 model=model,
                 temperature=self._temperature,
                 thinking_budget=None,
-                reasoning_effort=self._reasoning_effort,
+                reasoning_effort=None if auxiliary else self._reasoning_effort,
             ),
         }
         async for event in iter_anthropic_sdk_stream(

@@ -382,6 +382,7 @@ def get_provider_config(
                 aws_region=aws_region,
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
+                reasoning_effort=effort_arg,
             ),
             resolved_model,
         )
@@ -846,9 +847,7 @@ def ollama_options_from_config(config_path: str | None = None) -> tuple[str | No
     num_ctx: int | None
     if raw_num_ctx is None:
         num_ctx = None
-    elif isinstance(raw_num_ctx, bool) or not isinstance(raw_num_ctx, int):
-        raise ConfigError(f"model.num_ctx must be a positive integer, got {raw_num_ctx!r}")
-    elif raw_num_ctx < 1:
+    elif isinstance(raw_num_ctx, bool) or not isinstance(raw_num_ctx, int) or raw_num_ctx < 1:
         raise ConfigError(f"model.num_ctx must be a positive integer, got {raw_num_ctx!r}")
     else:
         num_ctx = raw_num_ctx

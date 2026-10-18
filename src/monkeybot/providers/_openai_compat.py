@@ -47,6 +47,11 @@ from monkeybot.core.types.content_blocks import (
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import safe_parse_tool_args
 from monkeybot.providers.model_capabilities import supports_param
+from monkeybot.providers.rejected_sampling import (
+    is_status_400,
+    omit_known_rejected,
+    remember_rejected_sampling,
+)
 from monkeybot.providers.request_budget import (
     RequestByteBudgetError,
     trim_message_media_for_byte_budget,
@@ -1167,10 +1172,19 @@ def _blames_sampling_param(msg: str, param: str) -> bool:
     )
 
 
-def drop_rejected_sampling(kwargs: dict[str, Any], exc: BaseException) -> list[str]:
-    """Remove sampling kwargs a 400 blames. Returns the names that were removed."""
-    status = getattr(exc, "status_code", None)
-    if status != 400 and "400" not in str(exc):
+def drop_rejected_sampling(
+    kwargs: dict[str, Any],
+    exc: BaseException,
+    *,
+    provider: str = "",
+    model: str = "",
+) -> list[str]:
+    """Remove sampling kwargs a 400 blames. Returns the names that were removed.
+
+    When ``provider`` and ``model`` are set, the names are remembered so later
+    turns omit them instead of paying for another rejected request.
+    """
+    if not is_status_400(exc):
         return []
     msg = str(exc)
     dropped = [
@@ -1178,6 +1192,8 @@ def drop_rejected_sampling(kwargs: dict[str, Any], exc: BaseException) -> list[s
     ]
     for name in dropped:
         del kwargs[name]
+    if dropped:
+        remember_rejected_sampling(provider, model, dropped)
     return dropped
 
 
@@ -1238,6 +1254,7 @@ async def stream_chat_completions_with_tool_fallback(
         kwargs["tools"] = openai_tools(tools)
     if reasoning_effort is not None:
         kwargs["reasoning_effort"] = reasoning_effort
+    omit_known_rejected(provider, model, kwargs)
     if extra_body:
         kwargs["extra_body"] = extra_body
     if max_request_bytes is not None and max_request_bytes > 0:
@@ -1273,7 +1290,7 @@ async def stream_chat_completions_with_tool_fallback(
                 return
             except Exception as exc:
                 if not yielded_any:
-                    dropped = drop_rejected_sampling(kwargs, exc)
+                    dropped = drop_rejected_sampling(kwargs, exc, provider=provider, model=model)
                     if dropped:
                         _log.warning(
                             "openai-compat stream rejected sampling params, retrying without them %s",

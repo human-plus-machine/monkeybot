@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -152,6 +154,7 @@ class TestGetProviderConfigSampling:
                 aws_region=None,
                 temperature=0.2,
                 max_tokens=8192,
+                reasoning_effort="",
             )
 
     def test_anthropic_threads_sampling(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -191,6 +194,35 @@ async def test_bedrock_stream_passes_sampling_to_api() -> None:
     assert kwargs["max_tokens"] == 8192
 
 
+@pytest.mark.asyncio
+async def test_bedrock_claude_sends_reasoning_effort() -> None:
+    provider = BedrockProvider(
+        temperature=0.2,
+        max_tokens=8192,
+        aws_region="us-east-1",
+        reasoning_effort="high",
+    )
+    events = [
+        SimpleNamespace(
+            type="message_start",
+            message=SimpleNamespace(usage=SimpleNamespace(input_tokens=1)),
+        ),
+        SimpleNamespace(type="message_delta", usage=SimpleNamespace(output_tokens=1)),
+    ]
+    client = make_anthropic_stream_mock(events)
+    provider._client = lambda: client  # type: ignore[method-assign]
+
+    async for _ in provider.stream(
+        [Message.text("user", "hi")], [], model="claude-3-5-sonnet-20241022"
+    ):
+        pass
+
+    kwargs = client.messages.stream.call_args.kwargs
+    assert kwargs["thinking"] == {"type": "adaptive"}
+    assert kwargs["output_config"] == {"effort": "high"}
+    assert "temperature" not in kwargs
+
+
 def test_drop_rejected_sampling_quotes_openai_style() -> None:
     kwargs = {"temperature": 0.7, "reasoning_effort": "max", "model": "gpt-5"}
     dropped = drop_rejected_sampling(
@@ -201,3 +233,81 @@ def test_drop_rejected_sampling_quotes_openai_style() -> None:
     assert "temperature" not in kwargs
     assert kwargs["reasoning_effort"] == "max"
     assert drop_rejected_sampling(kwargs, RuntimeError("Error code: 500")) == []
+
+
+def test_drop_rejected_sampling_ignores_bare_mentions_and_token_counts() -> None:
+    kwargs = {"temperature": 0.7, "reasoning_effort": "max"}
+    untouched = drop_rejected_sampling(
+        kwargs,
+        RuntimeError("Error code: 400 - max_tokens must be at most 4000 and temperature was fine"),
+    )
+    assert untouched == []
+    assert kwargs["temperature"] == 0.7
+    assert (
+        drop_rejected_sampling(
+            kwargs,
+            RuntimeError("max_tokens 4000 exceeds the model limit"),
+        )
+        == []
+    )
+
+
+@pytest.mark.asyncio
+async def test_openai_retries_then_omits_rejected_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    from monkeybot.core.llm.provider import TextDelta
+
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    monkeypatch.delenv("MODEL_REASONING_EFFORT", raising=False)
+    calls: list[dict[str, Any]] = []
+
+    async def fake_iter(_client: object, kwargs: dict[str, Any], **_rest: object):
+        calls.append(dict(kwargs))
+        if "reasoning_effort" in kwargs:
+            raise RuntimeError("Error code: 400 - Unsupported parameter: 'reasoning_effort'")
+        yield TextDelta(text="ok")
+
+    async def fake_messages(_messages: list[Message]) -> tuple[None, list[dict[str, str]]]:
+        return None, [{"role": "user", "content": "hi"}]
+
+    fake_openai = ModuleType("openai")
+    fake_openai.AsyncOpenAI = lambda **_kwargs: object()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    monkeypatch.setattr("monkeybot.providers.openai.iter_openai_compat_stream", fake_iter)
+    monkeypatch.setattr("monkeybot.providers.openai.messages_to_openai", fake_messages)
+
+    provider = OpenAIProvider(reasoning_effort="max")
+    first = [
+        event async for event in provider.stream([Message.text("user", "hi")], [], model="gpt-4.1")
+    ]
+    assert [event.text for event in first if isinstance(event, TextDelta)] == ["ok"]
+    assert calls[0]["reasoning_effort"] == "max"
+    assert "reasoning_effort" not in calls[1]
+
+    calls.clear()
+    _ = [
+        event async for event in provider.stream([Message.text("user", "hi")], [], model="gpt-4.1")
+    ]
+    assert len(calls) == 1
+    assert "reasoning_effort" not in calls[0]
+
+
+def test_rejected_sampling_is_omitted_on_the_next_request() -> None:
+    from monkeybot.providers.rejected_sampling import (
+        clear_rejected_sampling,
+        omit_known_rejected,
+    )
+
+    clear_rejected_sampling()
+    kwargs = {"temperature": 0.7, "reasoning_effort": "max"}
+    dropped = drop_rejected_sampling(
+        kwargs,
+        RuntimeError("Error code: 400 - Unsupported parameter: 'reasoning_effort'"),
+        provider="openai",
+        model="gpt-remember-effort",
+    )
+    assert dropped == ["reasoning_effort"]
+    again = {"temperature": 0.7, "reasoning_effort": "max"}
+    omit_known_rejected("openai", "gpt-remember-effort", again)
+    assert "reasoning_effort" not in again
+    assert again["temperature"] == 0.7
+    clear_rejected_sampling()
