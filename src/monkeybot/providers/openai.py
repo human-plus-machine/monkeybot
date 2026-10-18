@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
@@ -12,13 +11,11 @@ from monkeybot.core.llm.provider import (
     ProviderCallHints,
     ProviderEvent,
 )
-from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._openai_compat import (
     count_openai_compat_input_tokens,
-    drop_rejected_sampling,
     enforce_openai_request_byte_budget,
-    iter_openai_compat_stream,
+    iter_openai_compat_stream_with_sampling_retry,
     messages_to_openai,
     openai_messages_token_count,
     openai_reasoning_effort,
@@ -38,8 +35,6 @@ _messages_to_openai = messages_to_openai
 _openai_tools = openai_tools
 _openai_messages_token_count = openai_messages_token_count
 _openai_tools_token_count = openai_tools_token_count
-
-_log = logging.getLogger(__name__)
 
 __all__ = [
     "OpenAIProvider",
@@ -159,26 +154,11 @@ class OpenAIProvider:
             model=model,
         )
 
-        while True:
-            yielded = False
-            try:
-                async for event in iter_openai_compat_stream(
-                    client,
-                    kwargs,
-                    provider="openai",
-                    n_messages=len(messages),
-                    n_tools=len(tools),
-                ):
-                    yielded = True
-                    yield event
-                return
-            except Exception as exc:
-                if yielded:
-                    raise
-                dropped = drop_rejected_sampling(kwargs, exc, provider="openai", model=model)
-                if not dropped:
-                    raise
-                _log.warning(
-                    "openai stream rejected sampling params, retrying without them %s",
-                    kv(provider="openai", model=model, dropped=dropped),
-                )
+        async for event in iter_openai_compat_stream_with_sampling_retry(
+            client,
+            kwargs,
+            provider="openai",
+            n_messages=len(messages),
+            n_tools=len(tools),
+        ):
+            yield event

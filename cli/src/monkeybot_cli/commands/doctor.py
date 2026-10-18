@@ -10,10 +10,12 @@ import tomllib
 from pathlib import Path
 
 import httpx
+from monkeybot.core.config.settings import normalize_model_provider
 from monkeybot.core.layout import AgentLayout, bootstrap_agent_layout
 from monkeybot.core.memory.config import memory_enabled_from_config
 from monkeybot.core.tools.sandbox_executor import SandboxConfig
 from monkeybot.providers._bedrock_converse import uses_anthropic_bedrock
+from monkeybot.providers.sampling import normalize_reasoning_effort
 
 from monkeybot_cli.compat import COMPATIBLE_CORE_RANGE
 from monkeybot_cli.config_resolve import (
@@ -242,11 +244,9 @@ def _add_reasoning_effort_check(
     passing check does not increment the warning summary. A non-Claude Bedrock
     model fails this check because the Converse path does not send the field.
     """
-    text = ""
-    if reasoning_effort not in (None, ""):
-        text = str(reasoning_effort).strip().lower()
+    text = normalize_reasoning_effort(reasoning_effort) or ""
     converse = (
-        provider in {"aws_bedrock", "bedrock"}
+        normalize_model_provider(provider) in {"aws_bedrock", "bedrock"}
         and bool(model_name)
         and not uses_anthropic_bedrock(model_name)
     )

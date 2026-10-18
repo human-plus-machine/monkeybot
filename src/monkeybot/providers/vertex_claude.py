@@ -160,5 +160,6 @@ class VertexClaudeProvider:
             error_message="Vertex Claude stream error: %s",
             n_messages=len(messages),
             n_tools=len(tools),
+            fallback_temperature=self._temperature,
         ):
             yield event

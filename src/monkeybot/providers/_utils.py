@@ -41,7 +41,7 @@ from monkeybot.providers.rejected_sampling import (
     remember_rejected_sampling,
     was_rejected,
 )
-from monkeybot.providers.sampling import REASONING_EFFORT_OFF
+from monkeybot.providers.sampling import REASONING_EFFORT_NONE, normalize_reasoning_effort
 
 _log = logging.getLogger(__name__)
 
@@ -156,8 +156,8 @@ def anthropic_sampling_kwargs(
     the effort fields for this model, the temperature path is used instead so
     the configured temperature is not lost too.
     """
-    effort = (reasoning_effort or "").strip().lower()
-    if effort in REASONING_EFFORT_OFF:
+    effort = normalize_reasoning_effort(reasoning_effort) or ""
+    if effort == REASONING_EFFORT_NONE:
         effort = ""
         thinking_budget = None
     if effort and (
@@ -183,19 +183,6 @@ def anthropic_sampling_kwargs(
         if supports_param(model, "temperature"):
             kwargs["temperature"] = 1
     return kwargs
-
-
-def _rejects_param(msg: str, param: str) -> bool:
-    """True if ``msg`` blames ``param`` as a request field, not just mentions the word.
-
-    Anthropic reports a rejected param as a field path — ``temperature: Extra
-    inputs are not permitted``, ``thinking.budget_tokens: ...``. A bare
-    substring test would also match unrelated 400s that merely name the
-    concept, e.g. the message-shaping error "When 'thinking' is enabled, a
-    final 'assistant' message must start with a thinking block" — stripping
-    there would silently disable extended thinking and hide a real bug.
-    """
-    return blames_field_path(msg, param)
 
 
 _UNEXPECTED_KWARG = re.compile(r"unexpected keyword argument '([^']+)'")
@@ -236,7 +223,7 @@ def _strip_rejected_params(kwargs: dict[str, Any], exc: Exception) -> list[str]:
     if not is_status_400(exc):
         return []
     msg = str(exc).lower()
-    dropped = [p for p in _STRIPPABLE_PARAMS if p in kwargs and _rejects_param(msg, p)]
+    dropped = [p for p in _STRIPPABLE_PARAMS if p in kwargs and blames_field_path(msg, p)]
     for p in dropped:
         del kwargs[p]
     return dropped
@@ -304,6 +291,7 @@ async def iter_anthropic_sdk_stream(
     error_message: str,
     n_messages: int | None = None,
     n_tools: int | None = None,
+    fallback_temperature: float | None = None,
 ) -> AsyncIterator[ProviderEvent]:
     """Stream an Anthropic ``messages.stream`` call, yielding provider events.
 
@@ -317,11 +305,26 @@ async def iter_anthropic_sdk_stream(
     already received deltas.
     """
     kwargs = dict(stream_kwargs)  # never mutate the caller's dict
-    omit_known_rejected(provider, str(kwargs.get("model") or ""), kwargs)
+    model = str(kwargs.get("model") or "")
+    omit_known_rejected(provider, model, kwargs)
+
+    def strip_rejected(kw: dict[str, Any], exc: Exception) -> list[str]:
+        dropped = _strip_rejected_params(kw, exc)
+        # The effort path omits temperature. Once both effort fields are gone,
+        # send the configured ``fallback_temperature`` so this retry keeps it.
+        if (
+            fallback_temperature is not None
+            and {"thinking", "output_config"} & set(dropped)
+            and not {"thinking", "output_config", "temperature"} & kw.keys()
+            and supports_param(model, "temperature")
+        ):
+            kw["temperature"] = fallback_temperature
+        return dropped
+
     async for event in iter_stream_with_param_retry(
         lambda kw: _stream_anthropic_once(client, kw, provider=provider),
         kwargs,
-        strip_rejected=_strip_rejected_params,
+        strip_rejected=strip_rejected,
         max_attempts=len(_STRIPPABLE_PARAMS) + 1,
         provider=provider,
         error_message=error_message,

@@ -53,17 +53,26 @@ def blames_field_path(msg: str, param: str) -> bool:
 def blames_sampling_param(msg: str, param: str) -> bool:
     """True when a 400 names ``param`` as a rejected request field.
 
-    Anthropic-style field paths (``temperature:``) and OpenAI-style quoted
-    names (``Unsupported parameter: 'temperature'``) both count.
+    Anthropic-style field paths (``temperature:``), OpenAI-style quoted names
+    (``Unsupported parameter: 'temperature'``) and unquoted names after a colon
+    (``Unrecognized request argument supplied: reasoning_effort``) all count.
     """
     if blames_field_path(msg, param):
         return True
     lowered = msg.lower()
-    if re.search(rf"['\"]{re.escape(param)}['\"]", lowered) is None:
+    name = re.escape(param)
+    if re.search(rf"['\"]{name}['\"]|:\s*{name}\b", lowered) is None:
         return False
     return any(
         phrase in lowered
-        for phrase in ("unsupported", "not supported", "not permitted", "unknown", "invalid")
+        for phrase in (
+            "unsupported",
+            "not supported",
+            "not permitted",
+            "unknown",
+            "unrecognized",
+            "invalid",
+        )
     )
 
 

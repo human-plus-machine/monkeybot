@@ -17,8 +17,11 @@ if TYPE_CHECKING:
 DEFAULT_MODEL_TEMPERATURE = 0.7
 DEFAULT_MODEL_MAX_TOKENS = 60_000
 
-# Shared "do not think" words. Ollama's wire value for these is ``none``.
-REASONING_EFFORT_OFF = frozenset({"off", "none", "disabled"})
+# Shared "do not think" words. ``false`` covers an unquoted YAML ``off``, which
+# YAML 1.1 loads as a boolean. ``normalize_reasoning_effort`` maps all of them
+# to ``REASONING_EFFORT_NONE`` so providers only check that one value.
+REASONING_EFFORT_OFF = frozenset({"off", "none", "disabled", "false"})
+REASONING_EFFORT_NONE = "none"
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,11 +34,16 @@ class ModelSamplingConfig:
     reasoning_effort: str | None = None
 
 
-def normalize_reasoning_effort(value: str | None) -> str | None:
-    """Lowercase and trim. Empty becomes None so the provider field is omitted."""
+def normalize_reasoning_effort(value: object) -> str | None:
+    """Lowercase and trim. Empty becomes None so the provider field is omitted.
+
+    Off words (and a YAML boolean ``False``) become ``none``.
+    """
     if value is None:
         return None
     text = str(value).strip().lower()
+    if text in REASONING_EFFORT_OFF:
+        return REASONING_EFFORT_NONE
     return text or None
 
 

@@ -101,6 +101,7 @@ model:
   thinking_budget: -1
   # Effort level for models that take one (low, medium, high, xhigh, max, …).
   # Omit to use the provider default. Wins over thinking_budget when set.
+  # off / none / disabled turn thinking off (a bare YAML `off` is read as false; also off).
   # Gemini only sends levels its SDK knows (minimal, low, medium, high); anything
   # else falls back to thinking_budget. A value the API rejects is omitted on
   # later turns. Bedrock sends it for Claude ids only.

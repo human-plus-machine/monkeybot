@@ -62,10 +62,11 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._openai_compat import (
     count_input_tokens_tiktoken,
+    openai_reasoning_effort,
     stream_chat_completions_with_tool_fallback,
 )
 from monkeybot.providers.request_budget import configured_request_byte_budget
-from monkeybot.providers.sampling import REASONING_EFFORT_OFF, resolve_model_sampling
+from monkeybot.providers.sampling import resolve_model_sampling
 
 OllamaMode = Literal["auto", "cloud", "local"]
 
@@ -184,9 +185,7 @@ def reasoning_effort_for_thinking_budget(budget: int) -> str | None:
 def ollama_reasoning_effort(configured: str | None, budget: int) -> str | None:
     """Prefer an explicit effort. ``off`` / ``none`` / ``disabled`` become ``none``."""
     if configured:
-        if configured in REASONING_EFFORT_OFF:
-            return "none"
-        return configured
+        return openai_reasoning_effort(configured)
     return reasoning_effort_for_thinking_budget(budget)
 
 

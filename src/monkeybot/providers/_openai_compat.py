@@ -57,7 +57,7 @@ from monkeybot.providers.request_budget import (
     RequestByteBudgetError,
     trim_message_media_for_byte_budget,
 )
-from monkeybot.providers.sampling import REASONING_EFFORT_OFF
+from monkeybot.providers.sampling import normalize_reasoning_effort
 
 _log = logging.getLogger(__name__)
 
@@ -1158,9 +1158,7 @@ _OPENAI_STRIPPABLE = ("temperature", "reasoning_effort")
 
 def openai_reasoning_effort(value: str | None) -> str | None:
     """Wire value for ``reasoning_effort``. ``off`` / ``none`` / ``disabled`` become ``none``."""
-    if value and value in REASONING_EFFORT_OFF:
-        return "none"
-    return value
+    return normalize_reasoning_effort(value)
 
 
 def drop_rejected_sampling(
@@ -1188,6 +1186,45 @@ def drop_rejected_sampling(
     if dropped:
         remember_rejected_sampling(provider, model, dropped)
     return list(dropped)
+
+
+async def iter_openai_compat_stream_with_sampling_retry(
+    client: Any,
+    kwargs: dict[str, Any],
+    *,
+    provider: str,
+    n_messages: int,
+    n_tools: int,
+) -> AsyncIterator[ProviderEvent]:
+    """``iter_openai_compat_stream`` that retries once per sampling kwarg a 400 blames.
+
+    Only retries before the first event, so callers never see duplicated output.
+    """
+    model = str(kwargs.get("model") or "")
+    while True:
+        yielded = False
+        try:
+            async for event in iter_openai_compat_stream(
+                client,
+                kwargs,
+                provider=provider,
+                n_messages=n_messages,
+                n_tools=n_tools,
+            ):
+                yielded = True
+                yield event
+            return
+        except Exception as exc:
+            if yielded:
+                raise
+            dropped = drop_rejected_sampling(kwargs, exc, provider=provider, model=model)
+            if not dropped:
+                raise
+            _log.warning(
+                "%s stream rejected sampling params, retrying without them %s",
+                provider,
+                kv(provider=provider, model=model, dropped=dropped),
+            )
 
 
 async def stream_chat_completions_with_tool_fallback(
@@ -1271,7 +1308,7 @@ async def stream_chat_completions_with_tool_fallback(
         retry_delay: float | None = None
         async with sem if sem is not None else contextlib.nullcontext():
             try:
-                async for event in iter_openai_compat_stream(
+                async for event in iter_openai_compat_stream_with_sampling_retry(
                     client,
                     kwargs,
                     provider=provider,
@@ -1282,14 +1319,6 @@ async def stream_chat_completions_with_tool_fallback(
                     yield event
                 return
             except Exception as exc:
-                if not yielded_any:
-                    dropped = drop_rejected_sampling(kwargs, exc, provider=provider, model=model)
-                    if dropped:
-                        _log.warning(
-                            "openai-compat stream rejected sampling params, retrying without them %s",
-                            kv(provider=provider, model=model, dropped=dropped),
-                        )
-                        continue
                 if n_tools and is_tool_unsupported_error(exc):
                     _log.warning(
                         "%s model %r does not support tool calling; "
@@ -1397,6 +1426,7 @@ __all__ = [
     "ProviderServerError",
     "count_input_tokens_tiktoken",
     "drop_rejected_sampling",
+    "iter_openai_compat_stream_with_sampling_retry",
     "openai_reasoning_effort",
     "count_openai_compat_input_tokens",
     "is_rate_limit_error",

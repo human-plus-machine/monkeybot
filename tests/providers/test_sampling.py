@@ -272,7 +272,7 @@ async def test_openai_retries_then_omits_rejected_effort(monkeypatch: pytest.Mon
     fake_openai = ModuleType("openai")
     fake_openai.AsyncOpenAI = lambda **_kwargs: object()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
-    monkeypatch.setattr("monkeybot.providers.openai.iter_openai_compat_stream", fake_iter)
+    monkeypatch.setattr("monkeybot.providers._openai_compat.iter_openai_compat_stream", fake_iter)
     monkeypatch.setattr("monkeybot.providers.openai.messages_to_openai", fake_messages)
 
     provider = OpenAIProvider(reasoning_effort="max")
@@ -363,3 +363,21 @@ def test_anthropic_effort_falls_back_to_temperature_after_rejection() -> None:
     )
     assert "output_config" not in kwargs
     assert kwargs.get("temperature") == 0.2
+
+
+def test_normalize_reasoning_effort_maps_off_words_and_yaml_false() -> None:
+    from monkeybot.providers.sampling import normalize_reasoning_effort
+
+    assert normalize_reasoning_effort(False) == "none"
+    assert normalize_reasoning_effort(" OFF ") == "none"
+    assert normalize_reasoning_effort("disabled") == "none"
+    assert normalize_reasoning_effort("High") == "high"
+    assert normalize_reasoning_effort("") is None
+
+
+def test_blames_sampling_param_unquoted_unrecognized_argument() -> None:
+    from monkeybot.providers.rejected_sampling import blames_sampling_param
+
+    msg = "Error code: 400 - Unrecognized request argument supplied: reasoning_effort"
+    assert blames_sampling_param(msg, "reasoning_effort")
+    assert not blames_sampling_param(msg, "temperature")

@@ -31,16 +31,18 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.interfaces import LLMError
 from monkeybot.core.types.types_tools import ToolDef
-from monkeybot.providers._utils import (
-    suppress_thinking_for_auxiliary_call as _suppress_thinking_for_auxiliary_call,
-)
+from monkeybot.providers._utils import suppress_thinking_for_auxiliary_call
 from monkeybot.providers.rejected_sampling import (
     is_status_400,
     remember_rejected_sampling,
     was_rejected,
 )
 from monkeybot.providers.request_budget import trim_message_media_for_byte_budget
-from monkeybot.providers.sampling import REASONING_EFFORT_OFF, resolve_model_sampling
+from monkeybot.providers.sampling import (
+    REASONING_EFFORT_NONE,
+    normalize_reasoning_effort,
+    resolve_model_sampling,
+)
 
 THOUGHT_SIGNATURE_KEY = "thoughtSignature"
 SYNTHETIC_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
@@ -143,7 +145,7 @@ def _resolve_thinking_budget(
         from monkeybot.core.config.snapshot import current_env
 
         thinking_budget = int(current_env("MODEL_THINKING_BUDGET", "-1"))
-    if _suppress_thinking_for_auxiliary_call(messages, tools):
+    if suppress_thinking_for_auxiliary_call(messages, tools):
         return _THINKING_DISABLED
     return thinking_budget
 
@@ -196,7 +198,7 @@ def _effort_for_gemini_call(
     tools: Sequence[ToolDef],
 ) -> str | None:
     """Effort to send, or None for auxiliary calls and levels this model already rejected."""
-    if _suppress_thinking_for_auxiliary_call(messages, tools):
+    if suppress_thinking_for_auxiliary_call(messages, tools):
         return None
     if effort and was_rejected("gemini", model, "thinking_level", effort):
         return None
@@ -217,12 +219,14 @@ def _apply_thinking_config(
     level on an SDK without ``ThinkingLevel``, falls back to the token budget so an
     unsupported string cannot fail the request.
 
-    Returns True only when ``thinking_level`` was sent.
+    Returns True when ``effort`` set the thinking config (a level or the off
+    budget), so a 400 against it can be retried without it.
     """
+    effort = normalize_reasoning_effort(effort)
     if effort:
-        if effort in REASONING_EFFORT_OFF:
+        if effort == REASONING_EFFORT_NONE:
             cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
-            return False
+            return True
         level = _known_thinking_level(types, effort)
         if level is None:
             _warn_unknown_gemini_level(effort)
@@ -797,7 +801,7 @@ class GeminiProvider:
                 messages,
                 tools,
             )
-            sent_level = _apply_thinking_config(
+            sent_effort = _apply_thinking_config(
                 types,
                 cfg_kwargs,
                 effort=effort,
@@ -893,7 +897,7 @@ class GeminiProvider:
             except LLMError:
                 raise
             except Exception as exc:
-                if not yielded and sent_level and _gemini_blames_thinking(exc):
+                if not yielded and sent_effort and _gemini_blames_thinking(exc):
                     remember_rejected_sampling("gemini", model_param, {"thinking_level": effort})
                     omit_thinking_level = True
                     _log.warning(
