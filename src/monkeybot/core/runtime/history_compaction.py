@@ -15,7 +15,7 @@ from monkeybot.core.context.epoch import ContextEpochTracker
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.messages.transform_context import provider_visible_blocks
+from monkeybot.core.messages.transform_context import is_provider_visible, provider_visible_blocks
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.thread_summary import CONTEXT_SUMMARY_PREFIX
 from monkeybot.core.runtime.context_budget import (
@@ -55,6 +55,7 @@ def _intent_facts_from_ctx(ctx: TurnContext) -> str | None:
             exc_info=True,
         )
         return None
+
 
 # Fixed harness policy — not env/YAML tunable.
 # Pure bug guard, not a normal-flow limit: row count is otherwise unbounded and
@@ -220,7 +221,7 @@ def _split_accountable(
     visible rows), leaving ≥1 middle row whenever the transcript is long enough.
     """
     n = len(messages)
-    visible = [bool(provider_visible_blocks(m)) for m in messages]
+    visible = [is_provider_visible(m) for m in messages]
     min_for_middle = SUMMARY_KEEP_HEAD_COUNT + SUMMARY_KEEP_TAIL_MIN + 1
     if sum(visible) < min_for_middle:
         return list(messages), [], []
@@ -358,7 +359,7 @@ def _summarization_viable(
     window_tokens: int,
 ) -> bool:
     _, middle, _ = split_messages_for_compaction(messages, window_tokens=window_tokens)
-    return any(provider_visible_blocks(m) for m in middle)
+    return any(is_provider_visible(m) for m in middle)
 
 
 def _summarization_model_id(ctx: TurnContext) -> str:
@@ -488,10 +489,10 @@ async def _summarize_history(
     synthetic tool repairs).
     """
     messages = await history.load(thread_id)
-    head, middle, tail = split_messages_for_compaction(
-        messages, window_tokens=window_tokens
-    )
-    lines = [line for m in middle if (line := _summary_line_for_message(m, window_tokens=window_tokens))]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=window_tokens)
+    lines = [
+        line for m in middle if (line := _summary_line_for_message(m, window_tokens=window_tokens))
+    ]
     if not lines:
         return 0
     logger.debug(
@@ -520,9 +521,7 @@ async def _summarize_history(
         ),
     ]
     summary_text = ""
-    async with aclosing(
-        cast(Any, provider.stream(summarize_messages, [], model=model))
-    ) as stream:
+    async with aclosing(cast(Any, provider.stream(summarize_messages, [], model=model))) as stream:
         async for ev in stream:
             if isinstance(ev, TextDelta):
                 summary_text += ev.text
@@ -537,9 +536,7 @@ async def _summarize_history(
         role="assistant",
         content=[Text(text=summary_body)],
     )
-    merged = rebuild_compacted_history(
-        messages, head=head, summary=summary_row, tail=tail
-    )
+    merged = rebuild_compacted_history(messages, head=head, summary=summary_row, tail=tail)
     await history.reset(thread_id, merged)
     logger.debug(
         "history compaction reset %s",

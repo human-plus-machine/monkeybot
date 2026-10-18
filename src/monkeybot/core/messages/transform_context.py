@@ -54,52 +54,28 @@ def provider_visible_blocks(msg: Message) -> list[ContentBlock]:
     ]
 
 
-def _strip_provider_excluded(messages: Sequence[Message]) -> list[Message]:
-    out: list[Message] = []
-    for msg in messages:
-        kept = [b for b in msg.content if not isinstance(b, _PROVIDER_EXCLUDED_BLOCKS)]
-        if not kept and msg.content:
-            logger.debug(
-                "transform_context drop_ui_only_turn %s",
-                kv(action="drop_ui_only_turn", role=msg.role, blocks=len(msg.content)),
-            )
-            continue
-        if len(kept) == len(msg.content):
-            out.append(msg)
-        else:
-            out.append(replace(msg, content=kept))
-    return out
+def is_provider_visible(msg: Message) -> bool:
+    """True when ``msg`` survives :func:`transform_context` (rows with no content pass through)."""
+    return bool(provider_visible_blocks(msg)) or not msg.content
 
 
-def _strip_completed_turn_thinking(messages: Sequence[Message]) -> list[Message]:
-    """Drop Thinking from final-text assistant turns before provider conversion.
+def _strip_non_provider_blocks(messages: Sequence[Message]) -> list[Message]:
+    """Drop UI-only blocks and completed-reply Thinking via :func:`provider_visible_blocks`.
 
-    Chat-history persistence may store Thinking on completed replies for UI
-    reload, but those blocks must not enter later provider payloads (token
-    bloat / stale signatures). Assistant rows that include ``ToolRequest`` keep
-    Thinking so mid-turn Anthropic/Gemini signature replay still works.
+    Chat-history persistence may store Thinking on completed replies for UI reload,
+    but it must not enter later provider payloads (token bloat / stale signatures).
+    Rows left empty by stripping are dropped.
     """
     out: list[Message] = []
     for msg in messages:
-        if msg.role != "assistant":
-            out.append(msg)
-            continue
-        if any(isinstance(b, ToolRequest) for b in msg.content):
-            out.append(msg)
-            continue
-        kept = [
-            b for b in msg.content if not isinstance(b, (Thinking, RedactedThinking))
-        ]
+        kept = provider_visible_blocks(msg)
         if not kept and msg.content:
             logger.debug(
-                "transform_context drop_thinking_only_turn %s",
-                kv(action="drop_thinking_only_turn", role=msg.role, blocks=len(msg.content)),
+                "transform_context drop_non_provider_turn %s",
+                kv(action="drop_non_provider_turn", role=msg.role, blocks=len(msg.content)),
             )
             continue
-        if len(kept) == len(msg.content):
-            out.append(msg)
-        else:
-            out.append(replace(msg, content=kept))
+        out.append(msg if len(kept) == len(msg.content) else replace(msg, content=kept))
     return out
 
 
@@ -128,11 +104,8 @@ def transform_context(messages: Sequence[Message]) -> list[Message]:
 
     Steps:
     1. Repair broken tool-call / tool-result pairing (in-memory only).
-    2. Strip UI-only content blocks that must never reach a provider.
-    3. Strip Thinking from completed (non-tool-request) assistant turns.
-    4. Coalesce adjacent same-role messages left by dropped UI-only turns.
+    2. Strip UI-only blocks and completed-reply Thinking (see ``provider_visible_blocks``).
+    3. Coalesce adjacent same-role messages left by dropped UI-only turns.
     """
     repaired = repair_tool_turn_integrity(list(messages))
-    stripped = _strip_provider_excluded(repaired)
-    without_prior_thinking = _strip_completed_turn_thinking(stripped)
-    return _coalesce_adjacent_same_role(without_prior_thinking)
+    return _coalesce_adjacent_same_role(_strip_non_provider_blocks(repaired))
