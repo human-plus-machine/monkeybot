@@ -24,6 +24,21 @@ IMAGE_MIME_TYPES: frozenset[str] = frozenset(
 # Decoded to Text at resolve. HTML stays a File so the Files preview can render it.
 INLINE_TEXT_MIME_TYPES: frozenset[str] = frozenset({"text/plain", "text/markdown"})
 
+_MIME_ALIASES: dict[str, str] = {"text/x-markdown": "text/markdown"}
+# Browsers often send an empty type for .md (Windows especially).
+_GENERIC_MIME_TYPES: frozenset[str] = frozenset({"", "application/octet-stream"})
+_MIME_BY_SUFFIX: dict[str, str] = {".md": "text/markdown", ".markdown": "text/markdown"}
+
+
+def normalize_upload_mime(content_type: str | None, filename: str) -> str:
+    """Canonical mime for an upload: drop params, map aliases, infer generic types from suffix."""
+    mime = (content_type or "").split(";", 1)[0].strip().lower()
+    mime = _MIME_ALIASES.get(mime, mime)
+    if mime in _GENERIC_MIME_TYPES:
+        suffix = os.path.splitext(filename)[1].lower()
+        mime = _MIME_BY_SUFFIX.get(suffix, "application/octet-stream")
+    return mime
+
 
 def attachments_enabled_from_env() -> bool:
     raw = os.getenv("ATTACHMENTS_ENABLED", "true").strip().lower()

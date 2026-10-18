@@ -344,8 +344,27 @@ async def test_extract_pdf_text_truncates_long_text() -> None:
     assert "[... PDF text truncated ...]" not in result
 
 
+async def test_extract_pdf_text_sizes_from_window_without_workspace() -> None:
+    """A known small window caps the inline extract even when nothing can spill."""
+    from monkeybot.core.llm.provider import ProviderCallHints
+    from monkeybot.core.tools.spill_inventory import spill_budgets_from_window
+    from monkeybot.core.types.content_blocks import File
+    from monkeybot.providers._openai_compat import _extract_pdf_text
+
+    long_text = "word " * 30_000
+    block = File(mime_type="application/pdf", data=_pdf_b64(long_text))
+    hints = ProviderCallHints(session_id="sess", context_window_tokens=8_000)
+    result = await _extract_pdf_text(block, hints)
+    assert result is not None
+    inline_budget = spill_budgets_from_window(8_000).inline_budget
+    assert len(result) <= inline_budget + 200
+    assert "reloading the PDF will not yield more" in result
+
+
 async def test_extract_pdf_text_spills_and_reuses_path(tmp_path) -> None:
-    """A PDF over the inline budget spills once; a second extract returns that path."""
+    """A PDF over the inline budget spills once; a second extract reuses that file."""
+    import os
+
     from monkeybot.core.llm.provider import ProviderCallHints
     from monkeybot.core.types.content_blocks import File
     from monkeybot.providers._openai_compat import _extract_pdf_text
@@ -358,7 +377,10 @@ async def test_extract_pdf_text_spills_and_reuses_path(tmp_path) -> None:
         context_window_tokens=8_000,
     )
     first = await _extract_pdf_text(block, hints)
+    (spill_file,) = tmp_path.glob(".monkeybot/spill/**/*.txt")
+    os.utime(spill_file, ns=(1_000_000_000, 1_000_000_000))
     second = await _extract_pdf_text(block, hints)
+    assert spill_file.stat().st_mtime_ns == 1_000_000_000  # not rewritten
     assert first is not None
     assert first == second
     assert "Full output at:" in first

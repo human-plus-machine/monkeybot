@@ -146,7 +146,7 @@ def _user_file_placeholder(block: File) -> str:
     )
 
 
-# No-workspace fallback uses the 1M-window ceilings (128k inline, 256k read).
+# Unknown window + no workspace uses the 1M-window ceilings (128k inline, 256k read).
 _PDF_FALLBACK_WINDOW_TOKENS = 1_000_000
 _PDF_DEFAULT_WINDOW_TOKENS = 200_000
 _PDF_TEXT_CACHE_MAX = 32
@@ -165,10 +165,13 @@ def _pdf_content_digest(data_b64: str) -> str:
 def _pdf_budgets(hints: ProviderCallHints | None) -> SpillBudgets:
     from monkeybot.core.tools.spill_inventory import spill_budgets_from_window  # noqa: PLC0415
 
+    # A known window always sizes the extract; a workspace only decides whether
+    # the overflow can spill to disk.
+    if hints is not None and hints.context_window_tokens:
+        return spill_budgets_from_window(max(1, hints.context_window_tokens))
     if hints is None or hints.workspace_root is None:
         return spill_budgets_from_window(_PDF_FALLBACK_WINDOW_TOKENS)
-    window = hints.context_window_tokens or _PDF_DEFAULT_WINDOW_TOKENS
-    return spill_budgets_from_window(max(1, window))
+    return spill_budgets_from_window(_PDF_DEFAULT_WINDOW_TOKENS)
 
 
 def _remember_pdf_extract(
@@ -257,6 +260,7 @@ def _format_pdf_extract(
         f"pdf-{digest[:16]}",
         tool_name="pdf_extract",
         inline_budget=budgets.inline_budget,
+        reuse_existing=True,
     )
     if hit_cap:
         return spilled + _PDF_RELOAD_NOTE
