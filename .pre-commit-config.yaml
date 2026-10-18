@@ -1,6 +1,7 @@
 # Pre-commit hooks for monkeybot
-# Install: uv run pre-commit install
-# Run manually: uv run pre-commit run --all-files
+# Install: uv run pre-commit install && uv run pre-commit install --hook-type pre-push
+# Run the commit hooks manually: uv run pre-commit run --all-files
+# Run the full pull-request suite: bash scripts/ci-local.sh
 
 repos:
   - repo: local
@@ -18,3 +19,11 @@ repos:
         language: system
         files: ^(src/monkeybot|tests)/.*\.py$
         pass_filenames: true
+
+      - id: local-ci
+        name: local CI (mypy, pytest, cli, browser MCP, eval self-checks)
+        entry: bash scripts/ci-local.sh --if-needed
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
