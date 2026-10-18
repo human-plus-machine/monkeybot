@@ -455,6 +455,41 @@ class TestJailedArgv:
         assert "/home/x/ws/palace" in spec_json
 
 
+def test_seatbelt_profile_allows_headless_browser_and_child_signals():
+    profile = fs_isolation._seatbelt_jail_profile(
+        JailRoots(deny=(Path("/Users/x"),), read_write=(Path("/Users/x/ws"),))
+    )
+    for line in (
+        "(allow signal (target children))",
+        "(allow iokit-open)",
+        "(allow mach-register)",
+        "(allow ipc-posix-sem)",
+    ):
+        assert line in profile
+
+
+def test_toolchain_cache_follows_monkeybot_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("MONKEYBOT_HOME", str(tmp_path / "app"))
+    env = fs_isolation.toolchain_cache_env(tmp_path / "workspace")
+    root = (tmp_path / "app" / "tool-cache").resolve()
+    assert env["XDG_CACHE_HOME"] == str(root / "xdg")
+    assert env["UV_CACHE_DIR"] == str(root / "uv")
+    assert env["UV_TOOL_DIR"] == str(root / "uv-tools")
+    assert env["PLAYWRIGHT_BROWSERS_PATH"] == str(root / "playwright")
+    assert env["MPLCONFIGDIR"] == str(root / "matplotlib")
+    assert (root / "playwright").is_dir()
+    assert (root / "uv-python").is_dir()
+
+
+def test_toolchain_cache_defaults_inside_the_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.delenv("MONKEYBOT_HOME", raising=False)
+    workspace = tmp_path / "workspace"
+    env = fs_isolation.toolchain_cache_env(workspace)
+    assert env["UV_CACHE_DIR"].startswith(str((workspace / ".monkeybot" / "tool-cache").resolve()))
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="seatbelt jail is macOS-only")
 class TestMacJailBootstrap:
     """Real `sandbox-exec` subprocess tests — see fs_isolation.py's module
@@ -577,6 +612,44 @@ class TestMacJailBootstrap:
 
         assert proc.returncode == 0
         assert "jail-ok" in proc.stdout
+
+    def test_parent_can_signal_its_child(self, tmp_path: Path):
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+        marker = workspace / "signal.txt"
+        code = (
+            "import os, signal, time\n"
+            "pid = os.fork()\n"
+            "if pid == 0:\n"
+            "    time.sleep(2)\n"
+            "    os._exit(0)\n"
+            f"path = {str(marker)!r}\n"
+            "try:\n"
+            "    os.kill(pid, signal.SIGTERM)\n"
+            "    open(path, 'w').write('ok')\n"
+            "except OSError as exc:\n"
+            "    open(path, 'w').write('fail ' + str(exc.errno))\n"
+        )
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+        proc = self._run(roots, [sys.executable, "-c", code], cwd=workspace)
+        assert proc.returncode == 0, proc.stderr
+        assert marker.read_text(encoding="utf-8") == "ok"
+
+    def test_named_semaphore_is_allowed(self, tmp_path: Path):
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+        code = (
+            "import os\n"
+            "from _multiprocessing import SemLock\n"
+            "SemLock(0, 0, 1, name='/mb-jail-%s' % os.getpid(), unlink=True)\n"
+            "print('sem-ok')\n"
+        )
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+        proc = self._run(roots, [sys.executable, "-c", code], cwd=workspace)
+        assert proc.returncode == 0, proc.stderr
+        assert "sem-ok" in proc.stdout
 
     @pytest.mark.parametrize("inherited_git_env", [None, "GIT_OBJECT_DIRECTORY", "GIT_DIR"])
     def test_git_commit_works_inside_jail(self, tmp_path, monkeypatch, inherited_git_env):

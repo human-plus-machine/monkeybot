@@ -581,6 +581,13 @@ def _seatbelt_jail_profile(roots: JailRoots) -> str:
         "(allow process-fork)",
         "(allow process-exec)",
         "(allow signal (target self))",
+        # Playwright has to stop the browser it spawned. `target children`
+        # does not extend to unrelated processes (pid 1 stays denied).
+        "(allow signal (target children))",
+        # Headless Chromium (cadgen snapshot) SIGSEGVs under deny-default
+        # without these two. `dynamic-code` is not a seatbelt operation here.
+        "(allow iokit-open)",
+        "(allow mach-register)",
         "(allow mach-lookup)",
         "(allow sysctl-read)",
         "(allow file-read-metadata)",
@@ -589,6 +596,9 @@ def _seatbelt_jail_profile(roots: JailRoots) -> str:
         # unpacking. process-exec alone is not enough; without this the
         # binary dies with "Failed to initialize sync semaphore".
         "(allow ipc-sysv-sem)",
+        # joblib / numpy probe a named posix semaphore at import and otherwise
+        # fall back to serial mode with EPERM.
+        "(allow ipc-posix-sem)",
     ]
     if deny:
         lines.append(f'(allow file-read* (require-all (subpath "/") {deny_excludes}))')
@@ -818,6 +828,44 @@ def _namespace_jail_argv(executable: str, args: Sequence[str], roots: JailRoots)
         executable,
         *args,
     ]
+
+
+_TOOLCHAIN_CACHE_DIRS: tuple[tuple[str, str], ...] = (
+    ("XDG_CACHE_HOME", "xdg"),
+    ("UV_CACHE_DIR", "uv"),
+    ("UV_PYTHON_INSTALL_DIR", "uv-python"),
+    ("UV_TOOL_DIR", "uv-tools"),
+    ("UV_TOOL_BIN_DIR", "uv-bin"),
+    ("PLAYWRIGHT_BROWSERS_PATH", "playwright"),
+    ("MPLCONFIGDIR", "matplotlib"),
+)
+
+
+def toolchain_cache_directory(workspace: Path) -> Path:
+    """One writable cache root for toolchains the home-directory deny would block.
+
+    Lives under ``MONKEYBOT_HOME`` when the app set one, so every agent shares
+    the uv install and the Playwright browser. Otherwise it sits in the
+    workspace, which is already a read-write root.
+    """
+    raw = os.environ.get("MONKEYBOT_HOME", "").strip()
+    base = Path(raw).expanduser() if raw else Path(workspace) / ".monkeybot"
+    return (base / "tool-cache").resolve()
+
+
+def toolchain_cache_env(workspace: Path) -> dict[str, str]:
+    """Point uv, Playwright, matplotlib, and XDG caches at :func:`toolchain_cache_directory`.
+
+    Host values are replaced. A command can still override them in its own
+    shell, but the defaults no longer aim at ``~/.cache`` or ``~/Library/Caches``.
+    """
+    root = toolchain_cache_directory(workspace)
+    env: dict[str, str] = {}
+    for key, name in _TOOLCHAIN_CACHE_DIRS:
+        path = root / name
+        path.mkdir(parents=True, exist_ok=True)
+        env[key] = str(path)
+    return env
 
 
 def jailed_argv(

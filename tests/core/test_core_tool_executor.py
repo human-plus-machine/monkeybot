@@ -1607,6 +1607,65 @@ async def test_direct_mempalace_route_is_owned_by_each_executor(
     assert seen[0]["MEMPALACE_PALACE_PATH"] != str(palace_b.palace_path)
 
 
+@pytest.mark.asyncio
+async def test_run_command_points_toolchain_caches_at_the_granted_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.tools.terminal import ExecutionResult, TerminalExecutor
+
+    monkeypatch.setenv("MONKEYBOT_HOME", str(tmp_path / "app"))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    skills = workspace / "skills"
+    skills.mkdir()
+    seen: dict[str, object] = {}
+
+    async def fake_execute(
+        self,
+        command,
+        args,
+        timeout=60,
+        *,
+        cwd=None,
+        env_overrides=None,
+        extra_allowed_commands=None,
+        jail_roots=None,
+    ):
+        del self, command, args, timeout, cwd, extra_allowed_commands
+        seen["env"] = dict(env_overrides or {})
+        seen["roots"] = jail_roots
+        return ExecutionResult(stdout="ok", stderr="", exit_code=0)
+
+    monkeypatch.setattr(TerminalExecutor, "execute", fake_execute)
+    executor = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await executor.execute(
+            call=ToolCall(
+                call_id="cache",
+                name="run_command",
+                args={"argv": ["echo", "ok"]},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    cache = (tmp_path / "app" / "tool-cache").resolve()
+    roots = seen["roots"]
+    assert roots is not None
+    assert cache in roots.read_write
+    env = seen["env"]
+    assert isinstance(env, dict)
+    assert env["UV_CACHE_DIR"] == str(cache / "uv")
+    assert env["PLAYWRIGHT_BROWSERS_PATH"] == str(cache / "playwright")
+    assert env["MPLCONFIGDIR"] == str(cache / "matplotlib")
+    assert env["XDG_CACHE_HOME"] == str(cache / "xdg")
+
+
 @pytest.mark.skipif(
     not isolation_support().available,
     reason=f"host cannot isolate filesystems: {isolation_support().detail}",

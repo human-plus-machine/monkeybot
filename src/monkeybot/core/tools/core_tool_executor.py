@@ -107,6 +107,8 @@ from monkeybot.core.tools.fs_isolation import (
     local_whisper_model_dirs,
     memory_hidden_paths,
     readable_bin_dirs_under_deny,
+    toolchain_cache_directory,
+    toolchain_cache_env,
 )
 from monkeybot.core.tools.grant_store import PATH_GRANT_TOOLS, GrantStoreCache
 from monkeybot.core.tools.inspector import parse_run_command
@@ -1916,17 +1918,22 @@ class CoreToolExecutor(ToolExecutorPort):
         actually matters here (see `computer/safety.py::_allowed_roots`'s
         identical convention). Everything a command legitimately needs is
         named explicitly on top of that: the workspace and artifacts root
-        (read+write), the memory palace when memory is on (read+write, it's
-        a sibling of the workspace, not under it), OS temp dirs (read+write,
-        many toolchains stage there), skills and the interpreter's own
-        install prefix (read-only — the interpreter can live under $HOME for
-        a bundled desktop app), PATH ``bin`` directories that sit inside the
-        denied home (read-only — onefile tools such as bundled ``yt-dlp``
-        have to read their own executable), an installed on-device Whisper
-        model directory (read-only), and any folder the user has
-        granted read access to, durably or for this turn (read-only).
+        (read+write), the shared toolchain cache (read+write — uv, Playwright,
+        and matplotlib must not write ``~/.cache``), the memory palace when
+        memory is on (read+write, it's a sibling of the workspace, not under
+        it), OS temp dirs (read+write, many toolchains stage there), skills
+        and the interpreter's own install prefix (read-only — the interpreter
+        can live under $HOME for a bundled desktop app), PATH ``bin``
+        directories that sit inside the denied home (read-only — onefile tools
+        such as bundled ``yt-dlp`` have to read their own executable), an
+        installed on-device Whisper model directory (read-only), and any
+        folder the user has granted read access to, durably or for this turn
+        (read-only).
         """
-        read_write: list[Path] = [self._workspace.repo_root]
+        read_write: list[Path] = [
+            self._workspace.repo_root,
+            toolchain_cache_directory(self._workspace.repo_root),
+        ]
         if self._artifacts_path is not None:
             read_write.append(self._artifacts_path)
         if self._memory is not None:
@@ -2019,15 +2026,13 @@ class CoreToolExecutor(ToolExecutorPort):
                 # jail_roots is a TerminalExecutor-only concept — SandboxExecutor
                 # runs in a container that already isolates the host filesystem.
                 execute_kwargs["jail_roots"] = self._jail_roots(ctx)
-            if (
-                cmd == "mempalace"
-                and self._memory is not None
-                and isinstance(executor, TerminalExecutor)
-            ):
-                execute_kwargs["env_overrides"] = {
-                    "MEMPALACE_PALACE_PATH": str(self._memory.palace_path),
-                    "MEMPALACE_BACKEND": self._memory.backend,
-                }
+                # Same boundary: default caches live under the denied home.
+                # The container path keeps the host environment instead.
+                env_overrides = toolchain_cache_env(self._workspace.repo_root)
+                if cmd == "mempalace" and self._memory is not None:
+                    env_overrides["MEMPALACE_PALACE_PATH"] = str(self._memory.palace_path)
+                    env_overrides["MEMPALACE_BACKEND"] = self._memory.backend
+                execute_kwargs["env_overrides"] = env_overrides
             if background:
                 return await self._start_background_command(
                     executor,
