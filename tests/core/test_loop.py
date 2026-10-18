@@ -18,13 +18,15 @@ from monkeybot.core.attachments.catalog import AttachmentRecord, SessionAttachme
 from monkeybot.core.context import SkillRef, TurnContext
 from monkeybot.core.llm.provider import (
     Done,
-    GroundingEvent as ProviderGroundingEvent,
     Message,
     ProviderEvent,
     TextDelta,
     ThinkingDelta,
     ToolCall,
     UsageEvent,
+)
+from monkeybot.core.llm.provider import (
+    GroundingEvent as ProviderGroundingEvent,
 )
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.runtime.events import (
@@ -53,7 +55,16 @@ from monkeybot.core.runtime.tool_dispatch import _media_events, _resolved_path_f
 from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
 from monkeybot.core.tools.inspector import Decision
 from monkeybot.core.tools.types import ToolExecutionResult
-from monkeybot.core.types.content_blocks import File, Image, Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import (
+    AttachmentDescriptor,
+    File,
+    Image,
+    SystemNotification,
+    Text,
+    ToolRequest,
+    ToolResponse,
+)
+from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
 
 
@@ -1775,6 +1786,97 @@ async def test_run_emits_context_summarize_events_when_over_cap(
     assert post_usage.estimated_tokens > 0
 
 
+def _verdict_row() -> Message:
+    return Message(
+        role="user",
+        content=[SystemNotification(notification_type="verifierVerdict", msg="verdict-kept")],
+    )
+
+
+def _blocks(rows: list[Message], kind: type) -> list:
+    return [b for m in rows for b in m.content if isinstance(b, kind)]
+
+
+async def _run_over_cap(tmp_path: Path, preload: list[Message]) -> FakeHistory:
+    hist = FakeHistory(preload)
+    prov = FakeProvider(
+        [[TextDelta(text=" compressed summary "), Done()], [TextDelta(text="final"), Done()]]
+    )
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    async for _ in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        pass
+    assert len(hist.reset_calls) == 1
+    return hist
+
+
+def _padded(n: int) -> list[Message]:
+    return [
+        Message(role="user" if i % 2 == 0 else "assistant", content=[Text(text="z" * 600)])
+        for i in range(n)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_token_pressure_compaction_keeps_verdict_row(tmp_path: Path) -> None:
+    preload = _padded(8)
+    preload.insert(3, _verdict_row())
+    hist = await _run_over_cap(tmp_path, preload)
+    persisted = hist.reset_calls[0][1]
+    assert _blocks(persisted, SystemNotification)
+    assert _blocks(hist.rows, SystemNotification)
+
+
+@pytest.mark.asyncio
+async def test_token_pressure_compaction_keeps_tail_thinking(tmp_path: Path) -> None:
+    preload = _padded(8)
+    preload[-1] = Message(
+        role="assistant",
+        content=[ThinkingBlock(thinking="deep", signature="s"), Text(text="z" * 600)],
+    )
+    hist = await _run_over_cap(tmp_path, preload)
+    assert _blocks(hist.reset_calls[0][1], ThinkingBlock)
+
+
+@pytest.mark.asyncio
+async def test_token_pressure_compaction_keeps_tail_attachment_descriptor(
+    tmp_path: Path,
+) -> None:
+    preload = _padded(8)
+    preload[-1] = Message(
+        role="user",
+        content=[
+            Text(text="z" * 600),
+            AttachmentDescriptor(attachment_id="a1", mime_type="image/png", description="d"),
+        ],
+    )
+    hist = await _run_over_cap(tmp_path, preload)
+    assert _blocks(hist.reset_calls[0][1], AttachmentDescriptor)
+
+
+@pytest.mark.asyncio
+async def test_token_pressure_compaction_does_not_persist_synthetic_repairs(
+    tmp_path: Path,
+) -> None:
+    preload = _padded(8)
+    preload.append(
+        Message(role="assistant", content=[ToolRequest(id="orphan", name="echo", args={})])
+    )
+    hist = await _run_over_cap(tmp_path, preload)
+    marker = "was interrupted or its result is missing"
+    for m in hist.reset_calls[0][1]:
+        for b in m.content:
+            if isinstance(b, ToolResponse):
+                assert marker not in " ".join(x.text for x in b.result if isinstance(x, Text))
+
+
 @pytest.mark.asyncio
 async def test_run_emits_context_usage_after_tools_without_compaction() -> None:
     """Tool dispatch still yields ContextUsage when needs_compaction is False."""
@@ -2047,6 +2149,7 @@ async def test_run_persists_load_max_tail_when_compact_fails(
         )
         for i in range(20)
     ]
+    preload.insert(1, _verdict_row())
     hist = FakeHistory(preload)
     prov = FakeProvider([[TextDelta(text="final"), Done()]])
     # Huge window: token compact won't fire; load-max still truncates oversize history.
@@ -2065,6 +2168,7 @@ async def test_run_persists_load_max_tail_when_compact_fails(
     assert hist.reset_calls, "expected durable truncate via history.reset"
     _thread, persisted = hist.reset_calls[-1]
     assert len(persisted) == 12
+    assert _blocks(persisted, SystemNotification), "pinned verdict must survive truncation"
     flat_persisted = [b.text for m in persisted for b in m.content if isinstance(b, Text)]
     assert "row-0" not in flat_persisted
     assert "row-19" in flat_persisted

@@ -21,6 +21,7 @@ from monkeybot.core.types.content_blocks import (
     SystemNotification,
     Text,
     Thinking,
+    ToolRequest,
     ToolResponse,
 )
 
@@ -122,12 +123,40 @@ def test_estimate_counts_image_thinking_and_file_payloads() -> None:
             Image(mime_type="image/png", data=image_data),
             Thinking(thinking=thinking_text, signature="sig"),
             File(mime_type="application/pdf", data=file_data),
+            # Thinking is only provider-visible on tool-request assistant rows.
+            ToolRequest(id="c1", name="echo", args={}),
         ],
     )
     tokens = _estimate_message_tokens(message)
     # Type-name fallback would be ~5–8 tokens total; real payload is >> that.
     min_chars = len(image_data) + len(thinking_text) + len(file_data)
     assert tokens >= min_chars // 4
+
+
+def test_estimate_ignores_completed_reply_thinking_and_ui_blocks() -> None:
+    """Blocks stripped before the provider call must not consume the tail budget."""
+    message = Message(
+        role="assistant",
+        content=[
+            Thinking(thinking="r" * 20_000, signature="sig"),
+            SystemNotification(notification_type="verifierVerdict", msg="m" * 5_000),
+            Text(text="ok"),
+        ],
+    )
+    assert _estimate_message_tokens(message) < 10
+
+
+def test_split_head_and_tail_slots_skip_ui_only_rows() -> None:
+    ui = Message(
+        role="user",
+        content=[SystemNotification(notification_type="inline", msg="n")],  # type: ignore[arg-type]
+    )
+    body = _msgs(20, chars=40)
+    messages = [ui, *body, ui]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=100_000)
+    assert body[0] in head
+    assert any(m is body[-1] for m in tail)
+    assert middle
 
 
 def test_split_ignores_pinned_notification_for_tail_floor() -> None:
@@ -216,3 +245,21 @@ def test_truncate_history_keeps_pinned_verdicts() -> None:
     assert pinned in truncated
     assert truncated[-1] is messages[-1]
     assert messages[0] not in truncated
+
+
+def test_summary_line_skips_ui_only_rows_and_keeps_tool_request_thinking() -> None:
+    from monkeybot.core.runtime.loop_messages import _summary_line_for_message
+
+    ui_only = Message(
+        role="user",
+        content=[SystemNotification(notification_type="inline", msg="n")],  # type: ignore[arg-type]
+    )
+    assert _summary_line_for_message(ui_only) == ""
+    thinking_only = Message(role="assistant", content=[Thinking(thinking="t", signature="s")])
+    assert _summary_line_for_message(thinking_only) == ""
+    with_tool = Message(
+        role="assistant",
+        content=[Thinking(thinking="t", signature="s"), ToolRequest(id="c", name="echo", args={})],
+    )
+    line = _summary_line_for_message(with_tool)
+    assert "[tool_call: echo" in line and "[Thinking]" in line
