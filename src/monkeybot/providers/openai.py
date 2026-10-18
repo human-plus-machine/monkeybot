@@ -21,13 +21,14 @@ from monkeybot.providers._openai_compat import (
     openai_tools,
     openai_tools_token_count,
 )
+from monkeybot.providers._utils import suppress_thinking_for_auxiliary_call
 from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.rejected_sampling import omit_known_rejected
 from monkeybot.providers.request_budget import (
     configured_request_byte_budget,
     trim_message_media_for_byte_budget,
 )
-from monkeybot.providers.sampling import resolve_model_sampling
+from monkeybot.providers.sampling import REASONING_EFFORT_NONE, resolve_model_sampling
 
 # Re-export private names that existing tests import directly from this module.
 _messages_to_openai = messages_to_openai
@@ -138,7 +139,11 @@ class OpenAIProvider:
         }
         if supports_param(model, "temperature"):
             kwargs["temperature"] = self._temperature
-        if self._reasoning_effort:
+        # Curator and summarizer calls must not think: only an off effort goes through.
+        if self._reasoning_effort and (
+            self._reasoning_effort == REASONING_EFFORT_NONE
+            or not suppress_thinking_for_auxiliary_call(messages, tools)
+        ):
             kwargs["reasoning_effort"] = self._reasoning_effort
         omit_known_rejected("openai", model, kwargs)
         if tools:

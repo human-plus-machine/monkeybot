@@ -243,6 +243,57 @@ async def test_stream_chat_completions_forwards_reasoning_effort(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("effort", "expected"), [("high", None), ("none", "none")])
+async def test_stream_chat_completions_auxiliary_call_sends_only_off_effort(
+    monkeypatch: pytest.MonkeyPatch,
+    effort: str,
+    expected: str | None,
+) -> None:
+    from monkeybot.core.llm.provider import Message
+    from monkeybot.core.types.content_blocks import Text
+
+    captured: list[dict[str, Any]] = []
+
+    async def _create(**kwargs: Any) -> Any:
+        captured.append(kwargs)
+
+        async def _stream() -> Any:
+            if False:  # pragma: no cover
+                yield
+
+        return _stream()
+
+    def _fake_openai(*_args: Any, **_kwargs: Any) -> Any:
+        return SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=_create)),
+        )
+
+    fake_openai = ModuleType("openai")
+    fake_openai.AsyncOpenAI = _fake_openai
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+
+    curator = [
+        Message(role="system", content=[Text(text="You narrow context for another assistant.")]),
+        Message.text("user", "history"),
+    ]
+    _ = [
+        ev
+        async for ev in stream_chat_completions_with_tool_fallback(
+            base_url="https://api.fireworks.ai/inference/v1",
+            api_key="k",
+            provider="fireworks",
+            messages=curator,
+            tools=[],
+            model="accounts/fireworks/models/gpt-oss-120b",
+            temperature=0.7,
+            max_tokens=100,
+            reasoning_effort=effort,
+        )
+    ]
+    assert captured[0].get("reasoning_effort") == expected
+
+
+@pytest.mark.asyncio
 async def test_iter_openai_compat_stream_sets_include_usage() -> None:
     captured: list[dict[str, Any]] = []
 

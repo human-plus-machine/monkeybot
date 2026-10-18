@@ -291,6 +291,41 @@ async def test_openai_retries_then_omits_rejected_effort(monkeypatch: pytest.Mon
     assert "reasoning_effort" not in calls[0]
 
 
+@pytest.mark.asyncio
+async def test_openai_auxiliary_call_omits_configured_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from monkeybot.core.llm.provider import TextDelta
+    from monkeybot.core.types.content_blocks import Text
+
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    monkeypatch.delenv("MODEL_REASONING_EFFORT", raising=False)
+    calls: list[dict[str, Any]] = []
+
+    async def fake_iter(_client: object, kwargs: dict[str, Any], **_rest: object):
+        calls.append(dict(kwargs))
+        yield TextDelta(text="ok")
+
+    fake_openai = ModuleType("openai")
+    fake_openai.AsyncOpenAI = lambda **_kwargs: object()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    monkeypatch.setattr("monkeybot.providers._openai_compat.iter_openai_compat_stream", fake_iter)
+
+    curator = [
+        Message(role="system", content=[Text(text="You narrow context for another assistant.")]),
+        Message.text("user", "history"),
+    ]
+    provider = OpenAIProvider(reasoning_effort="high")
+    _ = [event async for event in provider.stream(curator, [], model="o4-mini")]
+    assert "reasoning_effort" not in calls[0]
+
+    calls.clear()
+    _ = [
+        event async for event in provider.stream([Message.text("user", "hi")], [], model="o4-mini")
+    ]
+    assert calls[0]["reasoning_effort"] == "high"
+
+
 def test_rejected_sampling_is_omitted_on_the_next_request() -> None:
     from monkeybot.providers.rejected_sampling import (
         clear_rejected_sampling,

@@ -45,7 +45,7 @@ from monkeybot.core.types.content_blocks import (
     ToolResponse,
 )
 from monkeybot.core.types.types_tools import ToolDef
-from monkeybot.providers._utils import safe_parse_tool_args
+from monkeybot.providers._utils import safe_parse_tool_args, suppress_thinking_for_auxiliary_call
 from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.rejected_sampling import (
     blames_sampling_param,
@@ -57,6 +57,7 @@ from monkeybot.providers.request_budget import (
     RequestByteBudgetError,
     trim_message_media_for_byte_budget,
 )
+from monkeybot.providers.sampling import REASONING_EFFORT_NONE
 
 _log = logging.getLogger(__name__)
 
@@ -1276,7 +1277,11 @@ async def stream_chat_completions_with_tool_fallback(
         kwargs["temperature"] = temperature
     if tools:
         kwargs["tools"] = openai_tools(tools)
-    if reasoning_effort is not None:
+    # Curator and summarizer calls must not think: only an off effort goes through.
+    if reasoning_effort is not None and (
+        reasoning_effort == REASONING_EFFORT_NONE
+        or not suppress_thinking_for_auxiliary_call(messages, tools)
+    ):
         kwargs["reasoning_effort"] = reasoning_effort
     omit_known_rejected(provider, model, kwargs)
     if extra_body:

@@ -110,9 +110,11 @@ def _install_fake_google_genai(
     stream_chunks: list[Any] | None = None,
     count_tokens_error: BaseException | None = None,
     stream_errors: list[BaseException] | None = None,
+    count_tokens_errors: list[BaseException] | None = None,
 ) -> dict[str, Any]:
     captured: dict[str, Any] = {}
     pending_errors = list(stream_errors or [])
+    pending_count_errors = list(count_tokens_errors or [])
 
     class FakeModels:
         async def generate_content_stream(self, **kwargs: Any) -> Any:
@@ -133,6 +135,9 @@ def _install_fake_google_genai(
         async def count_tokens(self, **kwargs: Any) -> Any:
             if count_tokens_error is not None:
                 raise count_tokens_error
+            captured.setdefault("count_configs", []).append(kwargs.get("config"))
+            if pending_count_errors:
+                raise pending_count_errors.pop(0)
             captured["model"] = kwargs["model"]
             captured["contents"] = kwargs["contents"]
             captured["config"] = kwargs.get("config")
@@ -463,7 +468,7 @@ def test_apply_thinking_config_without_sdk_levels_uses_budget() -> None:
     fake_types = types.SimpleNamespace(ThinkingConfig=_Cfg)
     _UNKNOWN_GEMINI_LEVELS.clear()
     cfg: dict[str, Any] = {}
-    assert _apply_thinking_config(fake_types, cfg, effort="high", budget=12) is False
+    assert _apply_thinking_config(fake_types, cfg, effort="high", budget=12) == {}
     assert cfg["thinking_config"].kwargs == {"thinking_budget": 12}
 
 
@@ -542,6 +547,70 @@ async def test_gemini_off_retries_without_thinking_on_thinking_only_model(
 
     # Next turn goes straight to the request that works.
     captured["configs"].clear()
+    _ = [ev async for ev in provider.stream([], [], model="gemini-2.5-pro")]
+    assert len(captured["configs"]) == 1
+    assert "thinking_config" not in captured["configs"][0]
+
+
+def _curator_messages() -> list[Message]:
+    from monkeybot.core.types.content_blocks import Text
+
+    return [
+        Message(role="system", content=[Text(text="You narrow context for another assistant.")]),
+        Message.text("user", "history"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_auxiliary_budget_zero_retries_on_thinking_only_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No effort configured: the curator's forced budget 0 must not fail every call."""
+    captured = _install_fake_google_genai(
+        monkeypatch,
+        stream_chunks=[_hi_chunk()],
+        stream_errors=[_BudgetZeroRejectedError()],
+    )
+    monkeypatch.delenv("MODEL_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("MODEL_THINKING_BUDGET", raising=False)
+
+    provider = GeminiProvider()
+    events = [ev async for ev in provider.stream(_curator_messages(), [], model="gemini-2.5-pro")]
+    configs = captured["configs"]
+    assert len(configs) == 2
+    assert configs[0]["thinking_config"] == {"thinking_budget": 0}
+    assert "thinking_config" not in configs[1]
+    assert any(getattr(ev, "text", None) == "hi" for ev in events)
+
+    captured["configs"].clear()
+    _ = [ev async for ev in provider.stream(_curator_messages(), [], model="gemini-2.5-pro")]
+    assert len(captured["configs"]) == 1
+    assert "thinking_config" not in captured["configs"][0]
+
+
+@pytest.mark.asyncio
+async def test_gemini_count_tokens_retries_rejected_off_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Assumed wording: Vertex count_tokens is taken to reject budget 0 with the
+    same text generate_content uses on a thinking-only model."""
+    captured = _install_fake_google_genai(
+        monkeypatch,
+        stream_chunks=[_hi_chunk()],
+        count_tokens_errors=[_BudgetZeroRejectedError()],
+    )
+    monkeypatch.delenv("MODEL_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("MODEL_THINKING_BUDGET", raising=False)
+
+    provider = GeminiProvider(reasoning_effort="off")
+    n = await provider.count_input_tokens([Message.text("user", "hi")], [], model="gemini-2.5-pro")
+    assert n == 42
+    count_configs = captured["count_configs"]
+    assert len(count_configs) == 2
+    assert count_configs[0]["generation_config"]["thinking_config"] == {"thinking_budget": 0}
+    assert "thinking_config" not in count_configs[1]["generation_config"]
+
+    # The stream learns from the count: it does not resend the rejected budget 0.
     _ = [ev async for ev in provider.stream([], [], model="gemini-2.5-pro")]
     assert len(captured["configs"]) == 1
     assert "thinking_config" not in captured["configs"][0]
