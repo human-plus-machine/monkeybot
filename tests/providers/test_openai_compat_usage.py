@@ -243,9 +243,17 @@ async def test_stream_chat_completions_forwards_reasoning_effort(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("effort", "expected"), [("high", None), ("none", "none")])
+@pytest.mark.parametrize(
+    ("provider", "effort", "expected"),
+    [
+        ("fireworks", "high", None),
+        ("fireworks", "none", "none"),
+        ("ollama-local", "high", "none"),
+    ],
+)
 async def test_stream_chat_completions_auxiliary_call_sends_only_off_effort(
     monkeypatch: pytest.MonkeyPatch,
+    provider: str,
     effort: str,
     expected: str | None,
 ) -> None:
@@ -281,7 +289,7 @@ async def test_stream_chat_completions_auxiliary_call_sends_only_off_effort(
         async for ev in stream_chat_completions_with_tool_fallback(
             base_url="https://api.fireworks.ai/inference/v1",
             api_key="k",
-            provider="fireworks",
+            provider=provider,
             messages=curator,
             tools=[],
             model="accounts/fireworks/models/gpt-oss-120b",

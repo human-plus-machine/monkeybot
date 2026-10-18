@@ -610,7 +610,6 @@ async def test_gemini_count_tokens_retries_rejected_off_effort(
     assert count_configs[0]["generation_config"]["thinking_config"] == {"thinking_budget": 0}
     assert "thinking_config" not in count_configs[1]["generation_config"]
 
-    # The stream learns from the count: it does not resend the rejected budget 0.
+    # A count rejection is not remembered, so the stream still tries the effort.
     _ = [ev async for ev in provider.stream([], [], model="gemini-2.5-pro")]
-    assert len(captured["configs"]) == 1
-    assert "thinking_config" not in captured["configs"][0]
+    assert captured["configs"][0]["thinking_config"] == {"thinking_budget": 0}

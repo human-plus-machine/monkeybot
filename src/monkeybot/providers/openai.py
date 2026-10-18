@@ -139,12 +139,13 @@ class OpenAIProvider:
         }
         if supports_param(model, "temperature"):
             kwargs["temperature"] = self._temperature
-        # Curator and summarizer calls must not think: only an off effort goes through.
-        if self._reasoning_effort and (
-            self._reasoning_effort == REASONING_EFFORT_NONE
-            or not suppress_thinking_for_auxiliary_call(messages, tools)
-        ):
-            kwargs["reasoning_effort"] = self._reasoning_effort
+        if self._reasoning_effort:
+            # Curator and summarizer calls send an off effort instead of the configured one.
+            kwargs["reasoning_effort"] = (
+                REASONING_EFFORT_NONE
+                if suppress_thinking_for_auxiliary_call(messages, tools)
+                else self._reasoning_effort
+            )
         omit_known_rejected("openai", model, kwargs)
         if tools:
             kwargs["tools"] = openai_tools(tools)

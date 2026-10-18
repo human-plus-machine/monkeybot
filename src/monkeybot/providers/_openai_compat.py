@@ -1277,12 +1277,13 @@ async def stream_chat_completions_with_tool_fallback(
         kwargs["temperature"] = temperature
     if tools:
         kwargs["tools"] = openai_tools(tools)
-    # Curator and summarizer calls must not think: only an off effort goes through.
-    if reasoning_effort is not None and (
-        reasoning_effort == REASONING_EFFORT_NONE
-        or not suppress_thinking_for_auxiliary_call(messages, tools)
-    ):
-        kwargs["reasoning_effort"] = reasoning_effort
+    if reasoning_effort is not None:
+        if not suppress_thinking_for_auxiliary_call(messages, tools):
+            kwargs["reasoning_effort"] = reasoning_effort
+        elif reasoning_effort == REASONING_EFFORT_NONE or provider.startswith("ollama"):
+            # Curator and summarizer calls: Ollama accepts ``none``. Other providers
+            # may reject it, so they omit the configured effort instead.
+            kwargs["reasoning_effort"] = REASONING_EFFORT_NONE
     omit_known_rejected(provider, model, kwargs)
     if extra_body:
         kwargs["extra_body"] = extra_body

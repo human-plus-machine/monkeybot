@@ -196,17 +196,6 @@ def _gemini_blames_thinking(exc: BaseException) -> bool:
     )
 
 
-def _effort_for_gemini_call(
-    effort: str | None,
-    messages: Sequence[Message],
-    tools: Sequence[ToolDef],
-) -> str | None:
-    """Effort to send, or None for auxiliary calls."""
-    if suppress_thinking_for_auxiliary_call(messages, tools):
-        return None
-    return effort
-
-
 def _apply_thinking_config(
     types: Any,
     cfg_kwargs: dict[str, Any],
@@ -730,20 +719,26 @@ class GeminiProvider:
                 "temperature": float(self._temperature),
                 "max_output_tokens": int(self._max_tokens),
             }
-            effort = _effort_for_gemini_call(self._reasoning_effort, messages, tools)
+            effort = (
+                None
+                if suppress_thinking_for_auxiliary_call(messages, tools)
+                else self._reasoning_effort
+            )
 
         client = self._client(model_param)
+        with_thinking = True
         while True:
             sent: dict[str, object] = {}
             if gen_cfg_kwargs is not None:
                 thinking_kwargs = dict(gen_cfg_kwargs)
-                sent = _apply_thinking_config(
-                    types,
-                    thinking_kwargs,
-                    effort=effort,
-                    budget=budget,
-                    model=model_param,
-                )
+                if with_thinking:
+                    sent = _apply_thinking_config(
+                        types,
+                        thinking_kwargs,
+                        effort=effort,
+                        budget=budget,
+                        model=model_param,
+                    )
                 count_cfg_kwargs["generation_config"] = types.GenerationConfig(**thinking_kwargs)
             ct_cfg = types.CountTokensConfig(**count_cfg_kwargs) if count_cfg_kwargs else None
             try:
@@ -755,7 +750,10 @@ class GeminiProvider:
             except LLMError:
                 raise
             except Exception as exc:
-                if _remember_rejected_thinking(model_param, sent, exc):
+                # Retry the count without thinking but do not remember the rejection:
+                # count_tokens may check it more strictly than generate_content.
+                if sent and _gemini_blames_thinking(exc):
+                    with_thinking = False
                     _log.warning(
                         "gemini count_tokens rejected thinking config, retrying without it %s",
                         kv(provider="gemini", model=model, dropped=sorted(sent)),
@@ -822,7 +820,11 @@ class GeminiProvider:
         client = self._client(model_param)
         # Effort wins over the token budget. Auxiliary calls still force budget 0
         # via ``_resolve_thinking_budget`` and skip the configured effort.
-        effort = _effort_for_gemini_call(self._reasoning_effort, messages, tools)
+        effort = (
+            None
+            if suppress_thinking_for_auxiliary_call(messages, tools)
+            else self._reasoning_effort
+        )
 
         pending_tools: dict[str, ToolCall] = {}
         last_usage: Any = None

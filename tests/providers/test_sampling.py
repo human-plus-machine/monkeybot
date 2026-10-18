@@ -317,7 +317,7 @@ async def test_openai_auxiliary_call_omits_configured_effort(
     ]
     provider = OpenAIProvider(reasoning_effort="high")
     _ = [event async for event in provider.stream(curator, [], model="o4-mini")]
-    assert "reasoning_effort" not in calls[0]
+    assert calls[0]["reasoning_effort"] == "none"
 
     calls.clear()
     _ = [
