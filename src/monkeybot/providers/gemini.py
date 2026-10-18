@@ -34,7 +34,11 @@ from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import (
     suppress_thinking_for_auxiliary_call as _suppress_thinking_for_auxiliary_call,
 )
-from monkeybot.providers.rejected_sampling import remember_rejected_sampling, was_rejected
+from monkeybot.providers.rejected_sampling import (
+    is_status_400,
+    remember_rejected_sampling,
+    was_rejected,
+)
 from monkeybot.providers.request_budget import trim_message_media_for_byte_budget
 from monkeybot.providers.sampling import REASONING_EFFORT_OFF, resolve_model_sampling
 
@@ -179,8 +183,6 @@ def _warn_unknown_gemini_level(effort: str) -> None:
 
 def _gemini_blames_thinking(exc: BaseException) -> bool:
     """True when a 400 names Gemini's thinking config as the rejected field."""
-    from monkeybot.providers.rejected_sampling import is_status_400
-
     if not is_status_400(exc):
         return False
     compact = str(exc).lower().replace("_", "")
@@ -196,7 +198,7 @@ def _effort_for_gemini_call(
     """Effort to send, or None for auxiliary calls and levels this model already rejected."""
     if _suppress_thinking_for_auxiliary_call(messages, tools):
         return None
-    if effort and was_rejected("gemini", model, "thinking_level"):
+    if effort and was_rejected("gemini", model, "thinking_level", effort):
         return None
     return effort
 
@@ -207,28 +209,29 @@ def _apply_thinking_config(
     *,
     effort: str | None,
     budget: int,
-) -> None:
+) -> bool:
     """Set ``thinking_config``. Effort wins over a token budget; they must not both be sent.
 
     ``off`` / ``none`` / ``disabled`` disable thinking with budget 0. A level the
-    installed SDK lists is sent as ``thinking_level``. Anything else falls back to
-    the token budget so an unsupported string cannot fail the request.
+    installed SDK lists is sent as ``thinking_level``. Anything else, including any
+    level on an SDK without ``ThinkingLevel``, falls back to the token budget so an
+    unsupported string cannot fail the request.
+
+    Returns True only when ``thinking_level`` was sent.
     """
     if effort:
         if effort in REASONING_EFFORT_OFF:
             cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
-            return
-        if getattr(types, "ThinkingLevel", None) is None:
-            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=effort)
-            return
+            return False
         level = _known_thinking_level(types, effort)
         if level is None:
             _warn_unknown_gemini_level(effort)
         else:
             cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=level)
-            return
+            return True
     if budget != -1:
         cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
+    return False
 
 
 def _split_system_and_rest(messages: Sequence[Message]) -> tuple[str, list[Message]]:
@@ -771,7 +774,7 @@ class GeminiProvider:
             stream_tools.append(types.Tool(google_search=types.GoogleSearch()))
 
         client = self._client(model_param)
-        omit_thinking_level = was_rejected("gemini", model_param, "thinking_level")
+        omit_thinking_level = False
 
         pending_tools: dict[str, ToolCall] = {}
         last_usage: Any = None
@@ -794,7 +797,7 @@ class GeminiProvider:
                 messages,
                 tools,
             )
-            _apply_thinking_config(
+            sent_level = _apply_thinking_config(
                 types,
                 cfg_kwargs,
                 effort=effort,
@@ -890,13 +893,8 @@ class GeminiProvider:
             except LLMError:
                 raise
             except Exception as exc:
-                if (
-                    not yielded
-                    and not omit_thinking_level
-                    and "thinking_config" in cfg_kwargs
-                    and _gemini_blames_thinking(exc)
-                ):
-                    remember_rejected_sampling("gemini", model_param, ["thinking_level"])
+                if not yielded and sent_level and _gemini_blames_thinking(exc):
+                    remember_rejected_sampling("gemini", model_param, {"thinking_level": effort})
                     omit_thinking_level = True
                     _log.warning(
                         "gemini rejected thinking config, retrying without it %s",

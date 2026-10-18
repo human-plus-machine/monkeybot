@@ -48,6 +48,7 @@ from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import safe_parse_tool_args
 from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.rejected_sampling import (
+    blames_sampling_param,
     is_status_400,
     omit_known_rejected,
     remember_rejected_sampling,
@@ -56,6 +57,7 @@ from monkeybot.providers.request_budget import (
     RequestByteBudgetError,
     trim_message_media_for_byte_budget,
 )
+from monkeybot.providers.sampling import REASONING_EFFORT_OFF
 
 _log = logging.getLogger(__name__)
 
@@ -1154,22 +1156,11 @@ def is_ollama_request_body_read_error(exc: BaseException) -> bool:
 _OPENAI_STRIPPABLE = ("temperature", "reasoning_effort")
 
 
-def _blames_sampling_param(msg: str, param: str) -> bool:
-    """True when a 400 names ``param`` as a rejected request field.
-
-    Anthropic-style field paths (``temperature:``) and OpenAI-style quoted
-    names (``Unsupported parameter: 'temperature'``) both count. A bare
-    mention of the word does not.
-    """
-    lowered = msg.lower()
-    if re.search(rf"(?:^|[^a-z0-9_.]){re.escape(param)}(?:\.[a-z0-9_.]+)?:", lowered):
-        return True
-    if re.search(rf"['\"]{re.escape(param)}['\"]", lowered) is None:
-        return False
-    return any(
-        phrase in lowered
-        for phrase in ("unsupported", "not supported", "not permitted", "unknown", "invalid")
-    )
+def openai_reasoning_effort(value: str | None) -> str | None:
+    """Wire value for ``reasoning_effort``. ``off`` / ``none`` / ``disabled`` become ``none``."""
+    if value and value in REASONING_EFFORT_OFF:
+        return "none"
+    return value
 
 
 def drop_rejected_sampling(
@@ -1187,14 +1178,16 @@ def drop_rejected_sampling(
     if not is_status_400(exc):
         return []
     msg = str(exc)
-    dropped = [
-        name for name in _OPENAI_STRIPPABLE if name in kwargs and _blames_sampling_param(msg, name)
-    ]
+    dropped = {
+        name: kwargs[name]
+        for name in _OPENAI_STRIPPABLE
+        if name in kwargs and blames_sampling_param(msg, name)
+    }
     for name in dropped:
         del kwargs[name]
     if dropped:
         remember_rejected_sampling(provider, model, dropped)
-    return dropped
+    return list(dropped)
 
 
 async def stream_chat_completions_with_tool_fallback(
@@ -1253,7 +1246,7 @@ async def stream_chat_completions_with_tool_fallback(
     if tools:
         kwargs["tools"] = openai_tools(tools)
     if reasoning_effort is not None:
-        kwargs["reasoning_effort"] = reasoning_effort
+        kwargs["reasoning_effort"] = openai_reasoning_effort(reasoning_effort)
     omit_known_rejected(provider, model, kwargs)
     if extra_body:
         kwargs["extra_body"] = extra_body
@@ -1404,6 +1397,7 @@ __all__ = [
     "ProviderServerError",
     "count_input_tokens_tiktoken",
     "drop_rejected_sampling",
+    "openai_reasoning_effort",
     "count_openai_compat_input_tokens",
     "is_rate_limit_error",
     "is_server_error",

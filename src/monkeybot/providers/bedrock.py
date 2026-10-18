@@ -222,6 +222,7 @@ class BedrockProvider:
                     if suppress_thinking_for_auxiliary_call(messages, tools)
                     else self._reasoning_effort
                 ),
+                provider="bedrock",
             ),
         }
         async for event in iter_anthropic_sdk_stream(

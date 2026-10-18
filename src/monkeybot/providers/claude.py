@@ -116,6 +116,7 @@ class ClaudeProvider:
                 temperature=self._temperature,
                 thinking_budget=None if auxiliary else thinking_budget,
                 reasoning_effort=None if auxiliary else self._reasoning_effort,
+                provider="claude",
             ),
         }
 

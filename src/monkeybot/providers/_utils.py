@@ -35,9 +35,11 @@ from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.pricing import estimate_cost
 from monkeybot.providers.rejected_sampling import (
+    blames_field_path,
     is_status_400,
     omit_known_rejected,
     remember_rejected_sampling,
+    was_rejected,
 )
 from monkeybot.providers.sampling import REASONING_EFFORT_OFF
 
@@ -131,6 +133,8 @@ def suppress_thinking_for_auxiliary_call(
     markers = (
         "You narrow context for another assistant",
         "You compress prior agent conversation turns",
+        # Opening of ``history_compaction._COMPACTION_SUMMARY_SYSTEM``.
+        "Output exactly the Markdown structure shown inside <template>",
     )
     return any(marker in sys_txt for marker in markers)
 
@@ -141,18 +145,26 @@ def anthropic_sampling_kwargs(
     temperature: float,
     thinking_budget: int | None,
     reasoning_effort: str | None,
+    provider: str = "",
 ) -> dict[str, Any]:
     """Sampling fields for an Anthropic Messages request.
 
     A set ``reasoning_effort`` uses adaptive thinking plus ``output_config.effort``
     and omits temperature and ``budget_tokens``. ``off`` / ``none`` / ``disabled``
     send neither. Otherwise temperature and a manual thinking budget are sent only
-    when the model is known to accept them.
+    when the model is known to accept them. When ``provider`` already rejected
+    the effort fields for this model, the temperature path is used instead so
+    the configured temperature is not lost too.
     """
     effort = (reasoning_effort or "").strip().lower()
     if effort in REASONING_EFFORT_OFF:
         effort = ""
         thinking_budget = None
+    if effort and (
+        was_rejected(provider, model, "output_config", {"effort": effort})
+        or was_rejected(provider, model, "thinking", {"type": "adaptive"})
+    ):
+        effort = ""
     if effort:
         return {
             "thinking": {"type": "adaptive"},
@@ -183,7 +195,7 @@ def _rejects_param(msg: str, param: str) -> bool:
     final 'assistant' message must start with a thinking block" — stripping
     there would silently disable extended thinking and hide a real bug.
     """
-    return re.search(rf"(?:^|[^a-z0-9_.]){re.escape(param)}(?:\.[a-z0-9_.]+)?:", msg) is not None
+    return blames_field_path(msg, param)
 
 
 _UNEXPECTED_KWARG = re.compile(r"unexpected keyword argument '([^']+)'")
@@ -255,9 +267,14 @@ async def iter_stream_with_param_retry(
         except Exception as exc:
             last_exc = exc
             if not started:
+                sent = dict(kwargs)
                 dropped = strip_rejected(kwargs, exc)
                 if dropped:
-                    remember_rejected_sampling(provider, str(model or ""), dropped)
+                    remember_rejected_sampling(
+                        provider,
+                        str(model or ""),
+                        {name: sent.get(name) for name in dropped},
+                    )
                     _log.warning(
                         retry_message,
                         kv(provider=provider, model=model, dropped=dropped),

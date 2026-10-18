@@ -21,6 +21,7 @@ from monkeybot.providers._openai_compat import (
     iter_openai_compat_stream,
     messages_to_openai,
     openai_messages_token_count,
+    openai_reasoning_effort,
     openai_tools,
     openai_tools_token_count,
 )
@@ -144,7 +145,7 @@ class OpenAIProvider:
         if supports_param(model, "temperature"):
             kwargs["temperature"] = self._temperature
         if self._reasoning_effort:
-            kwargs["reasoning_effort"] = self._reasoning_effort
+            kwargs["reasoning_effort"] = openai_reasoning_effort(self._reasoning_effort)
         omit_known_rejected("openai", model, kwargs)
         if tools:
             kwargs["tools"] = openai_tools(tools)

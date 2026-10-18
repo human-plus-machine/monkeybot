@@ -311,3 +311,55 @@ def test_rejected_sampling_is_omitted_on_the_next_request() -> None:
     assert "reasoning_effort" not in again
     assert again["temperature"] == 0.7
     clear_rejected_sampling()
+
+
+def test_rejected_sampling_retries_a_changed_value() -> None:
+    from monkeybot.providers.rejected_sampling import omit_known_rejected
+
+    drop_rejected_sampling(
+        {"reasoning_effort": "max"},
+        RuntimeError("Error code: 400 - Unsupported parameter: 'reasoning_effort'"),
+        provider="openai",
+        model="gpt-changed-effort",
+    )
+    changed = {"reasoning_effort": "high"}
+    omit_known_rejected("openai", "gpt-changed-effort", changed)
+    assert changed == {"reasoning_effort": "high"}
+
+
+def test_openai_reasoning_effort_maps_off_words_to_none() -> None:
+    from monkeybot.providers._openai_compat import openai_reasoning_effort
+
+    assert openai_reasoning_effort("off") == "none"
+    assert openai_reasoning_effort("disabled") == "none"
+    assert openai_reasoning_effort("high") == "high"
+    assert openai_reasoning_effort(None) is None
+
+
+def test_compaction_summary_call_is_auxiliary() -> None:
+    from monkeybot.core.runtime.history_compaction import _COMPACTION_SUMMARY_SYSTEM
+    from monkeybot.core.types.content_blocks import Text
+    from monkeybot.providers._utils import suppress_thinking_for_auxiliary_call
+
+    messages = [
+        Message(role="system", content=[Text(text=_COMPACTION_SUMMARY_SYSTEM)]),
+        Message.text("user", "history"),
+    ]
+    assert suppress_thinking_for_auxiliary_call(messages, [])
+
+
+def test_anthropic_effort_falls_back_to_temperature_after_rejection() -> None:
+    from monkeybot.providers._utils import anthropic_sampling_kwargs
+    from monkeybot.providers.rejected_sampling import remember_rejected_sampling
+
+    model = "claude-3-5-sonnet-20241022"
+    remember_rejected_sampling("claude", model, {"output_config": {"effort": "high"}})
+    kwargs = anthropic_sampling_kwargs(
+        model=model,
+        temperature=0.2,
+        thinking_budget=None,
+        reasoning_effort="high",
+        provider="claude",
+    )
+    assert "output_config" not in kwargs
+    assert kwargs.get("temperature") == 0.2

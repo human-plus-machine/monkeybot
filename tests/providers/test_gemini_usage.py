@@ -433,3 +433,54 @@ async def test_gemini_retries_without_rejected_thinking_level(
     _ = [ev async for ev in provider.stream([], [], model="gemini-2.5-flash")]
     assert len(captured["configs"]) == 1
     assert "thinking_config" not in captured["configs"][0]
+
+
+def test_gemini_client_error_counts_as_400() -> None:
+    from google.genai import errors
+
+    from monkeybot.providers.gemini import _gemini_blames_thinking
+
+    exc = errors.ClientError(
+        400,
+        {
+            "error": {
+                "code": 400,
+                "message": "thinking_level is not supported for this model.",
+                "status": "INVALID_ARGUMENT",
+            }
+        },
+    )
+    assert _gemini_blames_thinking(exc)
+
+
+def test_apply_thinking_config_without_sdk_levels_uses_budget() -> None:
+    from monkeybot.providers.gemini import _UNKNOWN_GEMINI_LEVELS, _apply_thinking_config
+
+    class _Cfg:
+        def __init__(self, **kwargs: Any) -> None:
+            self.kwargs = kwargs
+
+    fake_types = types.SimpleNamespace(ThinkingConfig=_Cfg)
+    _UNKNOWN_GEMINI_LEVELS.clear()
+    cfg: dict[str, Any] = {}
+    assert _apply_thinking_config(fake_types, cfg, effort="high", budget=12) is False
+    assert cfg["thinking_config"].kwargs == {"thinking_budget": 12}
+
+
+@pytest.mark.asyncio
+async def test_gemini_does_not_retry_budget_only_thinking_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from monkeybot.providers.rejected_sampling import was_rejected
+
+    captured = _install_fake_google_genai(
+        monkeypatch,
+        stream_errors=[_ThinkingRejectedError()],
+    )
+    monkeypatch.delenv("MODEL_REASONING_EFFORT", raising=False)
+
+    provider = GeminiProvider(thinking_budget=32768)
+    with pytest.raises(LLMError):
+        [ev async for ev in provider.stream([], [], model="gemini-2.5-flash")]
+    assert len(captured["configs"]) == 1
+    assert not was_rejected("gemini", "gemini-2.5-flash", "thinking_level")

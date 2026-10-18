@@ -150,6 +150,7 @@ class VertexClaudeProvider:
                 temperature=self._temperature,
                 thinking_budget=None,
                 reasoning_effort=None if auxiliary else self._reasoning_effort,
+                provider="vertex_claude",
             ),
         }
         async for event in iter_anthropic_sdk_stream(
