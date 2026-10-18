@@ -31,6 +31,20 @@ fi
 
 export CI=true
 
+# uv sync refreshes the editable package version in lockfiles. pre-commit
+# rejects the push if this hook leaves those files changed, so restore them.
+lock_backup="$(mktemp -d)"
+cp uv.lock "$lock_backup/root.lock"
+cp cli/uv.lock "$lock_backup/cli.lock"
+cp integrations/browser-mcp/uv.lock "$lock_backup/browser.lock"
+restore_locks() {
+  cp "$lock_backup/root.lock" uv.lock
+  cp "$lock_backup/cli.lock" cli/uv.lock
+  cp "$lock_backup/browser.lock" integrations/browser-mcp/uv.lock
+  rm -rf "$lock_backup"
+}
+trap restore_locks EXIT
+
 uv sync --extra claude --extra vertex-claude --extra bedrock --extra firestore --extra evals
 uv run mypy src/monkeybot
 uv run pytest tests/ -q
