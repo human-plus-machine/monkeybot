@@ -23,6 +23,9 @@ from monkeybot.core.llm.provider import ProviderCallHints
 _log = logging.getLogger(__name__)
 
 _lock = threading.Lock()
+# Clients kept per key and loop. Room for a key rotation while sessions built
+# before it still hold the old credentials, without growing on every rotation.
+_MAX_CLIENTS_PER_KEY = 4
 _clients: dict[tuple[Any, ...], list[_Slot]] = {}
 
 
@@ -65,9 +68,9 @@ def cached_sdk_client(
 
     ``key`` names an endpoint that may be used alongside others (a base URL, a
     region). ``fingerprint`` holds the credentials and settings the client was
-    built from. It is hashed before it is stored, and a new value replaces the
-    client for ``key`` instead of adding another one. The replaced client is not
-    closed here because a request may still be streaming on it.
+    built from. It is hashed before it is stored. Each key keeps the most recently
+    used ``_MAX_CLIENTS_PER_KEY`` fingerprints per loop, and the oldest is dropped
+    without closing because a request may still be streaming on it.
 
     With no running loop the client is not cached.
     """
@@ -77,16 +80,22 @@ def cached_sdk_client(
         return factory()
     digest = _digest(fingerprint)
     with _lock:
-        for slot in _clients.get(key, ()):
+        slots = _clients.get(key, [])
+        for slot in slots:
             if slot.loop() is current and slot.fingerprint == digest:
+                # Most recently used last, so eviction drops the stale ones.
+                slots.remove(slot)
+                slots.append(slot)
                 return slot.client
     # Built outside the lock: constructors can do blocking auth lookups. Only
-    # this loop's thread fills this loop's slot, so no other thread races it.
+    # this loop's thread fills this loop's slots, so no other thread races it.
     client = factory()
     with _lock:
-        kept = [slot for slot in _clients.get(key, ()) if slot.loop() not in (None, current)]
-        kept.append(_Slot(current, digest, client))
-        _clients[key] = kept
+        live = [slot for slot in _clients.get(key, ()) if slot.loop() is not None]
+        others = [slot for slot in live if slot.loop() is not current]
+        mine = [slot for slot in live if slot.loop() is current]
+        recent = mine[-(_MAX_CLIENTS_PER_KEY - 1) :]
+        _clients[key] = [*others, *recent, _Slot(current, digest, client)]
     return client
 
 

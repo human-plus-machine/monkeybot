@@ -13,6 +13,7 @@ import aiohttp
 import pytest
 
 from monkeybot.core.llm.provider import Message, ProviderCallHints
+from monkeybot.providers import _sdk_client
 from monkeybot.providers._openai_compat import stream_chat_completions_with_tool_fallback
 from monkeybot.providers._sdk_client import (
     _clients,
@@ -484,26 +485,24 @@ async def test_one_failing_close_does_not_skip_the_other_clients() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rotated_credentials_replace_the_cached_client(
+async def test_rotated_credentials_do_not_grow_the_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     constructed = _install_claude(monkeypatch)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-old")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-0")
     claude = ClaudeProvider()
-    for api_key in ("sk-ant-old", "sk-ant-new"):
-        monkeypatch.setenv("ANTHROPIC_API_KEY", api_key)
+    rotations = _sdk_client._MAX_CLIENTS_PER_KEY + 2
+    for n in range(rotations):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", f"sk-ant-{n}")
         async for _event in claude.stream(
             [Message.text("user", "hi")], [], model="claude-sonnet-4-5"
         ):
             pass
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://claude.example/v1")
-    async for _event in claude.stream([Message.text("user", "hi")], [], model="claude-sonnet-4-5"):
-        pass
 
-    assert len(constructed) == 3
-    assert _cached_slot_count() == 1
+    assert len(constructed) == rotations
+    assert _cached_slot_count() == _sdk_client._MAX_CLIENTS_PER_KEY
 
 
 @pytest.mark.asyncio
@@ -565,27 +564,32 @@ def test_building_a_client_does_not_block_other_threads() -> None:
     started = threading.Event()
     release = threading.Event()
     other_done = threading.Event()
+    threads: list[threading.Thread] = []
 
     def slow_factory() -> object:
         started.set()
-        release.wait(5)
+        release.wait(30)
         return object()
 
     async def build(key: tuple[str, ...], factory: Any) -> None:
         cached_sdk_client(key, factory)
 
-    slow = threading.Thread(target=lambda: asyncio.run(build(("slow",), slow_factory)))
-    slow.start()
+    threads.append(threading.Thread(target=lambda: asyncio.run(build(("slow",), slow_factory))))
+    threads[0].start()
     try:
         assert started.wait(5)
-        fast = threading.Thread(
-            target=lambda: (asyncio.run(build(("fast",), object)), other_done.set())
+        threads.append(
+            threading.Thread(
+                target=lambda: (asyncio.run(build(("fast",), object)), other_done.set())
+            )
         )
-        fast.start()
-        assert other_done.wait(1), "fast lookup waited on the slow constructor"
+        threads[1].start()
+        # Well under the slow constructor's 30s, well over a loaded CI thread start.
+        assert other_done.wait(10), "fast lookup waited on the slow constructor"
     finally:
         release.set()
-        slow.join(5)
+        for thread in threads:
+            thread.join(10)
 
 
 @pytest.mark.asyncio
@@ -631,3 +635,99 @@ async def test_any_sdk_env_var_change_rebuilds_the_client(
     async for _event in claude.stream([Message.text("user", "hi")], [], model="claude-sonnet-4-5"):
         pass
     assert len(constructed) == 2
+
+
+# Re-review follow-up on PR 300.
+
+
+def _install_counting_genai(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    constructed: list[dict[str, Any]] = []
+
+    class _Client:
+        def __init__(self, **kwargs: Any) -> None:
+            constructed.append(kwargs)
+
+    fake_google = ModuleType("google")
+    fake_genai = ModuleType("google.genai")
+    fake_genai.Client = _Client  # type: ignore[attr-defined]
+    fake_google.genai = fake_genai  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "google", fake_google)
+    monkeypatch.setitem(sys.modules, "google.genai", fake_genai)
+    return constructed
+
+
+@pytest.mark.asyncio
+async def test_gemini_clients_follow_the_env_google_genai_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """google-genai 1.75.0 reads ``GOOGLE_GENAI_USE_VERTEXAI`` and
+    ``GOOGLE_CLOUD_PROJECT`` / ``GOOGLE_CLOUD_LOCATION`` in ``Client.__init__``."""
+    constructed = _install_counting_genai(monkeypatch)
+    monkeypatch.delenv("GOOGLE_GENAI_USE_VERTEXAI", raising=False)
+    monkeypatch.setenv("VERTEX_AI_PROJECT_ID", "proj")
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+
+    keyed = GeminiProvider(api_key="studio-key")
+    first = keyed._client("gemini-2.5-flash")
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    assert keyed._client("gemini-2.5-flash") is not first
+
+    vertex = GeminiProvider()
+    regional = vertex._client("gemini-2.5-flash")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "/secrets/rotated-sa.json")
+    assert vertex._client("gemini-2.5-flash") is not regional
+    assert len(constructed) == 4
+
+
+@pytest.mark.asyncio
+async def test_two_keys_on_one_endpoint_keep_their_own_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a GEMINI_API_KEY rotation, sessions built before it still hold the old key."""
+    constructed = _install_counting_genai(monkeypatch)
+    old = GeminiProvider(api_key="studio-key-old")
+    new = GeminiProvider(api_key="studio-key-new")
+    for _ in range(3):
+        old._client("gemini-2.5-flash")
+        new._client("gemini-2.5-flash")
+
+    assert len(constructed) == 2
+
+
+@pytest.mark.asyncio
+async def test_vertex_claude_client_follows_its_base_url_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``AsyncAnthropicVertex`` reads ``ANTHROPIC_VERTEX_BASE_URL`` (anthropic 0.102.0)."""
+    from monkeybot.providers.vertex_claude import VertexClaudeProvider
+
+    constructed: list[dict[str, Any]] = []
+
+    def _factory(**kwargs: Any) -> object:
+        constructed.append(kwargs)
+        return object()
+
+    monkeypatch.setattr("anthropic.AsyncAnthropicVertex", _factory)
+    monkeypatch.delenv("ANTHROPIC_VERTEX_BASE_URL", raising=False)
+    provider = VertexClaudeProvider(project_id="proj", region="us-east5")
+    first = provider._sdk_client()
+    assert provider._sdk_client() is first
+    monkeypatch.setenv("ANTHROPIC_VERTEX_BASE_URL", "https://vertex-proxy.example/v1")
+    assert provider._sdk_client() is not first
+    assert constructed == [{"project_id": "proj", "region": "us-east5"}] * 2
+
+
+@pytest.mark.asyncio
+async def test_bedrock_client_follows_its_base_url_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``AsyncAnthropicBedrock`` reads ``ANTHROPIC_BEDROCK_BASE_URL`` (anthropic 0.102.0)."""
+    from monkeybot.providers.bedrock import BedrockProvider
+
+    monkeypatch.setattr("anthropic.AsyncAnthropicBedrock", lambda **_kwargs: object())
+    monkeypatch.delenv("ANTHROPIC_BEDROCK_BASE_URL", raising=False)
+    provider = BedrockProvider(aws_region="us-east-1")
+    first = provider._client()
+    assert provider._client() is first
+    monkeypatch.setenv("ANTHROPIC_BEDROCK_BASE_URL", "https://bedrock-proxy.example")
+    assert provider._client() is not first

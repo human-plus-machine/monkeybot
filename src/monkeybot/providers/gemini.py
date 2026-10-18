@@ -556,19 +556,21 @@ class GeminiProvider:
         """
         from google import genai
 
-        from monkeybot.providers._sdk_client import cached_sdk_client
+        from monkeybot.providers._sdk_client import cached_sdk_client, sdk_env
 
         if self._api_key:
             api_key = self._api_key
             return cached_sdk_client(
                 ("gemini-api",),
                 lambda: genai.Client(api_key=api_key),
-                fingerprint=(api_key,),
+                # google-genai reads GOOGLE_* and GEMINI_* env in Client.__init__.
+                fingerprint=(api_key, sdk_env("GOOGLE_", "GEMINI_")),
             )
         project, location = _vertex_project_and_location(model_param)
         return cached_sdk_client(
             ("gemini-vertex", project, location),
             lambda: genai.Client(vertexai=True, project=project, location=location),
+            fingerprint=sdk_env("GOOGLE_", "GEMINI_"),
         )
 
     @property
