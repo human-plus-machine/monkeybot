@@ -1,9 +1,10 @@
+# Automatic runs are off. Pushing a branch runs this same suite locally
+# (scripts/ci-local.sh via the pre-push hook). Dispatch this workflow from the
+# Actions tab only when you want a GitHub-hosted run.
 name: CI
 
 on:
-  push:
-    branches: [main, master, develop]
-  pull_request:
+  workflow_dispatch:
 
 jobs:
   python:
