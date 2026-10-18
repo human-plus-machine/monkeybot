@@ -29,6 +29,7 @@ from monkeybot.core.llm.provider import (
     GroundingEvent as ProviderGroundingEvent,
 )
 from monkeybot.core.llm.usage import Usage
+from monkeybot.core.messages.transform_context import transform_context
 from monkeybot.core.runtime.events import (
     AssistantDelta,
     ContextSummarized,
@@ -46,12 +47,16 @@ from monkeybot.core.runtime.events import (
     ToolConfirmationRequestEvent,
     TurnComplete,
 )
-from monkeybot.core.runtime.history_compaction import _compact_history_if_needed
+from monkeybot.core.runtime.history_compaction import (
+    _compact_history_if_needed,
+    _summarization_viable,
+)
 from monkeybot.core.runtime.loop import run
 from monkeybot.core.runtime.loop_messages import _messages_for_provider
 from monkeybot.core.runtime.loop_usage import _merge_usage_event, _usage_to_totals
 from monkeybot.core.runtime.tool_batch import _chunk_tool_calls
 from monkeybot.core.runtime.tool_dispatch import _media_events, _resolved_path_for_call
+from monkeybot.core.runtime.turn_loop import _token_pressure_should_summarize
 from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
 from monkeybot.core.tools.inspector import Decision
 from monkeybot.core.tools.types import ToolExecutionResult
@@ -1875,6 +1880,62 @@ async def test_token_pressure_compaction_does_not_persist_synthetic_repairs(
         for b in m.content:
             if isinstance(b, ToolResponse):
                 assert marker not in " ".join(x.text for x in b.result if isinstance(x, Text))
+
+
+def _short(role: str) -> Message:
+    return Message(role=role, content=[Text(text="z" * 40)])
+
+
+# Raw rows viable, coalesced view (user + assistant) is not.
+_RAW_ONLY_VIABLE = [_short("user")] * 4 + [_short("assistant")]
+# Coalesced view viable (synthetic repair adds a row), raw rows are not.
+_VIEW_ONLY_VIABLE = [
+    _short("user"),
+    Message(role="assistant", content=[ToolRequest(id="orphan", name="echo", args={})]),
+    _short("assistant"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(_RAW_ONLY_VIABLE, True), (_VIEW_ONLY_VIABLE, False)],
+    ids=["raw_only_viable", "view_only_viable"],
+)
+async def test_token_pressure_trigger_agrees_with_raw_compaction(
+    raw: list[Message], expected: bool
+) -> None:
+    """Trigger judges viability on raw rows, matching what compaction actually splits."""
+    view = transform_context(raw)
+    assert _summarization_viable(view, window_tokens=100) is not expected
+    hist = FakeHistory(raw)
+    fired = await _token_pressure_should_summarize(
+        history=hist, thread_id="t1", preflight=10, cap=10, window_tokens=100
+    )
+    assert fired is expected
+    turns = await _compact_history_if_needed(
+        thread_id="t1",
+        history=hist,
+        provider=FakeProvider([[TextDelta(text="summary"), Done()]]),
+        model="gemini-2.5-flash",
+        window_tokens=100,
+    )
+    assert (turns > 0) is expected
+
+
+@pytest.mark.asyncio
+async def test_token_pressure_trigger_skips_load_below_cap() -> None:
+    class NoLoadHistory(FakeHistory):
+        async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
+            raise AssertionError("history.load must not run below cap")
+
+    assert not await _token_pressure_should_summarize(
+        history=NoLoadHistory(_RAW_ONLY_VIABLE),
+        thread_id="t1",
+        preflight=9,
+        cap=10,
+        window_tokens=100,
+    )
 
 
 @pytest.mark.asyncio
