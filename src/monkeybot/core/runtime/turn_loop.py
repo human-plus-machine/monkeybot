@@ -90,9 +90,9 @@ from .events import (
 from .history_compaction import (
     HISTORY_LOAD_MAX,
     _await_history_write,
+    _compact_history_if_needed,
     _intent_facts_from_ctx,
     _summarization_model_id,
-    _compact_history_if_needed,
     _summarization_viable,
     protect_recent_count,
     truncate_history_preserving_pins,

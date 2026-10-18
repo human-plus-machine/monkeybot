@@ -15,6 +15,7 @@ from monkeybot.core.context.epoch import ContextEpochTracker
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.messages.transform_context import provider_visible_blocks
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.thread_summary import CONTEXT_SUMMARY_PREFIX
 from monkeybot.core.runtime.context_budget import (
@@ -173,12 +174,16 @@ def _raw_message_char_count(message: Message) -> int:
     decisions blind to large tool outputs — the exact payloads a
     token-budgeted tail exists to protect against.
 
+    Sizes only provider-visible blocks (stored UI blocks and completed-reply
+    Thinking are stripped before the provider call, so they must not shrink the
+    token-budgeted tail).
+
     Also counts ``Image`` / ``File`` base64 payloads and ``Thinking`` traces at
     full length: falling back to ``type(block).__name__`` would report ~5–8
     chars for multi-kilobyte multimodal / reasoning blocks and blow past
     ``SUMMARY_KEEP_TAIL_RATIO``.
     """
-    return sum(_raw_block_char_count(block) for block in message.content)
+    return sum(_raw_block_char_count(block) for block in provider_visible_blocks(message))
 
 
 def _estimate_message_tokens(message: Message) -> int:
@@ -208,33 +213,47 @@ def _split_accountable(
 ) -> tuple[list[Message], list[Message], list[Message]]:
     """Split history into (head, middle, tail) with a token-budgeted recent tail.
 
-    Tail grows from the newest message until it reaches
+    Head and tail slots (and the tail budget) are counted over rows with
+    provider-visible content; UI-only / thinking-only raw rows ride along with
+    their neighbours for free. Tail grows from the newest message until it reaches
     ``window_tokens * SUMMARY_KEEP_TAIL_RATIO`` (at least ``SUMMARY_KEEP_TAIL_MIN``
-    rows), leaving ≥1 middle row whenever the transcript is long enough to compact.
+    visible rows), leaving ≥1 middle row whenever the transcript is long enough.
     """
     n = len(messages)
+    visible = [bool(provider_visible_blocks(m)) for m in messages]
     min_for_middle = SUMMARY_KEEP_HEAD_COUNT + SUMMARY_KEEP_TAIL_MIN + 1
-    if n < min_for_middle:
+    if sum(visible) < min_for_middle:
         return list(messages), [], []
 
-    head = list(messages[:SUMMARY_KEEP_HEAD_COUNT])
+    head_end = 0
+    seen = 0
+    for i, is_visible in enumerate(visible):
+        if is_visible:
+            seen += 1
+            if seen == SUMMARY_KEEP_HEAD_COUNT:
+                head_end = i + 1
+                break
+    head = list(messages[:head_end])
     tail_budget = max(1, int(max(1, window_tokens) * SUMMARY_KEEP_TAIL_RATIO))
-    max_tail = n - SUMMARY_KEEP_HEAD_COUNT - 1  # leave ≥1 middle
+    max_tail = n - head_end - 1  # leave ≥1 middle
 
     tail_rev: list[Message] = []
+    visible_in_tail = 0
     used = 0
-    for i in range(n - 1, SUMMARY_KEEP_HEAD_COUNT - 1, -1):
+    for i in range(n - 1, head_end - 1, -1):
         if len(tail_rev) >= max_tail:
             break
         msg = messages[i]
-        tok = _estimate_message_tokens(msg)
-        if len(tail_rev) >= SUMMARY_KEEP_TAIL_MIN and used + tok > tail_budget:
-            break
+        if visible[i]:
+            tok = _estimate_message_tokens(msg)
+            if visible_in_tail >= SUMMARY_KEEP_TAIL_MIN and used + tok > tail_budget:
+                break
+            used += tok
+            visible_in_tail += 1
         tail_rev.append(msg)
-        used += tok
 
     tail = list(reversed(tail_rev))
-    middle = list(messages[SUMMARY_KEEP_HEAD_COUNT : n - len(tail)])
+    middle = list(messages[head_end : n - len(tail)])
     return head, middle, tail
 
 
@@ -339,7 +358,7 @@ def _summarization_viable(
     window_tokens: int,
 ) -> bool:
     _, middle, _ = split_messages_for_compaction(messages, window_tokens=window_tokens)
-    return bool(middle)
+    return any(provider_visible_blocks(m) for m in middle)
 
 
 def _summarization_model_id(ctx: TurnContext) -> str:
@@ -375,14 +394,8 @@ async def _compact_history_if_needed(
     intent_facts: str | None = None,
 ) -> int:
     """Summarize middle history when tool results exhausted headroom."""
-    # Compaction persists via history.reset; use unrepaired rows so synthetic
-    # in-memory repairs are never written to the store.
-    chat_messages = await history.load(thread_id)
-    if not _summarization_viable(chat_messages, window_tokens=window_tokens):
-        return 0
     return await _summarize_history(
         thread_id,
-        chat_messages,
         history,
         provider,
         model,
@@ -460,7 +473,6 @@ async def _append_budgeted_tool_responses(
 
 async def _summarize_history(
     thread_id: str,
-    messages: list[Message],
     history: HistoryStore,
     provider: Provider,
     model: str,
@@ -468,11 +480,19 @@ async def _summarize_history(
     window_tokens: int,
     intent_facts: str | None = None,
 ) -> int:
-    """Compress middle history into one assistant summary row. Returns middle row count."""
+    """Compress middle history into one assistant summary row. Returns middle row count.
+
+    Loads raw stored rows itself: ``history.reset`` persists whatever it is given, so
+    callers must never hand it a ``transform_context`` view (that would permanently
+    drop verdicts, descriptors, thinking and merged ``row_id``s, and persist
+    synthetic tool repairs).
+    """
+    messages = await history.load(thread_id)
     head, middle, tail = split_messages_for_compaction(
         messages, window_tokens=window_tokens
     )
-    if not middle:
+    lines = [line for m in middle if (line := _summary_line_for_message(m, window_tokens=window_tokens))]
+    if not lines:
         return 0
     logger.debug(
         "history compaction split %s",
@@ -485,7 +505,6 @@ async def _summarize_history(
             tail_budget=max(1, int(max(1, window_tokens) * SUMMARY_KEEP_TAIL_RATIO)),
         ),
     )
-    lines = [_summary_line_for_message(m, window_tokens=window_tokens) for m in middle]
     blob = "\n\n---\n\n".join(lines)
     user_text = "Create a structured summary from the conversation segment below.\n\n" + blob
     if intent_facts:

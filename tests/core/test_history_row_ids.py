@@ -231,7 +231,6 @@ async def test_compaction_keeps_head_and_tail_ids_and_adds_a_summary_row(store) 
     original = {m.row_id for m in loaded}
     summarized = await _summarize_history(
         "t",
-        loaded,
         store,
         _SummaryProvider(),
         "m",
@@ -266,7 +265,7 @@ async def test_compaction_on_raw_rows_keeps_rows_transform_context_would_merge(s
     assert len(transform_context(raw)) < len(raw)
     ids_before = {m.row_id for m in raw}
     assert await _summarize_history(
-        "t", raw, store, _SummaryProvider(), "m", window_tokens=100  # type: ignore[arg-type]
+        "t", store, _SummaryProvider(), "m", window_tokens=100  # type: ignore[arg-type]
     )
     rows = await store.load("t")
     assert any(

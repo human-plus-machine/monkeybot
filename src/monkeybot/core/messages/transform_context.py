@@ -38,6 +38,22 @@ _PROVIDER_EXCLUDED_BLOCKS: tuple[type[ContentBlock], ...] = (
 )
 
 
+def provider_visible_blocks(msg: Message) -> list[ContentBlock]:
+    """Blocks of ``msg`` that survive :func:`transform_context` into the provider payload.
+
+    Mirrors the strip rules: UI-only blocks never reach providers, and Thinking is
+    kept only on assistant rows that carry a ``ToolRequest`` (signature replay).
+    """
+    has_tool_request = any(isinstance(b, ToolRequest) for b in msg.content)
+    drop_thinking = msg.role == "assistant" and not has_tool_request
+    return [
+        b
+        for b in msg.content
+        if not isinstance(b, _PROVIDER_EXCLUDED_BLOCKS)
+        and not (drop_thinking and isinstance(b, (Thinking, RedactedThinking)))
+    ]
+
+
 def _strip_provider_excluded(messages: Sequence[Message]) -> list[Message]:
     out: list[Message] = []
     for msg in messages:
