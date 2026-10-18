@@ -47,9 +47,7 @@ def test_wait_for_page_2_is_one_harness_call(
     assert rec["ok"] is True
 
 
-def test_wait_for_missing_selector_times_out(
-    fixture_server: str, cdp_url: str
-) -> None:
+def test_wait_for_missing_selector_times_out(fixture_server: str, cdp_url: str) -> None:
     from browser_mcp import server
 
     json.loads(server.browser_goto(f"{fixture_server}/spa.html"))

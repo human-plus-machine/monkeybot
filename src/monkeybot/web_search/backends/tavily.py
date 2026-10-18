@@ -20,8 +20,7 @@ class TavilyBackend:
             import httpx
         except ImportError as exc:
             raise ImportError(
-                "httpx is required for the Tavily backend. "
-                "Install with: uv add httpx"
+                "httpx is required for the Tavily backend. Install with: uv add httpx"
             ) from exc
 
         payload = {

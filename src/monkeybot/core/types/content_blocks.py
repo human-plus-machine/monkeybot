@@ -30,9 +30,7 @@ def _require_str(d: Mapping[str, object], key: str, *, context: str) -> str:
         raise ValueError(f"{context}: missing required field {key!r}")
     val = d[key]
     if not isinstance(val, str):
-        raise ValueError(
-            f"{context}: field {key!r} must be a string, got {type(val).__name__}"
-        )
+        raise ValueError(f"{context}: field {key!r} must be a string, got {type(val).__name__}")
     return val
 
 
@@ -60,17 +58,14 @@ def _require_dict(d: Mapping[str, object], key: str, context: str) -> dict[str, 
     return val
 
 
-def _optional_dict(
-    d: Mapping[str, object], key: str, *, context: str
-) -> dict[str, object] | None:
+def _optional_dict(d: Mapping[str, object], key: str, *, context: str) -> dict[str, object] | None:
     """Return optional JSON object; absent or null -> None."""
     if key not in d or d[key] is None:
         return None
     val = d[key]
     if not isinstance(val, dict):
         raise ValueError(
-            f"{context}: field {key!r} must be a JSON object or null, "
-            f"got {type(val).__name__}"
+            f"{context}: field {key!r} must be a JSON object or null, got {type(val).__name__}"
         )
     return val
 
@@ -81,9 +76,7 @@ def _require_bool(d: Mapping[str, object], key: str, *, context: str) -> bool:
         raise ValueError(f"{context}: missing required field {key!r}")
     val = d[key]
     if not isinstance(val, bool):
-        raise ValueError(
-            f"{context}: field {key!r} must be a boolean, got {type(val).__name__}"
-        )
+        raise ValueError(f"{context}: field {key!r} must be a boolean, got {type(val).__name__}")
     return val
 
 
@@ -94,23 +87,18 @@ def _parse_tool_response_is_error(d: Mapping[str, object], *, context: str) -> b
     return _require_bool(d, "isError", context=context)
 
 
-def _require_block_list(
-    d: Mapping[str, object], key: str, *, context: str
-) -> list[ContentBlock]:
+def _require_block_list(d: Mapping[str, object], key: str, *, context: str) -> list[ContentBlock]:
     """Parse a list of content block objects."""
     if key not in d:
         raise ValueError(f"{context}: missing required field {key!r}")
     val = d[key]
     if not isinstance(val, list):
-        raise ValueError(
-            f"{context}: field {key!r} must be a list, got {type(val).__name__}"
-        )
+        raise ValueError(f"{context}: field {key!r} must be a list, got {type(val).__name__}")
     blocks: list[ContentBlock] = []
     for i, item in enumerate(val):
         if not isinstance(item, dict):
             raise ValueError(
-                f"{context}: {key!r}[{i}] must be a JSON object, "
-                f"got {type(item).__name__}"
+                f"{context}: {key!r}[{i}] must be a JSON object, got {type(item).__name__}"
             )
         blocks.append(ContentBlock.from_dict(item))
     return blocks
@@ -129,18 +117,14 @@ def _action_data_from_mapping(data: Mapping[str, object]) -> ActionRequiredData:
         return ToolConfirmationAction(
             id=_require_str(data, "id", context=f"{ctx}.toolConfirmation"),
             tool_name=_require_str(data, "toolName", context=f"{ctx}.toolConfirmation"),
-            arguments=_require_args_dict(
-                data, "arguments", context=f"{ctx}.toolConfirmation"
-            ),
+            arguments=_require_args_dict(data, "arguments", context=f"{ctx}.toolConfirmation"),
             prompt=_optional_str(data, "prompt"),
         )
     if action_type == ElicitationAction.ACTION_TYPE:
         return ElicitationAction(
             id=_require_str(data, "id", context=f"{ctx}.elicitation"),
             message=_require_str(data, "message", context=f"{ctx}.elicitation"),
-            requested_schema=_require_dict(
-                data, "requestedSchema", context=f"{ctx}.elicitation"
-            ),
+            requested_schema=_require_dict(data, "requestedSchema", context=f"{ctx}.elicitation"),
         )
     if action_type == ElicitationResponseAction.ACTION_TYPE:
         return ElicitationResponseAction(
@@ -485,9 +469,7 @@ class ToolConfirmationRequest(ContentBlock):
         return cls(
             id=_require_str(payload, "id", context="ToolConfirmationRequest"),
             tool_name=_require_str(payload, "toolName", context="ToolConfirmationRequest"),
-            arguments=_require_args_dict(
-                payload, "arguments", context="ToolConfirmationRequest"
-            ),
+            arguments=_require_args_dict(payload, "arguments", context="ToolConfirmationRequest"),
             prompt=_optional_str(payload, "prompt"),
         )
 
@@ -586,9 +568,7 @@ class SystemNotification(ContentBlock):
     @classmethod
     def _from_dict_payload(cls, payload: Mapping[str, object]) -> Self:
         return cls(
-            notification_type=_notification_type_from_wire(
-                payload, context="SystemNotification"
-            ),
+            notification_type=_notification_type_from_wire(payload, context="SystemNotification"),
             msg=_require_str(payload, "msg", context="SystemNotification"),
             data=_optional_dict(payload, "data", context="SystemNotification"),
         )

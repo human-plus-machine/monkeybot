@@ -83,7 +83,7 @@ class LLMError(MonkeybotError):
         - Rate limit exceeded (429)
         - Model unavailable (503)
         - Invalid API credentials
-        
+
     Note: Provider-level LLM errors are handled by the streaming adapter; this
     exception is kept for explicit error handling when needed.
     """

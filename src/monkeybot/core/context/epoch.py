@@ -206,9 +206,7 @@ class ContextEpochTracker:
         return f"{state.stable_baseline}{state.baseline_volatile}"
 
 
-def _diff_source_names(
-    prior: Mapping[str, str], current: Mapping[str, str]
-) -> tuple[str, ...]:
+def _diff_source_names(prior: Mapping[str, str], current: Mapping[str, str]) -> tuple[str, ...]:
     """Names of volatile sources whose fingerprint changed (added/removed/edited).
 
     Falls back to the catch-all ``"volatile"`` when the caller didn't supply

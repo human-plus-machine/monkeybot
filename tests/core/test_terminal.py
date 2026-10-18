@@ -44,7 +44,7 @@ def executor():
 def test_data_dir(tmp_path):
     """
     Create temporary test data directory.
-    
+
     Creates a directory structure that mimics the allowed paths:
         tmp_path/
             data/
@@ -64,7 +64,7 @@ def test_data_dir(tmp_path):
 class TestTerminalExecutorSecurity:
     """
     Security-focused tests for Terminal Executor.
-    
+
     These tests verify that the security boundary is properly enforced.
     ALL tests in this class must pass for the system to be secure.
     """
@@ -113,7 +113,7 @@ class TestTerminalExecutorSecurity:
             "/etc/shadow",
             "/root/.ssh/id_rsa",
             "/var/log/system.log",
-            "./unauthorized/path/file.txt"
+            "./unauthorized/path/file.txt",
         ]
 
         for path in dangerous_paths:
@@ -129,7 +129,7 @@ class TestTerminalExecutorSecurity:
         # These paths start with allowed prefixes but try to escape
         traversal_attempts = [
             "./unauthorized/path/file.txt",  # Not in allowed paths
-            "/etc/passwd",                     # System file
+            "/etc/passwd",  # System file
         ]
 
         # These should be blocked by the allowlist check
@@ -240,7 +240,7 @@ class TestTerminalExecutorSecurity:
 class TestTerminalExecutorExecution:
     """
     Functional tests for Terminal Executor.
-    
+
     These tests verify correct execution behavior for valid commands.
     """
 
@@ -257,10 +257,7 @@ class TestTerminalExecutorExecution:
     async def test_failed_command_returns_error(self, executor):
         """Test that failed command returns non-zero exit code."""
         # Python with invalid syntax should exit with error
-        result = await executor.execute(
-            "python3",
-            ["-c", "import sys; sys.exit(1)"]
-        )
+        result = await executor.execute("python3", ["-c", "import sys; sys.exit(1)"])
 
         assert result.exit_code == 1
 
@@ -268,8 +265,7 @@ class TestTerminalExecutorExecution:
     async def test_command_with_stderr(self, executor):
         """Test that command writing to stderr is captured."""
         result = await executor.execute(
-            "python3",
-            ["-c", "import sys; sys.stderr.write('Error message\\n')"]
+            "python3", ["-c", "import sys; sys.stderr.write('Error message\\n')"]
         )
 
         assert "Error message" in result.stderr
@@ -278,8 +274,7 @@ class TestTerminalExecutorExecution:
     async def test_command_with_multiple_arguments(self, executor):
         """Test that commands with multiple arguments work."""
         result = await executor.execute(
-            "python3",
-            ["-c", "import sys; print('arg1'); print('arg2')"]
+            "python3", ["-c", "import sys; print('arg1'); print('arg2')"]
         )
 
         assert result.exit_code == 0
@@ -480,9 +475,7 @@ class TestTerminalExecutorExecution:
         assert seen[0][1:] == ("search", "q")
 
     @pytest.mark.asyncio
-    async def test_mempalace_falls_back_to_python_module(
-        self, executor, tmp_path, monkeypatch
-    ):
+    async def test_mempalace_falls_back_to_python_module(self, executor, tmp_path, monkeypatch):
         import asyncio
         import sys
         from unittest.mock import AsyncMock, MagicMock
@@ -531,7 +524,7 @@ class TestTerminalExecutorExecution:
 class TestTerminalExecutorTimeout:
     """
     Timeout handling tests for Terminal Executor.
-    
+
     These tests verify that long-running processes are properly killed.
     """
 
@@ -541,11 +534,7 @@ class TestTerminalExecutorTimeout:
         from monkeybot.core.tools.terminal import CommandTimeoutError
 
         with pytest.raises(CommandTimeoutError) as exc_info:
-            await executor.execute(
-                "python3",
-                ["-c", "import time; time.sleep(60)"],
-                timeout=1
-            )
+            await executor.execute("python3", ["-c", "import time; time.sleep(60)"], timeout=1)
 
         assert "timeout" in str(exc_info.value).lower()
         assert exc_info.value.timeout == 1
@@ -592,20 +581,17 @@ class TestTerminalExecutorTimeout:
                 ),
                 timeout=8,
             )
-        assert "descendant" in str(exc_info.value).lower() or "streams did not close" in str(
-            exc_info.value
-        ).lower()
+        assert (
+            "descendant" in str(exc_info.value).lower()
+            or "streams did not close" in str(exc_info.value).lower()
+        )
         assert "done" in exc_info.value.stdout
 
     @pytest.mark.asyncio
     async def test_fast_command_does_not_timeout(self, executor):
         """Test that fast commands complete before timeout."""
         # Set generous timeout for fast command
-        result = await executor.execute(
-            "echo",
-            ["Fast command"],
-            timeout=5
-        )
+        result = await executor.execute("echo", ["Fast command"], timeout=5)
 
         assert result.exit_code == 0
         assert "Fast command" in result.stdout
@@ -615,9 +601,7 @@ class TestTerminalExecutorTimeout:
         """Test that custom timeout values are respected."""
         # Command that sleeps 2 seconds should succeed with 3s timeout
         result = await executor.execute(
-            "python3",
-            ["-c", "import time; time.sleep(2); print('Done')"],
-            timeout=3
+            "python3", ["-c", "import time; time.sleep(2); print('Done')"], timeout=3
         )
 
         assert result.exit_code == 0
@@ -627,7 +611,7 @@ class TestTerminalExecutorTimeout:
 class TestTerminalExecutorOutputTruncation:
     """
     Output truncation tests for Terminal Executor.
-    
+
     These tests verify that large outputs don't cause memory issues.
     """
 
@@ -635,10 +619,7 @@ class TestTerminalExecutorOutputTruncation:
     async def test_large_stdout_truncated(self, executor):
         """Test that large stdout is truncated to 1MB."""
         # Generate 2MB of output
-        result = await executor.execute(
-            "python3",
-            ["-c", "print('x' * (2 * 1024 * 1024))"]
-        )
+        result = await executor.execute("python3", ["-c", "print('x' * (2 * 1024 * 1024))"])
 
         # Should be truncated to ~1MB
         assert len(result.stdout) <= 1024 * 1024 + 200  # Small buffer for message
@@ -649,8 +630,7 @@ class TestTerminalExecutorOutputTruncation:
         """Test that large stderr is truncated to 1MB."""
         # Generate 2MB of error output
         result = await executor.execute(
-            "python3",
-            ["-c", "import sys; sys.stderr.write('x' * (2 * 1024 * 1024))"]
+            "python3", ["-c", "import sys; sys.stderr.write('x' * (2 * 1024 * 1024))"]
         )
 
         # Should be truncated to ~1MB
@@ -660,10 +640,7 @@ class TestTerminalExecutorOutputTruncation:
     @pytest.mark.asyncio
     async def test_small_output_not_truncated(self, executor):
         """Test that small outputs are not truncated."""
-        result = await executor.execute(
-            "echo",
-            ["Small output"]
-        )
+        result = await executor.execute("echo", ["Small output"])
 
         assert result.exit_code == 0
         assert "Small output" in result.stdout
@@ -673,17 +650,14 @@ class TestTerminalExecutorOutputTruncation:
 class TestTerminalExecutorEdgeCases:
     """
     Edge case tests for Terminal Executor.
-    
+
     These tests verify handling of unusual but valid inputs.
     """
 
     @pytest.mark.asyncio
     async def test_command_with_special_characters_in_output(self, executor):
         """Test that special characters in output are handled correctly."""
-        result = await executor.execute(
-            "echo",
-            ["Special chars: !@#$%^&*()[]{}"]
-        )
+        result = await executor.execute("echo", ["Special chars: !@#$%^&*()[]{}"])
 
         assert result.exit_code == 0
         assert "Special chars" in result.stdout
@@ -691,10 +665,7 @@ class TestTerminalExecutorEdgeCases:
     @pytest.mark.asyncio
     async def test_command_with_unicode_output(self, executor):
         """Test that unicode output is decoded correctly."""
-        result = await executor.execute(
-            "python3",
-            ["-c", "print('Unicode: 你好世界 🚀')"]
-        )
+        result = await executor.execute("python3", ["-c", "print('Unicode: 你好世界 🚀')"])
 
         assert result.exit_code == 0
         # Unicode should be in output (or replaced if not valid UTF-8)
@@ -703,10 +674,7 @@ class TestTerminalExecutorEdgeCases:
     @pytest.mark.asyncio
     async def test_command_with_empty_output(self, executor):
         """Test that commands with no output work correctly."""
-        result = await executor.execute(
-            "python3",
-            ["-c", "pass"]
-        )
+        result = await executor.execute("python3", ["-c", "pass"])
 
         assert result.exit_code == 0
         assert result.stdout == ""
@@ -729,7 +697,7 @@ class TestTerminalExecutorEdgeCases:
 class TestTerminalExecutorConstants:
     """
     Tests for security constants configuration.
-    
+
     These tests document and verify the security configuration.
     """
 
@@ -775,16 +743,25 @@ class TestTerminalExecutorConstants:
     def test_no_dangerous_commands_in_allowlist(self):
         """Test that dangerous commands are not in allowlist."""
         dangerous_commands = [
-            "rm", "rmdir", "del",  # Deletion
-            "curl", "wget",         # Network access
-            "sudo", "su",           # Privilege escalation
-            "chmod", "chown",       # Permission changes
-            "kill", "killall",      # Process manipulation
-            "eval", "exec",         # Code execution
+            "rm",
+            "rmdir",
+            "del",  # Deletion
+            "curl",
+            "wget",  # Network access
+            "sudo",
+            "su",  # Privilege escalation
+            "chmod",
+            "chown",  # Permission changes
+            "kill",
+            "killall",  # Process manipulation
+            "eval",
+            "exec",  # Code execution
         ]
 
         for cmd in dangerous_commands:
-            assert cmd not in ALLOWED_COMMANDS, f"Dangerous command '{cmd}' found in ALLOWED_COMMANDS!"
+            assert cmd not in ALLOWED_COMMANDS, (
+                f"Dangerous command '{cmd}' found in ALLOWED_COMMANDS!"
+            )
 
 
 @pytest.mark.skipif(
@@ -884,9 +861,7 @@ class TestTerminalExecutorIsolationFallback:
             "isolation_support",
             lambda: IsolationSupport("none", "probe says no"),
         )
-        executor = TerminalExecutor(
-            allowed_path_prefixes=[str(tmp_path)], hidden_paths=[palace]
-        )
+        executor = TerminalExecutor(allowed_path_prefixes=[str(tmp_path)], hidden_paths=[palace])
 
         with pytest.raises(SecurityError, match="Filesystem isolation is unavailable"):
             await executor.execute("echo", ["should-not-run"])
@@ -1043,9 +1018,7 @@ class TestTerminalExecutorJailRoots:
         )
         roots = JailRoots(deny=(home,), read_write=(workspace,))
 
-        result = await executor.execute(
-            "cat", [str(secret)], cwd=workspace, jail_roots=roots
-        )
+        result = await executor.execute("cat", [str(secret)], cwd=workspace, jail_roots=roots)
 
         assert result.exit_code != 0
         assert "PDF-BYTES" not in result.stdout

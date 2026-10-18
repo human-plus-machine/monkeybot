@@ -64,9 +64,7 @@ def test_seek_sequence_whitespace() -> None:
 
 def test_derive_new_contents_exact() -> None:
     original = "a\nb\nc\n"
-    chunks = (
-        UpdateChunk(old_lines=("b",), new_lines=("B",)),
-    )
+    chunks = (UpdateChunk(old_lines=("b",), new_lines=("B",)),)
     out = derive_new_contents("f.txt", chunks, original)
     assert out == "a\nB\nc\n"
 
@@ -228,9 +226,7 @@ def test_mid_apply_rollback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert (tmp_path / "keep.txt").read_text(encoding="utf-8") == "keep\n"
 
 
-def test_rollback_failed_lists_dirty_paths(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_rollback_failed_lists_dirty_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ws = WorkspaceFileService(tmp_path)
     (tmp_path / "old.txt").write_text("old\n", encoding="utf-8")
 

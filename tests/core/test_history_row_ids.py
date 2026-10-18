@@ -265,7 +265,11 @@ async def test_compaction_on_raw_rows_keeps_rows_transform_context_would_merge(s
     assert len(transform_context(raw)) < len(raw)
     ids_before = {m.row_id for m in raw}
     assert await _summarize_history(
-        "t", store, _SummaryProvider(), "m", window_tokens=100  # type: ignore[arg-type]
+        "t",
+        store,
+        _SummaryProvider(),  # type: ignore[arg-type]
+        "m",
+        window_tokens=100,
     )
     rows = await store.load("t")
     assert any(

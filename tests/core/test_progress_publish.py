@@ -202,9 +202,7 @@ async def test_coalesce_drops_non_forwardable() -> None:
         coalesce_ms=60_000,
         coalesce_chars=512,
     )
-    await coalescer.handle(
-        SystemPromptSnapshot(request_id="r", inner_turn=1, text="## Agent")
-    )
+    await coalescer.handle(SystemPromptSnapshot(request_id="r", inner_turn=1, text="## Agent"))
     assert pub.events == []
 
 

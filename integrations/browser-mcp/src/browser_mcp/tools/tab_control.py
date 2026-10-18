@@ -22,6 +22,7 @@ def browser_tabs() -> str:
     reg.refresh(helpers)
     return results.json_text(reg.list_payload())
 
+
 @mcp.tool()
 @_public_tool
 def browser_switch_tab(target_id: str, observe: str | None = None) -> str:
@@ -60,6 +61,7 @@ def browser_switch_tab(target_id: str, observe: str | None = None) -> str:
     )
     return results.json_text(results.with_observation(payload, wrapped))
 
+
 @mcp.tool()
 @_public_tool
 def browser_open_tab(
@@ -93,6 +95,7 @@ def browser_open_tab(
         before_url="",
     )
     return results.json_text(results.with_observation(opened, wrapped))
+
 
 @mcp.tool()
 @_public_tool
@@ -140,6 +143,7 @@ def browser_close_tab(tab: str) -> str:
         focused = reg.focused()
         focused_tab = focused.tab if focused else None
     return results.json_text({"ok": True, "closed": closed, "focused": focused_tab})
+
 
 @mcp.tool()
 @_public_tool

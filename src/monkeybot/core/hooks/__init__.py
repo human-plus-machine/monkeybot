@@ -111,9 +111,7 @@ class HookPayload:
 HookFn = Callable[[HookPayload], Awaitable[None]]
 
 
-_in_hook: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "monkeybot_in_hook", default=False
-)
+_in_hook: contextvars.ContextVar[bool] = contextvars.ContextVar("monkeybot_in_hook", default=False)
 
 
 _DEFAULT_TIMEOUT_S = 2.0

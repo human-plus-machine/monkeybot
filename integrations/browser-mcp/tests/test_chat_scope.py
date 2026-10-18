@@ -32,9 +32,7 @@ def _request_ctx(meta: object) -> SimpleNamespace:
     return SimpleNamespace(request_context=SimpleNamespace(meta=meta))
 
 
-def _install_in_app_harness(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> MagicMock:
+def _install_in_app_harness(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> MagicMock:
     cdp_file = tmp_path / "in-app-cdp-url"
     cdp_file.write_text("http://127.0.0.1:9333", encoding="utf-8")
     monkeypatch.setattr(in_app_cdp, "_IN_APP_CDP_URL_FILE", cdp_file)
@@ -262,9 +260,7 @@ def test_public_tool_continues_when_announce_fails(
     assert browse() == "ok"
 
 
-def test_in_app_bind_resets_and_announces(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_in_app_bind_resets_and_announces(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     helpers = _install_in_app_harness(monkeypatch, tmp_path)
     monkeypatch.setattr(chat_scope, "current_thread_id", lambda: "sess-bind")
 

@@ -1050,15 +1050,18 @@ def test_sealed_passkey_posts_bearer_and_strips_secrets(
 
     req = captured["req"]
     assert isinstance(req, Request)
-    assert result == {"ok": True, "loggedIn": True, "origin": "https://example.com", "mode": "passkey"}
+    assert result == {
+        "ok": True,
+        "loggedIn": True,
+        "origin": "https://example.com",
+        "mode": "passkey",
+    }
     assert req.full_url == "http://127.0.0.1:9333/json/passkey"
     assert req.get_header("Authorization") == "Bearer secret-token"
     assert req.get_method() == "POST"
 
 
-def test_browser_passkey_tool_returns_json(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_browser_passkey_tool_returns_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _publish_loopback_bridge(tmp_path, monkeypatch)
 
     def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
@@ -1149,9 +1152,7 @@ def test_sealed_passkey_passes_through_grant_expired(
     """Passkey shares the login grant check; a stale grant must read as 'grant
     expired', not collapse to 'login failed' and prompt a pointless retry."""
     _publish_loopback_bridge(tmp_path, monkeypatch)
-    payload = json.dumps({"ok": False, "loggedIn": False, "error": "grant expired"}).encode(
-        "utf-8"
-    )
+    payload = json.dumps({"ok": False, "loggedIn": False, "error": "grant expired"}).encode("utf-8")
 
     def fake_open(req: Request, timeout: object = None) -> _FakeHttpResponse:
         raise HTTPError(req.full_url, 400, "Bad Request", hdrs=None, fp=BytesIO(payload))

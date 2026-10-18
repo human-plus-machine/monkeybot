@@ -57,8 +57,7 @@ class PushToTalkGate:
         keys = aliases.get(key_name)
         if keys is None:
             raise PushToTalkError(
-                f"Unsupported push-to-talk key '{key_name}'. "
-                "Use one of: cmd, alt, ctrl, space"
+                f"Unsupported push-to-talk key '{key_name}'. Use one of: cmd, alt, ctrl, space"
             )
         return keys
 

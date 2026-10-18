@@ -135,9 +135,7 @@ def _with_query_param(url: str, name: str, value: str | None) -> str:
         return url
     parsed = urlparse(url)
     pairs = [
-        (key, item)
-        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
-        if key != name
+        (key, item) for key, item in parse_qsl(parsed.query, keep_blank_values=True) if key != name
     ]
     pairs.append((name, value))
     return urlunparse(parsed._replace(query=urlencode(pairs)))

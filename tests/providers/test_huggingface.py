@@ -33,6 +33,7 @@ def test_huggingface_provider_requires_token(monkeypatch: pytest.MonkeyPatch) ->
     with pytest.raises(ValueError, match="HF_TOKEN"):
         HuggingFaceProvider()
 
+
 def test_is_tool_unsupported_error_openai_status() -> None:
     try:
         import httpx

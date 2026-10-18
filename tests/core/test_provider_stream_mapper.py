@@ -49,9 +49,7 @@ def test_mapper_tool_call_closes_blocks_and_buffers() -> None:
 def test_mapper_tool_input_delta_and_done() -> None:
     m = ProviderStreamMapper("r1")
     evs = m.map(ToolInputDelta(call_id="c1", name="x", delta="{"))
-    assert evs == [
-        ToolInputDeltaEvent(request_id="r1", call_id="c1", tool="x", delta="{")
-    ]
+    assert evs == [ToolInputDeltaEvent(request_id="r1", call_id="c1", tool="x", delta="{")]
     assert m.map(Done(truncated=True)) == []
     assert m.stream_truncated is True
 

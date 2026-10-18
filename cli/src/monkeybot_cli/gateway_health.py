@@ -20,9 +20,7 @@ def port_free(port: int, host: str = "127.0.0.1") -> bool:
             return False
 
 
-def wait_for_health(
-    base: str, proc: subprocess.Popen[str] | None, timeout_s: float = 30.0
-) -> bool:
+def wait_for_health(base: str, proc: subprocess.Popen[str] | None, timeout_s: float = 30.0) -> bool:
     """Poll ``GET {base}/health`` until 200 from *our* child, process dies, or timeout.
 
     On success we re-check ``proc.poll()`` so a pre-existing listener on the same

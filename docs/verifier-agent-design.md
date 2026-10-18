@@ -509,14 +509,14 @@ _PROVIDER_EXCLUDED_BLOCKS: tuple[type[ContentBlock], ...] = (
 
 A row whose blocks are entirely provider-excluded is dropped whole, with adjacency fallout already handled by `_coalesce_adjacent_same_role`:
 
-**`src/monkeybot/core/messages/transform_context.py:43-49`**
+**`src/monkeybot/core/messages/transform_context.py` (`_strip_non_provider_blocks`)**
 
 ```python
-        kept = [b for b in msg.content if not isinstance(b, _PROVIDER_EXCLUDED_BLOCKS)]
+        kept = provider_visible_blocks(msg)
         if not kept and msg.content:
             logger.debug(
-                "transform_context drop_ui_only_turn %s",
-                kv(action="drop_ui_only_turn", role=msg.role, blocks=len(msg.content)),
+                "transform_context drop_non_provider_turn %s",
+                kv(action="drop_non_provider_turn", role=msg.role, blocks=len(msg.content)),
             )
             continue
 ```

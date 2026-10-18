@@ -117,7 +117,9 @@ class GCSWorkspaceStorage:
         try:
             await asyncio.to_thread(sb.delete)
         except Exception as exc:
-            _log.warning("gcs move: delete source failed after copy src=%s dest=%s: %r", sk, dk, exc)
+            _log.warning(
+                "gcs move: delete source failed after copy src=%s dest=%s: %r", sk, dk, exc
+            )
 
     async def mtime(self, path: str) -> float | None:
         key = self._key(path)

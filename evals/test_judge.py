@@ -30,6 +30,7 @@ def main() -> int:
     print(f"  creds    : {creds or '(NOT SET)'}")
     if creds:
         import pathlib
+
         p = pathlib.Path(creds)
         print(f"  creds ok : {p.exists()} (size={p.stat().st_size if p.exists() else 'N/A'})")
     print()
@@ -41,6 +42,7 @@ def main() -> int:
     # ── import check ────────────────────────────────────────────────────────────
     try:
         import google.genai  # noqa: F401
+
         print("  google.genai import: OK")
     except ImportError as e:
         print(f"FAIL: google.genai not installed: {e}")
@@ -48,6 +50,7 @@ def main() -> int:
 
     try:
         from deepeval.models import GeminiModel
+
         print("  deepeval GeminiModel import: OK")
     except ImportError as e:
         print(f"FAIL: deepeval GeminiModel not importable: {e}")

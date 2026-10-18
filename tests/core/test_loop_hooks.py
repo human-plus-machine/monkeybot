@@ -63,7 +63,12 @@ class FakeHistory:
         return list(self.rows)
 
     async def append(
-        self, thread_id: str, message: Message, *, turn_id: str | None = None, message_id: str | None = None
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str | None = None,
+        message_id: str | None = None,
     ) -> None:
         del thread_id, turn_id, message_id
         self.rows.append(message)
@@ -390,12 +395,7 @@ async def test_pre_tool_injection_lands_on_next_system_prompt_only() -> None:
 
     # Tool result in history must be the raw executor output, unmodified.
     tool_response = next(
-        (
-            b
-            for m in hist.rows
-            for b in m.content
-            if isinstance(b, ToolResponse)
-        ),
+        (b for m in hist.rows for b in m.content if isinstance(b, ToolResponse)),
         None,
     )
     assert tool_response is not None
@@ -668,9 +668,7 @@ class _MarkerScanner:
     def scan(self, texts: list[str]) -> list[object]:
         from monkeybot.core.context.secret_egress import Hit
 
-        return [
-            Hit(index=i, kind="secret") for i, t in enumerate(texts) if self.MARKER in t
-        ]
+        return [Hit(index=i, kind="secret") for i, t in enumerate(texts) if self.MARKER in t]
 
 
 @pytest.mark.asyncio

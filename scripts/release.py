@@ -11,6 +11,7 @@
 Branch protection on `main` (require PR + restrict merge to admins) is what
 actually gates the promotion - this script just does the busywork around it.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -67,16 +68,17 @@ def write_version(pyproject: Path, new_version: str) -> None:
 def _split_package_notes(body: str) -> dict[str, str]:
     """Return package-specific notes from the structured Unreleased section."""
     titles = "|".join(re.escape(title) for title in PACKAGE_CHANGELOG_TITLES.values())
-    matches = list(re.finditer(rf"^### ({titles})\n(.*?)(?=^### (?:{titles})\n|\Z)", body, re.M | re.S))
+    matches = list(
+        re.finditer(rf"^### ({titles})\n(.*?)(?=^### (?:{titles})\n|\Z)", body, re.M | re.S)
+    )
     if not matches:
-        raise SystemExit("Unreleased notes must be grouped under ### Core, ### Browser MCP, or ### CLI")
+        raise SystemExit(
+            "Unreleased notes must be grouped under ### Core, ### Browser MCP, or ### CLI"
+        )
     notes = {title: content.strip() for title, content in (m.groups() for m in matches)}
     if len(notes) != len(matches):
         raise SystemExit("Unreleased package headings must not be repeated")
-    return {
-        package: notes.get(title, "")
-        for package, title in PACKAGE_CHANGELOG_TITLES.items()
-    }
+    return {package: notes.get(title, "") for package, title in PACKAGE_CHANGELOG_TITLES.items()}
 
 
 def _format_unreleased(notes: Mapping[str, str]) -> str:
@@ -155,20 +157,24 @@ def cmd_prepare(args: argparse.Namespace) -> None:
     run("git", "commit", "-m", f"chore(release): {release_labels}")
     run("git", "push", "-u", "origin", branch)
     run(
-        "gh", "pr", "create",
-        "--base", "main",
-        "--head", branch,
-        "--title", f"Release {release_labels}",
-        "--body", "\n".join(
+        "gh",
+        "pr",
+        "create",
+        "--base",
+        "main",
+        "--head",
+        branch,
+        "--title",
+        f"Release {release_labels}",
+        "--body",
+        "\n".join(
             f"## {name} v{version}\n\n{changelog_section(name, version)}"
             for name, version in new_versions.items()
         ),
     )
     print(
         "Opened release PR: "
-        + ", ".join(
-            f"{name} {old_versions[name]} -> {new_versions[name]}" for name in names
-        )
+        + ", ".join(f"{name} {old_versions[name]} -> {new_versions[name]}" for name in names)
     )
 
 

@@ -38,9 +38,7 @@ def test_browser_click_by_index_success() -> None:
     helpers = MagicMock()
     with (
         _patch_harness(helpers),
-        patch.object(
-            dom_indexing, "get_rect", return_value={"x": 1, "y": 2, "tagName": "button"}
-        ),
+        patch.object(dom_indexing, "get_rect", return_value={"x": 1, "y": 2, "tagName": "button"}),
     ):
         result = json.loads(server.browser_click_by_index(35, observe="none"))
 

@@ -525,8 +525,7 @@ class SqliteSpanExporter(SpanExporter):
                 )
             elif str(row[0]) != _SCHEMA_VERSION:
                 raise RuntimeError(
-                    f"unsupported traces DB schema_version={row[0]!r}, "
-                    f"expected {_SCHEMA_VERSION!r}"
+                    f"unsupported traces DB schema_version={row[0]!r}, expected {_SCHEMA_VERSION!r}"
                 )
             conn.commit()
         except Exception:
@@ -563,9 +562,7 @@ class SqliteSpanExporter(SpanExporter):
             (row["trace_id"],),
         ).fetchone()
         if existing is None:
-            raise RuntimeError(
-                f"trace row missing after insert for trace_id={row['trace_id']!r}"
-            )
+            raise RuntimeError(f"trace row missing after insert for trace_id={row['trace_id']!r}")
         replace = (
             _root_fields(
                 span_name=row["name"],
@@ -589,16 +586,10 @@ class SqliteSpanExporter(SpanExporter):
                 "agent_name": row["agent_name"],
                 "workspace_id": row["workspace_id"],
                 "token_delta": row["total_tokens"] if is_new_span else None,
-                "root_span_id": (
-                    replace["root_span_id"] if replace else existing["root_span_id"]
-                ),
+                "root_span_id": (replace["root_span_id"] if replace else existing["root_span_id"]),
                 "root_name": replace["root_name"] if replace else existing["root_name"],
-                "input_value": (
-                    replace["input_value"] if replace else existing["input_value"]
-                ),
-                "output_value": (
-                    replace["output_value"] if replace else existing["output_value"]
-                ),
+                "input_value": (replace["input_value"] if replace else existing["input_value"]),
+                "output_value": (replace["output_value"] if replace else existing["output_value"]),
                 "updated_at": updated_at,
             },
         )
@@ -641,9 +632,7 @@ class SqliteSpanExporter(SpanExporter):
         except Exception as exc:
             logger.warning("sqlite trace retention failed: %s", exc)
 
-    def _recompute_trace_rollups(
-        self, conn: sqlite3.Connection, trace_ids: set[str]
-    ) -> None:
+    def _recompute_trace_rollups(self, conn: sqlite3.Connection, trace_ids: set[str]) -> None:
         for trace_id in trace_ids:
             conn.execute(_RECOMPUTE_TRACE_ROLLUPS_SQL, (trace_id,))
 

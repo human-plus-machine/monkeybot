@@ -40,8 +40,4 @@ def test_markdown_plain_stream_multiline_message() -> None:
         "1.  **browser**: browse\n"
     )
     out = stream.feed(raw)
-    assert out == (
-        "Core Capabilities\n"
-        "• Analysis & Reasoning: details\n"
-        "1.  browser: browse\n"
-    )
+    assert out == ("Core Capabilities\n• Analysis & Reasoning: details\n1.  browser: browse\n")

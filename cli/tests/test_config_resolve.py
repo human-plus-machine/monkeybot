@@ -11,7 +11,9 @@ def test_resolve_config_uses_cwd_without_chdir(tmp_path: Path, monkeypatch) -> N
     other = tmp_path / "agent"
     cfg_dir = other / "monkeybot_config"
     cfg_dir.mkdir(parents=True)
-    (cfg_dir / "monkeybot.yaml").write_text("model:\n  provider: gemini\n  name: test\n", encoding="utf-8")
+    (cfg_dir / "monkeybot.yaml").write_text(
+        "model:\n  provider: gemini\n  name: test\n", encoding="utf-8"
+    )
 
     monkeypatch.chdir(tmp_path)
 

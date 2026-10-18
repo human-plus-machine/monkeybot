@@ -144,9 +144,7 @@ def run_new_command(args: argparse.Namespace) -> int:
                 default_key=_DEFAULT_PROVIDER,
             )
         if model is None:
-            model = (
-                _prompt_line(f"Model name [{_DEFAULT_MODEL}]: ").strip() or _DEFAULT_MODEL
-            )
+            model = _prompt_line(f"Model name [{_DEFAULT_MODEL}]: ").strip() or _DEFAULT_MODEL
         # Only prompt for optional deps when --with was not already given.
         if not extras:
             more_providers = additional_provider_extra_choices(provider)

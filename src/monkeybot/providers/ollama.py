@@ -56,6 +56,7 @@ from urllib.parse import urlparse
 
 from monkeybot.core.llm.provider import (
     Message,
+    ProviderCallHints,
     ProviderEvent,
 )
 from monkeybot.core.logging_utils import kv
@@ -295,6 +296,7 @@ class OllamaProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        hints: ProviderCallHints | None = None,
     ) -> int:
         return await count_input_tokens_tiktoken(
             messages,
@@ -303,6 +305,7 @@ class OllamaProvider:
             provider=self.name,
             max_request_bytes=_ollama_max_request_bytes(self._mode, self._base_url),
             thinking_budget=thinking_budget,
+            hints=hints,
         )
 
     async def stream(
@@ -312,6 +315,7 @@ class OllamaProvider:
         *,
         model: str,
         thinking_budget: int | None = None,
+        hints: ProviderCallHints | None = None,
     ) -> AsyncIterator[ProviderEvent]:
         budget = _resolve_thinking_budget(self._thinking_budget, override=thinking_budget)
         extra_body: dict[str, Any] | None = None
@@ -333,5 +337,6 @@ class OllamaProvider:
             reasoning_effort=ollama_reasoning_effort(self._reasoning_effort, budget),
             extra_body=extra_body,
             max_request_bytes=_ollama_max_request_bytes(self._mode, self._base_url),
+            hints=hints,
         ):
             yield event

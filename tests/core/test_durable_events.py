@@ -86,10 +86,7 @@ async def test_transcript_skips_live_by_default(tmp_path: Path) -> None:
     await writer.write_event(
         ToolCallResult(request_id="r", tool="read_file", result="ok", call_id="c1")
     )
-    lines = [
-        json.loads(line)
-        for line in writer.path.read_text(encoding="utf-8").splitlines()
-    ]
+    lines = [json.loads(line) for line in writer.path.read_text(encoding="utf-8").splitlines()]
     types = [line["type"] for line in lines]
     assert types[0] == "SessionManifest"
     assert "durable_only" not in lines[0]

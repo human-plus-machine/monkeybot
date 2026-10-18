@@ -100,9 +100,7 @@ def resource_for_call(call: InspectorToolCall) -> str:
 
 
 def _match(rule: PermissionRule, tool: str, resource: str) -> bool:
-    return fnmatch.fnmatchcase(tool, rule.tool) and fnmatch.fnmatchcase(
-        resource, rule.pattern
-    )
+    return fnmatch.fnmatchcase(tool, rule.tool) and fnmatch.fnmatchcase(resource, rule.pattern)
 
 
 def evaluate(tool: str, resource: str, rules: tuple[PermissionRule, ...]) -> PermissionRule | None:
@@ -129,9 +127,7 @@ def load_permissions(path: Path) -> PermissionRuleset:
 
     default_raw = data.get("default", "allow")
     if default_raw not in ("allow", "ask", "deny"):
-        raise PermissionConfigError(
-            path, f"'default' must be allow|ask|deny, got {default_raw!r}"
-        )
+        raise PermissionConfigError(path, f"'default' must be allow|ask|deny, got {default_raw!r}")
     default = cast(Effect, default_raw)
 
     rules_raw = data.get("rules", [])
@@ -151,9 +147,7 @@ def load_permissions(path: Path) -> PermissionRuleset:
         if not isinstance(tool, str) or not tool.strip():
             raise PermissionConfigError(path, f"rules[{i}].tool must be a non-empty string")
         if not isinstance(pattern, str) or not pattern.strip():
-            raise PermissionConfigError(
-                path, f"rules[{i}].pattern must be a non-empty string"
-            )
+            raise PermissionConfigError(path, f"rules[{i}].pattern must be a non-empty string")
         if effect not in ("allow", "ask", "deny"):
             raise PermissionConfigError(
                 path, f"rules[{i}].effect must be allow|ask|deny, got {effect!r}"

@@ -246,7 +246,9 @@ async def test_history_rejects_invalid_role(history_db) -> None:
 
 
 @pytest.mark.asyncio
-async def test_history_load_malformed_json_logs_and_raises(history_db, caplog: pytest.LogCaptureFixture) -> None:
+async def test_history_load_malformed_json_logs_and_raises(
+    history_db, caplog: pytest.LogCaptureFixture
+) -> None:
     conn, history = history_db
     thread_id = "t-bad-json"
     await conn.execute(
@@ -257,8 +259,9 @@ async def test_history_load_malformed_json_logs_and_raises(history_db, caplog: p
         (thread_id, "user", "not-json", 1),
     )
     await conn.commit()
-    with caplog.at_level(logging.ERROR, logger="monkeybot.core.persistence.history"), pytest.raises(
-        ValueError, match=r"history row \d+ unparseable"
+    with (
+        caplog.at_level(logging.ERROR, logger="monkeybot.core.persistence.history"),
+        pytest.raises(ValueError, match=r"history row \d+ unparseable"),
     ):
         await history.load(thread_id)
     joined = " ".join(r.getMessage() for r in caplog.records)

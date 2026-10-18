@@ -160,9 +160,7 @@ def test_act_observe_none_skips_snapshot() -> None:
         patch.object(dom_indexing, "get_elements") as get_elements,
     ):
         json.loads(server.browser_tabs())
-        result = json.loads(
-            server.browser_act([{"do": "press", "key": "Enter"}], observe="none")
-        )
+        result = json.loads(server.browser_act([{"do": "press", "key": "Enter"}], observe="none"))
     assert result["ok"] is True
     assert result["steps"][0]["do"] == "press"
     assert "observation" not in result
@@ -213,7 +211,12 @@ def test_act_fill_form_uses_shared_do() -> None:
         patch.object(
             actions,
             "do_fill_form",
-            return_value={"ok": True, "filled": [{"label": "Email", "index": 1, "how": "aria-label"}], "unresolved": [], "submitted": False},
+            return_value={
+                "ok": True,
+                "filled": [{"label": "Email", "index": 1, "how": "aria-label"}],
+                "unresolved": [],
+                "submitted": False,
+            },
         ) as do_fill,
         patch.object(dom_indexing, "settle", return_value={"quiet": True, "navigated": False}),
         patch.object(dom_indexing, "get_elements") as get_elements,

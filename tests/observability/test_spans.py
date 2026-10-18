@@ -108,7 +108,9 @@ async def test_span_tool_truncates_input_output(otel_memory_exporter) -> None:
         args={"q": big},
     ):
         record_tool_outcome("ok" * 20_000, None)
-    tool_spans = [s for s in otel_memory_exporter.get_finished_spans() if s.name == "monkeybot.tool"]
+    tool_spans = [
+        s for s in otel_memory_exporter.get_finished_spans() if s.name == "monkeybot.tool"
+    ]
     assert tool_spans
     tool = tool_spans[0]
     assert str(tool.attributes["tool.input"]).endswith("…[truncated]")
@@ -125,7 +127,9 @@ async def test_span_tool_error_sets_error_attr(otel_memory_exporter) -> None:
             request_id="r1",
         ):
             raise RuntimeError("boom")
-    tool_spans = [s for s in otel_memory_exporter.get_finished_spans() if s.name == "monkeybot.tool"]
+    tool_spans = [
+        s for s in otel_memory_exporter.get_finished_spans() if s.name == "monkeybot.tool"
+    ]
     assert tool_spans
     assert "error" in tool_spans[0].attributes
 
@@ -175,7 +179,9 @@ def test_set_llm_usage_no_span_is_noop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_spans_noop_when_disabled(reset_observability_state: None, otel_memory_exporter) -> None:
+async def test_spans_noop_when_disabled(
+    reset_observability_state: None, otel_memory_exporter
+) -> None:
     from monkeybot.observability import shutdown_observability
 
     before = len(otel_memory_exporter.get_finished_spans())

@@ -19,6 +19,7 @@ def _goto_observation(
     )
     return results.json_text(results.with_observation(payload, wrapped))
 
+
 @mcp.tool()
 @_public_tool
 def browser_goto(

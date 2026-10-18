@@ -271,7 +271,9 @@ def migrate_agent_memory_layout(agent_root: Path) -> dict[str, Any]:
     yaml_path = config_dir / "monkeybot.yaml"
     if _rewrite_text_file(yaml_path, _URI_REPLACEMENTS):
         result["yaml_updated"] = True
-        result["action"] = "migrated" if result["action"] in ("noop", "migrated") else result["action"]
+        result["action"] = (
+            "migrated" if result["action"] in ("noop", "migrated") else result["action"]
+        )
         logger.info("Updated memory_storage_uri in %s", yaml_path)
 
     example = config_dir / "monkeybot.example.yaml"
@@ -342,9 +344,7 @@ def migrate_all_local_agent_memory_layouts(
     return results
 
 
-def migrate_host_memory_volume(
-    legacy: Path | str, dest: Path | str
-) -> dict[str, Any]:
+def migrate_host_memory_volume(legacy: Path | str, dest: Path | str) -> dict[str, Any]:
     """Migrate an absolute host memory dir (docker-compose upgrade path).
 
     When ``legacy`` exists and ``dest`` is missing or empty, move legacy contents
@@ -390,9 +390,7 @@ def migrate_host_memory_volume(
             # Non-empty leftovers (e.g. stuck file) — leave for operator.
             pass
     except OSError as exc:
-        logger.warning(
-            "Failed host memory migrate %s → %s: %r", legacy_path, dest_path, exc
-        )
+        logger.warning("Failed host memory migrate %s → %s: %r", legacy_path, dest_path, exc)
         result["action"] = "move_failed"
         result["error"] = repr(exc)
         return result

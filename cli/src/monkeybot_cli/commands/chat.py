@@ -64,6 +64,7 @@ _UNDERLINE = "\x1b[4m"
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _GROUNDING_SOURCES_MAX = 5
 
+
 def _hyperlink(url: str, label: str) -> str:
     """OSC 8 terminal hyperlink; falls back to a plain URL on non-TTY streams."""
     if not url:
@@ -278,9 +279,7 @@ def _resolve_base_url(args: argparse.Namespace, config_path: Path | None) -> str
     return f"http://127.0.0.1:{port}"
 
 
-def _model_banner_fields(
-    args: argparse.Namespace, config_path: Path | None
-) -> tuple[str, str]:
+def _model_banner_fields(args: argparse.Namespace, config_path: Path | None) -> tuple[str, str]:
     provider = (args.model_provider or "").strip()
     model = (args.model_name or "").strip()
     if config_path is not None and (not provider or not model):

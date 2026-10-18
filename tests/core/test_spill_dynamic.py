@@ -25,7 +25,9 @@ from tests.core.memory.helpers import make_memory_subsystem
 
 def _mem_sub(root: Path) -> MemorySubsystem:
     resolved = Path(root).resolve()
-    return make_memory_subsystem(resolved.parent.parent / f"palace-{resolved.parent.name}-{resolved.name}")
+    return make_memory_subsystem(
+        resolved.parent.parent / f"palace-{resolved.parent.name}-{resolved.name}"
+    )
 
 
 class _NoMCP:
@@ -33,7 +35,9 @@ class _NoMCP:
         del name, command, args, env
         return []
 
-    async def connect_streamable_http(self, name: str, url: str, headers: dict[str, str] | None = None):
+    async def connect_streamable_http(
+        self, name: str, url: str, headers: dict[str, str] | None = None
+    ):
         del name, url, headers
         return []
 
@@ -69,7 +73,9 @@ class _NoMCP:
         del path, raise_on_error
 
 
-def _ctx(*, context_window_tokens: int = 200_000, skills: list[SkillRef] | None = None) -> TurnContext:
+def _ctx(
+    *, context_window_tokens: int = 200_000, skills: list[SkillRef] | None = None
+) -> TurnContext:
     return TurnContext(
         thread_id="t",
         request_id="r",
@@ -174,7 +180,9 @@ async def test_ordinary_read_end_line_matches_content(tmp_path: Path) -> None:
     # ~80k chars of numbered-ish content (2000 lines * ~40 chars).
     lines = [f"{'word' * 10}-{i}" for i in range(2500)]
     (root / "big.py").write_text("\n".join(lines), encoding="utf-8")
-    ex = CoreToolExecutor(workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_NoMCP())
+    ex = CoreToolExecutor(
+        workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_NoMCP()
+    )
     out, err = unwrap_tool_execution_result(
         await ex.execute(
             call=ToolCall(call_id="rf", name="read_file", args={"path": "big.py"}),
@@ -203,7 +211,9 @@ async def test_spill_path_read_chars_only_no_default_line_limit(tmp_path: Path) 
     spill = root / ".monkeybot" / "spill" / "t" / "big.txt"
     spill.parent.mkdir(parents=True)
     spill.write_text("\n".join(f"line{i}" for i in range(3000)), encoding="utf-8")
-    ex = CoreToolExecutor(workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_NoMCP())
+    ex = CoreToolExecutor(
+        workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_NoMCP()
+    )
     out, err = unwrap_tool_execution_result(
         await ex.execute(
             call=ToolCall(
@@ -229,7 +239,9 @@ def test_read_file_paging_next_offset_no_gaps(tmp_path: Path) -> None:
     seen: list[int] = []
     offset = 1
     while True:
-        result = svc.read_file("src.txt", offset=offset, limit=None, max_chars=5_000, apply_default_limit=False)
+        result = svc.read_file(
+            "src.txt", offset=offset, limit=None, max_chars=5_000, apply_default_limit=False
+        )
         for i in range(result["start_line"], result["end_line"] + 1):
             seen.append(i)
         if not result["truncated"]:
@@ -303,9 +315,7 @@ def test_summary_cap_scales_with_window() -> None:
     small = len(summarize_tool_result_text(text, window_tokens=8_000))
     large = len(summarize_tool_result_text(text, window_tokens=1_000_000))
     assert small < large
-    assert small == pytest.approx(
-        spill_budgets_from_window(8_000).summary_max_chars, abs=200
-    )
+    assert small == pytest.approx(spill_budgets_from_window(8_000).summary_max_chars, abs=200)
 
 
 @pytest.mark.asyncio
@@ -327,7 +337,9 @@ async def test_env_vars_do_not_change_sizing(
         monkeypatch.setenv(key, val)
 
     (root / "wide.txt").write_text("\n".join(f"L{i}" for i in range(50)), encoding="utf-8")
-    ex = CoreToolExecutor(workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_NoMCP())
+    ex = CoreToolExecutor(
+        workspace_root=root, memory=_mem_sub(mem), skills_path=skills, mcp=_NoMCP()
+    )
     out, err = unwrap_tool_execution_result(
         await ex.execute(
             call=ToolCall(call_id="r", name="read_file", args={"path": "wide.txt"}),
@@ -356,7 +368,10 @@ async def test_env_vars_do_not_change_sizing(
 @pytest.mark.asyncio
 async def test_yaml_read_max_still_applies(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from monkeybot.core.tools.core_tool_executor import workspace_settings_from_config
-    from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES, WorkspaceFileService
+    from monkeybot.core.tools.workspace_service import (
+        AGENT_READ_DEFAULT_LINES,
+        WorkspaceFileService,
+    )
 
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir()
@@ -375,9 +390,7 @@ async def test_yaml_read_max_still_applies(tmp_path: Path, monkeypatch: pytest.M
     assert settings.WORKSPACE_READ_DEFAULT_LINES != 1
     # Omitted limit must still honor read_max_lines (default must not escape the cap).
     assert AGENT_READ_DEFAULT_LINES > 50
-    (tmp_path / "wide.txt").write_text(
-        "\n".join(f"L{i}" for i in range(200)), encoding="utf-8"
-    )
+    (tmp_path / "wide.txt").write_text("\n".join(f"L{i}" for i in range(200)), encoding="utf-8")
     svc = WorkspaceFileService(tmp_path, settings)
     omitted = svc.read_file("wide.txt")
     assert omitted["end_line"] - omitted["start_line"] + 1 == 50

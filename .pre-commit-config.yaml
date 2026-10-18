@@ -6,6 +6,13 @@
 repos:
   - repo: local
     hooks:
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format --check .
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: mypy
         name: mypy (src/monkeybot)
         entry: uv run mypy src/monkeybot
@@ -21,7 +28,7 @@ repos:
         pass_filenames: true
 
       - id: local-ci
-        name: local CI (mypy, pytest, cli, browser MCP, eval self-checks)
+        name: local CI (ruff format, mypy, pytest, cli, browser MCP, eval self-checks)
         entry: bash scripts/ci-local.sh --if-needed
         language: system
         pass_filenames: false

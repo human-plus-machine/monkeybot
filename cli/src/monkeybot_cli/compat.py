@@ -14,14 +14,10 @@ def _bounds_from_range(range_: str) -> tuple[str, str]:
     """Parse inclusive lower / exclusive upper versions from ``COMPATIBLE_CORE_RANGE``."""
     match = re.fullmatch(r">\s*=\s*([^,]+)\s*,\s*<\s*(.+)", range_.strip())
     if match is None:
-        raise ValueError(
-            f"COMPATIBLE_CORE_RANGE must be '>=LOWER,<UPPER', got {range_!r}"
-        )
+        raise ValueError(f"COMPATIBLE_CORE_RANGE must be '>=LOWER,<UPPER', got {range_!r}")
     lower, upper = match.group(1).strip(), match.group(2).strip()
     if not lower or not upper:
-        raise ValueError(
-            f"COMPATIBLE_CORE_RANGE must be '>=LOWER,<UPPER', got {range_!r}"
-        )
+        raise ValueError(f"COMPATIBLE_CORE_RANGE must be '>=LOWER,<UPPER', got {range_!r}")
     return lower, upper
 
 

@@ -139,9 +139,7 @@ def _create_blank_target(helpers: Any, *, focus: bool, url: str = "about:blank")
         return actions._is_blank_url(url)
     if callable(getattr(helpers, "cdp", None)):
         try:
-            result = helpers.cdp(
-                "Target.createTarget", url="about:blank", background=not focus
-            )
+            result = helpers.cdp("Target.createTarget", url="about:blank", background=not focus)
         except TypeError:
             result = helpers.cdp("Target.createTarget", url="about:blank")
         except Exception as exc:

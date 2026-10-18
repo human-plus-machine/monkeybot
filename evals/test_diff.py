@@ -32,7 +32,9 @@ def _record(run_id: str, status: str, output: str, failures: list[str] | None = 
 
 def test_regression_pinpoints_turn() -> None:
     old = _record("a", "passed", "The heading is Browser.")
-    new = _record("b", "failed", "I could not find that file.", ["required_tools: missing ['read_file']"])
+    new = _record(
+        "b", "failed", "I could not find that file.", ["required_tools: missing ['read_file']"]
+    )
     report, regression = diff_runs(old, new)
     assert regression
     assert "status passed -> failed" in report

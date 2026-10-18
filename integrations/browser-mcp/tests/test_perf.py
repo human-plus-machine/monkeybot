@@ -87,7 +87,9 @@ def test_log_skipped_when_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 def _read_records(path: Path) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()
+    ]
 
 
 _SCHEMA = {"ts", "tool", "wall_ms", "harness_calls", "result_chars", "ok"}

@@ -310,7 +310,8 @@ async def test_compat_budget_extracts_oversized_pdf_before_enforcement(
     captured: list[dict[str, Any]] = []
     extracted: list[File] = []
 
-    async def _extract_pdf_text(block: File) -> str:
+    async def _extract_pdf_text(block: File, hints: object = None) -> str:
+        del hints
         extracted.append(block)
         return "important extracted PDF text"
 
@@ -372,7 +373,10 @@ async def test_direct_openai_checks_budget_after_file_conversion(
 
     async def _messages_to_openai(
         _messages: list[Message],
+        *,
+        hints: object = None,
     ) -> tuple[None, list[dict[str, Any]]]:
+        del hints
         assert isinstance(_messages[0].content[0], File)
         return None, [{"role": "user", "content": "X" * 20_000}]
 

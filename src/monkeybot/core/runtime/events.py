@@ -1182,7 +1182,9 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         choices_raw = payload.get("choices", [])
         if not isinstance(call_raw, str) or not isinstance(question_raw, str):
             raise EventDecodeError("AskUserRequest fields must be strings")
-        if not isinstance(choices_raw, list) or any(not isinstance(item, str) for item in choices_raw):
+        if not isinstance(choices_raw, list) or any(
+            not isinstance(item, str) for item in choices_raw
+        ):
             raise EventDecodeError("AskUserRequest choices must be a list of strings")
         return AskUserRequestEvent(
             request_id=rid,

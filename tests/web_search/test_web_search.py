@@ -29,7 +29,9 @@ class _FakeMCP:
     async def connect(self, name: str, command: str, args: list[str], env: dict) -> list[ToolDef]:
         return []
 
-    async def connect_streamable_http(self, name: str, url: str, headers: Any = None) -> list[ToolDef]:
+    async def connect_streamable_http(
+        self, name: str, url: str, headers: Any = None
+    ) -> list[ToolDef]:
         return []
 
     async def disconnect(self, name: str) -> None:
@@ -79,6 +81,7 @@ def _make_executor(tmp_path: Path, extra_tools: list | None = None) -> CoreToolE
 
 def _ctx_stub() -> Any:
     from monkeybot.core.context import TurnContext
+
     return TurnContext(
         thread_id="t",
         request_id="r",
@@ -154,10 +157,12 @@ def test_build_backend_firecrawl_with_key(monkeypatch: pytest.MonkeyPatch) -> No
 async def test_web_search_tool_returns_results() -> None:
     fake_backend = MagicMock()
     fake_backend.name = "fake"
-    fake_backend.search = AsyncMock(return_value=[
-        SearchResult(title="T1", url="https://a.com", snippet="S1", score=0.9),
-        SearchResult(title="T2", url="https://b.com", snippet="S2"),
-    ])
+    fake_backend.search = AsyncMock(
+        return_value=[
+            SearchResult(title="T1", url="https://a.com", snippet="S1", score=0.9),
+            SearchResult(title="T2", url="https://b.com", snippet="S2"),
+        ]
+    )
 
     tool = WebSearchTool(fake_backend)
     assert tool.tool_def.name == "web_search"

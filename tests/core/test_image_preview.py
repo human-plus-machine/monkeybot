@@ -167,3 +167,34 @@ def test_resolve_inlines_plain_text_attachments(tmp_path: Path) -> None:
     assert texts[0] == "too long to send inline"
     assert "[Attached file: message.txt]" in texts[1]
     assert "please summarize this essay" in texts[1]
+
+
+def test_resolve_inlines_markdown_attachments(tmp_path: Path) -> None:
+    store = FilesystemAttachmentStore(tmp_path)
+    stored = store.save(
+        "s1",
+        data=b"# Notes\n\naction items",
+        mime_type="text/markdown",
+        filename="notes.md",
+    )
+    msgs = resolve_messages_for_provider(
+        [
+            Message(
+                role="user",
+                content=[
+                    AttachmentRef(
+                        attachment_id=stored.attachment_id,
+                        mime_type="text/markdown",
+                        metadata={"filename": "notes.md"},
+                    )
+                ],
+            )
+        ],
+        attachment_store=store,
+        session_id="s1",
+    )
+    texts = [b.text for b in msgs[0].content if isinstance(b, Text)]
+    assert len(texts) == 1
+    assert texts[0].startswith("[Attached file: notes.md]\n")
+    assert "# Notes" in texts[0]
+    assert "action items" in texts[0]

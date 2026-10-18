@@ -89,7 +89,7 @@ class OpenAIProvider:
         thinking_budget: int | None = None,
         hints: ProviderCallHints | None = None,
     ) -> int:
-        del thinking_budget, hints
+        del thinking_budget
         import tiktoken  # noqa: PLC0415
 
         msgs = trim_message_media_for_byte_budget(
@@ -103,7 +103,7 @@ class OpenAIProvider:
             enc = tiktoken.encoding_for_model(model)
         except KeyError:
             enc = tiktoken.get_encoding("cl100k_base")
-        return await count_openai_compat_input_tokens(enc, msgs, tools)
+        return await count_openai_compat_input_tokens(enc, msgs, tools, hints=hints)
 
     async def stream(
         self,
@@ -126,7 +126,7 @@ class OpenAIProvider:
             trim_files=False,
         )
 
-        system, oai_messages = await messages_to_openai(msgs)
+        system, oai_messages = await messages_to_openai(msgs, hints=hints)
         if system:
             oai_messages = [{"role": "system", "content": system}, *oai_messages]
 

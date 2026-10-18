@@ -58,7 +58,9 @@ def log_gateway_startup(layout: AgentLayout, *, force: bool = False) -> None:
             workspace_mode=workspace_mode,
             db_backend=_storage_kind(layout.db_url),
             memory_backend=_storage_kind(layout.memory_storage_uri),
-            sandbox_mode="shared-filesystem" if sandbox.shared_filesystem else "remote-compute-only",
+            sandbox_mode="shared-filesystem"
+            if sandbox.shared_filesystem
+            else "remote-compute-only",
             sandbox_enabled=sandbox.enabled,
             sandbox_image=sandbox.image,
             browser_mode=_browser_mode(layout.mcp_config_path),
