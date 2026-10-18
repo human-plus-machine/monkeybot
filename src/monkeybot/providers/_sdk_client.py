@@ -1,9 +1,9 @@
 """SDK HTTP clients cached per running event loop and endpoint.
 
-One client per loop, host, and credentials. The model id and the
-session-affinity header stay on each request, so a later turn can call a
-different model on the same warm connection. A client is not reused after its
-event loop closes.
+One client per loop and endpoint. The model id and the session-affinity header
+stay on each request, so a later turn can call a different model on the same
+warm connection. A client is not reused after its event loop closes, and code
+with no running loop gets a fresh client each time.
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import logging
+import os
 import threading
 import weakref
 from collections.abc import Callable
@@ -18,76 +20,74 @@ from typing import Any
 
 from monkeybot.core.llm.provider import ProviderCallHints
 
+_log = logging.getLogger(__name__)
+
 _lock = threading.Lock()
-# Clients built from synchronous code (no running loop) share this owner.
-_SYNC = object()
 _clients: dict[tuple[Any, ...], list[_Slot]] = {}
 
 
 class _Slot:
-    """A client plus a weak reference to the loop that may use it."""
+    """A client, the loop that may use it, and a digest of what built it."""
 
-    def __init__(self, loop: asyncio.AbstractEventLoop | None, client: Any) -> None:
+    def __init__(self, loop: asyncio.AbstractEventLoop, fingerprint: str, client: Any) -> None:
         self.client = client
-        self._sync = loop is None
-        self._loop: weakref.ref[asyncio.AbstractEventLoop] | None = (
-            weakref.ref(loop) if loop is not None else None
-        )
+        self.fingerprint = fingerprint
+        self._loop = weakref.ref(loop)
 
-    def owner(self) -> asyncio.AbstractEventLoop | object | None:
-        """The live loop, the sync sentinel, or None when that loop is gone."""
-        if self._sync:
-            return _SYNC
-        assert self._loop is not None
+    def loop(self) -> asyncio.AbstractEventLoop | None:
+        """The live loop, or None when that loop is gone."""
         loop = self._loop()
         if loop is None or loop.is_closed():
             return None
         return loop
 
 
-def _digest(secret: str) -> str:
-    return hashlib.sha256(secret.encode()).hexdigest()
+def _digest(values: tuple[Any, ...]) -> str:
+    return hashlib.sha256(repr(values).encode()).hexdigest()
 
 
-def _current_owner() -> asyncio.AbstractEventLoop | object:
-    try:
-        return asyncio.get_running_loop()
-    except RuntimeError:
-        return _SYNC
+def sdk_env(*prefixes: str) -> tuple[tuple[str, str], ...]:
+    """Env vars an SDK constructor may read, as sorted ``(name, value)`` pairs.
+
+    Pass this as ``fingerprint`` so a change to any of them rebuilds the client,
+    including variables a later SDK release starts reading.
+    """
+    return tuple(sorted((k, v) for k, v in os.environ.items() if k.startswith(prefixes)))
 
 
 def cached_sdk_client(
     key: tuple[Any, ...],
     factory: Callable[[], Any],
     *,
-    secrets: tuple[str, ...] = (),
+    fingerprint: tuple[Any, ...] = (),
 ) -> Any:
     """Return the client for ``key`` on this loop, building it once per loop.
 
-    ``secrets`` are hashed before they are stored. Pass API keys and auth
-    tokens here instead of putting them in ``key``.
+    ``key`` names an endpoint that may be used alongside others (a base URL, a
+    region). ``fingerprint`` holds the credentials and settings the client was
+    built from. It is hashed before it is stored, and a new value replaces the
+    client for ``key`` instead of adding another one. The replaced client is not
+    closed here because a request may still be streaming on it.
+
+    With no running loop the client is not cached.
     """
-    stored = (*key, *(_digest(secret) for secret in secrets))
-    current = _current_owner()
+    try:
+        current = asyncio.get_running_loop()
+    except RuntimeError:
+        return factory()
+    digest = _digest(fingerprint)
     with _lock:
-        kept: list[_Slot] = []
-        found: Any = None
-        for slot in _clients.get(stored, ()):
-            owner = slot.owner()
-            if owner is None:
-                continue
-            if found is None and owner is current:
-                found = slot.client
-            kept.append(slot)
-        if found is None:
-            found = factory()
-            loop = current if isinstance(current, asyncio.AbstractEventLoop) else None
-            kept.append(_Slot(loop, found))
-        if kept:
-            _clients[stored] = kept
-        else:
-            _clients.pop(stored, None)
-        return found
+        for slot in _clients.get(key, ()):
+            if slot.loop() is current and slot.fingerprint == digest:
+                return slot.client
+    # Built outside the lock: constructors can do blocking auth lookups. Only
+    # this loop's thread fills this loop's slot, so no other thread races it.
+    client = factory()
+    with _lock:
+        kept = [slot for slot in _clients.get(key, ()) if slot.loop() not in (None, current)]
+        kept.append(_Slot(current, digest, client))
+        _clients[key] = kept
+    return client
 
 
 def _take_clients() -> list[Any]:
@@ -119,7 +119,10 @@ async def _aclose_client(client: Any) -> None:
 
 async def _aclose_all(clients: list[Any]) -> None:
     for client in clients:
-        await _aclose_client(client)
+        try:
+            await _aclose_client(client)
+        except Exception:
+            _log.warning("SDK client close failed: %s", type(client).__name__, exc_info=True)
 
 
 async def aclose_sdk_clients() -> None:
@@ -128,17 +131,21 @@ async def aclose_sdk_clients() -> None:
 
 
 def clear_sdk_clients() -> None:
-    """Drop cached clients so a later call builds a new one.
+    """Close and drop cached clients so a later call builds a new one.
 
-    When no loop is running, also close them. A running loop must await
-    ``aclose_sdk_clients``; this function cannot block that loop.
+    Raises RuntimeError inside a running loop, where closing would block it.
+    Await ``aclose_sdk_clients`` there instead.
     """
-    clients = _take_clients()
-    if not clients:
-        return
     try:
         asyncio.get_running_loop()
     except RuntimeError:
+        pass
+    else:
+        raise RuntimeError(
+            "clear_sdk_clients cannot run inside an event loop; await aclose_sdk_clients"
+        )
+    clients = _take_clients()
+    if clients:
         asyncio.run(_aclose_all(clients))
 
 

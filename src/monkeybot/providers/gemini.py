@@ -563,7 +563,7 @@ class GeminiProvider:
             return cached_sdk_client(
                 ("gemini-api",),
                 lambda: genai.Client(api_key=api_key),
-                secrets=(api_key,),
+                fingerprint=(api_key,),
             )
         project, location = _vertex_project_and_location(model_param)
         return cached_sdk_client(

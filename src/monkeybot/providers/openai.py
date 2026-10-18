@@ -21,7 +21,11 @@ from monkeybot.providers._openai_compat import (
     openai_tools,
     openai_tools_token_count,
 )
-from monkeybot.providers._sdk_client import cached_sdk_client, session_affinity_headers
+from monkeybot.providers._sdk_client import (
+    cached_sdk_client,
+    sdk_env,
+    session_affinity_headers,
+)
 from monkeybot.providers.request_budget import (
     configured_request_byte_budget,
     trim_message_media_for_byte_budget,
@@ -118,18 +122,12 @@ class OpenAIProvider:
             oai_messages = [{"role": "system", "content": system}, *oai_messages]
 
         retention = hints.cache_retention if hints is not None else "short"
-        # Credentials and endpoint identify the connection. The model id is a
-        # request field. AsyncOpenAI reads these env vars in its constructor.
-        api_key = os.environ.get("OPENAI_API_KEY", "")
+        # The model id is a request field. AsyncOpenAI reads OPENAI_* env vars
+        # in its constructor, so those identify the client.
         client = cached_sdk_client(
-            (
-                "openai",
-                os.environ.get("OPENAI_BASE_URL"),
-                os.environ.get("OPENAI_ORG_ID"),
-                os.environ.get("OPENAI_PROJECT_ID"),
-            ),
+            ("openai",),
             lambda: AsyncOpenAI(),
-            secrets=(api_key,),
+            fingerprint=sdk_env("OPENAI_"),
         )
         kwargs: dict[str, Any] = {
             "model": model,

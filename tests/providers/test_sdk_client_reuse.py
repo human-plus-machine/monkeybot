@@ -14,7 +14,12 @@ import pytest
 
 from monkeybot.core.llm.provider import Message, ProviderCallHints
 from monkeybot.providers._openai_compat import stream_chat_completions_with_tool_fallback
-from monkeybot.providers._sdk_client import _clients, cached_sdk_client, clear_sdk_clients
+from monkeybot.providers._sdk_client import (
+    _clients,
+    aclose_sdk_clients,
+    cached_sdk_client,
+    clear_sdk_clients,
+)
 from monkeybot.providers.claude import ClaudeProvider
 from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.providers.openai import OpenAIProvider
@@ -190,7 +195,8 @@ async def test_openai_compat_reuses_one_client_per_endpoint(
     assert [call["model"] for call in seen["captured"]] == ["model-a", "model-b"]
 
 
-def test_gemini_client_follows_endpoint_not_model(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.asyncio
+async def test_gemini_client_follows_endpoint_not_model(monkeypatch: pytest.MonkeyPatch) -> None:
     constructed: list[dict[str, Any]] = []
 
     class _Client:
@@ -445,3 +451,183 @@ async def test_openai_and_claude_cache_keys_follow_sdk_endpoint_env(
     async for _event in claude.stream([Message.text("user", "hi")], [], model="claude-sonnet-4-5"):
         pass
     assert len(constructed) == 3
+
+
+# Review follow-up on PR 300. Error text is CPython's own: ``asyncio`` raises
+# ``RuntimeError('Event loop is closed')`` from ``BaseEventLoop._check_closed``.
+
+
+def _cached_slot_count() -> int:
+    return sum(len(slots) for slots in _clients.values())
+
+
+@pytest.mark.asyncio
+async def test_one_failing_close_does_not_skip_the_other_clients() -> None:
+    class _ClosedLoopClient:
+        async def close(self) -> None:
+            raise RuntimeError("Event loop is closed")
+
+    class _OpenAIShape:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    cached_sdk_client(("close-fails",), _ClosedLoopClient)
+    healthy = cached_sdk_client(("close-ok",), _OpenAIShape)
+
+    await aclose_sdk_clients()
+
+    assert healthy.closed is True
+    assert not _clients
+
+
+@pytest.mark.asyncio
+async def test_rotated_credentials_replace_the_cached_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    constructed = _install_claude(monkeypatch)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-old")
+    claude = ClaudeProvider()
+    for api_key in ("sk-ant-old", "sk-ant-new"):
+        monkeypatch.setenv("ANTHROPIC_API_KEY", api_key)
+        async for _event in claude.stream(
+            [Message.text("user", "hi")], [], model="claude-sonnet-4-5"
+        ):
+            pass
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://claude.example/v1")
+    async for _event in claude.stream([Message.text("user", "hi")], [], model="claude-sonnet-4-5"):
+        pass
+
+    assert len(constructed) == 3
+    assert _cached_slot_count() == 1
+
+
+@pytest.mark.asyncio
+async def test_bedrock_client_follows_the_bearer_token_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``AsyncAnthropicBedrock`` reads ``AWS_BEARER_TOKEN_BEDROCK`` and
+    ``ANTHROPIC_BEDROCK_BASE_URL`` in its constructor (anthropic 0.102.0)."""
+    from monkeybot.providers.bedrock import BedrockProvider
+
+    constructed: list[object] = []
+
+    def _factory(**_kwargs: Any) -> object:
+        client = object()
+        constructed.append(client)
+        return client
+
+    monkeypatch.setattr("anthropic.AsyncAnthropicBedrock", _factory)
+    provider = BedrockProvider(aws_region="us-east-1")
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-token-1")
+    first = provider._client()
+    assert provider._client() is first
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "bedrock-token-2")
+    assert provider._client() is not first
+    assert len(constructed) == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_callers_get_an_uncached_client() -> None:
+    """A client built with no running loop is not handed to later ``asyncio.run`` calls."""
+
+    def build() -> object:
+        return cached_sdk_client(("sync-built",), object)
+
+    first = await asyncio.to_thread(build)
+    second = await asyncio.to_thread(build)
+
+    assert first is not second
+    assert ("sync-built",) not in _clients
+
+
+@pytest.mark.asyncio
+async def test_openai_compat_client_follows_openai_org_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``AsyncOpenAI(base_url=..., api_key=...)`` still reads ``OPENAI_ORG_ID`` and
+    ``OPENAI_PROJECT_ID`` (openai 2.36.0)."""
+    seen = _install_openai(monkeypatch)
+    monkeypatch.delenv("OPENAI_ORG_ID", raising=False)
+    await _drain_compat("compat-key")
+    monkeypatch.setenv("OPENAI_ORG_ID", "org-123")
+    await _drain_compat("compat-key")
+
+    assert len(seen["constructed"]) == 2
+
+
+def test_building_a_client_does_not_block_other_threads() -> None:
+    """A slow constructor (``google.auth.default`` on GCE) must not hold the cache lock."""
+    started = threading.Event()
+    release = threading.Event()
+    other_done = threading.Event()
+
+    def slow_factory() -> object:
+        started.set()
+        release.wait(5)
+        return object()
+
+    async def build(key: tuple[str, ...], factory: Any) -> None:
+        cached_sdk_client(key, factory)
+
+    slow = threading.Thread(target=lambda: asyncio.run(build(("slow",), slow_factory)))
+    slow.start()
+    try:
+        assert started.wait(5)
+        fast = threading.Thread(
+            target=lambda: (asyncio.run(build(("fast",), object)), other_done.set())
+        )
+        fast.start()
+        assert other_done.wait(1), "fast lookup waited on the slow constructor"
+    finally:
+        release.set()
+        slow.join(5)
+
+
+@pytest.mark.asyncio
+async def test_clear_sdk_clients_refuses_to_orphan_clients_on_a_running_loop() -> None:
+    class _OpenAIShape:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    client = cached_sdk_client(("running-loop",), _OpenAIShape)
+
+    with pytest.raises(RuntimeError, match="aclose_sdk_clients"):
+        clear_sdk_clients()
+
+    assert cached_sdk_client(("running-loop",), _OpenAIShape) is client
+    await aclose_sdk_clients()
+    assert client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_any_sdk_env_var_change_rebuilds_the_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both SDKs read ``*_CUSTOM_HEADERS`` in their constructors (openai 2.36.0,
+    anthropic 0.102.0); no call site listed it."""
+    seen = _install_openai(monkeypatch)
+    monkeypatch.delenv("OPENAI_CUSTOM_HEADERS", raising=False)
+    provider = OpenAIProvider()
+    await _drain_openai(provider, model="gpt-4.1")
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "x-team: search")
+    await _drain_openai(provider, model="gpt-4.1")
+    assert len(seen["constructed"]) == 2
+
+    constructed = _install_claude(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.delenv("ANTHROPIC_CUSTOM_HEADERS", raising=False)
+    claude = ClaudeProvider()
+    async for _event in claude.stream([Message.text("user", "hi")], [], model="claude-sonnet-4-5"):
+        pass
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "x-team: search")
+    async for _event in claude.stream([Message.text("user", "hi")], [], model="claude-sonnet-4-5"):
+        pass
+    assert len(constructed) == 2

@@ -152,11 +152,13 @@ class VertexClaudeProvider:
         """One Vertex Claude client for this project and region."""
         from anthropic import AsyncAnthropicVertex  # noqa: PLC0415
 
-        from monkeybot.providers._sdk_client import cached_sdk_client
+        from monkeybot.providers._sdk_client import cached_sdk_client, sdk_env
 
         project_id = self._project_id
         region = self._region
         return cached_sdk_client(
             ("vertex-claude", project_id, region),
             lambda: AsyncAnthropicVertex(project_id=project_id, region=region),
+            # ANTHROPIC_VERTEX_BASE_URL is read by the constructor.
+            fingerprint=sdk_env("ANTHROPIC_VERTEX_"),
         )

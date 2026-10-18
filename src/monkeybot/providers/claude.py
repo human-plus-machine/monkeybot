@@ -8,7 +8,11 @@ from typing import Any, cast
 
 from monkeybot.core.llm.provider import Message, ProviderCallHints, ProviderEvent
 from monkeybot.core.types.types_tools import ToolDef
-from monkeybot.providers._sdk_client import cached_sdk_client, session_affinity_headers
+from monkeybot.providers._sdk_client import (
+    cached_sdk_client,
+    sdk_env,
+    session_affinity_headers,
+)
 from monkeybot.providers._utils import (
     anthropic_tool_defs,
     build_anthropic_messages,
@@ -136,16 +140,13 @@ class ClaudeProvider:
 
 
 def _anthropic_client(anthropic: Any) -> Any:
-    """One ``AsyncAnthropic`` for this loop, API key, and endpoint.
+    """One ``AsyncAnthropic`` for this loop.
 
-    ``AsyncAnthropic`` reads ``ANTHROPIC_BASE_URL`` and ``ANTHROPIC_AUTH_TOKEN``
-    when they are not passed in, so both are part of the cache key.
+    ``AsyncAnthropic`` reads ANTHROPIC_* env vars in its constructor, so those
+    identify the client.
     """
     return cached_sdk_client(
-        ("anthropic", os.environ.get("ANTHROPIC_BASE_URL")),
+        ("anthropic",),
         lambda: anthropic.AsyncAnthropic(),
-        secrets=(
-            os.environ.get("ANTHROPIC_API_KEY", ""),
-            os.environ.get("ANTHROPIC_AUTH_TOKEN", ""),
-        ),
+        fingerprint=sdk_env("ANTHROPIC_"),
     )

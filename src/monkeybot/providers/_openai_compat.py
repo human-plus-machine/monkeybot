@@ -1176,7 +1176,7 @@ async def stream_chat_completions_with_tool_fallback(
     """
     from openai import AsyncOpenAI  # noqa: PLC0415
 
-    from monkeybot.providers._sdk_client import cached_sdk_client  # noqa: PLC0415
+    from monkeybot.providers._sdk_client import cached_sdk_client, sdk_env  # noqa: PLC0415
 
     msgs = list(messages)
     if max_request_bytes is not None and max_request_bytes > 0:
@@ -1194,7 +1194,8 @@ async def stream_chat_completions_with_tool_fallback(
     client = cached_sdk_client(
         ("openai-compat", base_url),
         lambda: AsyncOpenAI(base_url=base_url, api_key=api_key),
-        secrets=(api_key,),
+        # AsyncOpenAI still reads OPENAI_ORG_ID and the other OPENAI_* vars.
+        fingerprint=(api_key, sdk_env("OPENAI_")),
     )
     kwargs: dict[str, Any] = {
         "model": model,
