@@ -4,7 +4,8 @@
 #
 # Precedence: environment variables (and optional root `.env`) win over values here
 # except ``model.*`` (provider, name, temperature, max_tokens, thinking_budget,
-# context_window, summarization_model, max_turns, cache_retention) which are YAML-only.
+# reasoning_effort, context_window, summarization_model, max_turns, cache_retention)
+# which are YAML-only.
 #
 # Secrets are not committed here. Create a `.env` in the repo root when you need keys or
 # machine-local paths, for example:
@@ -98,6 +99,11 @@ model:
   # Gemini: -1 = model default, 0 = off, N = token budget
   # Ollama (Gemma 4, Qwen3, …): -1 = server default, 0 = off (reasoning_effort: none)
   thinking_budget: -1
+  # Effort level for models that take one (low, medium, high, xhigh, max, …).
+  # Omit to use the provider default. Wins over thinking_budget when set.
+  # The app only offers levels the model's own API reports. A value the model
+  # rejects is retried without the field.
+  # reasoning_effort: high
   # Summarisation trigger (tokens). Also drives soft-spill / read_file char budgets.
   context_window: 1000000
   max_turns: 1000

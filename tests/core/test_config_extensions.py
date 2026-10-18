@@ -188,6 +188,7 @@ class TestVertexAnthropicProvider:
                 region="us-central1",
                 temperature=0.7,
                 max_tokens=60_000,
+                reasoning_effort="",
             )
 
     def test_get_provider_config_vertex_anthropic_missing_project(

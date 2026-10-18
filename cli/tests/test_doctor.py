@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from monkeybot_cli.commands.doctor import (
     _add_ollama_local_checks,
+    _add_reasoning_effort_check,
     _agent_defines_project_extra,
     _extra_remediation,
     _is_local_ollama_provider,
@@ -215,3 +216,17 @@ def test_ollama_local_thinking_default_pass_when_off() -> None:
         num_ctx=8192,
     )
     assert _doctor_by_id(report)["ollama.local.thinking_default"].status == "pass"
+
+
+def test_reasoning_effort_check_skips_when_unset() -> None:
+    report = CommandReport(command="doctor", ok=True, config_path=None)
+    _add_reasoning_effort_check(report, reasoning_effort=None)
+    assert _doctor_by_id(report)["model.reasoning_effort"].status == "skip"
+
+
+def test_reasoning_effort_check_passes_when_set() -> None:
+    report = CommandReport(command="doctor", ok=True, config_path=None)
+    _add_reasoning_effort_check(report, reasoning_effort=" High ")
+    result = _doctor_by_id(report)["model.reasoning_effort"]
+    assert result.status == "pass"
+    assert "high" in result.message

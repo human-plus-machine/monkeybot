@@ -58,6 +58,7 @@ class OpenRouterProvider:
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         api_key = os.environ.get("OPENROUTER_API_KEY", "")
         if not api_key:
@@ -67,9 +68,14 @@ class OpenRouterProvider:
             )
         self._api_key = api_key
         self._base_url = (os.environ.get("OPENROUTER_BASE_URL") or _DEFAULT_BASE_URL).rstrip("/")
-        sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
+        sampling = resolve_model_sampling(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
+        self._reasoning_effort = sampling.reasoning_effort
 
     async def count_input_tokens(
         self,
@@ -108,6 +114,7 @@ class OpenRouterProvider:
             model=model,
             temperature=self._temperature,
             max_tokens=self._max_tokens,
+            reasoning_effort=self._reasoning_effort,
             max_request_bytes=configured_request_byte_budget(provider=self.name),
         ):
             yield event

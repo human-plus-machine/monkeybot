@@ -2,7 +2,7 @@
 
 Deep reference for every `monkeybot.yaml` section. Load this only when a user needs to customize beyond Tier 1. The canonical, fully-commented template lives at `cli/src/monkeybot_cli/scaffold_defaults/monkeybot.example.yaml` in the monkeybot repo (copied to `monkeybot_config/monkeybot.example.yaml` when you scaffold); this file adds the **"when would I change this?"** context the comments don't.
 
-**Precedence:** env vars and `.env` win over YAML for `ENV_MAP` keys. `model.*` (provider, name, temperature, max_tokens, thinking_budget, context_window, summarization_model, max_turns, cache_retention) is YAML-only — leftover `MODEL_*` env vars are ignored. The YAML→env mapping is `ENV_MAP` in `src/monkeybot/core/config/runtime_env.py`. If a YAML edit has no effect, check for a shadowing env var (except `model.*`).
+**Precedence:** env vars and `.env` win over YAML for `ENV_MAP` keys. `model.*` (provider, name, temperature, max_tokens, thinking_budget, reasoning_effort, context_window, summarization_model, max_turns, cache_retention) is YAML-only — leftover `MODEL_*` env vars are ignored. The YAML→env mapping is `ENV_MAP` in `src/monkeybot/core/config/runtime_env.py`. If a YAML edit has no effect, check for a shadowing env var (except `model.*`).
 
 ---
 
@@ -42,7 +42,8 @@ YAML-only for provider, name, sampling, context window, summarization model, max
 | `name` | `gemini-3-flash` | Pick a specific model id |
 | `temperature` | `0.7` | Lower for deterministic output, higher for creative |
 | `max_tokens` | `60000` | Cap per-response length |
-| `thinking_budget` | `-1` | Gemini: `-1` model default, `0` off, `N` token budget. Ollama reasoning models: `-1` server default, `0` off (`reasoning_effort: none`) |
+| `thinking_budget` | `-1` | Gemini: `-1` model default, `0` off, `N` token budget. Ollama reasoning models: `-1` server default, `0` off (`reasoning_effort: none`). Ignored when `reasoning_effort` is set on providers that take an effort level |
+| `reasoning_effort` | (unset) | Effort level passed through to the provider (`low`, `medium`, `high`, `xhigh`, `max`, or whatever that provider accepts). Omit for the provider default. YAML-only. An unsupported level is retried without the field |
 | `context_window` | `1000000` | Summarization trigger (tokens); also drives soft-spill / `read_file` char budgets. **Not** Ollama `num_ctx` |
 | `keep_alive` | `24h` (ollama-local only) | How long local Ollama keeps the model (and KV prefix cache) loaded. YAML only. Set `"0"` to omit. See `docs/ollama-local.md` |
 | `num_ctx` | (unset) | Optional pinned Ollama `num_ctx`. YAML only. Omit = server default. Do not copy `context_window` |

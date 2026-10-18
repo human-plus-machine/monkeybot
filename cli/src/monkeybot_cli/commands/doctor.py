@@ -228,6 +228,30 @@ def _strict_positive_int(raw: object) -> tuple[int | None, bool]:
     return raw, False
 
 
+def _add_reasoning_effort_check(report: CommandReport, *, reasoning_effort: object) -> None:
+    """Note a YAML effort value. The harness sends it as-is and retries without it on 400."""
+    text = ""
+    if reasoning_effort not in (None, ""):
+        text = str(reasoning_effort).strip().lower()
+    check(
+        report,
+        id="model.reasoning_effort",
+        category="provider",
+        severity="warning",
+        passed=True,
+        skip=not text,
+        message=(
+            f"reasoning_effort {text!r} is sent to the provider. "
+            "It wins over thinking_budget where the provider accepts effort. "
+            "An unsupported level is retried without it."
+            if text
+            else "reasoning_effort unset"
+        ),
+        field="model.reasoning_effort",
+        value=text or None,
+    )
+
+
 def _add_ollama_local_checks(
     report: CommandReport,
     *,
@@ -463,6 +487,9 @@ def run_doctor(args: argparse.Namespace) -> int:
             passed=False,
             skip=True,
         )
+
+    effort_raw = model.get("reasoning_effort") if isinstance(model, dict) else None
+    _add_reasoning_effort_check(report, reasoning_effort=effort_raw)
 
     thinking_raw = model.get("thinking_budget") if isinstance(model, dict) else None
     if thinking_raw is None:

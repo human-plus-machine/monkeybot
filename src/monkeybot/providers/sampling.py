@@ -24,15 +24,32 @@ class ModelSamplingConfig:
 
     temperature: float
     max_tokens: int
+    # Provider-neutral effort string (``low``, ``high``, ``max``, …). None = omit.
+    reasoning_effort: str | None = None
+
+
+def normalize_reasoning_effort(value: str | None) -> str | None:
+    """Lowercase and trim. Empty becomes None so the provider field is omitted."""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    return text or None
 
 
 def resolve_model_sampling(
     *,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    reasoning_effort: str | None = None,
     config: RuntimeConfig | None = None,
 ) -> ModelSamplingConfig:
-    """Resolve temperature and max output tokens from args, snapshot, or environment."""
+    """Resolve temperature, max output tokens, and reasoning effort.
+
+    ``reasoning_effort=None`` reads ``MODEL_REASONING_EFFORT`` (YAML-only).
+    An explicit string, including ``""``, is used as-is and does not re-read
+    the environment — ``get_provider_config`` passes ``""`` when the snapshot
+    has no effort so a leftover process env var cannot leak back in.
+    """
     from monkeybot.core.config.snapshot import env_value_or_current
 
     resolved_temperature = (
@@ -47,7 +64,12 @@ def resolve_model_sampling(
         if max_tokens is not None
         else int(env_value_or_current(config, "MODEL_MAX_TOKENS", str(DEFAULT_MODEL_MAX_TOKENS)))
     )
+    if reasoning_effort is None:
+        raw_effort = env_value_or_current(config, "MODEL_REASONING_EFFORT", "")
+    else:
+        raw_effort = reasoning_effort
     return ModelSamplingConfig(
         temperature=resolved_temperature,
         max_tokens=resolved_max_tokens,
+        reasoning_effort=normalize_reasoning_effort(raw_effort),
     )

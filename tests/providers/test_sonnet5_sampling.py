@@ -81,6 +81,22 @@ async def test_sonnet5_drops_manual_thinking_and_does_not_force_temperature_1(
 
 
 @pytest.mark.asyncio
+async def test_reasoning_effort_sends_adaptive_and_omits_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.delenv("MODEL_REASONING_EFFORT", raising=False)
+    client = make_anthropic_stream_mock(_minimal_events())
+    provider = ClaudeProvider(temperature=0.9, reasoning_effort="High")
+    with patch("anthropic.AsyncAnthropic", return_value=client):
+        await _drain(provider, model=_OLDER, thinking_budget=4000)
+    kwargs = client.messages.stream.call_args.kwargs
+    assert kwargs["thinking"] == {"type": "adaptive"}
+    assert kwargs["output_config"] == {"effort": "high"}
+    assert "temperature" not in kwargs
+
+
+@pytest.mark.asyncio
 async def test_older_model_manual_thinking_forces_temperature_1(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -298,6 +314,53 @@ async def test_strips_multiple_rejected_params_across_retries() -> None:
     assert "thinking" not in calls[2]
     assert "temperature" not in calls[2]
     assert any(isinstance(e, UsageEvent) for e in events)
+
+
+@pytest.mark.asyncio
+async def test_strips_rejected_output_config_effort() -> None:
+    calls: list[dict[str, Any]] = []
+
+    def stream_fn(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        if "output_config" in kwargs:
+            return _cm_raising(
+                RuntimeError(
+                    "Error code: 400 - output_config.effort: Input should be 'low' or 'high'"
+                )
+            )
+
+        class _CM:
+            async def __aenter__(self) -> object:
+                async def _gen() -> object:
+                    for event in _minimal_events():
+                        yield event
+
+                return _gen()
+
+            async def __aexit__(self, *_exc: object) -> bool:
+                return False
+
+        return _CM()
+
+    client = MagicMock()
+    client.messages.stream = stream_fn
+
+    async for _ in iter_anthropic_sdk_stream(
+        client,
+        {
+            "model": "claude-sonnet-6-hypothetical",
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": "max"},
+            "max_tokens": 100,
+        },
+        provider="claude",
+        error_message="Claude stream error: %s",
+    ):
+        pass
+
+    assert len(calls) == 2
+    assert "output_config" not in calls[1]
+    assert calls[1]["thinking"] == {"type": "adaptive"}
 
 
 @pytest.mark.asyncio

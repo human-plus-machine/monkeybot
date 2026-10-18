@@ -162,6 +162,28 @@ def _resolve_thinking_budget(
     return thinking_budget
 
 
+def _apply_thinking_config(
+    types: Any,
+    cfg_kwargs: dict[str, Any],
+    *,
+    effort: str | None,
+    budget: int,
+) -> None:
+    """Set ``thinking_config``. Effort wins over a token budget; they must not both be sent.
+
+    ``off`` / ``none`` / ``disabled`` disable thinking with budget 0. Any other effort
+    string is passed through as ``thinking_level``.
+    """
+    if effort:
+        if effort in {"off", "none", "disabled"}:
+            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        else:
+            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=effort)
+        return
+    if budget != -1:
+        cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
+
+
 def _split_system_and_rest(messages: Sequence[Message]) -> tuple[str, list[Message]]:
     systems: list[str] = []
     rest: list[Message] = []
@@ -519,6 +541,7 @@ class GeminiProvider:
         max_tokens: int | None = None,
         max_output_tokens: int | None = None,
         thinking_budget: int | None = None,
+        reasoning_effort: str | None = None,
         api_key: str | None = None,
     ) -> None:
         """Gemini streaming provider (Vertex AI or Google AI Studio).
@@ -542,10 +565,15 @@ class GeminiProvider:
             raise ValueError("pass only one of max_tokens or max_output_tokens")
         effective_max_tokens = max_tokens if max_tokens is not None else max_output_tokens
         self._supports_streaming = supports_streaming
-        sampling = resolve_model_sampling(temperature=temperature, max_tokens=effective_max_tokens)
+        sampling = resolve_model_sampling(
+            temperature=temperature,
+            max_tokens=effective_max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
         self._thinking_budget = thinking_budget
+        self._reasoning_effort = sampling.reasoning_effort
         self._api_key = api_key
 
     def _client(self, model_param: str) -> Any:
@@ -619,8 +647,14 @@ class GeminiProvider:
                 "temperature": float(self._temperature),
                 "max_output_tokens": int(self._max_tokens),
             }
-            if budget != -1:
-                gen_cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=budget)
+            _apply_thinking_config(
+                types,
+                gen_cfg_kwargs,
+                effort=None
+                if _suppress_thinking_for_auxiliary_call(messages, tools)
+                else self._reasoning_effort,
+                budget=budget,
+            )
             count_cfg_kwargs["generation_config"] = types.GenerationConfig(**gen_cfg_kwargs)
 
         ct_cfg = types.CountTokensConfig(**count_cfg_kwargs) if count_cfg_kwargs else None
@@ -685,11 +719,16 @@ class GeminiProvider:
         }
         if system_instruction:
             cfg_kwargs["system_instruction"] = system_instruction
-        # -1 means "omit ThinkingConfig entirely" (model default).
-        # 0 means explicitly disable thinking (sent to API).
-        # Any other positive value sets a token budget.
-        if thinking_budget != -1:
-            cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
+        # Effort wins over the token budget. Auxiliary calls still force budget 0
+        # via ``_resolve_thinking_budget`` and skip the configured effort.
+        _apply_thinking_config(
+            types,
+            cfg_kwargs,
+            effort=None
+            if _suppress_thinking_for_auxiliary_call(messages, tools)
+            else self._reasoning_effort,
+            budget=thinking_budget,
+        )
 
         decls = _tool_defs_to_declarations(tools)
         stream_tools: list[Any] = []

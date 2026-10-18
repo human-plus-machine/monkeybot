@@ -46,6 +46,7 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import safe_parse_tool_args
+from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.request_budget import (
     RequestByteBudgetError,
     trim_message_media_for_byte_budget,
@@ -1145,6 +1146,41 @@ def is_ollama_request_body_read_error(exc: BaseException) -> bool:
     return True
 
 
+_OPENAI_STRIPPABLE = ("temperature", "reasoning_effort")
+
+
+def _blames_sampling_param(msg: str, param: str) -> bool:
+    """True when a 400 names ``param`` as a rejected request field.
+
+    Anthropic-style field paths (``temperature:``) and OpenAI-style quoted
+    names (``Unsupported parameter: 'temperature'``) both count. A bare
+    mention of the word does not.
+    """
+    lowered = msg.lower()
+    if re.search(rf"(?:^|[^a-z0-9_.]){re.escape(param)}(?:\.[a-z0-9_.]+)?:", lowered):
+        return True
+    if re.search(rf"['\"]{re.escape(param)}['\"]", lowered) is None:
+        return False
+    return any(
+        phrase in lowered
+        for phrase in ("unsupported", "not supported", "not permitted", "unknown", "invalid")
+    )
+
+
+def drop_rejected_sampling(kwargs: dict[str, Any], exc: BaseException) -> list[str]:
+    """Remove sampling kwargs a 400 blames. Returns the names that were removed."""
+    status = getattr(exc, "status_code", None)
+    if status != 400 and "400" not in str(exc):
+        return []
+    msg = str(exc)
+    dropped = [
+        name for name in _OPENAI_STRIPPABLE if name in kwargs and _blames_sampling_param(msg, name)
+    ]
+    for name in dropped:
+        del kwargs[name]
+    return dropped
+
+
 async def stream_chat_completions_with_tool_fallback(
     *,
     base_url: str,
@@ -1194,9 +1230,10 @@ async def stream_chat_completions_with_tool_fallback(
         "model": model,
         "messages": oai_messages,
         "stream": True,
-        "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if supports_param(model, "temperature"):
+        kwargs["temperature"] = temperature
     if tools:
         kwargs["tools"] = openai_tools(tools)
     if reasoning_effort is not None:
@@ -1235,6 +1272,14 @@ async def stream_chat_completions_with_tool_fallback(
                     yield event
                 return
             except Exception as exc:
+                if not yielded_any:
+                    dropped = drop_rejected_sampling(kwargs, exc)
+                    if dropped:
+                        _log.warning(
+                            "openai-compat stream rejected sampling params, retrying without them %s",
+                            kv(provider=provider, model=model, dropped=dropped),
+                        )
+                        continue
                 if n_tools and is_tool_unsupported_error(exc):
                     _log.warning(
                         "%s model %r does not support tool calling; "
@@ -1341,6 +1386,7 @@ __all__ = [
     "ProviderRateLimitError",
     "ProviderServerError",
     "count_input_tokens_tiktoken",
+    "drop_rejected_sampling",
     "count_openai_compat_input_tokens",
     "is_rate_limit_error",
     "is_server_error",

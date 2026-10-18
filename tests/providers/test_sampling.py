@@ -10,6 +10,7 @@ import pytest
 
 from monkeybot.core.config.settings import get_provider_config
 from monkeybot.core.llm.provider import Message
+from monkeybot.providers._openai_compat import drop_rejected_sampling
 from monkeybot.providers.bedrock import BedrockProvider
 from monkeybot.providers.claude import ClaudeProvider
 from monkeybot.providers.gemini import GeminiProvider
@@ -37,6 +38,35 @@ class TestResolveModelSampling:
         sampling = resolve_model_sampling(temperature=0.2, max_tokens=8192)
         assert sampling.temperature == 0.2
         assert sampling.max_tokens == 8192
+
+    def test_reasoning_effort_unset_by_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("MODEL_REASONING_EFFORT", raising=False)
+        sampling = resolve_model_sampling()
+        assert sampling.reasoning_effort is None
+
+    def test_reasoning_effort_normalizes_and_explicit_empty_skips_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MODEL_REASONING_EFFORT", "max")
+        assert resolve_model_sampling(reasoning_effort="  XHIGH ").reasoning_effort == "xhigh"
+        assert resolve_model_sampling(reasoning_effort="").reasoning_effort is None
+
+    def test_reasoning_effort_from_snapshot(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from monkeybot.core.config.snapshot import build_runtime_config
+
+        monkeypatch.chdir(tmp_path)
+        cfg_dir = tmp_path / "monkeybot_config"
+        cfg_dir.mkdir()
+        (cfg_dir / "monkeybot.yaml").write_text(
+            "model:\n  reasoning_effort: high\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("MODEL_REASONING_EFFORT", "low")
+        cfg = build_runtime_config(agent_root=tmp_path)
+        sampling = resolve_model_sampling(config=cfg)
+        assert sampling.reasoning_effort == "high"
 
     def test_reads_from_env_when_args_omitted(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("MODEL_TEMPERATURE", "0.15")
@@ -103,7 +133,9 @@ class TestProviderSamplingConstructors:
 
 
 class TestGetProviderConfigSampling:
-    def test_bedrock_threads_sampling_from_yaml_params(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_bedrock_threads_sampling_from_yaml_params(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         mock_instance = SimpleNamespace(name="bedrock")
         with patch(
             "monkeybot.providers.bedrock.BedrockProvider",
@@ -133,6 +165,7 @@ class TestGetProviderConfigSampling:
         assert isinstance(cfg.provider, ClaudeProvider)
         assert cfg.provider._temperature == 0.2
         assert cfg.provider._max_tokens == 8192
+        assert cfg.provider._reasoning_effort is None
 
 
 @pytest.mark.asyncio
@@ -148,9 +181,23 @@ async def test_bedrock_stream_passes_sampling_to_api() -> None:
     client = make_anthropic_stream_mock(events)
     provider._client = lambda: client  # type: ignore[method-assign]
 
-    async for _ in provider.stream([Message.text("user", "hi")], [], model="claude-3-5-sonnet-20241022"):
+    async for _ in provider.stream(
+        [Message.text("user", "hi")], [], model="claude-3-5-sonnet-20241022"
+    ):
         pass
 
     kwargs = client.messages.stream.call_args.kwargs
     assert kwargs["temperature"] == 0.2
     assert kwargs["max_tokens"] == 8192
+
+
+def test_drop_rejected_sampling_quotes_openai_style() -> None:
+    kwargs = {"temperature": 0.7, "reasoning_effort": "max", "model": "gpt-5"}
+    dropped = drop_rejected_sampling(
+        kwargs,
+        RuntimeError("Error code: 400 - Unsupported parameter: 'temperature'"),
+    )
+    assert dropped == ["temperature"]
+    assert "temperature" not in kwargs
+    assert kwargs["reasoning_effort"] == "max"
+    assert drop_rejected_sampling(kwargs, RuntimeError("Error code: 500")) == []

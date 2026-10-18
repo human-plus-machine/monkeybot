@@ -29,6 +29,8 @@ Configuration (environment variables or ``monkeybot.yaml``):
 - ``model.thinking_budget`` — thinking control for reasoning models (e.g. Gemma 4):
   ``-1`` = Ollama default (thinking on when supported), ``0`` = off via
   ``reasoning_effort: none``, ``N > 0`` = on (no token budget on Ollama).
+- ``model.reasoning_effort`` — when set, sent as ``reasoning_effort`` and wins
+  over ``thinking_budget``. ``off`` / ``disabled`` map to ``none``.
 - ``model.keep_alive`` (YAML only) — local only. How long Ollama keeps the model
   (and its KV prefix cache) loaded after a request. Default ``24h``. Set ``"0"``
   (or empty) to omit the field. Cloud mode never sends it. Distinct from the
@@ -179,6 +181,15 @@ def reasoning_effort_for_thinking_budget(budget: int) -> str | None:
     return None
 
 
+def ollama_reasoning_effort(configured: str | None, budget: int) -> str | None:
+    """Prefer an explicit effort. ``off`` / ``disabled`` become Ollama's ``none``."""
+    if configured:
+        if configured in {"off", "disabled"}:
+            return "none"
+        return configured
+    return reasoning_effort_for_thinking_budget(budget)
+
+
 def _resolve_thinking_budget(
     configured: int | None,
     *,
@@ -220,14 +231,20 @@ class OllamaProvider:
         temperature: float | None = None,
         max_tokens: int | None = None,
         thinking_budget: int | None = None,
+        reasoning_effort: str | None = None,
         keep_alive: str | None = None,
         num_ctx: int | None = None,
     ) -> None:
         self._mode = mode
         self._base_url, self._api_key = _resolve_host_and_key(mode)
-        sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
+        sampling = resolve_model_sampling(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
+        self._reasoning_effort = sampling.reasoning_effort
         if thinking_budget is not None:
             self._thinking_budget = thinking_budget
         else:
@@ -315,7 +332,7 @@ class OllamaProvider:
             model=model,
             temperature=self._temperature,
             max_tokens=self._max_tokens,
-            reasoning_effort=reasoning_effort_for_thinking_budget(budget),
+            reasoning_effort=ollama_reasoning_effort(self._reasoning_effort, budget),
             extra_body=extra_body,
             max_request_bytes=_ollama_max_request_bytes(self._mode, self._base_url),
         ):

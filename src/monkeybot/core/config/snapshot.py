@@ -128,6 +128,7 @@ class ModelConfig:
     anthropic_vertex_project_id: str | None = None
     anthropic_vertex_region: str | None = None
     fake_provider_events: str | None = None
+    reasoning_effort: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -882,6 +883,7 @@ def _model_from_env(env: Mapping[str, str]) -> ModelConfig:
         anthropic_vertex_project_id=env.get("ANTHROPIC_VERTEX_PROJECT_ID"),
         anthropic_vertex_region=env.get("ANTHROPIC_VERTEX_REGION"),
         fake_provider_events=env.get("MONKEYBOT_FAKE_PROVIDER_EVENTS"),
+        reasoning_effort=env.get("MODEL_REASONING_EFFORT"),
     )
 
 

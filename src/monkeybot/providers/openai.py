@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
@@ -11,9 +12,11 @@ from monkeybot.core.llm.provider import (
     ProviderCallHints,
     ProviderEvent,
 )
+from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._openai_compat import (
     count_openai_compat_input_tokens,
+    drop_rejected_sampling,
     enforce_openai_request_byte_budget,
     iter_openai_compat_stream,
     messages_to_openai,
@@ -21,6 +24,7 @@ from monkeybot.providers._openai_compat import (
     openai_tools,
     openai_tools_token_count,
 )
+from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.request_budget import (
     configured_request_byte_budget,
     trim_message_media_for_byte_budget,
@@ -32,6 +36,8 @@ _messages_to_openai = messages_to_openai
 _openai_tools = openai_tools
 _openai_messages_token_count = openai_messages_token_count
 _openai_tools_token_count = openai_tools_token_count
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "OpenAIProvider",
@@ -59,12 +65,18 @@ class OpenAIProvider:
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         if not os.environ.get("OPENAI_API_KEY"):
             raise ValueError("OPENAI_API_KEY is not set")
-        sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
+        sampling = resolve_model_sampling(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
+        self._reasoning_effort = sampling.reasoning_effort
 
     async def count_input_tokens(
         self,
@@ -126,9 +138,12 @@ class OpenAIProvider:
             "model": model,
             "messages": oai_messages,
             "stream": True,
-            "temperature": self._temperature,
             "max_tokens": self._max_tokens,
         }
+        if supports_param(model, "temperature"):
+            kwargs["temperature"] = self._temperature
+        if self._reasoning_effort:
+            kwargs["reasoning_effort"] = self._reasoning_effort
         if tools:
             kwargs["tools"] = openai_tools(tools)
             kwargs["parallel_" + "tool" + "_calls"] = True
@@ -141,11 +156,26 @@ class OpenAIProvider:
             model=model,
         )
 
-        async for event in iter_openai_compat_stream(
-            client,
-            kwargs,
-            provider="openai",
-            n_messages=len(messages),
-            n_tools=len(tools),
-        ):
-            yield event
+        while True:
+            yielded = False
+            try:
+                async for event in iter_openai_compat_stream(
+                    client,
+                    kwargs,
+                    provider="openai",
+                    n_messages=len(messages),
+                    n_tools=len(tools),
+                ):
+                    yielded = True
+                    yield event
+                return
+            except Exception as exc:
+                if yielded:
+                    raise
+                dropped = drop_rejected_sampling(kwargs, exc)
+                if not dropped:
+                    raise
+                _log.warning(
+                    "openai stream rejected sampling params, retrying without them %s",
+                    kv(provider="openai", model=model, dropped=dropped),
+                )

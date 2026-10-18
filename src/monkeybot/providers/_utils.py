@@ -31,6 +31,7 @@ from monkeybot.core.types.content_blocks import (
     ToolRequest,
     ToolResponse,
 )
+from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.pricing import estimate_cost
 
 _log = logging.getLogger(__name__)
@@ -103,7 +104,41 @@ async def count_anthropic_input_tokens(
 # can reject with HTTP 400. Model-specific cases are gated ahead of time via
 # ``model_capabilities.supports_param``; this is the fallback for a model that
 # table doesn't know about yet (e.g. released after this code was written).
-_STRIPPABLE_PARAMS = ("temperature", "thinking")
+_STRIPPABLE_PARAMS = ("temperature", "thinking", "output_config")
+
+
+def anthropic_sampling_kwargs(
+    *,
+    model: str,
+    temperature: float,
+    thinking_budget: int | None,
+    reasoning_effort: str | None,
+) -> dict[str, Any]:
+    """Sampling fields for an Anthropic Messages request.
+
+    A set ``reasoning_effort`` uses adaptive thinking plus ``output_config.effort``
+    and omits temperature and ``budget_tokens``. Otherwise temperature and a
+    manual thinking budget are sent only when the model is known to accept them.
+    """
+    effort = (reasoning_effort or "").strip().lower()
+    if effort:
+        return {
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": effort},
+        }
+    kwargs: dict[str, Any] = {}
+    if supports_param(model, "temperature"):
+        kwargs["temperature"] = temperature
+    if thinking_budget is not None and thinking_budget > 0 and supports_param(model, "thinking"):
+        kwargs["thinking"] = {
+            "type": "enabled",
+            "budget_tokens": thinking_budget,
+        }
+        # Anthropic requires temperature=1 when extended thinking is enabled —
+        # but only send it to models that accept a temperature at all.
+        if supports_param(model, "temperature"):
+            kwargs["temperature"] = 1
+    return kwargs
 
 
 def _rejects_param(msg: str, param: str) -> bool:
