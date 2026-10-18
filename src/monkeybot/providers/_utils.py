@@ -317,6 +317,7 @@ async def iter_anthropic_sdk_stream(
             and {"thinking", "output_config"} & set(dropped)
             and not {"thinking", "output_config", "temperature"} & kw.keys()
             and supports_param(model, "temperature")
+            and not was_rejected(provider, model, "temperature", fallback_temperature)
         ):
             kw["temperature"] = fallback_temperature
         return dropped

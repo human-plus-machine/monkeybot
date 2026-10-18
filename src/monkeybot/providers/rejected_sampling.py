@@ -54,15 +54,17 @@ def blames_sampling_param(msg: str, param: str) -> bool:
     """True when a 400 names ``param`` as a rejected request field.
 
     Anthropic-style field paths (``temperature:``), OpenAI-style quoted names
-    (``Unsupported parameter: 'temperature'``) and unquoted names after a colon
-    (``Unrecognized request argument supplied: reasoning_effort``) all count.
+    (``Unsupported parameter: 'temperature'``) and Azure's unquoted
+    ``Unrecognized request argument supplied: reasoning_effort`` count. The
+    ``invalid_request_error`` type every OpenAI 400 carries is not a reason.
     """
     if blames_field_path(msg, param):
         return True
     lowered = msg.lower()
     name = re.escape(param)
-    if re.search(rf"['\"]{name}['\"]|:\s*{name}\b", lowered) is None:
+    if re.search(rf"['\"]{name}['\"]|argument supplied:\s*{name}\b", lowered) is None:
         return False
+    lowered = lowered.replace("invalid_request_error", "")
     return any(
         phrase in lowered
         for phrase in (

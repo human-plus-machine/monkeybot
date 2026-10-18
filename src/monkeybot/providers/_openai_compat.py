@@ -57,7 +57,6 @@ from monkeybot.providers.request_budget import (
     RequestByteBudgetError,
     trim_message_media_for_byte_budget,
 )
-from monkeybot.providers.sampling import normalize_reasoning_effort
 
 _log = logging.getLogger(__name__)
 
@@ -1156,11 +1155,6 @@ def is_ollama_request_body_read_error(exc: BaseException) -> bool:
 _OPENAI_STRIPPABLE = ("temperature", "reasoning_effort")
 
 
-def openai_reasoning_effort(value: str | None) -> str | None:
-    """Wire value for ``reasoning_effort``. ``off`` / ``none`` / ``disabled`` become ``none``."""
-    return normalize_reasoning_effort(value)
-
-
 def drop_rejected_sampling(
     kwargs: dict[str, Any],
     exc: BaseException,
@@ -1283,7 +1277,7 @@ async def stream_chat_completions_with_tool_fallback(
     if tools:
         kwargs["tools"] = openai_tools(tools)
     if reasoning_effort is not None:
-        kwargs["reasoning_effort"] = openai_reasoning_effort(reasoning_effort)
+        kwargs["reasoning_effort"] = reasoning_effort
     omit_known_rejected(provider, model, kwargs)
     if extra_body:
         kwargs["extra_body"] = extra_body
@@ -1427,7 +1421,6 @@ __all__ = [
     "count_input_tokens_tiktoken",
     "drop_rejected_sampling",
     "iter_openai_compat_stream_with_sampling_retry",
-    "openai_reasoning_effort",
     "count_openai_compat_input_tokens",
     "is_rate_limit_error",
     "is_server_error",

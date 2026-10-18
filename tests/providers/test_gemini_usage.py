@@ -484,3 +484,64 @@ async def test_gemini_does_not_retry_budget_only_thinking_rejection(
         [ev async for ev in provider.stream([], [], model="gemini-2.5-flash")]
     assert len(captured["configs"]) == 1
     assert not was_rejected("gemini", "gemini-2.5-flash", "thinking_level")
+
+
+# Real google-genai text for a thinking-only model (gemini-2.5-pro) asked for budget 0.
+_BUDGET_ZERO_REJECTED = (
+    "400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': "
+    "'Budget 0 is invalid. This model only works in thinking mode.', "
+    "'status': 'INVALID_ARGUMENT'}}"
+)
+
+
+class _BudgetZeroRejectedError(Exception):
+    code = 400
+
+    def __str__(self) -> str:
+        return _BUDGET_ZERO_REJECTED
+
+
+def _hi_chunk() -> Any:
+    cand = types.SimpleNamespace(
+        content=types.SimpleNamespace(
+            parts=[types.SimpleNamespace(text="hi", function_call=None, thought=False)]
+        ),
+        grounding_metadata=None,
+        finish_reason=None,
+    )
+    return types.SimpleNamespace(candidates=[cand], usage_metadata=None)
+
+
+def test_gemini_blames_thinking_on_real_budget_zero_error() -> None:
+    from monkeybot.providers.gemini import _gemini_blames_thinking
+
+    assert _gemini_blames_thinking(_BudgetZeroRejectedError())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured_budget", [-1, 0])
+async def test_gemini_off_retries_without_thinking_on_thinking_only_model(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_budget: int,
+) -> None:
+    captured = _install_fake_google_genai(
+        monkeypatch,
+        stream_chunks=[_hi_chunk()],
+        stream_errors=[_BudgetZeroRejectedError()],
+    )
+    monkeypatch.delenv("MODEL_REASONING_EFFORT", raising=False)
+
+    provider = GeminiProvider(reasoning_effort="off", thinking_budget=configured_budget)
+    events = [ev async for ev in provider.stream([], [], model="gemini-2.5-pro")]
+    configs = captured["configs"]
+    assert len(configs) == 2
+    assert configs[0]["thinking_config"] == {"thinking_budget": 0}
+    # The retry must not resend the budget 0 the model just rejected.
+    assert "thinking_config" not in configs[1]
+    assert any(getattr(ev, "text", None) == "hi" for ev in events)
+
+    # Next turn goes straight to the request that works.
+    captured["configs"].clear()
+    _ = [ev async for ev in provider.stream([], [], model="gemini-2.5-pro")]
+    assert len(captured["configs"]) == 1
+    assert "thinking_config" not in captured["configs"][0]

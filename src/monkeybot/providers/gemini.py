@@ -188,7 +188,12 @@ def _gemini_blames_thinking(exc: BaseException) -> bool:
     if not is_status_400(exc):
         return False
     compact = str(exc).lower().replace("_", "")
-    return any(token in compact for token in ("thinkinglevel", "thinkingconfig", "thinkingbudget"))
+    # Thinking-only models reject budget 0 with "Budget 0 is invalid. This model
+    # only works in thinking mode." without naming the field.
+    return any(
+        token in compact
+        for token in ("thinkinglevel", "thinkingconfig", "thinkingbudget", "thinking mode")
+    )
 
 
 def _effort_for_gemini_call(
@@ -801,11 +806,17 @@ class GeminiProvider:
                 messages,
                 tools,
             )
+            budget = thinking_budget
+            if budget == _THINKING_DISABLED and was_rejected(
+                "gemini", model_param, "thinking_level", REASONING_EFFORT_NONE
+            ):
+                # This model cannot turn thinking off. Budget 0 fails the same way.
+                budget = -1
             sent_effort = _apply_thinking_config(
                 types,
                 cfg_kwargs,
                 effort=effort,
-                budget=thinking_budget,
+                budget=budget,
             )
             if stream_tools:
                 cfg_kwargs["tools"] = stream_tools

@@ -327,15 +327,6 @@ def test_rejected_sampling_retries_a_changed_value() -> None:
     assert changed == {"reasoning_effort": "high"}
 
 
-def test_openai_reasoning_effort_maps_off_words_to_none() -> None:
-    from monkeybot.providers._openai_compat import openai_reasoning_effort
-
-    assert openai_reasoning_effort("off") == "none"
-    assert openai_reasoning_effort("disabled") == "none"
-    assert openai_reasoning_effort("high") == "high"
-    assert openai_reasoning_effort(None) is None
-
-
 def test_compaction_summary_call_is_auxiliary() -> None:
     from monkeybot.core.runtime.history_compaction import _COMPACTION_SUMMARY_SYSTEM
     from monkeybot.core.types.content_blocks import Text
@@ -375,9 +366,87 @@ def test_normalize_reasoning_effort_maps_off_words_and_yaml_false() -> None:
     assert normalize_reasoning_effort("") is None
 
 
+def test_normalize_reasoning_effort_yaml_true_uses_provider_default() -> None:
+    from monkeybot.providers.sampling import normalize_reasoning_effort
+
+    # Unquoted YAML ``on`` / ``yes`` load as True and reach the env as "true".
+    assert normalize_reasoning_effort(True) is None
+    assert normalize_reasoning_effort("true") is None
+
+
 def test_blames_sampling_param_unquoted_unrecognized_argument() -> None:
     from monkeybot.providers.rejected_sampling import blames_sampling_param
 
     msg = "Error code: 400 - Unrecognized request argument supplied: reasoning_effort"
     assert blames_sampling_param(msg, "reasoning_effort")
     assert not blames_sampling_param(msg, "temperature")
+
+
+# Real OpenAI 400 body shape: ``'type': 'invalid_request_error'`` is always present.
+_OPENAI_400 = (
+    "Error code: 400 - {{'error': {{'message': {message!r}, "
+    "'type': 'invalid_request_error', 'param': None, 'code': None}}}}"
+)
+
+
+def test_blames_sampling_param_ignores_error_type_and_loose_colon_mentions() -> None:
+    from monkeybot.providers.rejected_sampling import blames_sampling_param
+
+    msg = _OPENAI_400.format(
+        message="Prompt flagged by moderation. Request settings: temperature=0.7"
+    )
+    assert not blames_sampling_param(msg, "temperature")
+
+
+def test_blames_sampling_param_real_openai_unsupported_value() -> None:
+    from monkeybot.providers.rejected_sampling import blames_sampling_param
+
+    msg = (
+        "Error code: 400 - {'error': {'message': \"Unsupported value: 'temperature' does "
+        'not support 0.7 with this model. Only the default (1) value is supported.", '
+        "'type': 'invalid_request_error', 'param': 'temperature', 'code': 'unsupported_value'}}"
+    )
+    assert blames_sampling_param(msg, "temperature")
+    assert not blames_sampling_param(msg, "reasoning_effort")
+
+
+@pytest.mark.asyncio
+async def test_anthropic_retry_does_not_resend_a_rejected_temperature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from monkeybot.core.llm.provider import TextDelta
+    from monkeybot.providers import _utils
+    from monkeybot.providers.rejected_sampling import remember_rejected_sampling
+
+    model = "claude-3-5-sonnet-20241022"
+    remember_rejected_sampling("claude", model, {"temperature": 0.2})
+    calls: list[dict[str, Any]] = []
+
+    async def fake_once(_client: object, kwargs: dict[str, Any], **_rest: object):
+        calls.append(dict(kwargs))
+        if "temperature" in kwargs:
+            raise RuntimeError(
+                "Error code: 400 - {'type': 'error', 'error': {'type': "
+                "'invalid_request_error', 'message': 'temperature: Extra inputs are not permitted'}}"
+            )
+        if "thinking" in kwargs:
+            raise RuntimeError(
+                "Error code: 400 - {'type': 'error', 'error': {'type': "
+                "'invalid_request_error', 'message': 'thinking: Extra inputs are not permitted'}}"
+            )
+        yield TextDelta(text="ok")
+
+    monkeypatch.setattr(_utils, "_stream_anthropic_once", fake_once)
+    events = [
+        ev
+        async for ev in _utils.iter_anthropic_sdk_stream(
+            object(),
+            {"model": model, "thinking": {"type": "adaptive"}, "temperature": 0.2},
+            provider="claude",
+            error_message="Claude stream error: %s",
+            fallback_temperature=0.2,
+        )
+    ]
+    assert [ev.text for ev in events if isinstance(ev, TextDelta)] == ["ok"]
+    assert len(calls) == 2
+    assert all("temperature" not in call for call in calls)

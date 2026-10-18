@@ -250,7 +250,10 @@ def _add_reasoning_effort_check(
         and bool(model_name)
         and not uses_anthropic_bedrock(model_name)
     )
-    if text and converse:
+    if text == "none":
+        message = "reasoning_effort turns thinking off where the provider supports it."
+        passed = True
+    elif text and converse:
         message = (
             f"reasoning_effort {text!r} is not sent for this Bedrock model. "
             "Only Claude ids receive it; Converse models ignore it."
