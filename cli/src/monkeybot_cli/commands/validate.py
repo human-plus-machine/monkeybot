@@ -120,10 +120,19 @@ def run_validate(args: argparse.Namespace) -> int:
             category="config",
             severity="warning",
             passed=not missing,
-            message=f"Missing includes: {', '.join(missing)}" if missing else "All includes resolved",
+            message=f"Missing includes: {', '.join(missing)}"
+            if missing
+            else "All includes resolved",
         )
     else:
-        check(report, id="config.includes.resolve", category="config", severity="warning", passed=True, skip=True)
+        check(
+            report,
+            id="config.includes.resolve",
+            category="config",
+            severity="warning",
+            passed=True,
+            skip=True,
+        )
 
     model = merged.get("model") if isinstance(merged.get("model"), dict) else {}
     provider = str(model.get("provider", "")).strip().lower() if isinstance(model, dict) else ""
@@ -134,7 +143,9 @@ def run_validate(args: argparse.Namespace) -> int:
         category="config",
         severity="error",
         passed=not provider or provider in SUPPORTED_YAML_MODEL_PROVIDERS,
-        message=f"model.provider '{provider}' is not supported" if provider and provider not in SUPPORTED_YAML_MODEL_PROVIDERS else "",
+        message=f"model.provider '{provider}' is not supported"
+        if provider and provider not in SUPPORTED_YAML_MODEL_PROVIDERS
+        else "",
         field="model.provider",
         value=provider,
         expected=sorted(SUPPORTED_YAML_MODEL_PROVIDERS),
@@ -172,12 +183,23 @@ def run_validate(args: argparse.Namespace) -> int:
     )
 
     flat = _flatten_to_env(merged)
-    flat.update({k: v for k, v in os.environ.items() if k.startswith(("GCP_", "GOOGLE_", "ANTHROPIC_VERTEX"))})
+    flat.update(
+        {
+            k: v
+            for k, v in os.environ.items()
+            if k.startswith(("GCP_", "GOOGLE_", "ANTHROPIC_VERTEX"))
+        }
+    )
     norm_provider = normalize_model_provider(provider or "gemini")
     needs_gcp = norm_provider == "vertex_anthropic"
     gcp_present = any(
         os.environ.get(k, "").strip() or flat.get(k, "").strip()
-        for k in ("GCP_PROJECT_ID", "VERTEX_AI_PROJECT_ID", "ANTHROPIC_VERTEX_PROJECT_ID", "GOOGLE_CLOUD_PROJECT")
+        for k in (
+            "GCP_PROJECT_ID",
+            "VERTEX_AI_PROJECT_ID",
+            "ANTHROPIC_VERTEX_PROJECT_ID",
+            "GOOGLE_CLOUD_PROJECT",
+        )
     )
     if needs_gcp:
         check(
@@ -190,11 +212,20 @@ def run_validate(args: argparse.Namespace) -> int:
             remediation="Set gcp.project_id in monkeybot.yaml or GCP_PROJECT_ID in .env",
         )
     else:
-        check(report, id="gcp.project.required", category="config", severity="error", passed=True, skip=True)
+        check(
+            report,
+            id="gcp.project.required",
+            category="config",
+            severity="error",
+            passed=True,
+            skip=True,
+        )
 
     try:
         validate_monkeybot_yaml_doc(merged, env=dict(os.environ))
-        validate_provider_env({**flat, "MODEL_PROVIDER": provider or flat.get("MODEL_PROVIDER", "gemini")})
+        validate_provider_env(
+            {**flat, "MODEL_PROVIDER": provider or flat.get("MODEL_PROVIDER", "gemini")}
+        )
     except ConfigError as exc:
         check(
             report,
@@ -329,7 +360,9 @@ def run_validate(args: argparse.Namespace) -> int:
                         category="mcp",
                         severity="warning",
                         passed=not missing_refs,
-                        message=f"Unresolved MCP env refs: {', '.join(missing_refs)}" if missing_refs else "All MCP env refs set",
+                        message=f"Unresolved MCP env refs: {', '.join(missing_refs)}"
+                        if missing_refs
+                        else "All MCP env refs set",
                     )
                     if args.check_mcp:
                         for name, srv in servers.items():

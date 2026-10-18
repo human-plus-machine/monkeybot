@@ -602,7 +602,9 @@ async def test_workspace_disabled_returns_404(
 
 
 @pytest.mark.asyncio
-async def test_workspace_file_requires_path(registry: SessionRegistry, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+async def test_workspace_file_requires_path(
+    registry: SessionRegistry, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
     monkeypatch.chdir(tmp_path)
     app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -716,7 +718,9 @@ async def test_chat_history_detail_includes_thinking(registry: SessionRegistry) 
 
 
 @pytest.mark.asyncio
-async def test_chat_history_disabled_returns_404(registry: SessionRegistry, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_chat_history_disabled_returns_404(
+    registry: SessionRegistry, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("MONKEYBOT_CHAT_HISTORY_API", "0")
     app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:

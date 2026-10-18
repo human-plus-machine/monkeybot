@@ -335,9 +335,7 @@ def encode_server_frame(frame: ServerFrame) -> str | bytes:
     elif isinstance(frame, ServerTurnBoundaryFrame):
         payload["role"] = frame.role
     elif isinstance(frame, ServerToolCallFrame):
-        payload.update(
-            {"call_id": frame.call_id, "name": frame.name, "args": frame.args or {}}
-        )
+        payload.update({"call_id": frame.call_id, "name": frame.name, "args": frame.args or {}})
     elif isinstance(frame, ServerToolResultFrame):
         payload.update(
             {

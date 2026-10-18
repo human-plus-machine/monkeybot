@@ -171,9 +171,7 @@ class RealtimeSessionController:
                 self.push_to_talk = None
         try:
             self._ws = await websockets.connect(url)
-            await self._ws.send(
-                json.dumps({"kind": "connect", "session_id": self.session_id})
-            )
+            await self._ws.send(json.dumps({"kind": "connect", "session_id": self.session_id}))
         except websockets.exceptions.InvalidStatus as exc:
             status = getattr(exc, "status_code", getattr(exc, "status", "unknown"))
             raise RuntimeError(f"Failed to connect to {url}: HTTP {status}") from exc

@@ -33,7 +33,7 @@ mcp = FastMCP(
         "3. browser_click_by_index / browser_input_by_index / browser_select_by_index "
         "to act. Each action settles and returns observation (diff by default) — read "
         "that instead of calling get_elements again. Indices remain valid until "
-        "navigation. Pass observe=\"none\" to skip the snapshot, observe=\"full\" for "
+        'navigation. Pass observe="none" to skip the snapshot, observe="full" for '
         "the whole viewport tree. Only call browser_get_elements again when you need "
         "a different filter, the whole tree, or after navigation if the observation "
         "is not enough. browser_goto returns a full observation by default.\n"
@@ -75,7 +75,7 @@ mcp = FastMCP(
         "browser_read_tabs. At most 10 agent-controlled tabs; if you hit the cap, "
         "relay the returned tab list to the user, ask which to close, then "
         "browser_close_tab and retry — never close a tab without their confirmation. "
-        "If the error's scope is \"app\", Spaces refused the tab because the window "
+        'If the error\'s scope is "app", Spaces refused the tab because the window '
         "is at its live-tab cap across chats; say that, and do not pretend the cap "
         "is this chat's 10 tabs. "
         "Close tabs you opened when done. Do not expect a background SPA to finish "
@@ -84,7 +84,12 @@ mcp = FastMCP(
 )
 
 
-def _run_tool(ctx: chat_context.ChatContext, fn: Callable[_P, str], args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+def _run_tool(
+    ctx: chat_context.ChatContext,
+    fn: Callable[_P, str],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> str:
     """Run one tool against ``ctx`` only. Other chats keep their own lock and daemon."""
     tokens = chat_context.enter(ctx)
     try:
@@ -176,9 +181,7 @@ def prepare_action(
             return PreparedAction(error=error, mode=mode)
     helpers, _ = backend.browser_harness()
     try:
-        handle = (
-            tab_ops._for_action(helpers, tab) if focus else tab_ops._for_read(helpers, tab)
-        )
+        handle = tab_ops._for_action(helpers, tab) if focus else tab_ops._for_read(helpers, tab)
     except tabs.UnknownTabError as exc:
         return PreparedAction(error=results.unknown_tab_result(exc), mode=mode)
     before_url = ""

@@ -322,9 +322,7 @@ def test_idempotent_reexport(tmp_path: Path) -> None:
     assert span_count == (1,)
 
 
-def test_export_failure_on_unwritable_db(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_export_failure_on_unwritable_db(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     blocker = tmp_path / "blocker"
     blocker.write_text("not-a-directory", encoding="utf-8")
     db_path = blocker / "traces.db"
@@ -419,9 +417,7 @@ def test_concurrent_same_trace_insert_no_integrity_error(tmp_path: Path) -> None
     conn = sqlite3.connect(db_path)
     assert conn.execute("select count(*) from spans").fetchone() == (2,)
     trace_id = format(finished[0].context.trace_id, "032x")
-    row = conn.execute(
-        "select span_count from traces where trace_id = ?", (trace_id,)
-    ).fetchone()
+    row = conn.execute("select span_count from traces where trace_id = ?", (trace_id,)).fetchone()
     conn.close()
     assert row == (2,)
 

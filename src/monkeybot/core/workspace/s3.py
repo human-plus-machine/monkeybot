@@ -136,7 +136,9 @@ class S3WorkspaceStorage:
             try:
                 self._s3.delete_object(Bucket=self._bucket, Key=sk)
             except Exception as exc:
-                _log.warning("s3 move: delete source failed after copy src=%s dest=%s: %r", sk, dk, exc)
+                _log.warning(
+                    "s3 move: delete source failed after copy src=%s dest=%s: %r", sk, dk, exc
+                )
 
         await asyncio.to_thread(_copy_delete)
 

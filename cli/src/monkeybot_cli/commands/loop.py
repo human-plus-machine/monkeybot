@@ -9,7 +9,12 @@ from pathlib import Path
 
 import httpx
 
-from monkeybot_cli.config_resolve import load_agent_dotenv, load_config_doc, resolve_agent_root, resolve_config
+from monkeybot_cli.config_resolve import (
+    load_agent_dotenv,
+    load_config_doc,
+    resolve_agent_root,
+    resolve_config,
+)
 
 DEFAULT_GATEWAY_PORT = 8000
 

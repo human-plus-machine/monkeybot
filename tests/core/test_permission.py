@@ -96,9 +96,7 @@ async def test_inspector_default_allow(tmp_path: Path) -> None:
     p = tmp_path / "permissions.yaml"
     p.write_text("default: allow\nrules: []\n", encoding="utf-8")
     insp = PermissionInspector(load_permissions(p))
-    d = await insp.check(
-        InspectorToolCall("1", "read_file", {"path": "a"}), _ctx()
-    )
+    d = await insp.check(InspectorToolCall("1", "read_file", {"path": "a"}), _ctx())
     assert d == Decision(kind="allow")
 
 
@@ -128,14 +126,10 @@ async def test_inspector_ask_and_deny(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     insp = PermissionInspector(load_permissions(p))
-    ask = await insp.check(
-        InspectorToolCall("1", "write_file", {"path": "a"}), _ctx()
-    )
+    ask = await insp.check(InspectorToolCall("1", "write_file", {"path": "a"}), _ctx())
     assert ask.kind == "confirm"
     assert ask.message == "Approve write?"
-    deny = await insp.check(
-        InspectorToolCall("2", "run_command", {"command": "rm -rf x"}), _ctx()
-    )
+    deny = await insp.check(InspectorToolCall("2", "run_command", {"command": "rm -rf x"}), _ctx())
     assert deny.kind == "deny"
     assert deny.message == "no rm"
 
@@ -178,9 +172,7 @@ async def test_inspector_ask_denies_when_interactive_disallowed(tmp_path: Path) 
         encoding="utf-8",
     )
     insp = PermissionInspector(load_permissions(p), allow_ask=False)
-    d = await insp.check(
-        InspectorToolCall("1", "write_file", {"path": "a"}), _ctx()
-    )
+    d = await insp.check(InspectorToolCall("1", "write_file", {"path": "a"}), _ctx())
     assert d.kind == "deny"
     assert d.message == "Approve write?"
 

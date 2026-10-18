@@ -46,7 +46,9 @@ def _mock_attr(obj: Any, **attrs: Any) -> Any:
     return obj
 
 
-def _mock_message(server_content: Any | None = None, tool_call: Any | None = None, error: Any | None = None) -> Any:
+def _mock_message(
+    server_content: Any | None = None, tool_call: Any | None = None, error: Any | None = None
+) -> Any:
     msg: Any = type("LiveServerMessage", (), {})()
     msg.server_content = server_content
     msg.tool_call = tool_call
@@ -146,9 +148,7 @@ class TestGeminiLiveEventMapping:
         )
         events = await _collect(session._map_message(msg))
         assert any(
-            isinstance(e, RealtimePartialTranscript)
-            and e.text == "user said hello"
-            and e.is_final
+            isinstance(e, RealtimePartialTranscript) and e.text == "user said hello" and e.is_final
             for e in events
         )
 
@@ -160,11 +160,15 @@ class TestGeminiLiveEventMapping:
             )
         )
         events = await _collect(session._map_message(msg))
-        assert any(isinstance(e, RealtimeTextDelta) and e.text == "model said hello" for e in events)
+        assert any(
+            isinstance(e, RealtimeTextDelta) and e.text == "model said hello" for e in events
+        )
 
     async def test_tool_call(self) -> None:
         session = _make_session()
-        msg = _mock_message(tool_call=_mock_tool_call(id="call-1", name="get_weather", args={"city": "NYC"}))
+        msg = _mock_message(
+            tool_call=_mock_tool_call(id="call-1", name="get_weather", args={"city": "NYC"})
+        )
         events = await _collect(session._map_message(msg))
         assert any(
             isinstance(e, RealtimeToolCall)
@@ -194,9 +198,7 @@ class TestGeminiLiveEventMapping:
 
     async def test_tool_call_with_bad_json_args(self) -> None:
         session = _make_session()
-        msg = _mock_message(
-            tool_call=_mock_tool_call(id="call-3", name="broken", args="not-json")
-        )
+        msg = _mock_message(tool_call=_mock_tool_call(id="call-3", name="broken", args="not-json"))
         events = await _collect(session._map_message(msg))
         assert any(
             isinstance(e, RealtimeToolCall)
@@ -214,9 +216,7 @@ class TestGeminiLiveEventMapping:
         msg.tool_call = None
         events = await _collect(session._map_message(msg))
         assert any(
-            isinstance(e, RealtimeError)
-            and "something went wrong" in e.error
-            for e in events
+            isinstance(e, RealtimeError) and "something went wrong" in e.error for e in events
         )
 
     async def test_usage_metadata(self) -> None:
@@ -228,9 +228,7 @@ class TestGeminiLiveEventMapping:
         msg.usage_metadata = usage
         events = await _collect(session._map_message(msg))
         assert any(
-            isinstance(e, RealtimeUsage)
-            and e.input_tokens == 42
-            and e.output_tokens == 17
+            isinstance(e, RealtimeUsage) and e.input_tokens == 42 and e.output_tokens == 17
             for e in events
         )
 
@@ -251,9 +249,7 @@ class TestGeminiLiveConfigWiring:
             max_output_tokens=256,
         )
         live = _build_live_config(cfg, types)
-        voice_name = (
-            live.speech_config.voice_config.prebuilt_voice_config.voice_name
-        )
+        voice_name = live.speech_config.voice_config.prebuilt_voice_config.voice_name
         assert voice_name == "Charon"
         assert live.max_output_tokens == 256
 

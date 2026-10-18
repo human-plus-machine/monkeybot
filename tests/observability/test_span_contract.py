@@ -60,9 +60,7 @@ REQUIRED_ATTRS: dict[str, frozenset[str]] = {
             "tool.input",
         }
     ),
-    "monkeybot.context.summarize": frozenset(
-        {"thread.id", "request.id", "turns.summarized"}
-    ),
+    "monkeybot.context.summarize": frozenset({"thread.id", "request.id", "turns.summarized"}),
 }
 
 assert frozenset(REQUIRED_ATTRS) <= EXPECTED_SPAN_NAMES

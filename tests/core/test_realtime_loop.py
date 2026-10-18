@@ -28,7 +28,12 @@ class FakeHistory:
         return list(self.rows)
 
     async def append(
-        self, thread_id: str, message: Message, *, turn_id: str | None = None, message_id: str | None = None
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str | None = None,
+        message_id: str | None = None,
     ) -> None:
         del thread_id, turn_id, message_id
         self.rows.append(message)
@@ -264,9 +269,7 @@ class TestRunRealtimeTurn:
         class _Exec(RecordingExecutor):
             def __init__(self) -> None:
                 super().__init__(
-                    ToolExecutionResult.ok_text(
-                        '{"ok": true, "server": "browser", "tools": []}'
-                    )
+                    ToolExecutionResult.ok_text('{"ok": true, "server": "browser", "tools": []}')
                 )
                 self.mcp = _Mcp()
 
@@ -447,7 +450,11 @@ class TestRunRealtimeTurn:
             run_realtime_turn(
                 "run ffmpeg",
                 "",
-                [RealtimeToolCall(call_id="c1", name="run_command", args={"command": "ffmpeg -version"})],
+                [
+                    RealtimeToolCall(
+                        call_id="c1", name="run_command", args={"command": "ffmpeg -version"}
+                    )
+                ],
                 ctx,
                 history=history,
                 tool_executor=executor,
@@ -467,7 +474,11 @@ class TestRunRealtimeTurn:
         from collections import deque
         from typing import Literal
 
-        from monkeybot.core.runtime.events import Error, ToolCallResult, ToolConfirmationRequestEvent
+        from monkeybot.core.runtime.events import (
+            Error,
+            ToolCallResult,
+            ToolConfirmationRequestEvent,
+        )
         from monkeybot.core.tools.inspector import Decision
         from monkeybot.core.types.content_blocks import ToolResponse
 
@@ -548,9 +559,7 @@ class TestRunRealtimeTurn:
             events.append(trailing)
 
         assert any(isinstance(e, Error) and "cancel" in e.error.lower() for e in events)
-        cancel_results = [
-            e for e in events if isinstance(e, ToolCallResult) and e.error
-        ]
+        cancel_results = [e for e in events if isinstance(e, ToolCallResult) and e.error]
         assert cancel_results, "confirm-cancel must emit cancel tool results"
         tool_msgs = [
             m
@@ -733,8 +742,4 @@ class TestRunRealtimeTurn:
             await task
         except asyncio.CancelledError:
             pass
-        assert not any(
-            isinstance(b, ToolResponse)
-            for m in history.rows
-            for b in m.content
-        )
+        assert not any(isinstance(b, ToolResponse) for m in history.rows for b in m.content)

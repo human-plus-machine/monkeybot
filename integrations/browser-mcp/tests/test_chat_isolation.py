@@ -68,9 +68,7 @@ def test_app_tab_limit_error_uses_the_same_payload() -> None:
 
 def test_daemon_url_carries_chat(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     cdp_file = tmp_path / "in-app-cdp-url"
-    cdp_file.write_text(
-        "ws://127.0.0.1:9333/devtools/browser/monkeybot", encoding="utf-8"
-    )
+    cdp_file.write_text("ws://127.0.0.1:9333/devtools/browser/monkeybot", encoding="utf-8")
     (tmp_path / "in-app-cdp-token").write_text("secret-token", encoding="utf-8")
     monkeypatch.setattr(in_app_cdp, "_IN_APP_CDP_URL_FILE", cdp_file)
     monkeypatch.setenv("MONKEYBOT_RUN_ID", "run-123")
@@ -279,7 +277,9 @@ def test_idle_sweep_stops_daemon_and_keeps_aliases(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(in_app_cdp, "_env_set_from_in_app_file", True)
     monkeypatch.setenv("MONKEYBOT_RUN_ID", "idle-run")
     stopped: list[str] = []
-    monkeypatch.setattr(chat_context, "_stop_daemon", lambda ctx: stopped.append(ctx.daemon_name or ""))
+    monkeypatch.setattr(
+        chat_context, "_stop_daemon", lambda ctx: stopped.append(ctx.daemon_name or "")
+    )
     ctx = chat_context.context_for_call("idle-chat")
     ctx.registry.ensure("target-kept", url="https://kept.example")
     ctx.bh = ("helpers", "admin")
@@ -324,9 +324,15 @@ def test_drop_keeps_the_in_flight_lock(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_app_tab_limit_uses_code_and_scope() -> None:
-    assert tab_ops._is_app_tab_limit(RuntimeError("{'code': -32010, 'message': 'too many live tabs'}"))
-    assert tab_ops._is_app_tab_limit(RuntimeError("{'code': -32000, 'message': 'Tab limit reached (12)'}"))
-    assert not tab_ops._is_app_tab_limit(RuntimeError("the user wrote tab limit reached in the page text"))
+    assert tab_ops._is_app_tab_limit(
+        RuntimeError("{'code': -32010, 'message': 'too many live tabs'}")
+    )
+    assert tab_ops._is_app_tab_limit(
+        RuntimeError("{'code': -32000, 'message': 'Tab limit reached (12)'}")
+    )
+    assert not tab_ops._is_app_tab_limit(
+        RuntimeError("the user wrote tab limit reached in the page text")
+    )
     reg = tabs.TabRegistry()
     reg.ensure("only-one")
     payload = tab_ops._app_tab_limit_payload(reg)

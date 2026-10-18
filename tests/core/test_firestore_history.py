@@ -28,7 +28,6 @@ def require_emulator() -> None:
         pytest.skip("FIRESTORE_EMULATOR_HOST not set")
 
 
-
 # ---------------------------------------------------------------------------
 # Pure-logic tests — no emulator required.
 # ---------------------------------------------------------------------------
@@ -201,7 +200,17 @@ async def test_list_threads_stops_at_cap_without_overfetching_forever() -> None:
     it must stop rather than keep paginating through the rest of the
     collection.
     """
-    docs = [_FakeDoc({"thread_id": f"t{i}", "last_message_at": 100 - i, "message_count": 1, "last_content": ""}) for i in range(5)]
+    docs = [
+        _FakeDoc(
+            {
+                "thread_id": f"t{i}",
+                "last_message_at": 100 - i,
+                "message_count": 1,
+                "last_content": "",
+            }
+        )
+        for i in range(5)
+    ]
     client = _FakeFirestoreClient(docs)
     store = FirestoreHistoryStore(client, "prefix", "agent-a")  # type: ignore[arg-type]
     threads = await store.list_threads(limit=2)

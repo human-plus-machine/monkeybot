@@ -68,7 +68,12 @@ class FakeHistory:
         return list(self.rows)
 
     async def append(
-        self, thread_id: str, message: Message, *, turn_id: str | None = None, message_id: str | None = None
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str | None = None,
+        message_id: str | None = None,
     ) -> None:
         del thread_id, turn_id, message_id
         self.rows.append(message)
@@ -140,7 +145,9 @@ def _read_lines(path: Path) -> list[dict[str, object]]:
 
 @pytest.mark.asyncio
 async def test_run_without_transcript_writer_writes_nothing(tmp_path: Path) -> None:
-    prov = FakeProvider([[TextDelta(text="hi"), UsageEvent(input_tokens=1, output_tokens=1), Done()]])
+    prov = FakeProvider(
+        [[TextDelta(text="hi"), UsageEvent(input_tokens=1, output_tokens=1), Done()]]
+    )
     async for _ in run(
         "hello",
         _ctx(workspace_root=tmp_path),
@@ -199,7 +206,9 @@ async def test_run_with_transcript_writer_captures_provider_request_and_response
 
 @pytest.mark.asyncio
 async def test_run_with_transcript_writer_captures_agent_events(tmp_path: Path) -> None:
-    prov = FakeProvider([[TextDelta(text="hi"), UsageEvent(input_tokens=1, output_tokens=1), Done()]])
+    prov = FakeProvider(
+        [[TextDelta(text="hi"), UsageEvent(input_tokens=1, output_tokens=1), Done()]]
+    )
     writer = TranscriptWriter("sess-t2", workspace_root=tmp_path)
 
     events = []

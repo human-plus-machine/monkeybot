@@ -27,7 +27,9 @@ SCORE_NOISE = 0.05
 def _latest_two(runs_dir: Path = RUNS_DIR) -> tuple[Path, Path]:
     candidates = sorted(runs_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
     if len(candidates) < 2:
-        raise SystemExit(f"Need two run files in {runs_dir} (found {len(candidates)}); pass paths explicitly.")
+        raise SystemExit(
+            f"Need two run files in {runs_dir} (found {len(candidates)}); pass paths explicitly."
+        )
     return candidates[-2], candidates[-1]
 
 
@@ -46,8 +48,11 @@ def _turn_diff_lines(old: ScenarioAggregate, new: ScenarioAggregate) -> list[str
             continue
         lines.append(f"  turn {i}: {nt.input!r}")
         diff = difflib.unified_diff(
-            old_out.splitlines(), nt.output.splitlines(),
-            fromfile="old", tofile="new", lineterm="",
+            old_out.splitlines(),
+            nt.output.splitlines(),
+            fromfile="old",
+            tofile="new",
+            lineterm="",
         )
         lines.extend(f"    {d}" for d in diff)
     if not lines:
@@ -104,7 +109,9 @@ def diff_runs(old: RunRecord, new: RunRecord) -> tuple[str, bool]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("runs", nargs="*", type=Path, help="Two run JSON files (default: latest two)")
+    parser.add_argument(
+        "runs", nargs="*", type=Path, help="Two run JSON files (default: latest two)"
+    )
     args = parser.parse_args(argv)
 
     if len(args.runs) == 2:

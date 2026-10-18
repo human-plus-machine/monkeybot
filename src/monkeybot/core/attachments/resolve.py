@@ -20,7 +20,7 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.interfaces import MonkeybotError
 
-from .config import IMAGE_MIME_TYPES, preview_max_bytes, preview_max_dim
+from .config import IMAGE_MIME_TYPES, INLINE_TEXT_MIME_TYPES, preview_max_bytes, preview_max_dim
 from .image_preview import ImagePreviewError, make_provider_preview, provider_preview_metadata
 from .store import AttachmentStore
 
@@ -110,12 +110,10 @@ def _ref_to_media(
         )
         data_b64 = base64.b64encode(preview_bytes).decode("ascii")
         return Image(mime_type=preview_mime, data=data_b64, metadata=preview_meta)
-    if mime_use == "text/plain":
+    if mime_use in INLINE_TEXT_MIME_TYPES:
         filename = meta.get("filename")
         label = (
-            filename.strip()
-            if isinstance(filename, str) and filename.strip()
-            else stored_filename
+            filename.strip() if isinstance(filename, str) and filename.strip() else stored_filename
         )
         body = raw.decode("utf-8", errors="replace")
         if label:

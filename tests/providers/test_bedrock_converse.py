@@ -217,8 +217,16 @@ def test_document_name_sanitizes_and_deduplicates() -> None:
         Message(
             role="user",
             content=[
-                File(mime_type="application/pdf", data="QQ==", metadata={"filename": "quarterly_report_v2.pdf"}),
-                File(mime_type="application/pdf", data="QQ==", metadata={"filename": "report  v2.pdf"}),
+                File(
+                    mime_type="application/pdf",
+                    data="QQ==",
+                    metadata={"filename": "quarterly_report_v2.pdf"},
+                ),
+                File(
+                    mime_type="application/pdf",
+                    data="QQ==",
+                    metadata={"filename": "report  v2.pdf"},
+                ),
                 File(mime_type="application/pdf", data="QQ=="),
                 File(mime_type="application/pdf", data="QQ=="),
                 File(

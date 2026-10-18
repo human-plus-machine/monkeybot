@@ -56,7 +56,9 @@ def test_format_http_error_transport() -> None:
     assert "connection refused" in message
 
 
-def test_chat_session_create_failure_returns_readable_error(capsys: pytest.CaptureFixture[str]) -> None:
+def test_chat_session_create_failure_returns_readable_error(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     args = MagicMock(
         model_provider=None,
         model_name=None,
@@ -79,7 +81,9 @@ def test_chat_session_create_failure_returns_readable_error(capsys: pytest.Captu
     mock_client.aclose = AsyncMock()
 
     with patch("monkeybot_cli.chat_session.httpx.AsyncClient", return_value=mock_client):
-        code = asyncio.run(_plain_chat_session(args, "http://localhost:8080", spawned_gateway=False))
+        code = asyncio.run(
+            _plain_chat_session(args, "http://localhost:8080", spawned_gateway=False)
+        )
 
     assert code == 1
     err = capsys.readouterr().err
@@ -141,7 +145,9 @@ def test_chat_session_stream_failure_exits_turn(capsys: pytest.CaptureFixture[st
         patch("monkeybot_cli.chat_session._RECONNECT_INITIAL_DELAY", 0.01),
         patch("monkeybot_cli.chat_session._RECONNECT_MAX_DELAY", 0.01),
     ):
-        code = asyncio.run(_plain_chat_session(args, "http://localhost:8080", spawned_gateway=False))
+        code = asyncio.run(
+            _plain_chat_session(args, "http://localhost:8080", spawned_gateway=False)
+        )
 
     assert code == 1
     err = capsys.readouterr().err
@@ -204,7 +210,9 @@ def test_run_chat_prints_gateway_log_on_startup_failure(
     )
 
     with (
-        patch("monkeybot_cli.commands.chat.resolve_config", return_value=cfg_dir / "monkeybot.yaml"),
+        patch(
+            "monkeybot_cli.commands.chat.resolve_config", return_value=cfg_dir / "monkeybot.yaml"
+        ),
         patch("monkeybot_cli.commands.chat.load_agent_dotenv", return_value=None),
         patch("monkeybot_cli.commands.chat._occupied_gateway_message", return_value=None),
         patch("monkeybot_cli.commands.chat._spawn_gateway", return_value=spawned),

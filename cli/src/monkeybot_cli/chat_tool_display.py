@@ -37,9 +37,7 @@ _SHELL_TAIL_LINES = 40
 
 _SHELL_TOOLS = frozenset({"run_command", "execute", "shell", "bash"})
 _READ_TOOLS = frozenset({"read_file", "read"})
-_EDIT_TOOLS = frozenset(
-    {"write_file", "write", "edit_file", "apply_patch", "str_replace"}
-)
+_EDIT_TOOLS = frozenset({"write_file", "write", "edit_file", "apply_patch", "str_replace"})
 _PATH_TOOLS = _READ_TOOLS | _EDIT_TOOLS
 _SEARCH_TOOLS = frozenset({"grep", "web_search"})
 _HINT_KEYS = frozenset(

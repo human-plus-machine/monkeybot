@@ -461,7 +461,9 @@ class TestMacJailBootstrap:
     docstring: this exact profile shape was validated by hand against real
     python3/git/bash invocations before being written into code."""
 
-    def _run(self, roots: JailRoots, argv: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self, roots: JailRoots, argv: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
         executable, args = jailed_argv(
             argv[0], argv[1:], roots, support=IsolationSupport("sandbox-exec", "test")
         )
@@ -495,9 +497,7 @@ class TestMacJailBootstrap:
         assert read.returncode == 0
         assert "workspace-content" in read.stdout
 
-        write = self._run(
-            roots, ["/bin/bash", "-c", "echo written > out.txt"], cwd=workspace
-        )
+        write = self._run(roots, ["/bin/bash", "-c", "echo written > out.txt"], cwd=workspace)
         assert write.returncode == 0
         assert (workspace / "out.txt").read_text(encoding="utf-8").strip() == "written"
 
@@ -514,9 +514,7 @@ class TestMacJailBootstrap:
         assert read.returncode == 0
         assert "# skill" in read.stdout
 
-        write = self._run(
-            roots, ["/bin/bash", "-c", f"echo x > {skills}/new.py"], cwd=workspace
-        )
+        write = self._run(roots, ["/bin/bash", "-c", f"echo x > {skills}/new.py"], cwd=workspace)
         assert write.returncode != 0
         assert not (skills / "new.py").exists()
 
@@ -636,9 +634,7 @@ class TestMacJailBootstrap:
         shared.mkdir()
 
         roots = JailRoots(deny=(home,), read_write=(workspace,), shared_write=(shared,))
-        proc = self._run(
-            roots, ["/bin/bash", "-c", f"echo x > {shared}/out.txt"], cwd=workspace
-        )
+        proc = self._run(roots, ["/bin/bash", "-c", f"echo x > {shared}/out.txt"], cwd=workspace)
 
         assert proc.returncode == 0, proc.stderr
         assert (shared / "out.txt").read_text(encoding="utf-8").strip() == "x"
@@ -657,9 +653,7 @@ class TestMacJailBootstrap:
         palace.mkdir(parents=True)
         (palace / "secret.txt").write_text("PALACE-SECRET", encoding="utf-8")
 
-        roots = JailRoots(
-            deny=(home, palace), read_write=(workspace,), shared_write=(shared,)
-        )
+        roots = JailRoots(deny=(home, palace), read_write=(workspace,), shared_write=(shared,))
         read = self._run(roots, ["/bin/cat", str(palace / "secret.txt")], cwd=workspace)
         assert read.returncode != 0
         assert "PALACE-SECRET" not in read.stdout
@@ -742,7 +736,9 @@ class TestLinuxJailBootstrap:
         if support.mechanism != "namespace":
             pytest.skip(support.detail)
 
-    def _run(self, roots: JailRoots, argv: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self, roots: JailRoots, argv: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
         executable, args = jailed_argv(
             argv[0], argv[1:], roots, support=IsolationSupport("namespace", "test")
         )

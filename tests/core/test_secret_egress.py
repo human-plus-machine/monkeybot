@@ -32,9 +32,7 @@ def _publish_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cdp_file = tmp_path / "in-app-cdp-url"
     cdp_file.write_text("ws://127.0.0.1:9333/devtools/browser/monkeybot", encoding="utf-8")
     (tmp_path / "in-app-cdp-token").write_text("secret-token", encoding="utf-8")
-    monkeypatch.setattr(
-        "monkeybot.core.context.secret_egress._BRIDGE_URL_FILE", cdp_file
-    )
+    monkeypatch.setattr("monkeybot.core.context.secret_egress._BRIDGE_URL_FILE", cdp_file)
 
 
 class _FakeResponse:
@@ -264,7 +262,9 @@ def test_scanner_no_op_without_app(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert scanner.scan(["anything"]) == []
 
 
-def test_scanner_posts_bearer_and_maps_hits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_scanner_posts_bearer_and_maps_hits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _publish_bridge(tmp_path, monkeypatch)
     captured: dict[str, object] = {}
 
@@ -364,9 +364,7 @@ def test_scanner_does_not_cache_a_failed_batch(
     assert captured["texts"] == ["maybe-secret"]
 
 
-def test_scanner_batches_by_json_body_size(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_scanner_batches_by_json_body_size(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _publish_bridge(tmp_path, monkeypatch)
     one_item = len(json.dumps({"texts": ["aaaaaa"]}).encode("utf-8"))
     monkeypatch.setattr("monkeybot.core.context.secret_egress._SCAN_MAX_BATCH_BYTES", one_item)
@@ -439,9 +437,7 @@ def test_scanner_fails_closed_when_json_escaping_exceeds_cap(
     assert calls == []
 
 
-def test_scanner_fails_closed_on_http_413(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_scanner_fails_closed_on_http_413(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A 413 from the bridge (body over the cap despite chunking) redacts
     the batch instead of treating the error as 'unresolved' / fail-open."""
     _publish_bridge(tmp_path, monkeypatch)

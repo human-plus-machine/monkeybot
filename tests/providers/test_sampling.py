@@ -266,7 +266,10 @@ async def test_openai_retries_then_omits_rejected_effort(monkeypatch: pytest.Mon
             raise RuntimeError("Error code: 400 - Unsupported parameter: 'reasoning_effort'")
         yield TextDelta(text="ok")
 
-    async def fake_messages(_messages: list[Message]) -> tuple[None, list[dict[str, str]]]:
+    async def fake_messages(
+        _messages: list[Message], *, hints: object = None
+    ) -> tuple[None, list[dict[str, str]]]:
+        del hints
         return None, [{"role": "user", "content": "hi"}]
 
     fake_openai = ModuleType("openai")

@@ -81,9 +81,7 @@ class MemorySubsystem:
         self._storage = storage
         self.backend = (backend or current_env("MEMPALACE_BACKEND") or DEFAULT_BACKEND).strip()
         self.embedding_model = (
-            embedding_model
-            or current_env("MEMPALACE_EMBEDDING_MODEL")
-            or DEFAULT_EMBEDDING_MODEL
+            embedding_model or current_env("MEMPALACE_EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL
         ).strip()
         self._palace: PalacePort = palace or create_palace(
             self._memory_uri,

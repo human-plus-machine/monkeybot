@@ -20,11 +20,14 @@ def _playbook_hints(url: str | None) -> dict[str, Any]:
     key = url or ""
     try:
         return {
-            "playbooks": playbooks.list_playbook_names(key) if key else playbooks.list_playbook_names(),
+            "playbooks": playbooks.list_playbook_names(key)
+            if key
+            else playbooks.list_playbook_names(),
             "flows": playbooks.list_flows(key) if key else playbooks.list_flows(),
         }
     except playbooks.PlaybookError:
         return {"playbooks": [], "flows": []}
+
 
 def _playbook_timeout_s() -> float:
     raw = (os.environ.get("BROWSER_MCP_PLAYBOOK_TIMEOUT_S") or "").strip()
@@ -34,6 +37,7 @@ def _playbook_timeout_s() -> float:
         return max(0.0, float(raw))
     except ValueError:
         return 120.0
+
 
 @mcp.tool()
 @_public_tool
@@ -51,6 +55,7 @@ def browser_list_playbooks(host: str | None = None) -> str:
         }
     )
 
+
 @mcp.tool()
 @_public_tool
 def browser_read_playbook(host: str) -> str:
@@ -62,6 +67,7 @@ def browser_read_playbook(host: str) -> str:
         return results.json_text({"ok": False, "error": str(exc)})
     return results.json_text({"ok": True, "host": playbooks.host_slug(host), "content": content})
 
+
 @mcp.tool()
 @_public_tool
 def browser_write_playbook(host: str, content: str, append: bool = False) -> str:
@@ -72,6 +78,7 @@ def browser_write_playbook(host: str, content: str, append: bool = False) -> str
         logger.warning("browser_write_playbook failed for host=%r: %s", host, exc)
         return results.json_text({"ok": False, "error": str(exc)})
     return results.json_text(result)
+
 
 @mcp.tool()
 @_public_tool
@@ -99,9 +106,7 @@ def browser_run_playbook(
         steps = playbooks.substitute_params(flow, params)
     except playbooks.PlaybookError as exc:
         return results.json_text({"ok": False, "error": str(exc), "name": name})
-    prep = prepare_action(
-        tab, observe=observe, default="diff", focus=True, capture_url=True
-    )
+    prep = prepare_action(tab, observe=observe, default="diff", focus=True, capture_url=True)
     if prep.error:
         return prep.error
     handle = prep.handle

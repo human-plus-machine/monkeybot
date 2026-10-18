@@ -16,7 +16,9 @@ class HttpTickInvoker:
         self._timeout_s = timeout_s
         self._sessions_ready: set[str] = set()
 
-    async def _ensure_session(self, client: httpx.AsyncClient, session_id: str) -> TickInvokeResult | None:
+    async def _ensure_session(
+        self, client: httpx.AsyncClient, session_id: str
+    ) -> TickInvokeResult | None:
         if session_id in self._sessions_ready:
             return None
         session_resp = await client.post(
@@ -36,9 +38,7 @@ class HttpTickInvoker:
         request_id: str,
         user_content: list[ContentBlock],
     ) -> TickInvokeResult:
-        message = "\n".join(
-            block.text for block in user_content if isinstance(block, Text)
-        )
+        message = "\n".join(block.text for block in user_content if isinstance(block, Text))
         payload = {
             "session_id": session_id,
             "request_id": request_id,
@@ -55,7 +55,5 @@ class HttpTickInvoker:
         if resp.status_code == 409:
             return TickInvokeResult.session_busy()
         if resp.status_code >= 400:
-            return TickInvokeResult.fail(
-                f"invoke-tick failed: {resp.status_code} {resp.text}"
-            )
+            return TickInvokeResult.fail(f"invoke-tick failed: {resp.status_code} {resp.text}")
         return TickInvokeResult.ok()

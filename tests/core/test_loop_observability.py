@@ -136,7 +136,11 @@ async def test_loop_summarize_span_when_over_cap(
     ):
         pass
     summarize = next(
-        (s for s in otel_memory_exporter.get_finished_spans() if s.name == "monkeybot.context.summarize"),
+        (
+            s
+            for s in otel_memory_exporter.get_finished_spans()
+            if s.name == "monkeybot.context.summarize"
+        ),
         None,
     )
     assert summarize is not None
@@ -156,7 +160,9 @@ async def test_loop_trace_io_on_run_span(otel_memory_exporter) -> None:
         max_turns=2,
     ):
         pass
-    run_span = next(s for s in otel_memory_exporter.get_finished_spans() if s.name == "monkeybot.run")
+    run_span = next(
+        s for s in otel_memory_exporter.get_finished_spans() if s.name == "monkeybot.run"
+    )
     assert run_span.attributes.get("trace.input") == "user input"
     assert run_span.attributes.get("trace.output") == "assistant reply"
 
@@ -175,7 +181,9 @@ async def test_loop_long_user_message_truncated_on_span(otel_memory_exporter) ->
         max_turns=2,
     ):
         pass
-    run_span = next(s for s in otel_memory_exporter.get_finished_spans() if s.name == "monkeybot.run")
+    run_span = next(
+        s for s in otel_memory_exporter.get_finished_spans() if s.name == "monkeybot.run"
+    )
     assert str(run_span.attributes.get("trace.input", "")).endswith("…[truncated]")
 
 

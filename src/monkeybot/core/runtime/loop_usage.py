@@ -112,6 +112,8 @@ def _provider_call_hints(ctx: TurnContext) -> ProviderCallHints:
     return ProviderCallHints(
         session_id=ctx.session_id,
         cache_retention=cache_retention_from_env(ctx.config),
+        workspace_root=ctx.workspace_root,
+        context_window_tokens=ctx.context_window_tokens,
     )
 
 

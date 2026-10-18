@@ -344,12 +344,9 @@ def test_postgres_bucket_sql_formats() -> None:
 
     expected = {
         "hour": (
-            "to_char((to_timestamp(created_at / 1000.0) AT TIME ZONE 'UTC'), "
-            "'YYYY-MM-DD\"T\"HH24')"
+            "to_char((to_timestamp(created_at / 1000.0) AT TIME ZONE 'UTC'), 'YYYY-MM-DD\"T\"HH24')"
         ),
-        "day": (
-            "to_char((to_timestamp(created_at / 1000.0) AT TIME ZONE 'UTC'), 'YYYY-MM-DD')"
-        ),
+        "day": ("to_char((to_timestamp(created_at / 1000.0) AT TIME ZONE 'UTC'), 'YYYY-MM-DD')"),
         "week": (
             "to_char((date_trunc('week', (to_timestamp(created_at / 1000.0) AT TIME ZONE "
             "'UTC')))::date, 'YYYY-MM-DD')"

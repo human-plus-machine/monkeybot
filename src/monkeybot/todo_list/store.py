@@ -225,9 +225,7 @@ class TodoListStore:
     def _write_mirror_sync(self) -> None:
         """Synchronous mirror write — always run via ``asyncio.to_thread``."""
         if self._session_dir is None:
-            self._session_dir = resolve_session_artifact_dir(
-                self._workspace_root, self.session_id
-            )
+            self._session_dir = resolve_session_artifact_dir(self._workspace_root, self.session_id)
         path = self._session_dir / _TODOS_FILENAME
         payload = {
             "session_id": self.session_id,

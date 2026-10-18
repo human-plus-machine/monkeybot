@@ -207,9 +207,7 @@ async def test_registry_remove_async_awaits_active_turn_before_returning(
         # Simulate a turn that still has work after DELETE detaches the session.
         await asyncio.sleep(0.05)
         assert bus.cancel_requested_for == "r1"
-        await writer.write_event(
-            TurnComplete(request_id="r1", usage=UsageTotals(duration_ms=12))
-        )
+        await writer.write_event(TurnComplete(request_id="r1", usage=UsageTotals(duration_ms=12)))
         bus.current_request_id = None
         wrote_late.set()
 
@@ -221,9 +219,7 @@ async def test_registry_remove_async_awaits_active_turn_before_returning(
     assert result.transcript_dir is not None
 
     lines = [
-        json.loads(line)
-        for line in writer.path.read_text(encoding="utf-8").splitlines()
-        if line
+        json.loads(line) for line in writer.path.read_text(encoding="utf-8").splitlines() if line
     ]
     types = [line.get("type") for line in lines]
     assert "TurnComplete" in types

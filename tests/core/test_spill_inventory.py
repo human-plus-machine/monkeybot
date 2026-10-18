@@ -90,9 +90,7 @@ async def test_cleanup_session_spill_files_concurrent(tmp_path: Path) -> None:
 def test_spill_preview_unwraps_run_command_json_stdout() -> None:
     rows = [{"id": i, "title": f"pr-{i}", "state": "OPEN"} for i in range(40)]
     payload = json.dumps({"ok": True, "stdout": json.dumps(rows)})
-    kind, preview, unwrapped, _body_lines = _build_spill_preview(
-        payload, tool_name="run_command"
-    )
+    kind, preview, unwrapped, _body_lines = _build_spill_preview(payload, tool_name="run_command")
     assert kind == "json"
     assert unwrapped is True
     assert "pr-0" in preview
@@ -115,9 +113,7 @@ def test_spill_inventory_note_includes_preview_not_full_body() -> None:
 def test_spill_preview_code_uses_head_tail() -> None:
     lines = [f"def f{i}():\n    return {i}" for i in range(100)]
     text = "\n".join(lines)
-    kind, preview, _unwrapped, _body_lines = _build_spill_preview(
-        text, tool_name="read_file"
-    )
+    kind, preview, _unwrapped, _body_lines = _build_spill_preview(text, tool_name="read_file")
     assert kind == "code"
     assert "def f0():" in preview
     assert "omitted from spill preview" in preview

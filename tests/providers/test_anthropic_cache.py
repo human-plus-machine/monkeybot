@@ -408,9 +408,7 @@ async def test_claude_count_input_tokens_unaffected(
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
     provider = ClaudeProvider()
     mock_client = MagicMock()
-    mock_client.messages.count_tokens = AsyncMock(
-        return_value=SimpleNamespace(input_tokens=42)
-    )
+    mock_client.messages.count_tokens = AsyncMock(return_value=SimpleNamespace(input_tokens=42))
 
     with patch("anthropic.AsyncAnthropic", return_value=mock_client):
         await provider.count_input_tokens(

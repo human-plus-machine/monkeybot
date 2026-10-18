@@ -71,9 +71,7 @@ def _strip_completed_turn_thinking(messages: Sequence[Message]) -> list[Message]
         if any(isinstance(b, ToolRequest) for b in msg.content):
             out.append(msg)
             continue
-        kept = [
-            b for b in msg.content if not isinstance(b, (Thinking, RedactedThinking))
-        ]
+        kept = [b for b in msg.content if not isinstance(b, (Thinking, RedactedThinking))]
         if not kept and msg.content:
             logger.debug(
                 "transform_context drop_thinking_only_turn %s",

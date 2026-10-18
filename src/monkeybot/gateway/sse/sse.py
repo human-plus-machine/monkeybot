@@ -29,9 +29,7 @@ def agent_event_to_wire_dict(event: AgentEvent) -> dict[str, Any]:
     """Map an AgentEvent to an SSE JSON dict with ``type`` + ``chat_request_id``."""
     kind = str(getattr(event, "kind"))
     payload = {
-        f.name: getattr(event, f.name)
-        for f in dc_fields(cast(Any, event))
-        if f.name != "kind"
+        f.name: getattr(event, f.name) for f in dc_fields(cast(Any, event)) if f.name != "kind"
     }
     rid = str(payload.get("request_id", ""))
     out: dict[str, Any] = {"type": kind, "request_id": rid, "chat_request_id": rid}

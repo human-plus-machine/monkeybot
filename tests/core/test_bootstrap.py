@@ -349,7 +349,9 @@ async def test_run_pattern_bc_turn_raises_on_error_event(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_run_pattern_bc_turn_default_run_command_allowlist(tmp_path: Path, monkeypatch) -> None:
+async def test_run_pattern_bc_turn_default_run_command_allowlist(
+    tmp_path: Path, monkeypatch
+) -> None:
     """Bootstrap must not pass an empty allowlist (issue #7)."""
     monkeypatch.delenv("COMMAND_ALLOWLIST_CONFIG", raising=False)
     (tmp_path / "skills").mkdir()

@@ -237,8 +237,9 @@ def seek_sequence(
         (lambda a, b: a.rstrip() == b.rstrip()),
         (lambda a, b: a.strip() == b.strip()),
         (
-            lambda a, b: normalize_unicode_punctuation(a.strip())
-            == normalize_unicode_punctuation(b.strip())
+            lambda a, b: (
+                normalize_unicode_punctuation(a.strip()) == normalize_unicode_punctuation(b.strip())
+            )
         ),
     ):
         found = _try_match(lines, pattern, start_index, compare, eof)
@@ -287,20 +288,15 @@ def derive_new_contents(
 
         pattern = list(chunk.old_lines)
         new_slice = list(chunk.new_lines)
-        found = seek_sequence(
-            original_lines, pattern, line_index, eof=chunk.is_end_of_file
-        )
+        found = seek_sequence(original_lines, pattern, line_index, eof=chunk.is_end_of_file)
         if found == -1 and pattern and pattern[-1] == "":
             pattern = pattern[:-1]
             if new_slice and new_slice[-1] == "":
                 new_slice = new_slice[:-1]
-            found = seek_sequence(
-                original_lines, pattern, line_index, eof=chunk.is_end_of_file
-            )
+            found = seek_sequence(original_lines, pattern, line_index, eof=chunk.is_end_of_file)
         if found == -1:
             raise PatchError(
-                f"Failed to find expected lines in {file_path}:\n"
-                + "\n".join(chunk.old_lines),
+                f"Failed to find expected lines in {file_path}:\n" + "\n".join(chunk.old_lines),
                 code="hunk_not_found",
             )
         replacements.append((found, len(pattern), new_slice))
@@ -369,9 +365,7 @@ def _plan_ops(workspace: WorkspaceFileService, hunks: list[Hunk]) -> list[_Plann
                     code="not_found",
                 )
             old = fp.read_text(encoding="utf-8", errors="replace")
-            planned.append(
-                _PlannedOp(action="delete", path=hunk.path, old_content=old)
-            )
+            planned.append(_PlannedOp(action="delete", path=hunk.path, old_content=old))
             removed_paths.add(canon)
             reserved_dests.discard(canon)
         else:
@@ -501,9 +495,7 @@ def _apply_ops(
                 workspace.write_file(op.move_path, op.content)
                 done.append(op)
                 workspace.delete_file(op.path)
-                files.append(
-                    {"path": op.move_path, "action": "move", "from": op.path}
-                )
+                files.append({"path": op.move_path, "action": "move", "from": op.path})
                 continue
             elif op.action == "delete":
                 workspace.delete_file(op.path)

@@ -83,9 +83,7 @@ def shared() -> ChatContext:
         return current
     with _guard:
         if _shared is None:
-            _shared = ChatContext(
-                key="shared", isolated=False, daemon_name=None, thread_id=None
-            )
+            _shared = ChatContext(key="shared", isolated=False, daemon_name=None, thread_id=None)
         return _shared
 
 
@@ -100,7 +98,9 @@ def deactivate() -> None:
     current_daemon.set(None)
 
 
-def enter(ctx: ChatContext) -> tuple[contextvars.Token[ChatContext | None], contextvars.Token[str | None]]:
+def enter(
+    ctx: ChatContext,
+) -> tuple[contextvars.Token[ChatContext | None], contextvars.Token[str | None]]:
     """Bind ``ctx`` on this thread so harness IPC and the tab registry follow it."""
     ctx.last_used = time.monotonic()
     return current_context.set(ctx), current_daemon.set(ctx.daemon_name)
@@ -266,9 +266,7 @@ def _stop_daemon(ctx: ChatContext) -> None:
 
         admin.restart_daemon(ctx.daemon_name)
     except Exception:
-        logger.warning(
-            "browser-mcp: failed to stop daemon %s", ctx.daemon_name, exc_info=True
-        )
+        logger.warning("browser-mcp: failed to stop daemon %s", ctx.daemon_name, exc_info=True)
 
 
 def _sweep_idle(now: float | None = None) -> None:

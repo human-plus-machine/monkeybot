@@ -180,11 +180,7 @@ def runtime_value(response: dict[str, Any], expression: str) -> Any:
         if isinstance(details, dict):
             line = details.get("lineNumber")
             col = details.get("columnNumber")
-            loc = (
-                f" at line {line}, column {col}"
-                if line is not None and col is not None
-                else ""
-            )
+            loc = f" at line {line}, column {col}" if line is not None and col is not None else ""
         raise RuntimeError(
             f"JavaScript evaluation failed{loc}: {desc}; expression: {_js_snippet(expression)}"
         )
@@ -434,7 +430,9 @@ class TabRegistry:
         tid = _target_id_of(current if isinstance(current, dict) else None)
         if tid:
             self._focused_id = tid
-            if tid not in self._tabs and not _is_chrome_internal(str((current or {}).get("url") or "")):
+            if tid not in self._tabs and not _is_chrome_internal(
+                str((current or {}).get("url") or "")
+            ):
                 tab = self._alloc_tn()
                 url = str((current or {}).get("url") or "")
                 title = str((current or {}).get("title") or "")
@@ -479,9 +477,7 @@ class TabRegistry:
     def set_alias(self, tab: str, alias: str) -> TabState:
         state = self.resolve(tab)
         if not _ALIAS_RE.match(alias):
-            raise ValueError(
-                f"alias {alias!r} must match [a-z][a-z0-9_-]{{0,23}}"
-            )
+            raise ValueError(f"alias {alias!r} must match [a-z][a-z0-9_-]{{0,23}}")
         owner = self._aliases.get(alias)
         if owner is not None and owner != state.target_id:
             raise ValueError(f"alias {alias!r} is already used")

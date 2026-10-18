@@ -56,9 +56,7 @@ class TestNonApplicableCalls:
     @pytest.mark.asyncio
     async def test_ignores_relative_path(self, workspace: Path) -> None:
         insp = PathGrantInspector(workspace_root=workspace)
-        d = await insp.check(
-            InspectorToolCall("1", "read_file", {"path": "README.md"}), _ctx()
-        )
+        d = await insp.check(InspectorToolCall("1", "read_file", {"path": "README.md"}), _ctx())
         assert d.kind == "allow"
 
     @pytest.mark.asyncio
@@ -73,9 +71,7 @@ class TestWorkspacePathsAllowed:
     async def test_absolute_path_inside_workspace_is_allowed(self, workspace: Path) -> None:
         insp = PathGrantInspector(workspace_root=workspace)
         target = workspace / "notes.txt"
-        d = await insp.check(
-            InspectorToolCall("1", "read_file", {"path": str(target)}), _ctx()
-        )
+        d = await insp.check(InspectorToolCall("1", "read_file", {"path": str(target)}), _ctx())
         assert d.kind == "allow"
 
 
@@ -122,9 +118,7 @@ class TestAskAndGrant:
         target = desktop / "report.pdf"
         insp = PathGrantInspector(workspace_root=workspace)
 
-        d = await insp.check(
-            InspectorToolCall("1", "read_file", {"path": str(target)}), _ctx()
-        )
+        d = await insp.check(InspectorToolCall("1", "read_file", {"path": str(target)}), _ctx())
 
         assert d.kind == "confirm"
         assert d.grant_kind == "path"

@@ -64,9 +64,7 @@ def _tree(url: str, text: str, **extra: object) -> dict:
 def _action_ctx(helpers: MagicMock, trees: list[dict], *, navigated: bool = False):
     with (
         _patch_harness(helpers),
-        patch.object(
-            dom_indexing, "settle", return_value={"quiet": True, "navigated": navigated}
-        ),
+        patch.object(dom_indexing, "settle", return_value={"quiet": True, "navigated": navigated}),
         patch.object(dom_indexing, "get_elements", side_effect=trees),
         patch.object(dom_indexing, "_register_driver_for_new_documents"),
         patch.object(
@@ -93,7 +91,9 @@ def test_click_observe_diff_includes_observation() -> None:
     ]
     with (
         _patch_harness(helpers),
-        patch.object(dom_indexing, "settle", return_value={"quiet": True, "navigated": False}) as settle,
+        patch.object(
+            dom_indexing, "settle", return_value={"quiet": True, "navigated": False}
+        ) as settle,
         patch.object(dom_indexing, "get_elements", side_effect=trees),
         patch.object(dom_indexing, "_register_driver_for_new_documents"),
         patch.object(
@@ -152,7 +152,9 @@ def test_input_and_select_settle_once() -> None:
     ]
     with (
         _patch_harness(helpers),
-        patch.object(dom_indexing, "settle", return_value={"quiet": True, "navigated": False}) as settle,
+        patch.object(
+            dom_indexing, "settle", return_value={"quiet": True, "navigated": False}
+        ) as settle,
         patch.object(dom_indexing, "get_elements", side_effect=trees),
         patch.object(dom_indexing, "_register_driver_for_new_documents"),
         patch.object(
@@ -233,14 +235,10 @@ def test_navigation_re_injects_and_uses_full_tree() -> None:
     trees = [_tree("https://a.test/two", "[9]<a>new />")]
     with (
         _patch_harness(helpers),
-        patch.object(
-            dom_indexing, "settle", return_value={"quiet": True, "navigated": True}
-        ),
+        patch.object(dom_indexing, "settle", return_value={"quiet": True, "navigated": True}),
         patch.object(dom_indexing, "get_elements", side_effect=trees),
         patch.object(dom_indexing, "_register_driver_for_new_documents") as register,
-        patch.object(
-            dom_indexing, "get_rect", return_value={"x": 1, "y": 2, "tagName": "a"}
-        ),
+        patch.object(dom_indexing, "get_rect", return_value={"x": 1, "y": 2, "tagName": "a"}),
     ):
         json.loads(server.browser_tabs())
         result = json.loads(server.browser_click_by_index(9, observe="diff"))
@@ -257,7 +255,9 @@ def test_click_retries_without_prior_browser_tabs() -> None:
     trees = [same, same, changed]
     with (
         _patch_harness(helpers),
-        patch.object(dom_indexing, "settle", return_value={"quiet": True, "navigated": False}) as settle,
+        patch.object(
+            dom_indexing, "settle", return_value={"quiet": True, "navigated": False}
+        ) as settle,
         patch.object(dom_indexing, "get_elements", side_effect=trees),
         patch.object(dom_indexing, "_register_driver_for_new_documents"),
         patch.object(
@@ -279,7 +279,9 @@ def test_click_retries_until_tree_changes() -> None:
     trees = [same, same, changed]
     with (
         _patch_harness(helpers),
-        patch.object(dom_indexing, "settle", return_value={"quiet": True, "navigated": False}) as settle,
+        patch.object(
+            dom_indexing, "settle", return_value={"quiet": True, "navigated": False}
+        ) as settle,
         patch.object(dom_indexing, "get_elements", side_effect=trees),
         patch.object(dom_indexing, "_register_driver_for_new_documents"),
         patch.object(
@@ -309,9 +311,7 @@ def test_settled_false_when_quiet_times_out() -> None:
     trees = [_tree("https://a.test/", "[0]<a>x />")]
     with (
         _patch_harness(helpers),
-        patch.object(
-            dom_indexing, "settle", return_value={"quiet": False, "navigated": False}
-        ),
+        patch.object(dom_indexing, "settle", return_value={"quiet": False, "navigated": False}),
         patch.object(dom_indexing, "get_elements", side_effect=trees),
         patch.object(dom_indexing, "get_rect", return_value={"x": 1, "y": 2}),
     ):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, Protocol, TypeAlias, cast
 
 from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolRequest, ToolResponse
@@ -28,9 +29,7 @@ class Message:
             raise ValueError(f"invalid role: {self.role!r}")
         for i, block in enumerate(self.content):
             if not isinstance(block, ContentBlock):
-                raise ValueError(
-                    f"content[{i}] must be ContentBlock, got {type(block).__name__}"
-                )
+                raise ValueError(f"content[{i}] must be ContentBlock, got {type(block).__name__}")
 
     def to_dict(self) -> dict[str, object]:
         return {"role": self.role, "content": [b.to_dict() for b in self.content]}
@@ -130,6 +129,10 @@ class ProviderCallHints:
 
     session_id: str | None = None
     cache_retention: Literal["none", "short", "long"] = "short"
+    workspace_root: Path | None = None
+    """Workspace for spill files. OpenAI-compat PDF extraction writes here."""
+    context_window_tokens: int | None = None
+    """Model context window. OpenAI-compat PDF extraction sizes spill budgets from this."""
 
 
 def cache_retention_from_env(cfg: Any | None = None) -> Literal["none", "short", "long"]:
@@ -148,6 +151,25 @@ def gemini_extra_kwargs(provider: Provider, *, vertex_google_search: bool) -> di
     return {}
 
 
+# Providers whose stream/count accept ``hints``. Anthropic-family uses them for
+# prompt cache; OpenAI-compat uses them to spill long PDF extracts.
+_HINT_PROVIDERS = frozenset(
+    {
+        "claude",
+        "vertex-claude",
+        "bedrock",
+        "openai",
+        "ollama",
+        "ollama-cloud",
+        "ollama-local",
+        "openrouter",
+        "nvidia",
+        "huggingface",
+        "fireworks",
+    }
+)
+
+
 def provider_call_hints_kwargs(
     provider: Provider,
     hints: ProviderCallHints | None,
@@ -155,8 +177,7 @@ def provider_call_hints_kwargs(
     """Return kwargs accepted by providers that opt into ``ProviderCallHints``."""
     if hints is None:
         return {}
-    # Anthropic-family + OpenAI accept hints; others ignore via Protocol default.
-    if provider.name in ("claude", "vertex-claude", "bedrock", "openai"):
+    if provider.name in _HINT_PROVIDERS:
         return {"hints": hints}
     return {}
 
@@ -175,9 +196,7 @@ async def provider_count_input_tokens(
     kwargs.update(gemini_extra_kwargs(provider, vertex_google_search=vertex_google_search))
     kwargs.update(provider_call_hints_kwargs(provider, hints))
     if kwargs.keys() - {"model", "thinking_budget"}:
-        return int(
-            await cast(Any, provider).count_input_tokens(messages, tools, **kwargs)
-        )
+        return int(await cast(Any, provider).count_input_tokens(messages, tools, **kwargs))
     return await provider.count_input_tokens(messages, tools, **kwargs)
 
 
@@ -221,13 +240,7 @@ class Done:
 
 
 ProviderEvent: TypeAlias = (
-    TextDelta
-    | ThinkingDelta
-    | ToolCall
-    | ToolInputDelta
-    | GroundingEvent
-    | UsageEvent
-    | Done
+    TextDelta | ThinkingDelta | ToolCall | ToolInputDelta | GroundingEvent | UsageEvent | Done
 )
 
 

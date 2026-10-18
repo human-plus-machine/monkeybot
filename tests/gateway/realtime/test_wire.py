@@ -75,7 +75,9 @@ def test_parse_invalid_json_raises() -> None:
 
 
 def test_encode_connected_frame() -> None:
-    frame = ServerConnectedFrame(session_id="s1", input_format="pcm", output_format="pcm", chunk_ms=80)
+    frame = ServerConnectedFrame(
+        session_id="s1", input_format="pcm", output_format="pcm", chunk_ms=80
+    )
     encoded = json.loads(encode_server_frame(frame))
     assert encoded["kind"] == "connected"
     assert encoded["session_id"] == "s1"
@@ -196,7 +198,9 @@ def test_parse_server_error_and_session_ended_frames() -> None:
     assert parse_server_frame(
         json.dumps({"kind": "session_ended", "reason": "timeout"})
     ) == ServerSessionEndedFrame(reason="timeout")
-    assert isinstance(parse_server_frame(json.dumps({"kind": "interrupted"})), ServerInterruptedFrame)
+    assert isinstance(
+        parse_server_frame(json.dumps({"kind": "interrupted"})), ServerInterruptedFrame
+    )
 
 
 def test_parse_server_unknown_kind_raises() -> None:
@@ -215,9 +219,7 @@ def test_tool_result_user_transcript_usage_hitl_roundtrip() -> None:
         ServerUserTranscriptFrame,
     )
 
-    tool_result = ServerToolResultFrame(
-        call_id="c1", name="read", result="ok", error=None
-    )
+    tool_result = ServerToolResultFrame(call_id="c1", name="read", result="ok", error=None)
     parsed = parse_server_frame(encode_server_frame(tool_result))
     assert isinstance(parsed, ServerToolResultFrame)
     assert parsed.call_id == "c1"

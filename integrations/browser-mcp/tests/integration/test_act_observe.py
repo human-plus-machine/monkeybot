@@ -28,16 +28,11 @@ def test_click_next_returns_diff_without_wait_for(
     clicked = json.loads(server.browser_click_by_index(idx))
     assert clicked.get("ok") is True
     obs = clicked.get("observation") or {}
-    blob = "\n".join(
-        [str(obs.get("tree") or "")]
-        + list(obs.get("added") or [])
-    )
+    blob = "\n".join([str(obs.get("tree") or "")] + list(obs.get("added") or []))
     assert "Page 2 done" in blob or "page-2" in blob
 
 
-def test_click_observe_none_skips_snapshot(
-    fixture_server: str, cdp_url: str, tree_index
-) -> None:
+def test_click_observe_none_skips_snapshot(fixture_server: str, cdp_url: str, tree_index) -> None:
     from browser_mcp import server
 
     json.loads(server.browser_goto(f"{fixture_server}/spa.html"))

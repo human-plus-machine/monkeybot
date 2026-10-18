@@ -86,12 +86,7 @@ def test_transform_repairs_missing_tool_result() -> None:
     ]
     out = transform_context(msgs)
     # Repair inserts a synthetic tool-result user turn before the next user text.
-    tool_results = [
-        b
-        for m in out
-        for b in m.content
-        if isinstance(b, ToolResponse)
-    ]
+    tool_results = [b for m in out for b in m.content if isinstance(b, ToolResponse)]
     assert any(b.id == "c1" for b in tool_results)
 
 

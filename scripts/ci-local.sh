@@ -51,6 +51,7 @@ restore_locks() {
 trap restore_locks EXIT
 
 uv sync --extra claude --extra vertex-claude --extra bedrock --extra firestore --extra evals
+uv run ruff format --check .
 uv run mypy src/monkeybot
 uv run pytest tests/ -q
 

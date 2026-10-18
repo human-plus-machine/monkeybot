@@ -331,16 +331,68 @@ async def test_openai_user_pdf_without_text_layer_falls_back_to_placeholder() ->
 
 
 async def test_extract_pdf_text_truncates_long_text() -> None:
-    """Extraction caps output so a huge PDF can't blow the context window."""
+    """Without a workspace, a huge PDF is inlined up to the ceiling and says so."""
     from monkeybot.core.types.content_blocks import File
     from monkeybot.providers._openai_compat import _extract_pdf_text
 
-    long_text = "word " * 5000  # well over a small max_chars cap
+    long_text = "word " * 30_000  # 150k chars, over the 128k no-workspace inline ceiling
     block = File(mime_type="application/pdf", data=_pdf_b64(long_text))
-    result = await _extract_pdf_text(block, max_chars=100)
+    result = await _extract_pdf_text(block)
     assert result is not None
     assert len(result) < len(long_text)
-    assert "[... PDF text truncated ...]" in result
+    assert "reloading the PDF will not yield more" in result
+    assert "[... PDF text truncated ...]" not in result
+
+
+async def test_extract_pdf_text_sizes_from_window_without_workspace() -> None:
+    """A known small window caps the inline extract even when nothing can spill."""
+    from monkeybot.core.llm.provider import ProviderCallHints
+    from monkeybot.core.tools.spill_inventory import spill_budgets_from_window
+    from monkeybot.core.types.content_blocks import File
+    from monkeybot.providers._openai_compat import _extract_pdf_text
+
+    long_text = "word " * 30_000
+    block = File(mime_type="application/pdf", data=_pdf_b64(long_text))
+    hints = ProviderCallHints(session_id="sess", context_window_tokens=8_000)
+    result = await _extract_pdf_text(block, hints)
+    assert result is not None
+    inline_budget = spill_budgets_from_window(8_000).inline_budget
+    assert len(result) <= inline_budget + 200
+    assert "reloading the PDF will not yield more" in result
+
+
+async def test_extract_pdf_text_spills_and_reuses_path(tmp_path) -> None:
+    """A PDF over the inline budget spills once; a second extract reuses that file."""
+    import os
+
+    from monkeybot.core.llm.provider import ProviderCallHints
+    from monkeybot.core.types.content_blocks import File
+    from monkeybot.providers._openai_compat import _extract_pdf_text
+
+    body = "word " * 1_500  # 7.5k chars: over an 8k-window inline budget, under the read cap
+    block = File(mime_type="application/pdf", data=_pdf_b64(body))
+    hints = ProviderCallHints(
+        session_id="sess",
+        workspace_root=tmp_path,
+        context_window_tokens=8_000,
+    )
+    first = await _extract_pdf_text(block, hints)
+    (spill_file,) = tmp_path.glob(".monkeybot/spill/**/*.txt")
+    os.utime(spill_file, ns=(1_000_000_000, 1_000_000_000))
+    second = await _extract_pdf_text(block, hints)
+    assert spill_file.stat().st_mtime_ns == 1_000_000_000  # not rewritten
+    assert first is not None
+    assert first == second
+    assert "Full output at:" in first
+    assert ".monkeybot/spill/" in first
+    assert "reloading the PDF will not yield more" not in first
+    assert body not in first
+    spills = list(tmp_path.glob(".monkeybot/spill/**/*.txt"))
+    assert len(spills) == 1
+    assert spills[0].name.startswith("pdf-")
+    assert spills[0].name in first
+    stored = spills[0].read_text()
+    assert body in stored or body.replace(" ", "") in stored.replace(" ", "")
 
 
 async def test_openai_user_image_only_message() -> None:
