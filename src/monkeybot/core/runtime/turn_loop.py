@@ -92,8 +92,8 @@ from .history_compaction import (
     _await_history_write,
     _intent_facts_from_ctx,
     _summarization_model_id,
+    _compact_history_if_needed,
     _summarization_viable,
-    _summarize_history,
     protect_recent_count,
     truncate_history_preserving_pins,
 )
@@ -712,12 +712,13 @@ async def _run_history_summarization(
         request_id=state.ctx.request_id,
     ):
         try:
-            turns_summarized = await _summarize_history(
-                state.ctx.thread_id,
-                state.chat_messages,
-                history,
-                provider,
-                _summarization_model_id(state.ctx),
+            # Reload raw rows: state.chat_messages is the provider-facing view
+            # and must never be persisted back via history.reset.
+            turns_summarized = await _compact_history_if_needed(
+                thread_id=state.ctx.thread_id,
+                history=history,
+                provider=provider,
+                model=_summarization_model_id(state.ctx),
                 window_tokens=state.ctx.context_window_tokens,
                 intent_facts=_intent_facts_from_ctx(state.ctx),
             )
@@ -812,14 +813,19 @@ async def _apply_history_load_max_safety(
     """Last resort after compact failure: persist a truncated tail (no silent slide)."""
     if len(state.chat_messages) <= HISTORY_LOAD_MAX:
         return
-    dropped = len(state.chat_messages) - HISTORY_LOAD_MAX
-    truncated = truncate_history_preserving_pins(state.chat_messages, max_rows=HISTORY_LOAD_MAX)
+    # Truncate raw stored rows (not the provider-facing view) so pinned verdicts,
+    # thinking, attachments and row_ids survive the durable reset.
+    raw = await history.load(state.ctx.thread_id)
+    if len(raw) <= HISTORY_LOAD_MAX:
+        return
+    dropped = len(raw) - HISTORY_LOAD_MAX
+    truncated = truncate_history_preserving_pins(raw, max_rows=HISTORY_LOAD_MAX)
     logger.error(
         "history exceeds load max after compact attempt; truncating tail %s",
         kv(
             request_id=state.ctx.request_id,
             thread_id=state.ctx.thread_id,
-            message_count=len(state.chat_messages),
+            message_count=len(raw),
             load_max=HISTORY_LOAD_MAX,
             dropped=dropped,
         ),

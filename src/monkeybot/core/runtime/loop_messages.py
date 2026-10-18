@@ -12,7 +12,10 @@ from monkeybot.core.context.epoch import ContextEpochTracker, EpochAdmit, finger
 from monkeybot.core.context.tool_result_ingress import summarize_tool_result_text
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.messages.transform_context import transform_context
+from monkeybot.core.messages.transform_context import (
+    _PROVIDER_EXCLUDED_BLOCKS,
+    transform_context,
+)
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.prompts.headings import RUNTIME_NOTES_HEADING
 from monkeybot.core.prompts.prompt import (
@@ -23,7 +26,9 @@ from monkeybot.core.types.content_blocks import (
     ContentBlock,
     File,
     Image,
+    RedactedThinking,
     Text,
+    Thinking,
     ToolRequest,
     ToolResponse,
 )
@@ -220,6 +225,9 @@ def _summary_line_for_message(m: Message, *, window_tokens: int | None = None) -
             body = _flatten_tool_result_for_summary(b, window_tokens=window_tokens)
             tag = "tool_error" if b.is_error else "tool_result"
             pieces.append(f"[{tag} {b.tool_name}: {body}]")
+        elif isinstance(b, (Thinking, RedactedThinking, *_PROVIDER_EXCLUDED_BLOCKS)):
+            # Raw stored rows carry blocks the model never saw; keep them out of the summary prompt.
+            continue
         else:
             pieces.append(f"[{type(b).__name__}]")
     joined = " ".join(pieces) if pieces else "(empty)"
