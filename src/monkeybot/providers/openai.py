@@ -21,6 +21,7 @@ from monkeybot.providers._openai_compat import (
     openai_tools,
     openai_tools_token_count,
 )
+from monkeybot.providers._sdk_client import cached_sdk_client, session_affinity_headers
 from monkeybot.providers.request_budget import (
     configured_request_byte_budget,
     trim_message_media_for_byte_budget,
@@ -117,11 +118,9 @@ class OpenAIProvider:
             oai_messages = [{"role": "system", "content": system}, *oai_messages]
 
         retention = hints.cache_retention if hints is not None else "short"
-        session_id = hints.session_id if hints is not None else None
-        client_kwargs: dict[str, Any] = {}
-        if session_id and retention != "none":
-            client_kwargs["default_headers"] = {"x-session-affinity": session_id}
-        client = AsyncOpenAI(**client_kwargs)
+        # Credentials identify the connection. The model id is a request field.
+        api_key = os.environ.get("OPENAI_API_KEY", "")
+        client = cached_sdk_client(("openai", api_key), lambda: AsyncOpenAI())
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": oai_messages,
@@ -140,6 +139,9 @@ class OpenAIProvider:
             provider=self.name,
             model=model,
         )
+        headers = session_affinity_headers(hints)
+        if headers:
+            kwargs["extra_headers"] = headers
 
         async for event in iter_openai_compat_stream(
             client,

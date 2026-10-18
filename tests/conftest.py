@@ -87,5 +87,15 @@ def _reap_leaked_aiosqlite_after_test() -> Any:
     _stop_leaked_aiosqlite_connections()
 
 
+@pytest.fixture(autouse=True)
+def _clear_provider_sdk_clients() -> Any:
+    """A patched SDK constructor must not be skipped by a client cached in an earlier test."""
+    from monkeybot.providers._sdk_client import clear_sdk_clients
+
+    clear_sdk_clients()
+    yield
+    clear_sdk_clients()
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     _stop_leaked_aiosqlite_connections()
