@@ -13,7 +13,7 @@ from monkeybot_cli.extras_catalog import (
     additional_provider_extra_choices,
     normalize_extra_token,
 )
-from monkeybot_cli.scaffold import run_new
+from monkeybot_cli.scaffold import DEFAULT_TEMPLATE, TEMPLATES, run_new
 
 _DEFAULT_PROVIDER = "gemini"
 _DEFAULT_MODEL = "gemini-3-flash"
@@ -26,7 +26,19 @@ def _prompt_line(prompt: str) -> str:
         return ""
 
 
-def _prompt_single(choices: tuple[ExtraChoice, ...], *, title: str, default_key: str) -> str:
+TEMPLATE_CHOICES: tuple[ExtraChoice, ...] = (
+    ExtraChoice("default", "General-purpose agent"),
+    ExtraChoice("coding", "Coding agent for a repository (verification gate, dev toolchain)"),
+)
+
+
+def _prompt_single(
+    choices: tuple[ExtraChoice, ...],
+    *,
+    title: str,
+    default_key: str,
+    noun: str = "provider",
+) -> str:
     """Numbered single-select; Enter keeps default_key."""
     print(title)
     default_idx = 1
@@ -35,7 +47,7 @@ def _prompt_single(choices: tuple[ExtraChoice, ...], *, title: str, default_key:
         if choice.key == default_key:
             default_idx = i
         print(f"  {i}) {choice.key} — {choice.label}{marker}")
-    raw = _prompt_line(f"Choose provider [{default_idx}]: ").strip()
+    raw = _prompt_line(f"Choose {noun} [{default_idx}]: ").strip()
     if not raw:
         return default_key
     if raw.isdigit():
@@ -48,7 +60,7 @@ def _prompt_single(choices: tuple[ExtraChoice, ...], *, title: str, default_key:
     for choice in choices:
         if raw.lower() == choice.key.lower():
             return choice.key
-    print(f"  unknown provider {raw!r}; using {default_key}", file=sys.stderr)
+    print(f"  unknown {noun} {raw!r}; using {default_key}", file=sys.stderr)
     return default_key
 
 
@@ -128,6 +140,13 @@ def run_new_command(args: argparse.Namespace) -> int:
 
     provider = args.provider
     model = args.model
+    template = getattr(args, "template", None)
+    if template is not None and template not in TEMPLATES:
+        print(
+            f"error: unknown --template {template!r}; choose from {', '.join(TEMPLATES)}",
+            file=sys.stderr,
+        )
+        return 2
     extras, unknown = _resolve_extras_from_args(getattr(args, "with_extras", None))
     if unknown:
         print(
@@ -137,6 +156,13 @@ def run_new_command(args: argparse.Namespace) -> int:
         return 2
 
     if not args.yes:
+        if template is None:
+            template = _prompt_single(
+                TEMPLATE_CHOICES,
+                title="Template:",
+                default_key=DEFAULT_TEMPLATE,
+                noun="template",
+            )
         if provider is None:
             provider = _prompt_single(
                 PROVIDER_CHOICES,
@@ -167,6 +193,7 @@ def run_new_command(args: argparse.Namespace) -> int:
         provider=provider,
         model=model,
         extras=extras or None,
+        template=template or DEFAULT_TEMPLATE,
     )
     print(f"monkeybot scaffold under {dest}:")
     print("\n".join(report))
@@ -177,6 +204,11 @@ def run_new_command(args: argparse.Namespace) -> int:
     print("  cp .env.example .env   # then add provider keys")
     print("  monkeybot doctor")
     print("  monkeybot chat")
+    if template == "coding":
+        print()
+        print("Coding template: point the agent at your repository by setting")
+        print("  paths.workspace_root: /absolute/path/to/your/repo")
+        print("in monkeybot_config/monkeybot.yaml (or clone the repo into ./workspace).")
     return 0
 
 
@@ -199,6 +231,13 @@ def register(subparsers: argparse._SubParsersAction[argparse.ArgumentParser]) ->
             "(repeatable or comma-separated). Examples: postgres, sandbox, "
             "observability, openai, bedrock, claude"
         ),
+    )
+    p.add_argument(
+        "--template",
+        choices=TEMPLATES,
+        default=None,
+        help="Scaffold flavour: default (general agent) or coding (repo workflow). "
+        "Prompted interactively when omitted.",
     )
     p.add_argument("--force", action="store_true", help="Overwrite existing scaffold files")
     p.add_argument("--yes", "-y", action="store_true", help="Skip interactive prompts")
