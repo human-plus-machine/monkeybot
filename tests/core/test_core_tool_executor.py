@@ -1610,6 +1610,52 @@ async def test_direct_mempalace_route_is_owned_by_each_executor(
 
 
 @pytest.mark.asyncio
+async def test_direct_mempalace_gets_no_toolchain_cache_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.tools.terminal import ExecutionResult, TerminalExecutor
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    skills = workspace / "skills"
+    skills.mkdir()
+    palace = _mem_sub(tmp_path / "memory")
+    seen: list[dict[str, str]] = []
+
+    async def fake_execute(self, command, args, timeout=60, **kwargs):
+        del self, command, args, timeout
+        seen.append(dict(kwargs.get("env_overrides") or {}))
+        return ExecutionResult(stdout="ok", stderr="", exit_code=0)
+
+    monkeypatch.setattr(TerminalExecutor, "execute", fake_execute)
+    monkeypatch.setattr(
+        "monkeybot.core.tools.core_tool_executor.isolation_support",
+        lambda: IsolationSupport("sandbox-exec", "test"),
+    )
+    executor = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=palace,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await executor.execute(
+            call=ToolCall(
+                call_id="palace",
+                name="run_command",
+                args={"argv": ["mempalace", "search", "query"]},
+            ),
+            ctx=dataclasses.replace(_ctx(), user_id="u"),
+        )
+    )
+    assert err is None and out is not None
+    # The tool-cache is workspace-writable, and in Docker sandbox mode the
+    # container can write it while mempalace runs on the host: a uv-bin entry
+    # on PATH would let a planted `mempalace` script win `shutil.which`.
+    assert set(seen[0]) == {"MEMPALACE_PALACE_PATH", "MEMPALACE_BACKEND"}
+
+
+@pytest.mark.asyncio
 async def test_run_command_points_toolchain_caches_at_the_granted_directory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

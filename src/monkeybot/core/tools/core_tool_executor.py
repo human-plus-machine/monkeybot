@@ -2032,8 +2032,11 @@ class CoreToolExecutor(ToolExecutorPort):
                 # Same boundary: default caches live under the denied home.
                 # The container path keeps the host environment instead, and so
                 # does a host where the jail fails open (~/.cache is reachable).
+                # mempalace never needs the caches, and the tool-cache is
+                # workspace-writable (by the container, in sandbox mode), so its
+                # uv-bin must not take part in resolving the host mempalace.
                 env_overrides: dict[str, str] = {}
-                if (await asyncio.to_thread(isolation_support)).available:
+                if cmd != "mempalace" and (await asyncio.to_thread(isolation_support)).available:
                     env_overrides = toolchain_cache_env(
                         self._workspace.repo_root,
                         jail_roots,
