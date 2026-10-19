@@ -3580,3 +3580,36 @@ def test_resolved_path_skips_non_filesystem_tools(tmp_path: Path) -> None:
     ctx = _ctx(workspace_root=tmp_path)
     call = ToolCall(call_id="c1", name="enable_mcp", args={"path": "mcp.json"})
     assert _resolved_path_for_call(call, ctx) is None
+
+
+class _SilentErrorProvider:
+    """Raises an exception whose ``str()`` is empty, like ``httpx.ReadTimeout``."""
+
+    name = "silent"
+    supports_streaming = True
+
+    async def stream(self, messages: Any, tools: Any, *, model: str, **_: Any) -> Any:
+        raise TimeoutError()
+        yield  # pragma: no cover
+
+    async def count_input_tokens(self, messages: Any, tools: Any, *, model: str, **_: Any) -> int:
+        return 0
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_with_empty_message_still_reports_something() -> None:
+    events = [
+        e
+        async for e in run(
+            "hi",
+            _ctx(),
+            provider=_SilentErrorProvider(),  # type: ignore[arg-type]
+            history=FakeHistory(),
+            inspectors=[],
+            tool_executor=RecordingExecutor(),
+            max_turns=2,
+        )
+    ]
+    errors = [e.error for e in events if type(e).__name__ == "Error"]
+    assert errors == ["Provider request failed (TimeoutError)"]
+    assert type(events[-1]).__name__ == "TurnComplete"

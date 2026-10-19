@@ -165,3 +165,33 @@ def test_fit_still_sanitizes_run_command_blob_json_fields() -> None:
     parsed = json.loads(out)
     assert parsed["stdout"] == "x" * 2000
     assert "omitted" in parsed["data"]
+
+
+def test_trim_keeps_head_and_tail_so_the_end_of_output_survives() -> None:
+    from monkeybot.core.runtime.context_budget import _trim_text_to_token_budget
+
+    text = "HEAD-START\n" + "line\n" * 5_000 + "=== 2 failed, 9 passed in 3.2s ==="
+    out = _trim_text_to_token_budget(text, 500)  # ~2000 chars
+    assert out.startswith("HEAD-START")
+    assert out.endswith("=== 2 failed, 9 passed in 3.2s ===")
+    assert "truncated for context budget" in out
+    assert len(out) < 2_200
+    marker_at = out.index("[... truncated")
+    head, tail = out[:marker_at], out[marker_at:]
+    assert 0.6 < len(head) / (len(head) + len(tail)) < 0.85  # ~70/30 split
+
+
+def test_trim_leaves_text_that_fits_untouched() -> None:
+    from monkeybot.core.runtime.context_budget import _trim_text_to_token_budget
+
+    assert _trim_text_to_token_budget("short", 500) == "short"
+    assert _trim_text_to_token_budget("anything", 0) == ""
+
+
+def test_trim_with_inventory_note_trims_body_both_ends_and_keeps_note() -> None:
+    from monkeybot.core.runtime.context_budget import _trim_text_to_token_budget
+
+    note = "[Spill inventory — 99 total chars.\nFull output at: .monkeybot/spill/t/x.txt — read_file it.]"
+    text = "A" * 30_000 + "ZZZ-END" + "\n" + note
+    out = _trim_text_to_token_budget(text, 500)
+    assert out.startswith("AAAA") and "ZZZ-END" in out and out.endswith(note)

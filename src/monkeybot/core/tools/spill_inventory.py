@@ -494,18 +494,19 @@ def partial_output_tail(
     return f"…(+{omitted} chars omitted)\n{combined[-max_chars:]}"
 
 
-def write_run_command_timeout_spill(
+def _write_run_command_spill(
     *,
     workspace_root: Path,
     thread_id: str,
     call_id: str,
+    suffix: str,
+    title: str,
     stdout: str,
     stderr: str,
 ) -> str:
-    """Persist drained run_command streams after timeout; return workspace-relative path."""
     body = "\n".join(
         [
-            "=== run_command partial output (process killed on timeout) ===",
+            title,
             "",
             "--- stdout ---",
             stdout if stdout else "(empty)",
@@ -519,7 +520,7 @@ def write_run_command_timeout_spill(
     if rel_dir_out is None:
         return ""
     rel_dir, out_dir = rel_dir_out
-    filename = f"{_safe_spill_filename(f'{call_id}-timeout')}.txt"
+    filename = f"{_safe_spill_filename(f'{call_id}-{suffix}')}.txt"
     rel = f"{rel_dir}/{filename}"
     out_path = out_dir / filename
     if _spill_path_contained(spill_root(workspace_root), out_path) is None:
@@ -527,10 +528,95 @@ def write_run_command_timeout_spill(
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path.write_text(body, encoding="utf-8")
     logger.debug(
-        "run_command timeout spill %s",
+        "run_command %s spill %s",
+        suffix,
         kv(path=rel, stdout_chars=len(stdout), stderr_chars=len(stderr)),
     )
     return rel
+
+
+def write_run_command_timeout_spill(
+    *,
+    workspace_root: Path,
+    thread_id: str,
+    call_id: str,
+    stdout: str,
+    stderr: str,
+) -> str:
+    """Persist drained run_command streams after timeout; return workspace-relative path."""
+    return _write_run_command_spill(
+        workspace_root=workspace_root,
+        thread_id=thread_id,
+        call_id=call_id,
+        suffix="timeout",
+        title="=== run_command partial output (process killed on timeout) ===",
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def write_run_command_output_spill(
+    *,
+    workspace_root: Path,
+    thread_id: str,
+    call_id: str,
+    stdout: str,
+    stderr: str,
+    exit_code: int,
+) -> str:
+    """Persist full streams of a finished run_command; return workspace-relative path."""
+    return _write_run_command_spill(
+        workspace_root=workspace_root,
+        thread_id=thread_id,
+        call_id=call_id,
+        suffix="output",
+        title=f"=== run_command full output (exit_code={exit_code}) ===",
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+_RUN_COMMAND_HEAD_LINES = 20
+
+
+def _tail_chars(text: str, max_chars: int) -> str:
+    """Last ``max_chars`` of ``text``, cut at a line boundary when one is nearby."""
+    if len(text) <= max_chars:
+        return text
+    cut = text[-max_chars:]
+    newline = cut.find("\n")
+    if 0 <= newline < max_chars // 4:
+        cut = cut[newline + 1 :]
+    return cut
+
+
+def _head_chars(text: str, max_chars: int) -> str:
+    lines = text.splitlines()[:_RUN_COMMAND_HEAD_LINES]
+    head = "\n".join(lines)
+    return head[:max_chars]
+
+
+def shape_run_command_streams(
+    stdout: str,
+    stderr: str,
+    *,
+    unit_chars: int,
+) -> dict[str, Any]:
+    """Head/tail views of ``run_command`` streams that always keep the tail.
+
+    Repeated lines are collapsed first (same shaper as the log budget) so noisy
+    progress output does not eat the tail budget. ``stdout_head`` is a handful
+    of leading lines; the tails are what carry test summaries and tracebacks.
+    """
+    shaped_out = shape_logs(stdout, max_lines=None, keep_patterns=(), collapse_repeated=True)
+    shaped_err = shape_logs(stderr, max_lines=None, keep_patterns=(), collapse_repeated=True)
+    return {
+        "stdout_head": _head_chars(shaped_out, unit_chars),
+        "stdout_tail": _tail_chars(shaped_out, unit_chars * 2),
+        "stderr_tail": _tail_chars(shaped_err, unit_chars * 2),
+        "stdout_chars": len(stdout),
+        "stderr_chars": len(stderr),
+    }
 
 
 def spill_root(workspace_root: Path) -> Path:

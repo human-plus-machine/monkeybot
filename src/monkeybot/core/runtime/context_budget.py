@@ -99,6 +99,24 @@ def _split_inventory_note(text: str) -> tuple[str, str | None]:
     return text[:idx].rstrip(), text[idx:].lstrip()
 
 
+_TRUNCATION_MARKER = "[... truncated for context budget — use read_file on spill path to page ...]"
+_HEAD_FRACTION = 0.7
+
+
+def _head_and_tail(text: str, max_chars: int) -> str:
+    """First 70% and last 30% of a ``max_chars`` budget, with a marker between.
+
+    Keeps the tail because that is where command output ends: test summaries, final
+    errors, exit lines. Head-only trimming used to cut exactly those.
+    """
+    if len(text) <= max_chars:
+        return text
+    head = max(1, int(max_chars * _HEAD_FRACTION))
+    tail = max(0, max_chars - head)
+    kept_tail = text[-tail:] if tail else ""
+    return f"{text[:head]}\n{_TRUNCATION_MARKER}\n{kept_tail}".rstrip("\n")
+
+
 def _trim_text_to_token_budget(text: str, token_budget: int) -> str:
     if token_budget <= 0:
         return ""
@@ -111,16 +129,8 @@ def _trim_text_to_token_budget(text: str, token_budget: int) -> str:
         head_budget = max(0, max_chars - note_len)
         if head_budget <= 0:
             return note
-        trimmed_body = body[:head_budget]
-        if len(body) > head_budget:
-            trimmed_body += (
-                "\n[... truncated for context budget — use read_file on spill path to page ...]"
-            )
-        return f"{trimmed_body}\n{note}"
-    trimmed = text[:max_chars]
-    if len(text) > max_chars:
-        trimmed += "\n[... truncated for context budget — use read_file on spill path to page ...]"
-    return trimmed
+        return f"{_head_and_tail(body, head_budget)}\n{note}"
+    return _head_and_tail(text, max_chars)
 
 
 @dataclass

@@ -116,7 +116,9 @@ from monkeybot.core.tools.inspector import parse_run_command
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.spill_inventory import (
     partial_output_tail,
+    shape_run_command_streams,
     spill_budgets_from_window,
+    write_run_command_output_spill,
     write_run_command_timeout_spill,
     write_spill_with_inventory,
 )
@@ -179,7 +181,8 @@ _CORE_TOOL_NAMES = frozenset(
     }
 )
 
-_SPILL_SKIP_TOOLS = frozenset({"read_file", "load_file"})
+# run_command self-spills in ``_tool_run_command`` so exit_code and the tail survive.
+_SPILL_SKIP_TOOLS = frozenset({"read_file", "load_file", "run_command"})
 
 
 def _mcp_call_meta(ctx: TurnContext) -> dict[str, object]:
@@ -1011,7 +1014,11 @@ class CoreToolExecutor(ToolExecutorPort):
             # Allow absolute argv paths under the resolved skills root (list_skills
             # returns this path; scripts live outside the workspace cwd).
             skills = str(self._skills_path)
-            paths = tuple(dict.fromkeys((*paths, skills, f"{skills}/")))
+            # ``./tests`` and absolute paths inside the workspace are the agent's
+            # own tree; ``_validate_paths`` still resolves them, so ``../memory``
+            # and symlink escapes stay outside.
+            workspace = str(self._workspace.repo_root)
+            paths = tuple(dict.fromkeys((*paths, skills, f"{skills}/", "./", workspace)))
         self._run_cmd_allowed_commands = cmds
         self._run_cmd_allowed_paths = paths
         _job_cfg = SandboxConfig.from_env(self._config)
@@ -1799,6 +1806,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 ),
             )
 
+        persona = self._subagent_registry.get(subagent_type) if subagent_type else None
         parent_label = f"{ctx.request_id}:{call.call_id}"
         traceparent = _inject_subagent_traceparent()
         run_id = make_run_id()
@@ -1808,7 +1816,7 @@ class CoreToolExecutor(ToolExecutorPort):
             context=context_val,
             memory_storage_uri=memory_uri,
             parent_run_id=parent_label,
-            model=ctx.model,
+            model=(persona.model if persona is not None else None) or ctx.model,
             traceparent=traceparent,
             agent_md=str(agent_md_path),
             subagent_type=subagent_type,
@@ -1871,6 +1879,8 @@ class CoreToolExecutor(ToolExecutorPort):
             artifacts_path=self._artifacts_path,
             config=self._config,
         )
+        if persona is not None and persona.vertex_location:
+            child_env["VERTEX_AI_LOCATION"] = persona.vertex_location
         payload = await _run_inline_subagent_with_progress(
             script=script,
             envelope=envelope,
@@ -2112,17 +2122,42 @@ class CoreToolExecutor(ToolExecutorPort):
                     {"tool": "run_command", "command": cmd, "argv": list(argv)},
                 ),
             )
-        return (
-            _j(
-                {
-                    "ok": result.exit_code == 0,
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
-                    "exit_code": result.exit_code,
-                }
-            ),
-            None,
+        ok = result.exit_code == 0
+        payload = _j(
+            {
+                "ok": ok,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exit_code": result.exit_code,
+            }
         )
+        budgets = spill_budgets_from_window(ctx.context_window_tokens)
+        if len(payload) < budgets.spill_threshold:
+            return payload, None
+        spill_path = write_run_command_output_spill(
+            workspace_root=self._workspace.repo_root,
+            thread_id=ctx.session_id,
+            call_id=call.call_id,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.exit_code,
+        )
+        shaped: dict[str, Any] = {"ok": ok, "exit_code": result.exit_code}
+        if spill_path:
+            shaped["output_path"] = spill_path
+        shaped.update(
+            shape_run_command_streams(
+                result.stdout,
+                result.stderr,
+                unit_chars=max(1, budgets.inline_hard_cap // 12),
+            )
+        )
+        shaped["note"] = "Output was large; stdout/stderr are shown as head/tail only. " + (
+            f"read_file {spill_path} (offset/limit) for the full streams."
+            if spill_path
+            else "The full streams could not be saved."
+        )
+        return _j(shaped), None
 
     async def _start_background_command(
         self,
