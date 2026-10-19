@@ -3582,6 +3582,200 @@ def test_resolved_path_skips_non_filesystem_tools(tmp_path: Path) -> None:
     assert _resolved_path_for_call(call, ctx) is None
 
 
+# --- coding mode: workspace trailer + read-ledger reset on compaction ---
+
+
+class _CodingCfg:
+    """Minimal pinned-config double: coding verify patterns, nothing else configured."""
+
+    from monkeybot.core.config.settings import CodingConfig as _CodingConfig
+    from monkeybot.core.config.settings import VerifierConfig as _VerifierConfig
+
+    env_values: dict[str, str] = {}
+    coding = _CodingConfig()
+    verifier = _VerifierConfig()
+
+
+def _ledger_ctx(tmp_path: Path, ledger: Any) -> TurnContext:
+    return dataclasses.replace(
+        _ctx(workspace_root=tmp_path, context_window_tokens=800),
+        read_ledger=ledger,
+        config=_CodingCfg(),  # type: ignore[arg-type]
+    )
+
+
+async def _compact_with_ledger(
+    tmp_path: Path, ledger: Any, *, summary: str = " compressed summary ", hooks: Any = None
+) -> tuple[FakeHistory, list[Any]]:
+    hist = FakeHistory(_padded(8))
+    prov = FakeProvider([[TextDelta(text=summary), Done()], [TextDelta(text="final"), Done()]])
+    events = [
+        e
+        async for e in run(
+            "hello",
+            _ledger_ctx(tmp_path, ledger),
+            provider=prov,
+            history=hist,
+            inspectors=[],
+            tool_executor=RecordingExecutor(),
+            max_turns=4,
+            hook_manager=hooks,
+        )
+    ]
+    assert len(hist.reset_calls) == 1
+    return hist, events
+
+
+def _summary_text(hist: FakeHistory) -> str:
+    return next(
+        x.text
+        for m in hist.rows
+        for x in m.content
+        if isinstance(x, Text) and x.text.startswith("[Context Summary]:")
+    )
+
+
+@pytest.mark.asyncio
+async def test_compaction_appends_harness_generated_workspace_trailer(tmp_path: Path) -> None:
+    from monkeybot.core.tools.read_ledger import FileReadLedger
+
+    ledger = FileReadLedger()
+    ledger.record_write("calc/ops.py", (1, 1))
+    ledger.record_write("tests/test_ops.py", (1, 1))
+    ledger.record_command("ls -la", 0)
+    ledger.record_command("python -m pytest -q", 1)
+    ledger.record_command("git status", 0)
+    hist, _ = await _compact_with_ledger(tmp_path, ledger)
+    text = _summary_text(hist)
+
+    assert "## Workspace state (harness-generated)" in text
+    assert "- Files written this session: calc/ops.py, tests/test_ops.py" in text
+    assert "- Last verification run: `python -m pytest -q` → exit 1 (FAILED)" in text
+    assert "read_file` again before editing" in text
+    # Order: model summary, then the deterministic facts, then the standing instructions.
+    assert (
+        text.index("compressed summary")
+        < text.index("## Workspace state")
+        < text.index("Standing instructions (still in effect after compaction)")
+    )
+    assert text.count("Standing instructions (still in effect") == 1
+
+
+@pytest.mark.asyncio
+async def test_compaction_trailer_replaces_an_echoed_older_trailer(tmp_path: Path) -> None:
+    from monkeybot.core.tools.read_ledger import FileReadLedger
+
+    ledger = FileReadLedger()
+    ledger.record_write("new.py", (1, 1))
+    echoed = "kept summary\n\n## Workspace state (harness-generated)\n- Files written this session: STALE.py"
+    hist, _ = await _compact_with_ledger(tmp_path, ledger, summary=echoed)
+    text = _summary_text(hist)
+    assert text.count("## Workspace state (harness-generated)") == 1
+    assert "STALE.py" not in text and "new.py" in text and "kept summary" in text
+
+
+@pytest.mark.asyncio
+async def test_compaction_without_ledger_or_activity_adds_no_trailer(tmp_path: Path) -> None:
+    from monkeybot.core.tools.read_ledger import FileReadLedger
+
+    hist, _ = await _compact_with_ledger(tmp_path, FileReadLedger())  # nothing written or run
+    assert "Workspace state" not in _summary_text(hist)
+    hist2 = await _run_over_cap(tmp_path, _padded(8))  # no ledger at all
+    assert "Workspace state" not in _summary_text(hist2)
+
+
+@pytest.mark.asyncio
+async def test_compaction_fires_history_compacted_and_resets_the_ledger(tmp_path: Path) -> None:
+    from monkeybot.core.coding.read_ledger_hook import ReadLedgerCompactionHook
+    from monkeybot.core.hooks import HookEvent, HookManager
+    from monkeybot.core.tools.read_ledger import FileReadLedger
+
+    ledger = FileReadLedger()
+    ledger.record_read("calc/ops.py", (5, 50))
+    ledger.record_write("calc/ops.py", (6, 60))
+    assert ledger.check_write("calc/ops.py", (6, 60)) is None
+
+    seen: list[int | None] = []
+
+    async def spy(p: Any) -> None:
+        seen.append(p.turns_summarized)
+
+    mgr = HookManager()
+    mgr.register(HookEvent.HISTORY_COMPACTED, spy)
+    ReadLedgerCompactionHook().register(mgr)
+    await _compact_with_ledger(tmp_path, ledger, hooks=mgr)
+
+    assert seen and seen[0] is not None and seen[0] > 0
+    assert ledger.check_write("calc/ops.py", (6, 60)) == "read_before_write"
+    assert ledger.written == {"calc/ops.py"}  # the record of what was written survives
+
+
+@pytest.mark.asyncio
+async def test_no_compaction_means_no_history_compacted_event(tmp_path: Path) -> None:
+    from monkeybot.core.hooks import HookEvent, HookManager
+
+    fired: list[int | None] = []
+
+    async def spy(p: Any) -> None:
+        fired.append(p.turns_summarized)
+
+    mgr = HookManager()
+    mgr.register(HookEvent.HISTORY_COMPACTED, spy)
+    prov = FakeProvider([[TextDelta(text="hi"), Done()]])
+    async for _ in run(
+        "hello",
+        _ctx(workspace_root=tmp_path),
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=2,
+        hook_manager=mgr,
+    ):
+        pass
+    assert fired == []
+
+
+@pytest.mark.asyncio
+async def test_post_tool_compaction_also_resets_the_ledger_and_adds_the_trailer(
+    tmp_path: Path,
+) -> None:
+    from monkeybot.core.coding.read_ledger_hook import ReadLedgerCompactionHook
+    from monkeybot.core.hooks import HookManager
+    from monkeybot.core.runtime.context_budget import ContextBudgeter
+    from monkeybot.core.runtime.history_compaction import _append_budgeted_tool_responses
+    from monkeybot.core.tools.read_ledger import FileReadLedger
+
+    ledger = FileReadLedger()
+    ledger.record_read("a.py", (1, 1))
+    ledger.record_write("a.py", (2, 2))
+    ledger.record_command("make test", 0)
+    mgr = HookManager()
+    ReadLedgerCompactionHook().register(mgr)
+    hist = FakeHistory(_padded(8))
+    prov = FakeProvider([[TextDelta(text=" tool-time summary "), Done()]])
+    ctx = _ledger_ctx(tmp_path, ledger)
+    budgeter = ContextBudgeter(
+        window_tokens=800, used_tokens=790, safety_fraction=0.5, floor_tokens=10
+    )
+    big = ToolResponse(id="c1", tool_name="run_command", result=[Text(text="o" * 20_000)])
+    async for _ in _append_budgeted_tool_responses(
+        chunk_responses=[big],
+        ctx=ctx,
+        history=hist,
+        usage=Usage(),
+        budgeter=budgeter,
+        provider=prov,
+        hook_manager=mgr,
+    ):
+        pass
+    assert len(hist.reset_calls) == 1
+    text = _summary_text(hist)
+    assert "- Files written this session: a.py" in text
+    assert "`make test` → exit 0 (passed)" in text
+    assert ledger.check_write("a.py", (2, 2)) == "read_before_write"
+
+
 class _SilentErrorProvider:
     """Raises an exception whose ``str()`` is empty, like ``httpx.ReadTimeout``."""
 

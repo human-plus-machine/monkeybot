@@ -1916,6 +1916,10 @@ class WorkspaceFileService:
             files_only=files_only,
         )
 
+    def repo_rel(self, p: Path) -> str:
+        """Canonical workspace-relative key for ``p`` (``skills/…`` / ``artifacts/…`` virtual roots)."""
+        return self._as_repo_rel(p)
+
     def _as_repo_rel(self, p: Path) -> str:
         if self._skills_root is not None:
             try:

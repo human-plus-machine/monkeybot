@@ -1,0 +1,36 @@
+description: "A verified edit is not held back: the first final answer is accepted"
+executor: real
+coding: true
+gate: true
+workspace_fixture: fixtures/coding/calc_repo
+user_message: "Fix divide() and tell me it works."
+scripted_turns:
+  - - type: tool_call
+      call_id: c1
+      name: read_file
+      args:
+        path: calc/ops.py
+    - type: done
+  - - type: tool_call
+      call_id: c2
+      name: replace_in_file
+      args:
+        path: calc/ops.py
+        old_string: "    return a / b\n"
+        new_string: "    if b == 0:\n        raise ValueError(\"division by zero\")\n    return a / b\n"
+    - type: done
+  - - type: tool_call
+      call_id: c3
+      name: run_command
+      args:
+        argv: ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+    - type: done
+  - - type: text_delta
+      text: "Fixed; python -m pytest -q: 5 passed."
+    - type: done
+assertions:
+  provider_calls: 4
+  workspace_command_passes:
+    - python -m pytest -q -p no:cacheprovider
+  turn_completed: true
+  max_turns: 8

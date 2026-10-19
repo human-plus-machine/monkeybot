@@ -19,6 +19,7 @@ from monkeybot.core.context.project_context import load_project_instructions, re
 from monkeybot.core.mcp.ports_mcp import MCPClientPort, normalize_catalog_mcp_names
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import AgentEvent
+from monkeybot.core.tools.read_ledger import FileReadLedger
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES
 from monkeybot.core.types.types_tools import ToolDef
@@ -168,6 +169,9 @@ class TurnContext:
     """Coding mode: ``AGENTS.md`` (or equivalent) text for the stable prompt prefix; ``""`` if none."""
     repo_overview: str = ""
     """Coding mode: deterministic toolchain + layout summary for the stable prompt prefix."""
+    read_ledger: FileReadLedger | None = None
+    """Session read/write ledger (coding mode only); mutable store held by frozen context.
+    Shared with ``CoreToolExecutor``; history compaction reads and clears it."""
     invoked_skill: SkillRef | None = None
     """Installed skill the user explicitly invoked with a leading `/slug` this turn."""
     session: str | None = None
@@ -1073,6 +1077,7 @@ async def build_context(
     goal_ledger: GoalLedger | None = None,
     verdict_mailbox: VerdictMailbox | None = None,
     session_id: str | None = None,
+    read_ledger: FileReadLedger | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -1110,6 +1115,7 @@ async def build_context(
         config: Optional pinned ``RuntimeConfig`` for this turn. When omitted the
             turn is not snapshot-aware (tests / callers that only need env).
         goal_ledger: Optional goal ledger for intent capture and compaction facts.
+        read_ledger: Optional coding-mode file read/write ledger shared with the executor.
         session_id: Chat session when it differs from ``thread_id``; see
             ``TurnContext.session_id``.
 
@@ -1176,6 +1182,7 @@ async def build_context(
         verdict_mailbox=verdict_mailbox,
         project_instructions=project_instructions,
         repo_overview=overview,
+        read_ledger=read_ledger,
         session=session_id,
     )
 

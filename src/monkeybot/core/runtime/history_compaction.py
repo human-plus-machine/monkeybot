@@ -59,6 +59,44 @@ def _intent_facts_from_ctx(ctx: TurnContext) -> str | None:
         return None
 
 
+_WORKSPACE_STATE_HEADING = "## Workspace state (harness-generated)"
+_TRAILER_MAX_FILES = 25
+
+
+def _workspace_trailer_from_ctx(ctx: TurnContext) -> str | None:
+    """Facts about the workspace the harness itself recorded — never LLM-written.
+
+    A summary can misremember which files were touched or whether the tests passed; the
+    ledger saw every write and every command, so state it from there. ``None`` outside
+    coding mode (no ledger) or when nothing has been written or run yet.
+    """
+    ledger = ctx.read_ledger
+    if ledger is None:
+        return None
+    lines: list[str] = []
+    written = sorted(ledger.written)
+    if written:
+        shown = ", ".join(written[:_TRAILER_MAX_FILES])
+        if len(written) > _TRAILER_MAX_FILES:
+            shown += f", +{len(written) - _TRAILER_MAX_FILES} more"
+        lines.append(f"- Files written this session: {shown}")
+    config = ctx.config
+    patterns = config.coding.verification_gate.verify_commands if config is not None else ()
+    verify = ledger.last_command_matching(tuple(patterns)) if patterns else None
+    if verify is not None:
+        outcome = "passed" if verify.exit_code == 0 else "FAILED"
+        lines.append(
+            f"- Last verification run: `{verify.command}` → exit {verify.exit_code} ({outcome})"
+        )
+    if not lines:
+        return None
+    lines.append(
+        "- File contents read before this point are no longer in context: "
+        "`read_file` again before editing."
+    )
+    return "\n".join([_WORKSPACE_STATE_HEADING, *lines])
+
+
 async def _fire_history_compacted(
     hook_manager: HookManager | None, ctx: TurnContext, *, turns_summarized: int
 ) -> None:
@@ -145,7 +183,8 @@ _POST_COMPACTION_STANDING = f"""\
 Harness rules still apply: prefer `grep` / `glob` before broad exploration for codebase Q&A; \
 `read_file` (or `glob` for binary assets) before `Evidence:` citations; keep incremental \
 answers in a workspace file for long multi-item tasks; preserve any user answer-format \
-contract verbatim.\
+contract verbatim. File contents seen before this point are gone from context: `read_file` \
+again before editing.\
 """
 
 
@@ -417,6 +456,7 @@ async def _compact_history_if_needed(
     model: str,
     window_tokens: int,
     intent_facts: str | None = None,
+    workspace_trailer: str | None = None,
 ) -> int:
     """Summarize middle history when tool results exhausted headroom."""
     return await _summarize_history(
@@ -426,6 +466,7 @@ async def _compact_history_if_needed(
         model,
         window_tokens=window_tokens,
         intent_facts=intent_facts,
+        workspace_trailer=workspace_trailer,
     )
 
 
@@ -463,6 +504,7 @@ async def _append_budgeted_tool_responses(
                 model=_summarization_model_id(ctx),
                 window_tokens=ctx.context_window_tokens,
                 intent_facts=_intent_facts_from_ctx(ctx),
+                workspace_trailer=_workspace_trailer_from_ctx(ctx),
             )
         except Exception:
             logger.warning(
@@ -506,6 +548,7 @@ async def _summarize_history(
     *,
     window_tokens: int,
     intent_facts: str | None = None,
+    workspace_trailer: str | None = None,
 ) -> int:
     """Compress middle history into one assistant summary row. Returns middle row count.
 
@@ -552,6 +595,10 @@ async def _summarize_history(
             elif isinstance(ev, Done):
                 break
     summary_text = summary_text.strip() or "(empty summary)"
+    if workspace_trailer:
+        # A prior compaction's trailer may have been echoed into the new summary; ours replaces it.
+        summary_text = summary_text.split(_WORKSPACE_STATE_HEADING)[0].rstrip() or "(empty summary)"
+        summary_text = f"{summary_text}\n\n{workspace_trailer}"
     if _POST_COMPACTION_STANDING_HEADING in summary_text:
         summary_body = f"{CONTEXT_SUMMARY_PREFIX}\n{summary_text}"
     else:

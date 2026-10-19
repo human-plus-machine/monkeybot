@@ -279,6 +279,37 @@ async def test_pre_turn_inject_text_lands_in_system_prompt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_git_context_hook_note_lands_in_runtime_notes_not_the_stable_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.coding.git_context_hook import GitContextHook
+    from monkeybot.providers._utils import split_system_prompt_for_cache
+
+    async def fake_note(root: Path, **_: object) -> str:
+        return "git: branch feat/x, 2 modified (a.py, b.py)"
+
+    monkeypatch.setattr("monkeybot.core.coding.git_context_hook.git_status_note", fake_note)
+    mgr = HookManager()
+    GitContextHook().register(mgr)
+    prov = CapturingProvider([[TextDelta(text="ok"), Done()]])
+    async for _ in run(
+        "hi",
+        dataclasses.replace(_ctx(), workspace_root=tmp_path),
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=2,
+        hook_manager=mgr,
+    ):
+        pass
+    stable, volatile = split_system_prompt_for_cache(prov.system_texts[0])
+    assert "git: branch feat/x, 2 modified (a.py, b.py)" in prov.system_texts[0]
+    assert "git: branch" not in stable
+    assert "## Runtime notes" in prov.system_texts[0]
+
+
+@pytest.mark.asyncio
 async def test_pre_turn_inject_memory_lines_appear_in_context() -> None:
     mgr = HookManager()
     seen_indexes: list[list[str]] = []
