@@ -162,6 +162,7 @@ def test_run_refresh_adds_template_commands_and_keeps_extras(tmp_path: Path) -> 
     assert "- mempalace\n" in text
     assert "officecli" in text
     assert "./custom-data/" in text
+    assert "- ./\n" in text  # pytest ./tests works after refresh
     assert "../memory/mempalace/" in text
     assert "my-custom-deny" in text
     assert agent_md.read_text(encoding="utf-8") == "custom persona\n"

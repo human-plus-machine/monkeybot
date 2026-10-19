@@ -1264,15 +1264,16 @@ async def _consume_provider_stream_body(
                 partial_chars=len(state.assistant_text or ""),
             ),
         )
+        error_text = _provider_error_text(exc)
         await _fire_after_provider_response(
             hook_manager,
             ctx=state.ctx,
             inner_turn=state.turn_index,
             assistant_text=state.assistant_text,
             thinking_text=state.thinking_text,
-            provider_error=_provider_error_text(exc),
+            provider_error=error_text,
         )
-        yield Error(request_id=state.ctx.request_id, error=_provider_error_text(exc))
+        yield Error(request_id=state.ctx.request_id, error=error_text)
         state.needs_followup_after_tools = False
         state.provider_stream_failed = True
         state.action = "return"

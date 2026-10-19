@@ -186,8 +186,9 @@ def _parse_update_chunks(
             else:
                 raise _bad_hunk_line(path, change)
             i += 1
-        if trailing_blank:
-            # Blank lines closing a chunk are separators, not content.
+        if trailing_blank and not is_eof:
+            # Blank lines closing a chunk are separators, not content; before
+            # ``*** End of File`` they are the file's own trailing blank lines.
             del old_lines[-trailing_blank:]
             del new_lines[-trailing_blank:]
         chunks.append(
@@ -320,6 +321,21 @@ def _ambiguous_hunk(file_path: str, starts: list[int]) -> PatchError:
     )
 
 
+def _context_targets(lines: list[str], chunk: UpdateChunk, header_starts: list[int]) -> set[int]:
+    """Where ``chunk`` would land under each matching ``@@`` header line."""
+    if not chunk.old_lines:
+        return {start + 1 for start in header_starts}
+    pattern = list(chunk.old_lines)
+    targets: set[int] = set()
+    for start in header_starts:
+        found = seek_sequence(lines, pattern, start + 1, eof=chunk.is_end_of_file)
+        if found == -1 and pattern[-1] == "":
+            found = seek_sequence(lines, pattern[:-1], start + 1, eof=chunk.is_end_of_file)
+        if found != -1:
+            targets.add(found)
+    return targets
+
+
 def derive_new_contents(
     file_path: str,
     chunks: tuple[UpdateChunk, ...] | list[UpdateChunk],
@@ -341,6 +357,12 @@ def derive_new_contents(
                     f"Failed to find context '{chunk.change_context}' in {file_path}",
                     code="context_not_found",
                 )
+            header_starts = _match_starts(original_lines, [chunk.change_context], line_index)
+            if (
+                len(header_starts) > 1
+                and len(_context_targets(original_lines, chunk, header_starts)) > 1
+            ):
+                raise _ambiguous_hunk(file_path, header_starts)
             line_index = ctx_idx + 1
             context_matched = True
 

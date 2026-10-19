@@ -1014,11 +1014,14 @@ class CoreToolExecutor(ToolExecutorPort):
             # Allow absolute argv paths under the resolved skills root (list_skills
             # returns this path; scripts live outside the workspace cwd).
             skills = str(self._skills_path)
-            # ``./tests`` and absolute paths inside the workspace are the agent's
-            # own tree; ``_validate_paths`` still resolves them, so ``../memory``
-            # and symlink escapes stay outside.
-            workspace = str(self._workspace.repo_root)
-            paths = tuple(dict.fromkeys((*paths, skills, f"{skills}/", "./", workspace)))
+            extra = [skills, f"{skills}/"]
+            if run_command_allowed_path_prefixes is None:
+                # Built-in defaults only: ``./tests`` and absolute paths inside the
+                # workspace are the agent's own tree; ``_validate_paths`` still
+                # resolves them, so ``../memory`` and symlink escapes stay outside.
+                # A configured allowlist is the operator's call and is not widened.
+                extra += ["./", str(self._workspace.repo_root)]
+            paths = tuple(dict.fromkeys((*paths, *extra)))
         self._run_cmd_allowed_commands = cmds
         self._run_cmd_allowed_paths = paths
         _job_cfg = SandboxConfig.from_env(self._config)
@@ -2134,7 +2137,8 @@ class CoreToolExecutor(ToolExecutorPort):
         budgets = spill_budgets_from_window(ctx.context_window_tokens)
         if len(payload) < budgets.spill_threshold:
             return payload, None
-        spill_path = write_run_command_output_spill(
+        spill_path = await asyncio.to_thread(
+            write_run_command_output_spill,
             workspace_root=self._workspace.repo_root,
             thread_id=ctx.session_id,
             call_id=call.call_id,
@@ -2142,22 +2146,26 @@ class CoreToolExecutor(ToolExecutorPort):
             stderr=result.stderr,
             exit_code=result.exit_code,
         )
-        shaped: dict[str, Any] = {"ok": ok, "exit_code": result.exit_code}
-        if spill_path:
-            shaped["output_path"] = spill_path
-        shaped.update(
-            shape_run_command_streams(
-                result.stdout,
-                result.stderr,
-                unit_chars=max(1, budgets.inline_hard_cap // 12),
-            )
-        )
-        shaped["note"] = "Output was large; stdout/stderr are shown as head/tail only. " + (
+        note = "Output was large; stdout/stderr are shown as head/tail only. " + (
             f"read_file {spill_path} (offset/limit) for the full streams."
             if spill_path
             else "The full streams could not be saved."
         )
-        return _j(shaped), None
+        # Excerpts are sized in raw chars, but JSON escapes (``\u001b``, ``\n``) can
+        # grow them past the hard cap, which would cut the JSON; halve until it fits.
+        unit_chars = max(1, budgets.inline_hard_cap // 12)
+        while True:
+            shaped: dict[str, Any] = {"ok": ok, "exit_code": result.exit_code}
+            if spill_path:
+                shaped["output_path"] = spill_path
+            shaped.update(
+                shape_run_command_streams(result.stdout, result.stderr, unit_chars=unit_chars)
+            )
+            shaped["note"] = note
+            text = _j(shaped)
+            if len(text) <= budgets.inline_hard_cap or unit_chars == 1:
+                return text, None
+            unit_chars = max(1, unit_chars // 2)
 
     async def _start_background_command(
         self,

@@ -175,6 +175,39 @@ _SHELL_BINARIES = frozenset({"bash", "sh", "zsh", "dash"})
 _SHELL_C_FLAG_RE = re.compile(r"^-[A-Za-z]*c[A-Za-z]*$")
 _SHELL_PUNCTUATION = frozenset("();<>|&")
 _MAX_SHELL_NESTING = 3
+# Shell options that consume the next argv entry (``bash -o pipefail -c ...``).
+_SHELL_VALUE_OPTS = frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
+# Words that run the command after them: keywords, grouping, and builtins.
+_COMMAND_PREFIX_WORDS = frozenset(
+    {
+        "if",
+        "then",
+        "elif",
+        "else",
+        "while",
+        "until",
+        "do",
+        "!",
+        "{",
+        "time",
+        "exec",
+        "command",
+        "builtin",
+        "nohup",
+    }
+)
+# Wrapper binaries that run their trailing argv, with the options that take a value.
+_WRAPPER_VALUE_OPTS: dict[str, frozenset[str]] = {
+    "env": frozenset({"-u", "--unset", "-C", "--chdir"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
+    "stdbuf": frozenset({"-i", "-o", "-e"}),
+    "xargs": frozenset({"-I", "-n", "-P", "-L", "-d", "-E", "-s", "-a"}),
+    "sudo": frozenset({"-u", "-g", "-C", "-h", "-p"}),
+}
+_WRAPPER_POSITIONALS = {"timeout": 1}  # the duration
+_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_SUBSTITUTION_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
 
 
 def _split_shell_script(script: str, depth: int = 0) -> list[str]:
@@ -184,6 +217,10 @@ def _split_shell_script(script: str, depth: int = 0) -> list[str]:
         line = raw_line.strip()
         if not line:
             continue
+        if depth < _MAX_SHELL_NESTING:
+            # ``$(...)`` and backticks run even inside double quotes.
+            for match in _SUBSTITUTION_RE.finditer(line):
+                segments.extend(_split_shell_script(match[1] or match[2] or "", depth + 1))
         lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
         try:
@@ -193,7 +230,7 @@ def _split_shell_script(script: str, depth: int = 0) -> list[str]:
             continue
         current: list[str] = []
         for token in [*tokens, ";"]:
-            if all(ch in _SHELL_PUNCTUATION for ch in token):
+            if token and all(ch in _SHELL_PUNCTUATION for ch in token):
                 if current:
                     segments.extend(_command_lines(current, depth))
                 current = []
@@ -202,9 +239,45 @@ def _split_shell_script(script: str, depth: int = 0) -> list[str]:
     return segments
 
 
+def _strip_command_prefixes(argv: list[str]) -> list[str]:
+    """The command ``argv`` actually runs: keywords, ``VAR=x``, wrappers and ``""`` removed."""
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        name = Path(token).name
+        if token in _COMMAND_PREFIX_WORDS or _ASSIGNMENT_RE.match(token):
+            i += 1
+        elif name in _WRAPPER_VALUE_OPTS:
+            value_opts = _WRAPPER_VALUE_OPTS[name]
+            positionals = _WRAPPER_POSITIONALS.get(name, 0)
+            i += 1
+            while i < len(argv):
+                arg = argv[i]
+                if arg == "--":
+                    i += 1
+                    break
+                if arg in value_opts:
+                    i += 2
+                elif (arg.startswith("-") and len(arg) > 1) or (
+                    name == "env" and _ASSIGNMENT_RE.match(arg)
+                ):
+                    i += 1
+                elif positionals:
+                    positionals -= 1
+                    i += 1
+                else:
+                    break
+        else:
+            break
+    return [arg for arg in argv[i:] if arg != ""]
+
+
 def _command_lines(argv: list[str], depth: int) -> list[str]:
     lines = [shlex.join(argv)]
-    nested = shell_script_arg(argv)
+    inner = _strip_command_prefixes(argv)
+    if inner and inner != argv:
+        lines.append(shlex.join(inner))
+    nested = shell_script_arg(inner)
     if nested is not None and depth < _MAX_SHELL_NESTING:
         lines.extend(_split_shell_script(nested, depth + 1))
     return lines
@@ -214,27 +287,32 @@ def shell_script_arg(argv: list[str]) -> str | None:
     """Script text of ``bash|sh|zsh -c <script>``; ``None`` for any other argv."""
     if len(argv) < 3 or Path(argv[0]).name not in _SHELL_BINARIES:
         return None
-    for idx, arg in enumerate(argv[1:-1], start=1):
+    i = 1
+    while i < len(argv) - 1:
+        arg = argv[i]
         if _SHELL_C_FLAG_RE.match(arg):
-            return argv[idx + 1]
-        if not arg.startswith("-"):
+            return argv[i + 1]
+        if arg in _SHELL_VALUE_OPTS:
+            i += 2
+            continue
+        if not arg.startswith(("-", "+")):
             return None
+        i += 1
     return None
 
 
 def shell_script_segments(args: dict[str, object]) -> list[str]:
-    """Commands hidden inside a ``bash -c "..."`` call, one normalized line each.
+    """The commands a ``run_command`` call really runs, one normalized line each.
 
-    The whole-call line from ``norm_run_command_line`` quotes the script as a
-    single token, so line-anchored deny patterns never see the commands inside.
+    The whole-call line from ``norm_run_command_line`` quotes a ``bash -c`` script
+    as a single token and keeps wrappers like ``env``/``timeout`` in front, so
+    line-anchored deny patterns never see the command that runs.
     """
     try:
         binary, rest = parse_run_command(args)
     except ValueError:
         return []
-    argv = [binary, *rest]
-    script = shell_script_arg(argv)
-    return _split_shell_script(script) if script is not None else []
+    return _command_lines([binary, *rest], 0)
 
 
 def _needs_shell_wrapper(stripped: str, parts: list[str]) -> bool:
