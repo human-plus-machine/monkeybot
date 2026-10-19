@@ -830,6 +830,12 @@ class MCPClient:
             raise
         except Exception as exc:
             await stack.aclose()
+            from monkeybot.core.mcp.oauth_flow import find_auth_error
+
+            auth_exc = find_auth_error(exc)
+            if auth_exc is not None:
+                self._record_connect_failure(name, auth_exc)
+                raise auth_exc from exc
             wrapped = MCPConnectionError(name, str(exc))
             self._record_connect_failure(name, wrapped)
             raise wrapped from exc
@@ -1104,13 +1110,31 @@ class MCPClient:
                 for k, val in headers_any.items():
                     headers_out[str(k)] = "" if val is None else str(val)
 
+            from monkeybot.core.mcp.oauth_flow import (
+                looks_like_oauth_challenge,
+                oauth_auth_for_connect,
+                server_uses_browser_oauth,
+            )
+
+            # A client-credentials or password grant uses the legacy token handler.
+            # Any other remote URL signs in through the browser. A client id on
+            # the entry is for that browser flow, not a client-credentials grant.
+            browser_oauth = server_uses_browser_oauth(dict(spec))
             auth_handler: Any | None = None
             auth_any = spec.get("auth")
-            if isinstance(auth_any, dict) and auth_any:
+            if isinstance(auth_any, dict) and auth_any and not browser_oauth:
                 handler_cls = _mcp_auth_handler_cls()
                 auth_handler = handler_cls(server_name, auth_any)
                 headers_out.pop("Authorization", None)
                 headers_out.pop("authorization", None)
+            had_stored_oauth = False
+            if browser_oauth:
+                stored_auth = oauth_auth_for_connect(url.strip())
+                if stored_auth is not None:
+                    auth_handler = stored_auth
+                    had_stored_oauth = True
+                    headers_out.pop("Authorization", None)
+                    headers_out.pop("authorization", None)
 
             try:
                 defs = await self.connect_streamable_http(
@@ -1120,9 +1144,21 @@ class MCPClient:
                     auth=auth_handler,
                 )
             except Exception as exc:
+                if (
+                    browser_oauth
+                    and not had_stored_oauth
+                    and not isinstance(exc, MCPAuthError)
+                    and await looks_like_oauth_challenge(url.strip())
+                ):
+                    exc = MCPAuthError(
+                        server_name,
+                        "This tool needs you to sign in.",
+                        remedy="Use Sign in on the tool in Studio.",
+                    )
+                    self._record_connect_failure(server_name, exc)
                 self._log_connect_failure(exc, server_name=server_name, config_path=config_path)
                 if raise_on_error:
-                    raise
+                    raise exc
                 return []
             logger.info(
                 "mcp catalog server connected %s",
@@ -1181,6 +1217,9 @@ class MCPClient:
 
         Streamable HTTP entries may include an ``auth`` object with ``flow`` set to
         ``client_credentials`` or ``password`` plus ``token_url`` and related fields.
+        A URL with neither of those grants uses browser OAuth when
+        ``MONKEYBOT_MCP_OAUTH_DIR`` holds a previous sign-in. Unsigned servers that
+        answer 401 are marked needs-auth instead of opening a browser.
 
         Every server under ``mcpServers`` is registered in the catalog for
         :meth:`connect_from_catalog` / ``enable_mcp`` unless ``"enabled": false``.
