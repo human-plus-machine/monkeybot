@@ -148,6 +148,8 @@ _PARENT_CANCEL_TASK_ERR = "task: cancelled (parent)"
 
 _SPILL_DIR = ".monkeybot/spill"
 
+_LIST_DIR_MAX_ENTRIES = 300
+
 _CORE_TOOL_NAMES = frozenset(
     {
         "load_file",
@@ -156,6 +158,7 @@ _CORE_TOOL_NAMES = frozenset(
         "replace_in_file",
         "glob",
         "grep",
+        "list_dir",
         "apply_patch",
         "list_skills",
         "task",
@@ -713,6 +716,14 @@ def _built_in_tool_error(
     return _j(payload)
 
 
+def _bool_arg(raw: object, *, default: bool) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
 # Credential broker phase 5.3: tool calls that can route a secret out of the
 # process without ever touching the LLM provider (a shell command, a file
 # write, a browser navigation/input, or an outbound web request) get their
@@ -1196,6 +1207,8 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = self._tool_glob(args)
             elif name == "grep":
                 result_text, err_text = self._tool_grep(args)
+            elif name == "list_dir":
+                result_text, err_text = self._tool_list_dir(args)
             elif name == "apply_patch":
                 result_text, err_text = self._tool_apply_patch(args)
             elif name == "list_skills":
@@ -1565,6 +1578,23 @@ class CoreToolExecutor(ToolExecutorPort):
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
 
+    def _tool_list_dir(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        path = _str_arg(args, "path", "root", "dir") or "."
+        try:
+            entries = self._workspace.list_directory(path)
+        except WorkspaceError as exc:
+            return (None, _workspace_error_envelope(exc))
+        shown = entries[:_LIST_DIR_MAX_ENTRIES]
+        payload: dict[str, Any] = {
+            "ok": True,
+            "path": path if path != "." else ".",
+            "dirs": [e["name"] for e in shown if e["kind"] == "dir"],
+            "files": [e["name"] for e in shown if e["kind"] == "file"],
+            "count": len(entries),
+            "truncated": len(entries) > len(shown),
+        }
+        return (_j(payload), None)
+
     def _tool_glob(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         pattern = _str_arg(args, "pattern", "glob")
         if not pattern:
@@ -1578,8 +1608,19 @@ class CoreToolExecutor(ToolExecutorPort):
                 ),
             )
         root = _str_arg(args, "root")
+        files_only = args.get("files_only", True)
+        if not isinstance(files_only, bool):
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "files_only must be a boolean",
+                    "Pass files_only as true or false (a JSON boolean, not a string).",
+                    {"files_only": files_only},
+                ),
+            )
         try:
-            payload = self._workspace.glob_paths(pattern, root=root)
+            payload = self._workspace.glob_paths(pattern, root=root, files_only=files_only)
             return (_j(payload), None)
         except WorkspaceError as exc:
             if getattr(exc, "code", None) == "incomplete_scan":
@@ -1629,6 +1670,9 @@ class CoreToolExecutor(ToolExecutorPort):
             file_glob = None
         max_matches = _coerce_int(args.get("max_matches"), None)
         offset = _coerce_int(args.get("offset"), None)
+        context = _coerce_int(args.get("context"), 0) or 0
+        files_only = _bool_arg(args.get("files_only"), default=False)
+        respect_gitignore = _bool_arg(args.get("respect_gitignore"), default=True)
         try:
             payload = self._workspace.grep(
                 pattern,
@@ -1637,6 +1681,9 @@ class CoreToolExecutor(ToolExecutorPort):
                 file_glob=file_glob,
                 max_matches=max_matches,
                 offset=offset,
+                context=context,
+                files_only=files_only,
+                respect_gitignore=respect_gitignore,
             )
             return (_j(payload), None)
         except WorkspaceError as exc:

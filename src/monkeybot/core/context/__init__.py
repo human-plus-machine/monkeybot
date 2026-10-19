@@ -545,6 +545,10 @@ def _core_tool_defs(
                 "type": "string",
                 "description": "Optional repo-relative directory to search under.",
             },
+            "files_only": {
+                "type": "boolean",
+                "description": "Return files only (default true); false also returns directories.",
+            },
         },
         "required": ["pattern"],
     }
@@ -595,8 +599,40 @@ def _core_tool_defs(
                     "(default 0). Continue from a prior response's next_offset."
                 ),
             },
+            "context": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3,
+                "description": (
+                    "Lines of surrounding context to return with each match, as "
+                    "`before` / `after` (default 0, max 3)."
+                ),
+            },
+            "files_only": {
+                "type": "boolean",
+                "description": (
+                    "Return only the paths of files that match, in `files` (default false). "
+                    "match_count / total_match_count then count files."
+                ),
+            },
+            "respect_gitignore": {
+                "type": "boolean",
+                "description": (
+                    "Skip paths ignored by .gitignore files in the workspace "
+                    "(default true; noise directories like node_modules are always skipped)."
+                ),
+            },
         },
         "required": ["pattern"],
+    }
+    list_dir_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Repo-relative directory to list (default: the workspace root).",
+            },
+        },
     }
     apply_patch_schema: dict[str, object] = {
         "type": "object",
@@ -812,13 +848,15 @@ def _core_tool_defs(
         ToolDef(
             "replace_in_file",
             "Replace old_string with new_string in an existing file. Requires a unique match "
-            "unless replace_all is true. Uses exact match first, then light fuzzy fallbacks.",
+            "unless replace_all is true. Uses exact match first, then light fuzzy fallbacks. "
+            "Returns `line` and a numbered `snippet` of the edited region.",
             replace_schema,
         ),
         ToolDef(
             "glob",
-            "List workspace file paths matching a glob pattern. Prefer over run_command+ls for "
-            "discovery. For content questions ('how does X work?'), use `grep`, then `read_file`. "
+            "List workspace file paths matching a glob pattern; noise directories "
+            "(node_modules, .git, build, ...) are skipped unless the pattern names them. "
+            "Prefer over run_command+ls for discovery. For content questions ('how does X work?'), use `grep`, then `read_file`. "
             "A path list is evidence of absence only when the call succeeds with ok:true "
             "(incomplete scans return ok:false / incomplete_scan — narrow root or pattern).",
             glob_schema,
@@ -832,8 +870,18 @@ def _core_tool_defs(
             "distinctive terms, then `read_file` the matching paths. "
             "An empty match list is evidence of absence only when the payload has "
             "scan_complete=true (incomplete scans return ok:false / incomplete_scan — narrow "
-            "root or pass file_glob). Capped pages still report total_match_count and next_offset.",
+            "root or pass file_glob). Capped pages still report total_match_count and next_offset. "
+            "Use `context` to see lines around a match and `files_only` to just list files.",
             grep_schema,
+            parallel_safe=True,
+            read_only=True,
+        ),
+        ToolDef(
+            "list_dir",
+            "List the immediate children of a workspace directory (directory and file names). "
+            "Use it to see a project's layout; use `glob` to find files by pattern and `grep` "
+            "to find content.",
+            list_dir_schema,
             parallel_safe=True,
             read_only=True,
         ),

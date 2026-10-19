@@ -10,12 +10,13 @@ import re
 import shutil
 import subprocess
 import time
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NotRequired, TypedDict
 
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.tools.gitignore import GitignoreRules
 from monkeybot.core.tools.text_normalize import normalize_unicode_punctuation
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,15 @@ _GREP_IGNORE_DIRS = frozenset(
         "vendor",
     }
 )
+
+_GLOB_MAGIC_RE = re.compile(r"[*?\[]")
+
+
+class _GlobTimeout(Exception):
+    """Raised inside ``_iter_glob`` when the wall-clock budget is spent."""
+
+
+_GREP_MAX_CONTEXT = 3
 
 # Wall-clock budget for the optional ripgrep accelerator. On expiry we fail closed
 # (incomplete_scan) instead of falling back to an unbounded Python walk.
@@ -83,6 +93,8 @@ class ReplaceResult(TypedDict):
     replacements: int
     bytes: int
     match_mode: str
+    line: NotRequired[int]
+    snippet: NotRequired[str]
 
 
 class DeleteResult(TypedDict):
@@ -94,6 +106,8 @@ class GrepMatch(TypedDict):
     path: str
     line: int
     text: str
+    before: NotRequired[list[str]]
+    after: NotRequired[list[str]]
 
 
 class GlobResult(TypedDict):
@@ -116,6 +130,7 @@ class GrepResult(TypedDict):
     scan_complete: bool
     duration_ms: int
     next_offset: NotRequired[int]
+    files: NotRequired[list[str]]
 
 
 @dataclass
@@ -409,6 +424,78 @@ def _utf8_byte_offsets_to_char_offsets(
         end = start
     char_end = len(encoded[:end].decode("utf-8"))
     return char_start, char_end
+
+
+_SNIPPET_CONTEXT_LINES = 3
+_SNIPPET_MAX_LINES = 40
+
+
+def snippet_around(
+    text: str,
+    first_line: int,
+    last_line: int,
+    *,
+    context: int = _SNIPPET_CONTEXT_LINES,
+    max_lines: int = _SNIPPET_MAX_LINES,
+) -> str:
+    """Numbered excerpt of ``text`` covering ``first_line..last_line`` (1-based) ± ``context``.
+
+    Uses the same ``{n:>6}|line`` numbering as ``read_file`` so the model can quote it back.
+    """
+    lines = text.splitlines()
+    total = len(lines)
+    if total == 0:
+        return ""
+    start = max(1, first_line - context)
+    end = min(total, max(last_line, first_line) + context)
+    clipped = end - start + 1 > max_lines
+    if clipped:
+        end = start + max_lines - 1
+    width = max(6, len(str(total)))
+    out = [f"{n:{width}d}|{lines[n - 1]}" for n in range(start, end + 1)]
+    if clipped:
+        out.append(f"{'…':>{width}}|(+{min(total, last_line + context) - end} more lines)")
+    return "\n".join(out)
+
+
+def changed_line_range(old: str, new: str) -> tuple[int, int]:
+    """1-based ``(first, last)`` line range of ``new`` that differs from ``old``.
+
+    Common leading and trailing lines are trimmed; a pure deletion yields the line at the
+    deletion point. Returns ``(1, 1)`` for identical text.
+    """
+    old_lines = old.splitlines()
+    new_lines = new.splitlines()
+    prefix = 0
+    limit = min(len(old_lines), len(new_lines))
+    while prefix < limit and old_lines[prefix] == new_lines[prefix]:
+        prefix += 1
+    suffix = 0
+    while (
+        suffix < limit - prefix
+        and old_lines[len(old_lines) - 1 - suffix] == new_lines[len(new_lines) - 1 - suffix]
+    ):
+        suffix += 1
+    first = min(prefix + 1, max(1, len(new_lines)))
+    last = max(first, len(new_lines) - suffix)
+    return first, last
+
+
+def _attach_grep_context(
+    match: GrepMatch,
+    line_at: Callable[[int], str | None],
+    context: int,
+) -> None:
+    """Add ``before`` / ``after`` neighbour lines (clipped) around ``match["line"]``."""
+    line_no = match["line"]
+    before = [line_at(n) for n in range(max(1, line_no - context), line_no)]
+    after = [line_at(n) for n in range(line_no + 1, line_no + context + 1)]
+    kept_before = [_clip_grep_match_line(t, None) for t in before if t is not None]
+    kept_after = [_clip_grep_match_line(t, None) for t in after if t is not None]
+    if kept_before:
+        match["before"] = kept_before
+    if kept_after:
+        match["after"] = kept_after
 
 
 def _clip_grep_match_line(
@@ -1166,15 +1253,95 @@ class WorkspaceFileService:
                 except OSError:
                     pass
             raise WorkspaceError(f"Write failed: {e}", code="write_failed") from e
+        first_line = text.count("\n", 0, spans[0][0]) + 1
+        replaced_lines = max(1, len(new_string.splitlines()))
         return {
             "ok": True,
             "path": self._as_repo_rel(fp),
             "replacements": len(spans),
             "bytes": len(raw),
             "match_mode": match_mode,
+            "line": first_line,
+            "snippet": snippet_around(new_text, first_line, first_line + replaced_lines - 1),
         }
 
-    def glob_paths(self, pattern: str, root: str | None = None) -> GlobResult:
+    def _iter_glob(self, base: Path, pattern: str, deadline: float) -> Iterator[Path]:
+        """``Path.glob`` semantics, but never descends noise directories.
+
+        ``_GREP_IGNORE_DIRS`` (``node_modules``, ``.git``, ``build``, ...) are
+        skipped when reached through ``**`` or a wildcard segment, unless the
+        pattern names them literally (``node_modules/*/package.json``).
+        """
+        segments = [seg for seg in pattern.split("/") if seg and seg != "."]
+        explicit = {seg for seg in segments if not _GLOB_MAGIC_RE.search(seg)}
+
+        def children(directory: Path) -> list[os.DirEntry[str]]:
+            if time.monotonic() > deadline:
+                raise _GlobTimeout
+            try:
+                with os.scandir(directory) as it:
+                    return sorted(it, key=lambda e: e.name)
+            except OSError:
+                return []
+
+        def descendable(entry: os.DirEntry[str]) -> bool:
+            return entry.is_dir(follow_symlinks=False) and (
+                entry.name not in _GREP_IGNORE_DIRS or entry.name in explicit
+            )
+
+        def descendants(directory: Path) -> Iterator[Path]:
+            for entry in children(directory):
+                yield Path(entry.path)
+                if descendable(entry):
+                    yield from descendants(Path(entry.path))
+
+        def walk(directory: Path, segs: list[str]) -> Iterator[Path]:
+            if not segs:
+                yield directory
+                return
+            seg, rest = segs[0], segs[1:]
+            if seg == "**":
+                if not rest:
+                    # Trailing ``**`` matches the directory, its files and subdirectories.
+                    yield directory
+                    yield from descendants(directory)
+                    return
+                yield from walk(directory, rest)
+                for entry in children(directory):
+                    if descendable(entry):
+                        yield from walk(Path(entry.path), segs)
+                return
+            if not _GLOB_MAGIC_RE.search(seg):
+                child = directory / seg
+                if rest:
+                    if child.is_dir():
+                        yield from walk(child, rest)
+                elif child.exists():
+                    yield child
+                return
+            for entry in children(directory):
+                if not fnmatch.fnmatchcase(entry.name, seg):
+                    continue
+                if entry.name in _GREP_IGNORE_DIRS and entry.name not in explicit:
+                    continue
+                if rest:
+                    if entry.is_dir():
+                        yield from walk(Path(entry.path), rest)
+                else:
+                    yield Path(entry.path)
+
+        dirs_only = pattern.endswith("/")
+        for found in walk(base, segments):
+            if not dirs_only or found.is_dir():
+                yield found
+
+    def glob_paths(
+        self,
+        pattern: str,
+        root: str | None = None,
+        *,
+        files_only: bool = True,
+    ) -> GlobResult:
         if not pattern or not pattern.strip():
             raise WorkspaceError("pattern is required", code="missing_pattern")
         pattern = pattern.strip()
@@ -1194,11 +1361,11 @@ class WorkspaceFileService:
         stop_reason: str | None = None
         t0 = time.monotonic()
         try:
-            for p in base.glob(effective_pattern):
+            for p in self._iter_glob(base, effective_pattern, deadline):
                 if time.monotonic() > deadline:
                     stop_reason = "timeout"
                     break
-                if not (p.is_file() or p.is_dir()):
+                if not (p.is_file() or (p.is_dir() and not files_only)):
                     continue
                 # ``Path.glob`` can yield the search root for patterns like ``.`` / ``*``.
                 if p.resolve() == base.resolve():
@@ -1213,6 +1380,8 @@ class WorkspaceFileService:
                 if len(paths) >= max_paths:
                     stop_reason = "max_paths"
                     break
+        except _GlobTimeout:
+            stop_reason = "timeout"
         except OSError as e:
             raise WorkspaceError(f"Glob failed: {e}", code="glob_failed") from e
         paths.sort()
@@ -1257,9 +1426,24 @@ class WorkspaceFileService:
         file_glob: str | list[str] | None = None,
         max_matches: int | None = None,
         offset: int | None = None,
+        context: int = 0,
+        files_only: bool = False,
+        respect_gitignore: bool = True,
     ) -> GrepResult:
+        """Search file contents.
+
+        ``context`` (0-3) adds that many surrounding lines to each match as
+        ``before`` / ``after``. ``files_only`` returns matching file paths in
+        ``files`` (one per file; ``match_count`` / ``total_match_count`` then count
+        files). ``respect_gitignore`` skips paths ignored by ``.gitignore`` files
+        inside the searched tree, on top of the built-in noise directories.
+        """
         if not pattern or not str(pattern).strip():
             raise WorkspaceError("pattern is required", code="missing_pattern")
+        if not 0 <= context <= _GREP_MAX_CONTEXT:
+            raise WorkspaceError(
+                f"context must be between 0 and {_GREP_MAX_CONTEXT}", code="invalid_context"
+            )
         pat = pattern.strip()
         flags = re.IGNORECASE if ignore_case else 0
         try:
@@ -1293,6 +1477,9 @@ class WorkspaceFileService:
                     max_files=max_files,
                     max_file_bytes=max_file_bytes,
                     t0=t0,
+                    context=context,
+                    files_only=files_only,
+                    respect_gitignore=respect_gitignore,
                 )
             except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
                 # Fall back to the pure-Python walker; do not change match semantics
@@ -1309,6 +1496,9 @@ class WorkspaceFileService:
             max_files=max_files,
             max_file_bytes=max_file_bytes,
             t0=t0,
+            context=context,
+            files_only=files_only,
+            respect_gitignore=respect_gitignore,
         )
 
     def _grep_result(
@@ -1321,8 +1511,12 @@ class WorkspaceFileService:
         files_scanned: int,
         offset: int,
         t0: float,
+        files_only: bool = False,
     ) -> GrepResult:
         duration_ms = int((time.monotonic() - t0) * 1000)
+        files: list[str] | None = None
+        if files_only:
+            files = [m["path"] for m in matches]
         payload: GrepResult = {
             "ok": True,
             "root": self._as_repo_rel(base) if base != self._root else ".",
@@ -1334,15 +1528,43 @@ class WorkspaceFileService:
             "scan_complete": True,
             "duration_ms": duration_ms,
         }
+        if files is not None:
+            payload["files"] = files
+            payload["matches"] = []
         next_offset = offset + len(matches)
         if next_offset < total_match_count:
             payload["next_offset"] = next_offset
         return payload
 
+    def _gitignore_anchor(self, base: Path) -> Path:
+        """Directory ``.gitignore`` paths are scoped against: the workspace root when ``base``
+        lies inside it, else ``base`` itself (skills/artifacts roots, granted folders)."""
+        try:
+            base.resolve().relative_to(self._root)
+        except ValueError:
+            return base if base.is_dir() else base.parent
+        return self._root
+
+    def _initial_gitignore_rules(self, anchor: Path, start_dir: Path) -> GitignoreRules:
+        """Rules from every ``.gitignore`` between ``anchor`` and ``start_dir`` inclusive."""
+        rules = GitignoreRules()
+        directory = anchor
+        rules = rules.with_directory(directory, "")
+        try:
+            parts = start_dir.resolve().relative_to(anchor.resolve()).parts
+        except ValueError:
+            return rules
+        for part in parts:
+            directory = directory / part
+            rules = rules.with_directory(directory, directory.relative_to(anchor).as_posix())
+        return rules
+
     def _iter_grep_candidates(
         self,
         base: Path,
         globs: list[str] | None,
+        *,
+        respect_gitignore: bool = True,
     ) -> Iterator[tuple[Path, str]]:
         """Yield ``(path, repo-relative)`` for grep candidates under ``base``."""
         walk_iter: Iterator[tuple[str, list[str], list[str]]]
@@ -1350,17 +1572,37 @@ class WorkspaceFileService:
             walk_iter = iter([(str(base.parent), [], [base.name])])
         else:
             walk_iter = os.walk(base)
+        anchor = self._gitignore_anchor(base)
+        start_dir = base if base.is_dir() else base.parent
+        rules_by_dir: dict[str, GitignoreRules] = {}
+        if respect_gitignore:
+            rules_by_dir[str(start_dir)] = self._initial_gitignore_rules(anchor, start_dir)
         for dirpath, dirnames, filenames in walk_iter:
+            rules = rules_by_dir.get(dirpath) if respect_gitignore else None
+            if respect_gitignore and rules is None:
+                rules = GitignoreRules()
             if not base.is_file():
-                dirnames[:] = sorted(
-                    d
-                    for d in dirnames
-                    if d not in _GREP_IGNORE_DIRS
-                    and not self._is_denied_extra_root_result(Path(dirpath) / d)
-                )
+                kept: list[str] = []
+                for d in sorted(dirnames):
+                    if d in _GREP_IGNORE_DIRS:
+                        continue
+                    child = Path(dirpath) / d
+                    if self._is_denied_extra_root_result(child):
+                        continue
+                    if rules is not None:
+                        rel_dir = child.relative_to(anchor).as_posix()
+                        if rules.is_ignored(rel_dir, is_dir=True):
+                            continue
+                        rules_by_dir[str(child)] = rules.with_directory(child, rel_dir)
+                    kept.append(d)
+                dirnames[:] = kept
             for name in sorted(filenames):
                 fp = Path(dirpath) / name
                 if self._is_denied_extra_root_result(fp):
+                    continue
+                if rules is not None and rules.is_ignored(
+                    fp.relative_to(anchor).as_posix(), is_dir=False
+                ):
                     continue
                 try:
                     rel = self._as_repo_rel(fp)
@@ -1382,6 +1624,9 @@ class WorkspaceFileService:
         max_files: int,
         max_file_bytes: int,
         t0: float,
+        context: int = 0,
+        files_only: bool = False,
+        respect_gitignore: bool = True,
     ) -> GrepResult:
         matches: list[GrepMatch] = []
         files_scanned = 0
@@ -1389,7 +1634,7 @@ class WorkspaceFileService:
         candidates_remaining = False
         tallies = {"oversized": 0, "binary": 0, "unreadable": 0}
 
-        for fp, rel in self._iter_grep_candidates(base, globs):
+        for fp, rel in self._iter_grep_candidates(base, globs, respect_gitignore=respect_gitignore):
             kind, data = _grep_classify(fp, max_file_bytes)
             if _tally_grep_skip(kind, tallies):
                 continue
@@ -1399,21 +1644,27 @@ class WorkspaceFileService:
             assert data is not None
             files_scanned += 1
             text = data.decode("utf-8", errors="replace")
-            for line_no, line in enumerate(text.splitlines(), start=1):
+            file_lines = text.splitlines()
+            for line_no, line in enumerate(file_lines, start=1):
                 m = regex.search(line)
                 if m is None:
                     continue
                 total_match_count += 1
-                if total_match_count <= offset:
-                    continue
-                if len(matches) < max_matches:
-                    matches.append(
-                        {
-                            "path": rel,
-                            "line": line_no,
-                            "text": _clip_grep_match_line(line, m.start(), m.end()),
-                        }
-                    )
+                if total_match_count > offset and len(matches) < max_matches:
+                    match: GrepMatch = {
+                        "path": rel,
+                        "line": line_no,
+                        "text": _clip_grep_match_line(line, m.start(), m.end()),
+                    }
+                    if context and not files_only:
+                        _attach_grep_context(
+                            match,
+                            lambda n: file_lines[n - 1] if 1 <= n <= len(file_lines) else None,
+                            context,
+                        )
+                    matches.append(match)
+                if files_only:
+                    break  # one hit per file is all a file list needs
 
         if candidates_remaining:
             _raise_grep_max_files(
@@ -1443,6 +1694,7 @@ class WorkspaceFileService:
             files_scanned=files_scanned,
             offset=offset,
             t0=t0,
+            files_only=files_only,
         )
 
     def _grep_with_rg(
@@ -1457,6 +1709,9 @@ class WorkspaceFileService:
         max_files: int,
         max_file_bytes: int,
         t0: float,
+        context: int = 0,
+        files_only: bool = False,
+        respect_gitignore: bool = True,
     ) -> GrepResult:
         rg_bin = shutil.which("rg")
         if not rg_bin:
@@ -1466,10 +1721,26 @@ class WorkspaceFileService:
             "--json",
             "--no-config",
             "--hidden",
-            "--no-ignore",
             "--max-filesize",
             str(max_file_bytes),
         ]
+        if respect_gitignore:
+            # Same rule set as ``GitignoreRules``: only .gitignore files inside the tree.
+            cmd.extend(
+                [
+                    "--no-require-git",
+                    "--no-ignore-global",
+                    "--no-ignore-parent",
+                    "--no-ignore-dot",
+                    "--no-ignore-exclude",
+                ]
+            )
+        else:
+            cmd.append("--no-ignore")
+        if files_only:
+            cmd.extend(["--max-count", "1"])
+        elif context:
+            cmd.extend(["-C", str(context)])
         if ignore_case:
             cmd.append("-i")
         for ignore_dir in sorted(_GREP_IGNORE_DIRS):
@@ -1521,6 +1792,8 @@ class WorkspaceFileService:
         total_match_count = 0
         files_begun = 0
         files_scanned = 0
+        file_lines: dict[int, str] = {}
+        file_matches: list[GrepMatch] = []
         for line in proc.stdout.splitlines():
             if not line.strip():
                 continue
@@ -1530,6 +1803,19 @@ class WorkspaceFileService:
             if etype == "begin":
                 # begin is emitted for files with ≥1 match (not every file searched).
                 files_begun += 1
+                file_lines = {}
+                file_matches = []
+            elif etype == "context":
+                ctx_no = data.get("line_number")
+                ctx_lines = data.get("lines") or {}
+                ctx_text = ctx_lines.get("text") if isinstance(ctx_lines, dict) else None
+                if isinstance(ctx_no, int) and isinstance(ctx_text, str):
+                    file_lines[ctx_no] = ctx_text.rstrip("\n\r")
+            elif etype == "end":
+                for pending in file_matches:
+                    _attach_grep_context(pending, file_lines.get, context)
+                file_matches = []
+                file_lines = {}
             elif etype == "match":
                 path_info = data.get("path") or {}
                 path_text = path_info.get("text") if isinstance(path_info, dict) else None
@@ -1540,6 +1826,15 @@ class WorkspaceFileService:
                     fp = self._root / fp
                 if self._is_denied_extra_root_result(fp):
                     continue
+                lines_info = data.get("lines") or {}
+                text = lines_info.get("text") if isinstance(lines_info, dict) else ""
+                if not isinstance(text, str):
+                    text = ""
+                text = text.rstrip("\n\r")
+                raw_line_no = data.get("line_number")
+                if isinstance(raw_line_no, int):
+                    # Neighbouring matches are context for each other, even when skipped by paging.
+                    file_lines[raw_line_no] = text
                 total_match_count += 1
                 if total_match_count <= offset or len(matches) >= max_matches:
                     continue
@@ -1547,11 +1842,6 @@ class WorkspaceFileService:
                     rel = self._as_repo_rel(fp.resolve())
                 except WorkspaceError:
                     continue
-                lines_info = data.get("lines") or {}
-                text = lines_info.get("text") if isinstance(lines_info, dict) else ""
-                if not isinstance(text, str):
-                    text = ""
-                text = text.rstrip("\n\r")
                 match_start: int | None = None
                 match_end: int | None = None
                 submatches = data.get("submatches")
@@ -1570,7 +1860,10 @@ class WorkspaceFileService:
                 line_no = data.get("line_number")
                 if not isinstance(line_no, int):
                     line_no = 0
-                matches.append({"path": rel, "line": line_no, "text": text})
+                entry: GrepMatch = {"path": rel, "line": line_no, "text": text}
+                matches.append(entry)
+                if context and not files_only:
+                    file_matches.append(entry)
             elif etype == "summary":
                 stats = data.get("stats") or {}
                 searches = stats.get("searches")
@@ -1587,7 +1880,9 @@ class WorkspaceFileService:
 
         tallies = {"oversized": 0, "binary": 0, "unreadable": 0}
         candidate_count = 0
-        for fp, _rel in self._iter_grep_candidates(base, globs):
+        for fp, _rel in self._iter_grep_candidates(
+            base, globs, respect_gitignore=respect_gitignore
+        ):
             candidate_count += 1
             kind, _data = _grep_classify(fp, max_file_bytes)
             _tally_grep_skip(kind, tallies)
@@ -1614,6 +1909,7 @@ class WorkspaceFileService:
             files_scanned=files_scanned,
             offset=offset,
             t0=t0,
+            files_only=files_only,
         )
 
     def _as_repo_rel(self, p: Path) -> str:

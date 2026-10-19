@@ -326,6 +326,7 @@ async def test_build_context_merges_core_and_mcp_tools(tmp_path: Path) -> None:
         "replace_in_file",
         "glob",
         "grep",
+        "list_dir",
         "apply_patch",
         "list_skills",
         "task",

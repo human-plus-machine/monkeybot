@@ -21,6 +21,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- New `list_dir` tool. `grep` gains `context`, `files_only` and `respect_gitignore`; `glob` takes `files_only` and no longer walks `node_modules`, `.git`, `build` and similar. `replace_in_file` and `apply_patch` return the edited `line` and a numbered `snippet`. Skills appear in the prompt as `name — description`.
 - `fireworks` model provider (`monkeybot[fireworks]`) for Fireworks AI's OpenAI-compatible API. Set `model.provider: fireworks` and `FIREWORKS_API_KEY`; `FIREWORKS_BASE_URL` overrides the default `https://api.fireworks.ai/inference/v1`. Model ids are passed through unchanged, e.g. `accounts/fireworks/models/llama-v3p3-70b-instruct`.
 - `model.reasoning_effort` sends an effort level on the provider's wire field. It wins over `thinking_budget` where the provider accepts it. `none` turns thinking off. A level the API rejects is omitted on later turns. Gemini only sends levels its SDK knows; other values stay on `thinking_budget`.
 
@@ -45,6 +46,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - Subagent personas' `model` and `vertex_location` are used by `task` instead of the parent's model.
 - A provider call that fails with an empty message (for example an `httpx.ReadTimeout`) now reports `Provider request failed (<ExceptionType>)` instead of a blank error.
 - Over-budget tool text keeps its tail (70% head / 30% tail) instead of only its head.
+
+### Changed
+
+- `glob` returns files only by default; pass `files_only: false` to also list directories. `bash -c` scripts are screened command by command against `deny_patterns`.
 
 ## [cli v0.9.0] - 2026-10-07
 
