@@ -601,21 +601,27 @@ def _head_chars(text: str, max_chars: int) -> str:
     return head[:max_chars]
 
 
-def shape_run_command_streams(
-    stdout: str,
-    stderr: str,
+def collapse_run_command_streams(stdout: str, stderr: str) -> tuple[str, str]:
+    """Collapse repeated lines (same shaper as the log budget) in both streams."""
+    return (
+        shape_logs(stdout, max_lines=None, keep_patterns=(), collapse_repeated=True),
+        shape_logs(stderr, max_lines=None, keep_patterns=(), collapse_repeated=True),
+    )
+
+
+def slice_run_command_streams(
+    collapsed: tuple[str, str],
     *,
+    stdout_chars: int,
+    stderr_chars: int,
     unit_chars: int,
 ) -> dict[str, Any]:
-    """Head/tail views of ``run_command`` streams that always keep the tail.
+    """Head/tail views of collapsed ``run_command`` streams that always keep the tail.
 
-    Repeated lines are collapsed first (same shaper as the log budget) so noisy
-    progress output does not eat the tail budget. ``stdout_head`` is a handful
-    of leading lines, left out when the tail already holds all of stdout; the
-    tails are what carry test summaries and tracebacks.
+    ``stdout_head`` is a handful of leading lines, left out when the tail already
+    holds all of stdout; the tails carry test summaries and tracebacks.
     """
-    shaped_out = shape_logs(stdout, max_lines=None, keep_patterns=(), collapse_repeated=True)
-    shaped_err = shape_logs(stderr, max_lines=None, keep_patterns=(), collapse_repeated=True)
+    shaped_out, shaped_err = collapsed
     tail_chars = unit_chars * 2
     shaped: dict[str, Any] = {}
     if len(shaped_out) > tail_chars:
@@ -623,8 +629,8 @@ def shape_run_command_streams(
     shaped.update(
         stdout_tail=_tail_chars(shaped_out, tail_chars),
         stderr_tail=_tail_chars(shaped_err, tail_chars),
-        stdout_chars=len(stdout),
-        stderr_chars=len(stderr),
+        stdout_chars=stdout_chars,
+        stderr_chars=stderr_chars,
     )
     return shaped
 

@@ -116,7 +116,8 @@ from monkeybot.core.tools.inspector import parse_run_command
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.spill_inventory import (
     partial_output_tail,
-    shape_run_command_streams,
+    collapse_run_command_streams,
+    slice_run_command_streams,
     spill_budgets_from_window,
     write_run_command_output_spill,
     write_run_command_timeout_spill,
@@ -1016,11 +1017,12 @@ class CoreToolExecutor(ToolExecutorPort):
             skills = str(self._skills_path)
             extra = [skills, f"{skills}/"]
             if run_command_allowed_path_prefixes is None:
-                # Built-in defaults only: ``./tests`` and absolute paths inside the
-                # workspace are the agent's own tree; ``_validate_paths`` still
-                # resolves them, so ``../memory`` and symlink escapes stay outside.
+                # Built-in defaults only: the agent's own ``tests``/``src`` trees (relative
+                # or absolute). ``_validate_paths`` still resolves them, so ``../memory``
+                # and symlink escapes stay outside, and ``.env``/config stay unreachable.
                 # A configured allowlist is the operator's call and is not widened.
-                extra += ["./", str(self._workspace.repo_root)]
+                root = str(self._workspace.repo_root)
+                extra += ["./tests/", "./src/", f"{root}/tests/", f"{root}/src/"]
             paths = tuple(dict.fromkeys((*paths, *extra)))
         self._run_cmd_allowed_commands = cmds
         self._run_cmd_allowed_paths = paths
@@ -2154,18 +2156,35 @@ class CoreToolExecutor(ToolExecutorPort):
         # Excerpts are sized in raw chars, but JSON escapes (``\u001b``, ``\n``) can
         # grow them past the hard cap, which would cut the JSON; halve until it fits.
         unit_chars = max(1, budgets.inline_hard_cap // 12)
+        collapsed = collapse_run_command_streams(result.stdout, result.stderr)
+        base: dict[str, Any] = {"ok": ok, "exit_code": result.exit_code}
+        if spill_path:
+            base["output_path"] = spill_path
         while True:
-            shaped: dict[str, Any] = {"ok": ok, "exit_code": result.exit_code}
-            if spill_path:
-                shaped["output_path"] = spill_path
-            shaped.update(
-                shape_run_command_streams(result.stdout, result.stderr, unit_chars=unit_chars)
-            )
-            shaped["note"] = note
+            shaped = {
+                **base,
+                **slice_run_command_streams(
+                    collapsed,
+                    stdout_chars=len(result.stdout),
+                    stderr_chars=len(result.stderr),
+                    unit_chars=unit_chars,
+                ),
+                "note": note,
+            }
             text = _j(shaped)
-            if len(text) <= budgets.inline_hard_cap or unit_chars == 1:
+            if len(text) <= budgets.inline_hard_cap:
                 return text, None
+            if unit_chars == 1:
+                break
             unit_chars = max(1, unit_chars // 2)
+        # Even minimal excerpts exceed the cap: drop them rather than let the JSON be cut.
+        bare = {
+            **base,
+            "stdout_chars": len(result.stdout),
+            "stderr_chars": len(result.stderr),
+            "note": note,
+        }
+        return _j(bare), None
 
     async def _start_background_command(
         self,

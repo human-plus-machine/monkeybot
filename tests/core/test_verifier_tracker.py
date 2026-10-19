@@ -24,7 +24,7 @@ def _tracker() -> tuple[ProgressTracker, VerdictMailbox]:
 
 
 def test_write_tools_name_real_tools() -> None:
-    assert {"write_file", "replace_in_file", "apply_patch"} == WRITE_TOOLS
+    assert {"write_file", "edit_file", "replace_in_file", "apply_patch"} == WRITE_TOOLS
 
 
 @pytest.mark.parametrize("tool", sorted(WRITE_TOOLS))

@@ -195,3 +195,9 @@ def test_trim_with_inventory_note_trims_body_both_ends_and_keeps_note() -> None:
     text = "A" * 30_000 + "ZZZ-END" + "\n" + note
     out = _trim_text_to_token_budget(text, 500)
     assert out.startswith("AAAA") and "ZZZ-END" in out and out.endswith(note)
+
+
+def test_head_and_tail_zero_budget_is_empty() -> None:
+    from monkeybot.core.runtime.context_budget import _head_and_tail
+
+    assert _head_and_tail("abc", 0) == ""

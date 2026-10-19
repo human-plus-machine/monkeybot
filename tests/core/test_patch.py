@@ -474,3 +474,45 @@ def test_parse_empty_update_hunk_rejected() -> None:
     with pytest.raises(PatchError) as ei:
         parse_patch(text)
     assert ei.value.code == "empty_hunk"
+
+
+# --- Finding 7: an ambiguous @@ header silently picks the first match --------------
+
+_TWO_INITS = (
+    "class A:\n    def __init__(self):\n        pass\n"
+    "class B:\n    def __init__(self):\n        pass\n"
+)
+
+
+def test_patch_ambiguous_context_header_rejected() -> None:
+    chunks = (
+        UpdateChunk(
+            old_lines=("        pass",),
+            new_lines=("        self.x = 1",),
+            change_context="def __init__(self):",
+        ),
+    )
+    with pytest.raises(PatchError) as ei:
+        derive_new_contents("f.py", chunks, _TWO_INITS)
+    assert ei.value.code == "ambiguous_context"
+
+
+def test_patch_header_ambiguous_but_body_unique_still_applies() -> None:
+    original = "def f():\n    a = 1\ndef f():\n    b = 2\n"
+    chunks = (
+        UpdateChunk(old_lines=("    b = 2",), new_lines=("    b = 3",), change_context="def f():"),
+    )
+    assert (
+        derive_new_contents("f.py", chunks, original)
+        == "def f():\n    a = 1\ndef f():\n    b = 3\n"
+    )
+
+
+# --- Finding 8: trailing blanks dropped before *** End of File ---------------------
+
+
+def test_patch_end_of_file_chunk_keeps_trailing_blank() -> None:
+    text = "*** Begin Patch\n*** Update File: a.txt\n@@\n-x\n+y\n\n*** End of File\n*** End Patch\n"
+    chunk = parse_patch(text)[0].chunks[0]  # type: ignore[union-attr]
+    out = derive_new_contents("a.txt", (chunk,), "x\nmid\nx\n\n")
+    assert out.startswith("x\nmid\ny"), out

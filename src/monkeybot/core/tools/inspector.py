@@ -206,36 +206,96 @@ _WRAPPER_VALUE_OPTS: dict[str, frozenset[str]] = {
     "sudo": frozenset({"-u", "-g", "-C", "-h", "-p"}),
 }
 _WRAPPER_POSITIONALS = {"timeout": 1}  # the duration
+_SYSTEM_BIN_DIRS = frozenset({"/bin", "/usr/bin", "/usr/local/bin", "/sbin", "/usr/sbin"})
+_FIND_EXEC_FLAGS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _SUBSTITUTION_RE = re.compile(r"\$\(([^()]*)\)|`([^`]*)`")
+
+
+class UnscreenableScript(ValueError):
+    """A shell script uses a construct the deny screening does not model (fail closed)."""
+
+
+def _scan_script(script: str) -> tuple[str, str]:
+    """``(separated, substitutable)`` views of ``script`` from one quote-aware pass.
+
+    ``separated`` turns unquoted newlines into ``;`` so a quoted string spanning lines
+    stays whole when lexed. ``substitutable`` blanks single-quoted text and escaped
+    ``$``/backticks, where ``$(...)`` is literal. Constructs this screen cannot judge
+    (heredocs, ``$'...'``) raise ``UnscreenableScript`` so the call fails closed.
+    """
+    sep: list[str] = []
+    sub: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(script):
+        ch = script[i]
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+            sep.append(ch)
+            sub.append(" " if ch != "'" else ch)
+        elif ch == "\\" and i + 1 < len(script):
+            nxt = script[i + 1]
+            if nxt == "\n" and not quote:
+                sep.append(" ")
+                sub.append(" ")
+            else:
+                sep.extend((ch, nxt))
+                # An escaped ``$`` or backtick is literal, not a substitution.
+                sub.extend((" ", " ") if nxt in "$`" else (ch, nxt))
+            i += 1
+        elif not quote and ch == "$" and script[i + 1 : i + 2] == "'":
+            raise UnscreenableScript("ANSI-C $'...' quoting")
+        elif not quote and ch == "<" and script[i : i + 3] == "<<<":
+            sep.append("<<<")
+            sub.append("<<<")
+            i += 2
+        elif not quote and ch == "<" and script[i : i + 2] == "<<":
+            raise UnscreenableScript("heredoc")
+        elif ch == "\n" and not quote:
+            sep.append(";")
+            sub.append("\n")
+        else:
+            if ch in "'\"" and (not quote or quote == ch):
+                quote = "" if quote else ch
+            sep.append(ch)
+            sub.append(ch)
+        i += 1
+    return "".join(sep), "".join(sub)
 
 
 def _split_shell_script(script: str, depth: int = 0) -> list[str]:
     """Return each simple command in ``script`` as its own normalized line."""
     segments: list[str] = []
-    for raw_line in script.splitlines():
-        line = raw_line.strip()
-        if not line:
+    separated, substitutable = _scan_script(script)
+    if depth < _MAX_SHELL_NESTING:
+        # ``$(...)`` and backticks run even inside double quotes.
+        for match in _SUBSTITUTION_RE.finditer(substitutable):
+            segments.extend(_split_shell_script(match[1] or match[2] or "", depth + 1))
+    lexer = shlex.shlex(separated, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        tokens = list(lexer)
+    except ValueError as exc:
+        raise UnscreenableScript("unparseable quoting") from exc
+    current: list[str] = []
+    skip_target = False
+    for token in [*tokens, ";"]:
+        if skip_target:
+            skip_target = False  # redirect target, not a command
             continue
-        if depth < _MAX_SHELL_NESTING:
-            # ``$(...)`` and backticks run even inside double quotes.
-            for match in _SUBSTITUTION_RE.finditer(line):
-                segments.extend(_split_shell_script(match[1] or match[2] or "", depth + 1))
-        lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        try:
-            tokens = list(lexer)
-        except ValueError:
-            segments.append(line)
-            continue
-        current: list[str] = []
-        for token in [*tokens, ";"]:
-            if token and all(ch in _SHELL_PUNCTUATION for ch in token):
-                if current:
-                    segments.extend(_command_lines(current, depth))
-                current = []
-            else:
-                current.append(token)
+        if token and all(ch in _SHELL_PUNCTUATION for ch in token):
+            if ("<" in token or ">" in token) and not token.endswith("("):
+                if current and current[-1].isdigit():
+                    current.pop()  # fd prefix of ``2>&1``
+                skip_target = True
+                continue
+            if current:
+                segments.extend(_command_lines(current, depth))
+            current = []
+        else:
+            current.append(token)
     return segments
 
 
@@ -277,9 +337,33 @@ def _command_lines(argv: list[str], depth: int) -> list[str]:
     inner = _strip_command_prefixes(argv)
     if inner and inner != argv:
         lines.append(shlex.join(inner))
+    if inner and str(Path(inner[0]).parent) in _SYSTEM_BIN_DIRS:
+        # ``/bin/rm -rf x`` must meet the same ``^rm`` patterns as ``rm -rf x``.
+        lines.append(shlex.join([Path(inner[0]).name, *inner[1:]]))
     nested = shell_script_arg(inner)
-    if nested is not None and depth < _MAX_SHELL_NESTING:
+    if nested is not None:
+        if depth >= _MAX_SHELL_NESTING:
+            raise UnscreenableScript("deeply nested shell")
         lines.extend(_split_shell_script(nested, depth + 1))
+    if inner and Path(inner[0]).name in ("eval", "source", ".") and len(inner) > 1:
+        raise UnscreenableScript(f"{Path(inner[0]).name} runs dynamic code")
+    if inner and Path(inner[0]).name == "find" and depth < _MAX_SHELL_NESTING:
+        lines.extend(_find_exec_lines(inner, depth))
+    return lines
+
+
+def _find_exec_lines(argv: list[str], depth: int) -> list[str]:
+    """Commands run by ``find -exec|-execdir|-ok|-okdir <cmd> ;|+``."""
+    lines: list[str] = []
+    for i, arg in enumerate(argv):
+        if arg in _FIND_EXEC_FLAGS:
+            cmd: list[str] = []
+            for tok in argv[i + 1 :]:
+                if tok in (";", "+"):
+                    break
+                cmd.append(tok)
+            if cmd:
+                lines.extend(_command_lines(cmd, depth + 1))
     return lines
 
 
@@ -480,7 +564,20 @@ class CommandTierInspector:
                 message="run_command policy check needs argv, command, or shell/script",
             )
 
-        lines = [cmd_norm, *shell_script_segments(call.args)]
+        try:
+            segments = shell_script_segments(call.args)
+        except UnscreenableScript as exc:
+            if self._deny_regexes:
+                return Decision(
+                    kind="deny",
+                    message=(
+                        f"run_command script uses {exc} and cannot be screened against "
+                        "deny_patterns; run the steps as separate argv calls or write the "
+                        "content with write_file"
+                    ),
+                )
+            segments = []
+        lines = [cmd_norm, *segments]
         for rx in self._deny_regexes:
             if any(rx.search(line) for line in lines):
                 return Decision(kind="deny", message="denied by run_command deny_patterns policy")

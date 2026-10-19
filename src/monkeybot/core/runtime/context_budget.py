@@ -111,8 +111,13 @@ def _head_and_tail(text: str, max_chars: int) -> str:
     """
     if len(text) <= max_chars:
         return text
-    head = max(1, int(max_chars * _HEAD_FRACTION))
-    tail = max(0, max_chars - head)
+    if max_chars <= 0:
+        return ""
+    keep = max_chars - len(_TRUNCATION_MARKER) - 2  # marker and its two newlines count
+    if keep < 2:
+        return text[-max_chars:]
+    head = max(1, int(keep * _HEAD_FRACTION))
+    tail = max(0, keep - head)
     kept_tail = text[-tail:] if tail else ""
     return f"{text[:head]}\n{_TRUNCATION_MARKER}\n{kept_tail}".rstrip("\n")
 
