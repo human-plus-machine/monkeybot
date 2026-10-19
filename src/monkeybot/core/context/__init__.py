@@ -15,6 +15,7 @@ import yaml
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.tools import load_file_tool_def
 from monkeybot.core.config.settings import SubagentConfig
+from monkeybot.core.context.project_context import load_project_instructions, repo_overview
 from monkeybot.core.mcp.ports_mcp import MCPClientPort, normalize_catalog_mcp_names
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import AgentEvent
@@ -163,6 +164,10 @@ class TurnContext:
     """Optional goal ledger (Phase 1). None when verifier.ledger is off."""
     verdict_mailbox: VerdictMailbox | None = None
     """Optional verdict mailbox (Phase 2). None when verifier.tracker is off."""
+    project_instructions: str = ""
+    """Coding mode: ``AGENTS.md`` (or equivalent) text for the stable prompt prefix; ``""`` if none."""
+    repo_overview: str = ""
+    """Coding mode: deterministic toolchain + layout summary for the stable prompt prefix."""
     invoked_skill: SkillRef | None = None
     """Installed skill the user explicitly invoked with a leading `/slug` this turn."""
     session: str | None = None
@@ -1035,6 +1040,10 @@ def _load_agent_md(agent_md_path: Path) -> str:
     return content
 
 
+def _coding_project_context(workspace_root: Path, names: Sequence[str]) -> tuple[str, str]:
+    return load_project_instructions(workspace_root, names), repo_overview(workspace_root)
+
+
 async def build_context(
     thread_id: str,
     request_id: str,
@@ -1133,6 +1142,12 @@ async def build_context(
         tools.extend(SCHEDULED_LOOP_TOOL_DEFS)
     for ct in extra_tools or []:
         tools.append(ct.tool_def)
+    project_instructions = ""
+    overview = ""
+    if config is not None and config.coding.enabled and workspace_root is not None:
+        project_instructions, overview = await asyncio.to_thread(
+            _coding_project_context, workspace_root, config.coding.project_instructions_files
+        )
     return TurnContext(
         thread_id=thread_id,
         request_id=request_id,
@@ -1159,6 +1174,8 @@ async def build_context(
         config=config,
         goal_ledger=goal_ledger,
         verdict_mailbox=verdict_mailbox,
+        project_instructions=project_instructions,
+        repo_overview=overview,
         session=session_id,
     )
 

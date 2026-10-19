@@ -24,7 +24,12 @@ from monkeybot.computer import build_computer_tools, should_enable_computer_tool
 from monkeybot.computer.permissions import build_computer_permission_inspector, build_persist_hook
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
-from monkeybot.core.config.runtime_env import SUBAGENTS_DIFF_KEY, VERIFIER_DIFF_KEY, ConfigTier
+from monkeybot.core.config.runtime_env import (
+    CODING_DIFF_KEY,
+    SUBAGENTS_DIFF_KEY,
+    VERIFIER_DIFF_KEY,
+    ConfigTier,
+)
 from monkeybot.core.config.settings import (
     ConfigError,
     SubagentConfig,
@@ -555,6 +560,13 @@ class GatewayRuntime:
             logger.info(
                 "config slice rebuilt %s",
                 kv(slice="memory_hooks", revision=cfg.revision),
+            )
+        if CODING_DIFF_KEY in diff.changed_env_keys:
+            self.rebuild_hooks(cfg, fastapi_app)
+            applied.append(CODING_DIFF_KEY)
+            logger.info(
+                "config slice rebuilt %s",
+                kv(slice="coding", revision=cfg.revision),
             )
         if VERIFIER_DIFF_KEY in diff.changed_env_keys:
             storage = (

@@ -17,6 +17,8 @@ from monkeybot.core.prompts.headings import (
     CURRENT_REQUEST_HEADING,
     INVOKED_SKILL_HEADING,
     MEMORY_INDEX_HEADING,
+    PROJECT_INSTRUCTIONS_HEADING,
+    REPO_OVERVIEW_HEADING,
     SKILLS_HEADING,
     TODO_LIST_HEADING,
 )
@@ -166,7 +168,18 @@ def _harness_text(ctx: TurnContext) -> str:
         subagent_personas=ctx.subagent_personas,
         emission_style=emission_style_terse_from_env(ctx.config),
         catalog_mcp_servers=ctx.catalog_mcp_servers,
+        coding_mode=ctx.config is not None and ctx.config.coding.enabled,
     )
+
+
+def _coding_context_blocks(ctx: TurnContext) -> str:
+    """Coding-mode project instructions + repo overview (stable, so they cache with the prefix)."""
+    out = ""
+    if ctx.project_instructions:
+        out += f"{PROJECT_INSTRUCTIONS_HEADING}{ctx.project_instructions}"
+    if ctx.repo_overview:
+        out += f"{REPO_OVERVIEW_HEADING}{ctx.repo_overview}"
+    return out
 
 
 def compose_stable_baseline(
@@ -174,10 +187,11 @@ def compose_stable_baseline(
     *,
     attachment_catalog: Sequence[AttachmentRecord] | None = None,
 ) -> str:
-    """Cacheable prefix: AGENT.md + harness + session attachments."""
+    """Cacheable prefix: AGENT.md + harness + project context + session attachments."""
     harness = _harness_text(ctx)
+    coding_context = _coding_context_blocks(ctx)
     attachments = _session_attachments_block(attachment_catalog)
-    return f"{ctx.agent_md}\n\n{harness}{attachments}"
+    return f"{ctx.agent_md}\n\n{harness}{coding_context}{attachments}"
 
 
 def compose_volatile_tail(

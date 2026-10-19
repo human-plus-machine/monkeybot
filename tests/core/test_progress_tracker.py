@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from monkeybot.core.config.settings import VerifierTrackerConfig
+from monkeybot.core.config.settings import CodingConfig, VerifierTrackerConfig
 from monkeybot.core.context import TurnContext
 from monkeybot.core.hooks import HookEvent, HookPayload
 from monkeybot.core.persistence.goal_ledger import (
@@ -502,6 +502,7 @@ async def test_replan_empties_tools_for_exactly_one_turn() -> None:
 
     class _Cfg:
         env_values: dict[str, str] = {}
+        coding = CodingConfig()
         verifier = VerifierConfig(
             escalation=VerifierEscalationConfig(max_severity="replan"),
         )
@@ -564,6 +565,7 @@ async def test_replan_from_a_finished_request_does_not_leak_into_the_next() -> N
 
     class _Cfg:
         env_values: dict[str, str] = {}
+        coding = CodingConfig()
         verifier = VerifierConfig(
             escalation=VerifierEscalationConfig(max_severity="replan"),
         )
@@ -615,6 +617,7 @@ async def test_block_denies_mutating_tool_and_allows_read_only() -> None:
 
     class _Cfg:
         env_values: dict[str, str] = {}
+        coding = CodingConfig()
         verifier = VerifierConfig(
             escalation=VerifierEscalationConfig(max_severity="block"),
         )
