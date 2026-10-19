@@ -44,7 +44,9 @@ def _make_envelope(parent_run_id: str = "parent-1", *, task: str = "do work") ->
 
 
 @pytest.mark.asyncio
-async def test_kill_scratch_subagent_reads_pid_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_kill_scratch_subagent_reads_pid_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     (scratch / "subagent.pid").write_text("424242\nps:Wed Aug 11 12:00:00 2026\n", encoding="utf-8")
@@ -76,9 +78,7 @@ async def test_kill_scratch_subagent_skips_pid_reuse(
 ) -> None:
     scratch = tmp_path / "scratch"
     scratch.mkdir()
-    (scratch / "subagent.pid").write_text(
-        "424242\nps:original-start\n", encoding="utf-8"
-    )
+    (scratch / "subagent.pid").write_text("424242\nps:original-start\n", encoding="utf-8")
     killpgs: list[tuple[int, int]] = []
 
     monkeypatch.setattr(subprocess_groups, "SUPPORTS_PROCESS_GROUPS", True)
@@ -141,9 +141,7 @@ async def test_kill_scratch_subagent_kills_when_leader_gone(
 ) -> None:
     scratch = tmp_path / "scratch"
     scratch.mkdir()
-    (scratch / "subagent.pid").write_text(
-        "424242\nps:original-start\n", encoding="utf-8"
-    )
+    (scratch / "subagent.pid").write_text("424242\nps:original-start\n", encoding="utf-8")
     killpgs: list[tuple[int, int]] = []
 
     monkeypatch.setattr(subprocess_groups, "SUPPORTS_PROCESS_GROUPS", True)
@@ -465,7 +463,9 @@ async def test_worker_loop_claims_and_executes_pending_run(
 
     with (
         patch.object(worker_pool, "spawn_subagent", side_effect=_fake_spawn),
-        patch.object(worker_pool.asyncio, "sleep", new=AsyncMock(side_effect=asyncio.CancelledError)),
+        patch.object(
+            worker_pool.asyncio, "sleep", new=AsyncMock(side_effect=asyncio.CancelledError)
+        ),
         pytest.raises(asyncio.CancelledError),
     ):
         await worker_pool.run_worker_loop(
@@ -673,7 +673,9 @@ async def test_queue_mode_enqueue_then_worker_executes_e2e(
 
     with (
         patch.object(worker_pool, "spawn_subagent", side_effect=_fake_spawn),
-        patch.object(worker_pool.asyncio, "sleep", new=AsyncMock(side_effect=asyncio.CancelledError)),
+        patch.object(
+            worker_pool.asyncio, "sleep", new=AsyncMock(side_effect=asyncio.CancelledError)
+        ),
         pytest.raises(asyncio.CancelledError),
     ):
         await worker_pool.run_worker_loop(

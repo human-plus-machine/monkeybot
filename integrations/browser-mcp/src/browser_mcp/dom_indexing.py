@@ -59,8 +59,7 @@ _STALE_INDEX_MSG = (
     "Call browser_get_elements again after navigation."
 )
 _FOOTER_BELOW = (
-    "… {n} more interactive elements below the viewport "
-    "(scroll or pass viewport_only=false)"
+    "… {n} more interactive elements below the viewport (scroll or pass viewport_only=false)"
 )
 _FOOTER_TRUNCATED = "… truncated, {k} elements omitted; use contains= or scroll"
 # helpers._send uses a 5s socket timeout; each awaited JS wait must stay under it.
@@ -342,9 +341,7 @@ def get_elements(
     """
     handle = as_handle(target)
     _ensure_driver(handle)
-    expr = get_tree_expr(
-        viewport_only, kind=kind, contains=contains, max_elements=max_elements
-    )
+    expr = get_tree_expr(viewport_only, kind=kind, contains=contains, max_elements=max_elements)
     try:
         result = handle.evaluate(expr)
     except RuntimeError:

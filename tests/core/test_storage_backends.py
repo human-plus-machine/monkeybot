@@ -330,21 +330,27 @@ async def test_sqlite_backend_raises_before_open() -> None:
 
 
 @pytest.mark.asyncio
-async def test_sqlite_backend_history_returns_same_instance(sqlite_backend: SQLiteStorageBackend) -> None:
+async def test_sqlite_backend_history_returns_same_instance(
+    sqlite_backend: SQLiteStorageBackend,
+) -> None:
     h1 = sqlite_backend.history()
     h2 = sqlite_backend.history()
     assert h1 is h2
 
 
 @pytest.mark.asyncio
-async def test_sqlite_backend_usage_returns_same_instance(sqlite_backend: SQLiteStorageBackend) -> None:
+async def test_sqlite_backend_usage_returns_same_instance(
+    sqlite_backend: SQLiteStorageBackend,
+) -> None:
     u1 = sqlite_backend.usage()
     u2 = sqlite_backend.usage()
     assert u1 is u2
 
 
 @pytest.mark.asyncio
-async def test_sqlite_backend_runs_returns_same_instance(sqlite_backend: SQLiteStorageBackend) -> None:
+async def test_sqlite_backend_runs_returns_same_instance(
+    sqlite_backend: SQLiteStorageBackend,
+) -> None:
     r1 = sqlite_backend.runs()
     r2 = sqlite_backend.runs()
     assert r1 is r2
@@ -421,7 +427,9 @@ async def test_history_reset_to_empty(sqlite_backend: SQLiteStorageBackend) -> N
 
 
 @pytest.mark.asyncio
-async def test_history_load_empty_thread_returns_empty(sqlite_backend: SQLiteStorageBackend) -> None:
+async def test_history_load_empty_thread_returns_empty(
+    sqlite_backend: SQLiteStorageBackend,
+) -> None:
     store = sqlite_backend.history()
     assert await store.load("nonexistent") == []
 
@@ -568,11 +576,21 @@ async def test_history_migration_does_not_auto_claim_legacy_rows_when_not_owned(
     )
     await conn.execute(
         "INSERT INTO conversation_history(thread_id, role, content, created_at) VALUES (?,?,?,?)",
-        ("agent-a-legacy-thread", "user", '[{"type":"text","text":"a\'s secret"}]', int(time.time() * 1000)),
+        (
+            "agent-a-legacy-thread",
+            "user",
+            '[{"type":"text","text":"a\'s secret"}]',
+            int(time.time() * 1000),
+        ),
     )
     await conn.execute(
         "INSERT INTO conversation_history(thread_id, role, content, created_at) VALUES (?,?,?,?)",
-        ("agent-b-legacy-thread", "user", '[{"type":"text","text":"b\'s secret"}]', int(time.time() * 1000)),
+        (
+            "agent-b-legacy-thread",
+            "user",
+            '[{"type":"text","text":"b\'s secret"}]',
+            int(time.time() * 1000),
+        ),
     )
     await conn.commit()
     await conn.close()
@@ -639,7 +657,12 @@ async def test_history_migration_auto_claims_legacy_rows_when_owned_by_agent_roo
     )
     await conn.execute(
         "INSERT INTO conversation_history(thread_id, role, content, created_at) VALUES (?,?,?,?)",
-        ("my-old-chat", "user", '[{"type":"text","text":"pre-upgrade message"}]', int(time.time() * 1000)),
+        (
+            "my-old-chat",
+            "user",
+            '[{"type":"text","text":"pre-upgrade message"}]',
+            int(time.time() * 1000),
+        ),
     )
     await conn.commit()
     await conn.close()
@@ -815,7 +838,9 @@ async def test_usage_record_and_summary_roundtrip(sqlite_backend: SQLiteStorageB
 
 
 @pytest.mark.asyncio
-async def test_usage_summary_aggregates_multiple_turns(sqlite_backend: SQLiteStorageBackend) -> None:
+async def test_usage_summary_aggregates_multiple_turns(
+    sqlite_backend: SQLiteStorageBackend,
+) -> None:
     store = sqlite_backend.usage()
     for cost in [0.1, 0.2, 0.3]:
         u = Usage(input_tokens=1, output_tokens=1, cost_usd=cost, duration_ms=1)
@@ -834,7 +859,9 @@ async def test_usage_summary_empty_returns_zeros(sqlite_backend: SQLiteStorageBa
 
 
 @pytest.mark.asyncio
-async def test_usage_summary_since_ms_filters_old_rows(sqlite_backend: SQLiteStorageBackend) -> None:
+async def test_usage_summary_since_ms_filters_old_rows(
+    sqlite_backend: SQLiteStorageBackend,
+) -> None:
     """since_ms filtering exercised via direct SQL inserts to control created_at."""
     import aiosqlite
 
@@ -904,7 +931,9 @@ async def test_run_record_started_not_in_pending_runs(sqlite_backend: SQLiteStor
 
 
 @pytest.mark.asyncio
-async def test_run_record_completed_removes_from_pending(sqlite_backend: SQLiteStorageBackend) -> None:
+async def test_run_record_completed_removes_from_pending(
+    sqlite_backend: SQLiteStorageBackend,
+) -> None:
     store = sqlite_backend.runs()
     env = _make_envelope(parent_run_id="p3")
     await store.record_pending(
@@ -939,7 +968,9 @@ async def test_run_record_completed_updates_status(sqlite_backend: SQLiteStorage
 
 
 @pytest.mark.asyncio
-async def test_run_record_failed_sets_status_and_error(sqlite_backend: SQLiteStorageBackend) -> None:
+async def test_run_record_failed_sets_status_and_error(
+    sqlite_backend: SQLiteStorageBackend,
+) -> None:
     store = sqlite_backend.runs()
     env = _make_envelope(parent_run_id="p5")
     await store.record_started(
@@ -1004,7 +1035,9 @@ async def test_run_pending_runs_orders_by_started_at(sqlite_backend: SQLiteStora
 
 
 @pytest.mark.asyncio
-async def test_run_record_pending_appears_in_pending_runs(sqlite_backend: SQLiteStorageBackend) -> None:
+async def test_run_record_pending_appears_in_pending_runs(
+    sqlite_backend: SQLiteStorageBackend,
+) -> None:
     store = sqlite_backend.runs()
     env = _make_envelope(parent_run_id="pending-parent")
     await store.record_pending(
@@ -1020,7 +1053,9 @@ async def test_run_record_pending_appears_in_pending_runs(sqlite_backend: SQLite
 
 
 @pytest.mark.asyncio
-async def test_run_claim_transitions_pending_to_running(sqlite_backend: SQLiteStorageBackend) -> None:
+async def test_run_claim_transitions_pending_to_running(
+    sqlite_backend: SQLiteStorageBackend,
+) -> None:
     store = sqlite_backend.runs()
     env = _make_envelope(parent_run_id="claim-parent")
     await store.record_pending(
@@ -1039,7 +1074,9 @@ async def test_run_claim_transitions_pending_to_running(sqlite_backend: SQLiteSt
 
 
 @pytest.mark.asyncio
-async def test_run_claim_returns_false_for_second_caller(sqlite_backend: SQLiteStorageBackend) -> None:
+async def test_run_claim_returns_false_for_second_caller(
+    sqlite_backend: SQLiteStorageBackend,
+) -> None:
     store = sqlite_backend.runs()
     env = _make_envelope(parent_run_id="claim-parent-2")
     await store.record_pending(
@@ -1054,7 +1091,9 @@ async def test_run_claim_returns_false_for_second_caller(sqlite_backend: SQLiteS
 
 
 @pytest.mark.asyncio
-async def test_run_claim_returns_false_for_non_pending(sqlite_backend: SQLiteStorageBackend) -> None:
+async def test_run_claim_returns_false_for_non_pending(
+    sqlite_backend: SQLiteStorageBackend,
+) -> None:
     store = sqlite_backend.runs()
     env = _make_envelope(parent_run_id="claim-parent-3")
     await store.record_started(
@@ -1185,15 +1224,13 @@ async def test_run_record_completed_requires_owner_when_worker_id_set(
         scratch_dir=Path("/tmp/run-owner-1"),
     )
     assert await store.claim("run-owner-1", "worker-a") is True
-    assert await store.record_completed(
-        "run-owner-1", '{"from":"b"}', worker_id="worker-b"
-    ) is False
+    assert (
+        await store.record_completed("run-owner-1", '{"from":"b"}', worker_id="worker-b") is False
+    )
     row = await store.get_run("run-owner-1")
     assert row is not None
     assert row.status == "running"
-    assert await store.record_completed(
-        "run-owner-1", '{"from":"a"}', worker_id="worker-a"
-    ) is True
+    assert await store.record_completed("run-owner-1", '{"from":"a"}', worker_id="worker-a") is True
     row = await store.get_run("run-owner-1")
     assert row is not None
     assert row.status == "completed"
@@ -1219,9 +1256,10 @@ async def test_run_record_failed_ignored_after_reclaim(
     await asyncio.sleep(0.02)
     assert await store.reset_stale_claims(stale_after_ms=10) == 1
     assert await store.claim("run-reclaim-1", "worker-new") is True
-    assert await store.record_failed(
-        "run-reclaim-1", "stale worker finishing", worker_id="worker-old"
-    ) is False
+    assert (
+        await store.record_failed("run-reclaim-1", "stale worker finishing", worker_id="worker-old")
+        is False
+    )
     row = await store.get_run("run-reclaim-1")
     assert row is not None
     assert row.status == "running"

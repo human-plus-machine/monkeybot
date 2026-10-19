@@ -307,16 +307,12 @@ async def test_run_doom_loop_emits_error_and_forces_no_tools(
         events.append(e)
 
     doom_errors = [
-        e
-        for e in events
-        if isinstance(e, Error) and e.error.startswith("Doom loop detected:")
+        e for e in events if isinstance(e, Error) and e.error.startswith("Doom loop detected:")
     ]
     assert len(doom_errors) == 1
     assert doom_errors[0].error == _doom_loop_texts("run_command", 3)[0]
     interventions = [
-        e
-        for e in events
-        if isinstance(e, HarnessIntervention) and e.intervention == "doom_loop"
+        e for e in events if isinstance(e, HarnessIntervention) and e.intervention == "doom_loop"
     ]
     assert len(interventions) == 1
     assert interventions[0].detail == doom_errors[0].error
@@ -353,9 +349,7 @@ async def test_run_doom_loop_on_identical_successes(
         events.append(e)
 
     doom_errors = [
-        e
-        for e in events
-        if isinstance(e, Error) and e.error.startswith("Doom loop detected:")
+        e for e in events if isinstance(e, Error) and e.error.startswith("Doom loop detected:")
     ]
     assert len(doom_errors) == 1
     assert isinstance(events[-1], TurnComplete)
@@ -396,9 +390,7 @@ async def test_run_doom_loop_triggers_again_after_recovery(
         events.append(e)
 
     doom_errors = [
-        e
-        for e in events
-        if isinstance(e, Error) and e.error.startswith("Doom loop detected:")
+        e for e in events if isinstance(e, Error) and e.error.startswith("Doom loop detected:")
     ]
     assert len(doom_errors) == 2
     assert isinstance(events[-1], TurnComplete)
@@ -490,9 +482,7 @@ async def test_run_injects_doom_loop_system_note(
         ) -> AsyncIterator[ProviderEvent]:
             system = next((m for m in messages if m.role == "system"), None)
             if system is not None:
-                text = "".join(
-                    getattr(b, "text", "") for b in system.content if hasattr(b, "text")
-                )
+                text = "".join(getattr(b, "text", "") for b in system.content if hasattr(b, "text"))
                 snapshots.append(text)
             async for ev in super().stream(
                 messages,

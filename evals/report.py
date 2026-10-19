@@ -105,8 +105,7 @@ async def _run_scenario(scenario: Scenario, agent_url: str) -> ScenarioAggregate
         trace_ids=[t.trace_id for t in turns if t.trace_id],
         requirement_failures=requirement_failures,
         turns=[
-            TurnLog(input=t.input, output=t.output, duration_ms=t.usage.duration_ms)
-            for t in turns
+            TurnLog(input=t.input, output=t.output, duration_ms=t.usage.duration_ms) for t in turns
         ],
     )
 
@@ -164,7 +163,9 @@ def compare_to_baseline(
 
     for s in current.scenarios:
         if s.status == "errored":
-            hard.append(f"{s.scenario_id}: scenario errored — {s.failure_reason or 'unknown error'}")
+            hard.append(
+                f"{s.scenario_id}: scenario errored — {s.failure_reason or 'unknown error'}"
+            )
         elif s.status == "failed":
             hard.append(f"{s.scenario_id}: assertion failed — {'; '.join(s.requirement_failures)}")
 
@@ -193,9 +194,13 @@ def compare_to_baseline(
     if _pct_increase(cur_output, base_output) > 0.20:
         hard.append(f"output tokens: {base_output} -> {cur_output} (> 20% increase)")
     if _pct_increase(cur.total_cost_usd, base.total_cost_usd) > 0.15:
-        hard.append(f"cost: ${base.total_cost_usd:.4f} -> ${cur.total_cost_usd:.4f} (> 15% increase)")
+        hard.append(
+            f"cost: ${base.total_cost_usd:.4f} -> ${cur.total_cost_usd:.4f} (> 15% increase)"
+        )
     if _pct_increase(cur.p95_latency_ms, base.p95_latency_ms) > 0.20:
-        hard.append(f"p95 latency: {base.p95_latency_ms:.0f}ms -> {cur.p95_latency_ms:.0f}ms (> 20% increase)")
+        hard.append(
+            f"p95 latency: {base.p95_latency_ms:.0f}ms -> {cur.p95_latency_ms:.0f}ms (> 20% increase)"
+        )
     if cur_tool_errors > base_tool_errors:
         hard.append(f"tool errors: {base_tool_errors} -> {cur_tool_errors} (increase)")
 
@@ -298,7 +303,9 @@ def build_markdown_report(
     improvements = [
         f"- {m}: {base.mean_quality_by_metric[m]:.3f} -> {score:.3f}"
         for m, score in cur.mean_quality_by_metric.items()
-        if base and m in base.mean_quality_by_metric and score - base.mean_quality_by_metric[m] > 0.05
+        if base
+        and m in base.mean_quality_by_metric
+        and score - base.mean_quality_by_metric[m] > 0.05
     ]
     lines.extend(improvements) if improvements else lines.append("- None")
     lines += ["", "### Trace Links", ""]
@@ -312,7 +319,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--suite", default="smoke", help="Suite id under evals/suites/<id>.yaml")
     parser.add_argument("--baseline", type=Path, default=None, help="Baseline JSON path")
-    parser.add_argument("--run", type=Path, default=None, help="Load an existing run JSON instead of executing")
+    parser.add_argument(
+        "--run", type=Path, default=None, help="Load an existing run JSON instead of executing"
+    )
     parser.add_argument("--agent-url", default=None, help="Override AGENT_URL env var")
     parser.add_argument("--fail-on-regression", action="store_true")
     parser.add_argument(
@@ -322,7 +331,9 @@ def main(argv: list[str] | None = None) -> int:
         "which always still blocks on this run's own scenario errors/failures regardless of "
         "baseline presence).",
     )
-    parser.add_argument("--update-baseline", action="store_true", help="Write this run as the new baseline")
+    parser.add_argument(
+        "--update-baseline", action="store_true", help="Write this run as the new baseline"
+    )
     parser.add_argument(
         "--scenario-delay-sec",
         type=float,

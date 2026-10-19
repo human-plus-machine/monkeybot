@@ -90,10 +90,10 @@ from .events import (
 from .history_compaction import (
     HISTORY_LOAD_MAX,
     _await_history_write,
+    _compact_history_if_needed,
     _intent_facts_from_ctx,
     _summarization_model_id,
     _summarization_viable,
-    _summarize_history,
     protect_recent_count,
     truncate_history_preserving_pins,
 )
@@ -647,14 +647,34 @@ async def _refresh_prompt_after_history_change(
     )
 
 
-def _token_pressure_should_summarize(
-    chat_messages: list[Message],
+async def _token_pressure_should_summarize(
     *,
+    history: HistoryStore,
+    thread_id: str,
     preflight: int,
     cap: int,
     window_tokens: int,
 ) -> bool:
-    return preflight >= cap and _summarization_viable(chat_messages, window_tokens=window_tokens)
+    if preflight < cap:
+        return False
+    # Judge viability on the raw stored rows ``_summarize_history`` splits, not the
+    # coalesced ``transform_context`` view in ``state.chat_messages`` (fewer rows).
+    try:
+        raw = await history.load(thread_id)
+    except Exception:
+        logger.warning(
+            "summarization skipped: history load failed %s",
+            kv(thread_id=thread_id),
+            exc_info=True,
+        )
+        return False
+    if _summarization_viable(raw, window_tokens=window_tokens):
+        return True
+    logger.debug(
+        "summarization skipped: nothing compactable %s",
+        kv(thread_id=thread_id, preflight=preflight, cap=cap, message_count=len(raw)),
+    )
+    return False
 
 
 async def _preflight_prompt_tokens(
@@ -712,12 +732,13 @@ async def _run_history_summarization(
         request_id=state.ctx.request_id,
     ):
         try:
-            turns_summarized = await _summarize_history(
-                state.ctx.thread_id,
-                state.chat_messages,
-                history,
-                provider,
-                _summarization_model_id(state.ctx),
+            # Reload raw rows: state.chat_messages is the provider-facing view
+            # and must never be persisted back via history.reset.
+            turns_summarized = await _compact_history_if_needed(
+                thread_id=state.ctx.thread_id,
+                history=history,
+                provider=provider,
+                model=_summarization_model_id(state.ctx),
                 window_tokens=state.ctx.context_window_tokens,
                 intent_facts=_intent_facts_from_ctx(state.ctx),
             )
@@ -781,8 +802,9 @@ async def _maybe_summarize_on_token_pressure(
     cap: int,
 ) -> AsyncIterator[AgentEvent]:
     """Compact when prompt tokens hit the context-window ratio threshold."""
-    if not _token_pressure_should_summarize(
-        state.chat_messages,
+    if not await _token_pressure_should_summarize(
+        history=history,
+        thread_id=state.ctx.thread_id,
         preflight=preflight,
         cap=cap,
         window_tokens=state.ctx.context_window_tokens,
@@ -812,14 +834,19 @@ async def _apply_history_load_max_safety(
     """Last resort after compact failure: persist a truncated tail (no silent slide)."""
     if len(state.chat_messages) <= HISTORY_LOAD_MAX:
         return
-    dropped = len(state.chat_messages) - HISTORY_LOAD_MAX
-    truncated = truncate_history_preserving_pins(state.chat_messages, max_rows=HISTORY_LOAD_MAX)
+    # Truncate raw stored rows (not the provider-facing view) so pinned verdicts,
+    # thinking, attachments and row_ids survive the durable reset.
+    raw = await history.load(state.ctx.thread_id)
+    if len(raw) <= HISTORY_LOAD_MAX:
+        return
+    dropped = len(raw) - HISTORY_LOAD_MAX
+    truncated = truncate_history_preserving_pins(raw, max_rows=HISTORY_LOAD_MAX)
     logger.error(
         "history exceeds load max after compact attempt; truncating tail %s",
         kv(
             request_id=state.ctx.request_id,
             thread_id=state.ctx.thread_id,
-            message_count=len(state.chat_messages),
+            message_count=len(raw),
             load_max=HISTORY_LOAD_MAX,
             dropped=dropped,
         ),

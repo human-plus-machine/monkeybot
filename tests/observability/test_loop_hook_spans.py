@@ -30,7 +30,9 @@ async def test_pre_post_tool_hook_events_on_tool_span(otel_memory_exporter: Any)
     ):
         pass
 
-    tool_spans = [s for s in otel_memory_exporter.get_finished_spans() if s.name == "monkeybot.tool"]
+    tool_spans = [
+        s for s in otel_memory_exporter.get_finished_spans() if s.name == "monkeybot.tool"
+    ]
     assert len(tool_spans) == 1
     tool = tool_spans[0]
     event_names = {e.name for e in tool.events}

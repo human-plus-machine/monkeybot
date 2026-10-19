@@ -64,7 +64,10 @@ def test_refresh_assigns_and_retires_aliases() -> None:
     assert reg.resolve("t1").target_id == "aaa"
     assert reg.resolve("aaa").tab == "t1"
 
-    helpers.list_tabs.return_value = [_tab("bbb", "https://b.test/"), _tab("ccc", "https://c.test/")]
+    helpers.list_tabs.return_value = [
+        _tab("bbb", "https://b.test/"),
+        _tab("ccc", "https://c.test/"),
+    ]
     helpers.current_tab.return_value = _tab("bbb", "https://b.test/")
     reg.refresh(helpers)
     aliases = {s.tab for s in reg.tabs()}
@@ -144,9 +147,7 @@ def test_user_opened_untouched_tabs_do_not_count_toward_cap(
         json.loads(server.browser_tabs())
         result = json.loads(server.browser_open_tab("https://ex.test/new", focus=False))
     assert result["ok"] is True
-    helpers.cdp.assert_any_call(
-        "Target.createTarget", url="about:blank", background=True
-    )
+    helpers.cdp.assert_any_call("Target.createTarget", url="about:blank", background=True)
 
 
 def test_open_tab_reuses_focused_blank_instead_of_creating() -> None:
@@ -165,8 +166,7 @@ def test_open_tab_reuses_focused_blank_instead_of_creating() -> None:
     assert result["ok"] is True
     assert result["url"] == "https://ex.test/new"
     assert all(
-        not (c.args and c.args[0] == "Target.createTarget")
-        for c in helpers.cdp.call_args_list
+        not (c.args and c.args[0] == "Target.createTarget") for c in helpers.cdp.call_args_list
     )
 
 
@@ -176,6 +176,7 @@ def test_close_tab_then_retry_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
     agent = _tab("agent", "https://agent.test/")
     created = _tab("new", "https://new.test/")
     helpers = _helpers(tabs_list=[user, agent], focused="agent")
+
     def cdp(method: str, **_params: object) -> dict:
         if method == "Target.createTarget":
             return {"targetId": "new"}
@@ -193,8 +194,7 @@ def test_close_tab_then_retry_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
 
         def list_tabs(*_a, **_k):
             if any(
-                c.args and c.args[0] == "Target.createTarget"
-                for c in helpers.cdp.call_args_list
+                c.args and c.args[0] == "Target.createTarget" for c in helpers.cdp.call_args_list
             ):
                 return [user, created]
             if helpers.close_tab.called:
@@ -264,9 +264,7 @@ def test_focused_page_info_returns_empty_on_no_page() -> None:
 
 def test_focused_page_info_raises_on_unknown_session() -> None:
     helpers = MagicMock()
-    helpers.page_info.side_effect = RuntimeError(
-        "{'code': -32000, 'message': 'unknown session'}"
-    )
+    helpers.page_info.side_effect = RuntimeError("{'code': -32000, 'message': 'unknown session'}")
     handle = tabs.TabHandle(helpers, None, focused=True)
     with pytest.raises(RuntimeError, match="unknown session"):
         handle.page_info()

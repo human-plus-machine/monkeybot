@@ -101,9 +101,7 @@ def extract_elicitation_fields(payload: dict[str, Any]) -> tuple[str | None, dic
     else:
         message = message.strip()
     schema_raw = (
-        payload.get("requestedSchema")
-        or payload.get("requested_schema")
-        or payload.get("schema")
+        payload.get("requestedSchema") or payload.get("requested_schema") or payload.get("schema")
     )
     schema = dict(schema_raw) if isinstance(schema_raw, dict) else None
     return message, schema
@@ -662,9 +660,7 @@ class ChatSessionController:
 
         self._maybe_thinking_trace(evt, request_id)
 
-    def _on_context_usage_hint(
-        self, *, estimated_tokens: int, context_window_tokens: int
-    ) -> None:
+    def _on_context_usage_hint(self, *, estimated_tokens: int, context_window_tokens: int) -> None:
         self.usage.update_context_hint(
             estimated_prompt_tokens=estimated_tokens,
             context_window_tokens=context_window_tokens,
@@ -750,9 +746,7 @@ class ChatSessionController:
         if answer.cancelled:
             approved = False
         reason = (
-            "cancelled by user"
-            if answer.cancelled
-            else (None if approved else "denied by user")
+            "cancelled by user" if answer.cancelled else (None if approved else "denied by user")
         )
         ok = await self._post_hitl(
             f"{self.base}/sessions/{self.session_id}/tool-confirmations/{evt.tool_call_id}",

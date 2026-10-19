@@ -174,9 +174,7 @@ def test_run_playbook_opens_tab_when_page_info_has_no_page() -> None:
         patch.object(playbooks, "check_expect", return_value=None),
     ):
         result = json.loads(
-            server.browser_run_playbook(
-                "a.test", "signup", {"nickname": "ada"}, observe="none"
-            )
+            server.browser_run_playbook("a.test", "signup", {"nickname": "ada"}, observe="none")
         )
     assert result["ok"] is True
     helpers.new_tab.assert_called_once_with("https://a.test/form.html")
@@ -200,11 +198,20 @@ def test_run_playbook_success_and_expect() -> None:
         _patch_harness(helpers),
         patch.object(dom_indexing, "settle", return_value={"quiet": True, "navigated": False}),
         patch.object(dom_indexing, "get_elements", return_value=tree),
-        patch.object(actions, "do_goto", return_value={"ok": True, "url": "https://a.test/form.html", "title": "A"}),
+        patch.object(
+            actions,
+            "do_goto",
+            return_value={"ok": True, "url": "https://a.test/form.html", "title": "A"},
+        ),
         patch.object(
             actions,
             "do_fill_form",
-            return_value={"ok": True, "filled": [{"label": "Nickname", "index": 1, "how": "label_for"}], "unresolved": [], "submitted": True},
+            return_value={
+                "ok": True,
+                "filled": [{"label": "Nickname", "index": 1, "how": "label_for"}],
+                "unresolved": [],
+                "submitted": True,
+            },
         ),
     ):
         json.loads(server.browser_tabs())
@@ -242,7 +249,11 @@ steps:
         patch.object(
             actions,
             "do_click_text",
-            return_value={"ok": False, "error": "no matching element for 'No Such Button'", "did_you_mean": []},
+            return_value={
+                "ok": False,
+                "error": "no matching element for 'No Such Button'",
+                "did_you_mean": [],
+            },
         ),
     ):
         json.loads(server.browser_tabs())
@@ -282,4 +293,3 @@ steps:
     assert result["ok"] is False
     assert result["error"] == "playbook timeout"
     assert result["failed_step"] == 0
-

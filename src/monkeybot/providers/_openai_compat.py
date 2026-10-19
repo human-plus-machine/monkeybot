@@ -22,11 +22,12 @@ import re
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from monkeybot.core.llm.provider import (
     Done,
     Message,
+    ProviderCallHints,
     ProviderEvent,
     TextDelta,
     ThinkingDelta,
@@ -45,11 +46,22 @@ from monkeybot.core.types.content_blocks import (
     ToolResponse,
 )
 from monkeybot.core.types.types_tools import ToolDef
-from monkeybot.providers._utils import safe_parse_tool_args
+from monkeybot.providers._utils import safe_parse_tool_args, suppress_thinking_for_auxiliary_call
+from monkeybot.providers.model_capabilities import supports_param
+from monkeybot.providers.rejected_sampling import (
+    blames_sampling_param,
+    is_status_400,
+    omit_known_rejected,
+    remember_rejected_sampling,
+)
 from monkeybot.providers.request_budget import (
     RequestByteBudgetError,
     trim_message_media_for_byte_budget,
 )
+from monkeybot.providers.sampling import REASONING_EFFORT_NONE
+
+if TYPE_CHECKING:
+    from monkeybot.core.tools.spill_inventory import SpillBudgets
 
 _log = logging.getLogger(__name__)
 
@@ -134,13 +146,45 @@ def _user_file_placeholder(block: File) -> str:
     )
 
 
-_MAX_EXTRACTED_PDF_CHARS = 20_000
+# Unknown window + no workspace uses the 1M-window ceilings (128k inline, 256k read).
+_PDF_FALLBACK_WINDOW_TOKENS = 1_000_000
+_PDF_DEFAULT_WINDOW_TOKENS = 200_000
 _PDF_TEXT_CACHE_MAX = 32
-# Hash → extracted text (or None). Avoids lru_cache retaining full base64 keys.
-_PDF_TEXT_CACHE: OrderedDict[tuple[str, int], str | None] = OrderedDict()
+_PDF_RELOAD_NOTE = (
+    "\n\n[PDF text extract stopped here. This is the full extract this provider "
+    "will return; reloading the PDF will not yield more.]"
+)
+# Hash + extract cap → (text, hit_cap) or None. Avoids lru_cache retaining base64 keys.
+_PDF_TEXT_CACHE: OrderedDict[tuple[str, int], tuple[str, bool] | None] = OrderedDict()
 
 
-def _extract_pdf_text_sync(data_b64: str, max_chars: int) -> str | None:
+def _pdf_content_digest(data_b64: str) -> str:
+    return hashlib.sha256(data_b64.encode("ascii", errors="ignore")).hexdigest()
+
+
+def _pdf_budgets(hints: ProviderCallHints | None) -> SpillBudgets:
+    from monkeybot.core.tools.spill_inventory import spill_budgets_from_window  # noqa: PLC0415
+
+    # A known window always sizes the extract; a workspace only decides whether
+    # the overflow can spill to disk.
+    if hints is not None and hints.context_window_tokens:
+        return spill_budgets_from_window(max(1, hints.context_window_tokens))
+    if hints is None or hints.workspace_root is None:
+        return spill_budgets_from_window(_PDF_FALLBACK_WINDOW_TOKENS)
+    return spill_budgets_from_window(_PDF_DEFAULT_WINDOW_TOKENS)
+
+
+def _remember_pdf_extract(
+    cache_key: tuple[str, int], value: tuple[str, bool] | None
+) -> tuple[str, bool] | None:
+    _PDF_TEXT_CACHE[cache_key] = value
+    _PDF_TEXT_CACHE.move_to_end(cache_key)
+    while len(_PDF_TEXT_CACHE) > _PDF_TEXT_CACHE_MAX:
+        _PDF_TEXT_CACHE.popitem(last=False)
+    return value
+
+
+def _extract_pdf_text_sync(data_b64: str, max_chars: int) -> tuple[str, bool] | None:
     """Best-effort text layer extraction. Returns None on any failure or no text.
 
     Bytes are an untrusted user upload (may be corrupt, encrypted, or a scanned
@@ -148,10 +192,13 @@ def _extract_pdf_text_sync(data_b64: str, max_chars: int) -> str | None:
     extract" outcome, not a bug, so failures fall back to the caller's placeholder
     rather than raising. Cache is keyed by content sha256 so repeated history walks
     do not re-parse the same attachment or retain giant base64 cache keys.
+
+    The second tuple element is true when extraction stopped at ``max_chars`` with
+    unread pages or a sliced page still remaining.
     """
     from pypdf import PdfReader  # noqa: PLC0415
 
-    digest = hashlib.sha256(data_b64.encode("ascii", errors="ignore")).hexdigest()
+    digest = _pdf_content_digest(data_b64)
     cache_key = (digest, max_chars)
     if cache_key in _PDF_TEXT_CACHE:
         _PDF_TEXT_CACHE.move_to_end(cache_key)
@@ -161,15 +208,13 @@ def _extract_pdf_text_sync(data_b64: str, max_chars: int) -> str | None:
         reader = PdfReader(io.BytesIO(base64.b64decode(data_b64)))
     except Exception:
         _log.warning("PDF extraction failed to open document", exc_info=True)
-        _PDF_TEXT_CACHE[cache_key] = None
-        _PDF_TEXT_CACHE.move_to_end(cache_key)
-        while len(_PDF_TEXT_CACHE) > _PDF_TEXT_CACHE_MAX:
-            _PDF_TEXT_CACHE.popitem(last=False)
-        return None
+        return _remember_pdf_extract(cache_key, None)
 
+    pages = list(reader.pages)
     parts: list[str] = []
     total = 0
-    for page in reader.pages:
+    hit_cap = False
+    for index, page in enumerate(pages):
         try:
             text = (page.extract_text() or "").strip()
         except Exception:
@@ -178,25 +223,67 @@ def _extract_pdf_text_sync(data_b64: str, max_chars: int) -> str | None:
         if text:
             parts.append(text)
             total += len(text)
-        if total >= max_chars:
+        if total >= max_chars and index < len(pages) - 1:
+            hit_cap = True
             break
     text = "\n\n".join(parts).strip()
-    result = text or None
-    _PDF_TEXT_CACHE[cache_key] = result
-    _PDF_TEXT_CACHE.move_to_end(cache_key)
-    while len(_PDF_TEXT_CACHE) > _PDF_TEXT_CACHE_MAX:
-        _PDF_TEXT_CACHE.popitem(last=False)
-    return result
+    if not text:
+        return _remember_pdf_extract(cache_key, None)
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip()
+        hit_cap = True
+    return _remember_pdf_extract(cache_key, (text, hit_cap))
 
 
-async def _extract_pdf_text(block: File, max_chars: int = _MAX_EXTRACTED_PDF_CHARS) -> str | None:
+def _format_pdf_extract(
+    text: str,
+    *,
+    hit_cap: bool,
+    hints: ProviderCallHints | None,
+    digest: str,
+) -> str:
+    """Inline what fits the window. Spill the rest when a workspace is available."""
+    from monkeybot.core.tools.spill_inventory import write_spill_with_inventory  # noqa: PLC0415
+
+    budgets = _pdf_budgets(hints)
+    if len(text) <= budgets.inline_budget:
+        if hit_cap:
+            return text.rstrip() + _PDF_RELOAD_NOTE
+        return text
+    if hints is None or hints.workspace_root is None:
+        return text[: budgets.inline_budget].rstrip() + _PDF_RELOAD_NOTE
+    session_id = (hints.session_id or "").strip() or "pdf"
+    spilled = write_spill_with_inventory(
+        text,
+        hints.workspace_root,
+        session_id,
+        f"pdf-{digest[:16]}",
+        tool_name="pdf_extract",
+        inline_budget=budgets.inline_budget,
+        reuse_existing=True,
+    )
+    if hit_cap:
+        return spilled + _PDF_RELOAD_NOTE
+    return spilled
+
+
+async def _extract_pdf_text(block: File, hints: ProviderCallHints | None = None) -> str | None:
     """Off-thread PDF text extraction so parsing never blocks the gateway's event loop."""
     if block.mime_type != "application/pdf":
         return None
-    text = await asyncio.to_thread(_extract_pdf_text_sync, block.data, max_chars)
-    if text and len(text) > max_chars:
-        text = text[:max_chars].rstrip() + "\n\n[... PDF text truncated ...]"
-    return text
+    budgets = _pdf_budgets(hints)
+    extracted = await asyncio.to_thread(
+        _extract_pdf_text_sync, block.data, budgets.spill_read_budget
+    )
+    if extracted is None:
+        return None
+    text, hit_cap = extracted
+    return _format_pdf_extract(
+        text,
+        hit_cap=hit_cap,
+        hints=hints,
+        digest=_pdf_content_digest(block.data),
+    )
 
 
 def _extracted_file_text(block: File, text: str) -> str:
@@ -205,15 +292,17 @@ def _extracted_file_text(block: File, text: str) -> str:
     return f"[File attachment{label_bit}, extracted text follows:]\n{text}"
 
 
-async def _user_file_content(block: File) -> str:
+async def _user_file_content(block: File, hints: ProviderCallHints | None = None) -> str:
     """Real extracted text when available, else the existing can't-read placeholder."""
-    extracted = await _extract_pdf_text(block)
+    extracted = await _extract_pdf_text(block, hints)
     if extracted:
         return _extracted_file_text(block, extracted)
     return _user_file_placeholder(block)
 
 
-async def _flatten_tool_response_text(block: ToolResponse) -> str:
+async def _flatten_tool_response_text(
+    block: ToolResponse, hints: ProviderCallHints | None = None
+) -> str:
     parts: list[str] = []
     for b in block.result:
         if isinstance(b, Text):
@@ -221,7 +310,7 @@ async def _flatten_tool_response_text(block: ToolResponse) -> str:
         elif isinstance(b, Image):
             parts.append(_image_tool_result_stub(b))
         elif isinstance(b, File):
-            extracted = await _extract_pdf_text(b)
+            extracted = await _extract_pdf_text(b, hints)
             parts.append(
                 _extracted_file_text(b, extracted)
                 if extracted
@@ -236,6 +325,8 @@ async def _flatten_tool_response_text(block: ToolResponse) -> str:
 
 async def messages_to_openai(
     messages: Sequence[Message],
+    *,
+    hints: ProviderCallHints | None = None,
 ) -> tuple[str | None, list[dict[str, Any]]]:
     """Split system prompt text vs OpenAI Chat messages (block-native)."""
     system_parts: list[str] = []
@@ -263,7 +354,7 @@ async def messages_to_openai(
                     }
                 )
             elif isinstance(item, File):
-                content.append({"type": "text", "text": await _user_file_content(item)})
+                content.append({"type": "text", "text": await _user_file_content(item, hints)})
             else:
                 raise ValueError(
                     f"unsupported user content block for OpenAI-compat: {type(item).__name__}"
@@ -334,7 +425,7 @@ async def messages_to_openai(
                     {
                         "role": "tool",
                         "tool_call_id": block.id,
-                        "content": await _flatten_tool_response_text(block),
+                        "content": await _flatten_tool_response_text(block, hints),
                     }
                 )
                 promoted_images.extend((block.id, b) for b in block.result if isinstance(b, Image))
@@ -430,8 +521,10 @@ async def count_openai_compat_input_tokens(
     encoding: Any,
     messages: Sequence[Message],
     tools: Sequence[ToolDef],
+    *,
+    hints: ProviderCallHints | None = None,
 ) -> int:
-    system, oai_messages = await messages_to_openai(messages)
+    system, oai_messages = await messages_to_openai(messages, hints=hints)
     if system:
         oai_messages = [{"role": "system", "content": system}, *oai_messages]
     tool_defs = openai_tools(tools) if tools else []
@@ -911,6 +1004,7 @@ async def count_input_tokens_tiktoken(
     provider: str,
     max_request_bytes: int,
     thinking_budget: int | None = None,
+    hints: ProviderCallHints | None = None,
 ) -> int:
     """Shared ``count_input_tokens`` body for tiktoken-based providers.
 
@@ -939,7 +1033,7 @@ async def count_input_tokens_tiktoken(
         enc = tiktoken.encoding_for_model(model)
     except KeyError:
         enc = tiktoken.get_encoding("cl100k_base")
-    return await count_openai_compat_input_tokens(enc, msgs, tools)
+    return await count_openai_compat_input_tokens(enc, msgs, tools, hints=hints)
 
 
 _OMITTED_IMAGE_TEXT = (
@@ -1145,6 +1239,75 @@ def is_ollama_request_body_read_error(exc: BaseException) -> bool:
     return True
 
 
+_OPENAI_STRIPPABLE = ("temperature", "reasoning_effort")
+
+
+def drop_rejected_sampling(
+    kwargs: dict[str, Any],
+    exc: BaseException,
+    *,
+    provider: str = "",
+    model: str = "",
+) -> list[str]:
+    """Remove sampling kwargs a 400 blames. Returns the names that were removed.
+
+    When ``provider`` and ``model`` are set, the names are remembered so later
+    turns omit them instead of paying for another rejected request.
+    """
+    if not is_status_400(exc):
+        return []
+    msg = str(exc)
+    dropped = {
+        name: kwargs[name]
+        for name in _OPENAI_STRIPPABLE
+        if name in kwargs and blames_sampling_param(msg, name)
+    }
+    for name in dropped:
+        del kwargs[name]
+    if dropped:
+        remember_rejected_sampling(provider, model, dropped)
+    return list(dropped)
+
+
+async def iter_openai_compat_stream_with_sampling_retry(
+    client: Any,
+    kwargs: dict[str, Any],
+    *,
+    provider: str,
+    n_messages: int,
+    n_tools: int,
+) -> AsyncIterator[ProviderEvent]:
+    """``iter_openai_compat_stream`` that retries once per sampling kwarg a 400 blames.
+
+    Only retries before the first event, so callers never see duplicated output.
+    """
+    model = str(kwargs.get("model") or "")
+    while True:
+        yielded = False
+        try:
+            async for event in iter_openai_compat_stream(
+                client,
+                kwargs,
+                provider=provider,
+                n_messages=n_messages,
+                n_tools=n_tools,
+            ):
+                yielded = True
+                yield event
+            return
+        except Exception as exc:
+            if yielded:
+                raise
+            dropped = drop_rejected_sampling(kwargs, exc, provider=provider, model=model)
+            if not dropped:
+                raise
+            _log.warning(
+                "%s stream rejected sampling params, retrying without them %s",
+                provider,
+                kv(provider=provider, model=model, dropped=dropped),
+            )
+
+
 async def stream_chat_completions_with_tool_fallback(
     *,
     base_url: str,
@@ -1158,6 +1321,7 @@ async def stream_chat_completions_with_tool_fallback(
     reasoning_effort: str | None = None,
     extra_body: dict[str, Any] | None = None,
     max_request_bytes: int | None = None,
+    hints: ProviderCallHints | None = None,
 ) -> AsyncIterator[ProviderEvent]:
     """Shared ``stream`` body for OpenAI-compat providers.
 
@@ -1176,6 +1340,8 @@ async def stream_chat_completions_with_tool_fallback(
     """
     from openai import AsyncOpenAI  # noqa: PLC0415
 
+    from monkeybot.providers._sdk_client import cached_sdk_client, sdk_env  # noqa: PLC0415
+
     msgs = list(messages)
     if max_request_bytes is not None and max_request_bytes > 0:
         msgs = trim_message_media_for_byte_budget(
@@ -1185,22 +1351,34 @@ async def stream_chat_completions_with_tool_fallback(
             provider=provider,
             trim_files=False,
         )
-    system, oai_messages = await messages_to_openai(msgs)
+    system, oai_messages = await messages_to_openai(msgs, hints=hints)
     if system:
         oai_messages = [{"role": "system", "content": system}, *oai_messages]
 
-    client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+    client = cached_sdk_client(
+        ("openai-compat", base_url),
+        lambda: AsyncOpenAI(base_url=base_url, api_key=api_key),
+        # AsyncOpenAI still reads OPENAI_ORG_ID and the other OPENAI_* vars.
+        fingerprint=(api_key, sdk_env("OPENAI_")),
+    )
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": oai_messages,
         "stream": True,
-        "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if supports_param(model, "temperature"):
+        kwargs["temperature"] = temperature
     if tools:
         kwargs["tools"] = openai_tools(tools)
     if reasoning_effort is not None:
-        kwargs["reasoning_effort"] = reasoning_effort
+        if not suppress_thinking_for_auxiliary_call(messages, tools):
+            kwargs["reasoning_effort"] = reasoning_effort
+        elif reasoning_effort == REASONING_EFFORT_NONE or provider.startswith("ollama"):
+            # Curator and summarizer calls: Ollama accepts ``none``. Other providers
+            # may reject it, so they omit the configured effort instead.
+            kwargs["reasoning_effort"] = REASONING_EFFORT_NONE
+    omit_known_rejected(provider, model, kwargs)
     if extra_body:
         kwargs["extra_body"] = extra_body
     if max_request_bytes is not None and max_request_bytes > 0:
@@ -1224,7 +1402,7 @@ async def stream_chat_completions_with_tool_fallback(
         retry_delay: float | None = None
         async with sem if sem is not None else contextlib.nullcontext():
             try:
-                async for event in iter_openai_compat_stream(
+                async for event in iter_openai_compat_stream_with_sampling_retry(
                     client,
                     kwargs,
                     provider=provider,
@@ -1341,6 +1519,8 @@ __all__ = [
     "ProviderRateLimitError",
     "ProviderServerError",
     "count_input_tokens_tiktoken",
+    "drop_rejected_sampling",
+    "iter_openai_compat_stream_with_sampling_retry",
     "count_openai_compat_input_tokens",
     "is_rate_limit_error",
     "is_server_error",

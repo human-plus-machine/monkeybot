@@ -21,6 +21,7 @@ SUPPORTED_MODEL_PROVIDERS = frozenset(
         "ollama-local",
         "nvidia",
         "openrouter",
+        "fireworks",
         "fake",
         "aws_bedrock",
     }

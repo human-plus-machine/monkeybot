@@ -4,7 +4,8 @@
 #
 # Precedence: environment variables (and optional root `.env`) win over values here
 # except ``model.*`` (provider, name, temperature, max_tokens, thinking_budget,
-# context_window, summarization_model, max_turns, cache_retention) which are YAML-only.
+# reasoning_effort, context_window, summarization_model, max_turns, cache_retention)
+# which are YAML-only.
 #
 # Secrets are not committed here. Create a `.env` in the repo root when you need keys or
 # machine-local paths, for example:
@@ -14,6 +15,7 @@
 #   ANTHROPIC_VERTEX_PROJECT_ID, ANTHROPIC_VERTEX_REGION,
 #   OLLAMA_BASE_URL (default http://localhost:11434, no API key needed),
 #   NVIDIA_API_KEY (free key from https://build.nvidia.com),
+#   FIREWORKS_API_KEY (https://fireworks.ai/account/api-keys),
 #   TAVILY_API_KEY, FIRECRAWL_API_KEY, SANDBOX_API_KEY,
 #   MONKEYBOT_TOOL_DENIED_PATTERNS, MONKEYBOT_CORS_ALLOW_ORIGINS, MONKEYBOT_CONFIG, …
 #
@@ -89,7 +91,7 @@ paths:
   workspace_root: ./workspace
 
 model:
-  # gemini | openai | anthropic | vertex-claude | huggingface | ollama-cloud | ollama-local | ollama | nvidia | openrouter | aws_bedrock | fake
+  # gemini | openai | anthropic | vertex-claude | huggingface | ollama-cloud | ollama-local | ollama | nvidia | openrouter | fireworks | aws_bedrock | fake
   provider: gemini
   name: gemini-3.1-flash-live-preview
   temperature: 0.7
@@ -97,6 +99,13 @@ model:
   # Gemini: -1 = model default, 0 = off, N = token budget
   # Ollama (Gemma 4, Qwen3, …): -1 = server default, 0 = off (reasoning_effort: none)
   thinking_budget: -1
+  # Effort level for models that take one (low, medium, high, xhigh, max, …).
+  # Omit to use the provider default. Wins over thinking_budget when set.
+  # off / none / disabled turn thinking off (a bare YAML `off` is read as false; also off).
+  # Gemini only sends levels its SDK knows (minimal, low, medium, high); anything
+  # else falls back to thinking_budget. A value the API rejects is omitted on
+  # later turns. Bedrock sends it for Claude ids only.
+  # reasoning_effort: high
   # Summarisation trigger (tokens). Also drives soft-spill / read_file char budgets.
   context_window: 1000000
   max_turns: 1000

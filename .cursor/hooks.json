@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [
+      {
+        "command": ".cursor/hooks/pre-pr.py",
+        "matcher": "gh\\s+pr\\s+create",
+        "timeout": 2400,
+        "failClosed": true
+      }
+    ],
+    "beforeMCPExecution": [
+      {
+        "command": ".cursor/hooks/pre-pr.py",
+        "matcher": "create_pull_request",
+        "timeout": 2400,
+        "failClosed": true
+      }
+    ]
+  }
+}

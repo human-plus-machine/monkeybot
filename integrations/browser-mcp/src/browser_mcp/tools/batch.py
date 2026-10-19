@@ -22,6 +22,7 @@ def _act_context(helpers: Any, handle: tabs.TabHandle) -> actions.ActContext:
         login=login._sealed_login,
     )
 
+
 @mcp.tool()
 @_public_tool
 def browser_act(
@@ -44,9 +45,7 @@ def browser_act(
     validated = actions.validate_steps(steps)
     if isinstance(validated, dict):
         return results.json_text(validated)
-    prep = prepare_action(
-        tab, observe=observe, default="diff", focus=True, capture_url=True
-    )
+    prep = prepare_action(tab, observe=observe, default="diff", focus=True, capture_url=True)
     if prep.error:
         return prep.error
     ctx = _act_context(prep.helpers, prep.handle)

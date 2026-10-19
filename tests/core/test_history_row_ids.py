@@ -227,11 +227,10 @@ class _SummaryProvider:
 async def test_compaction_keeps_head_and_tail_ids_and_adds_a_summary_row(store) -> None:
     for i in range(20):
         await store.append("t", _text("user" if i % 2 == 0 else "assistant", "x" * 400 + str(i)))
-    loaded = transform_context(await store.load("t"))
+    loaded = await store.load("t")
     original = {m.row_id for m in loaded}
     summarized = await _summarize_history(
         "t",
-        loaded,
         store,
         _SummaryProvider(),
         "m",
@@ -245,6 +244,42 @@ async def test_compaction_keeps_head_and_tail_ids_and_adds_a_summary_row(store) 
     assert kept == [m.row_id for m in loaded if m.row_id in set(kept)]
     assert len(new) == 1 and new[0].row_id
     assert any(isinstance(b, Text) and "summary" in b.text for b in new[0].content)
+
+
+@pytest.mark.asyncio
+async def test_compaction_on_raw_rows_keeps_rows_transform_context_would_merge(store) -> None:
+    """A UI-only row between same-role rows is merged by transform_context; raw compaction keeps all."""
+    for i in range(12):
+        await store.append("t", _text("user" if i % 2 == 0 else "assistant", "x" * 400 + str(i)))
+    await store.append(
+        "t",
+        Message(
+            role="user",
+            content=[SystemNotification(notification_type="verifierVerdict", msg="ok")],
+        ),
+    )
+    await store.append("t", _text("assistant", "tail-a"))
+    await store.append("t", _text("user", "tail-b"))
+    await store.append("t", _text("assistant", "tail-c"))
+    raw = await store.load("t")
+    assert len(transform_context(raw)) < len(raw)
+    ids_before = {m.row_id for m in raw}
+    assert await _summarize_history(
+        "t",
+        store,
+        _SummaryProvider(),  # type: ignore[arg-type]
+        "m",
+        window_tokens=100,
+    )
+    rows = await store.load("t")
+    assert any(
+        isinstance(b, SystemNotification) and b.notification_type == "verifierVerdict"
+        for m in rows
+        for b in m.content
+    )
+    tail_ids = {m.row_id for m in raw[-3:]}
+    assert tail_ids <= {m.row_id for m in rows}
+    assert {m.row_id for m in rows} - ids_before  # summary row is new
 
 
 @pytest.mark.asyncio

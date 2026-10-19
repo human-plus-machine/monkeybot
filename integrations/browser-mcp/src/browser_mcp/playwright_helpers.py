@@ -100,7 +100,9 @@ def _connect_impl(ws_url: str, headers: dict[str, str]) -> None:
     # Playwright's driver rejects an empty headers dict ("expected array, got
     # object") -- only pass it through when non-empty. generate_ws_headers()
     # always returns a populated dict in practice (Host/X-Amz-Date/Authorization/...).
-    browser = pw.chromium.connect_over_cdp(ws_url, headers=headers or None, timeout=_CONNECT_TIMEOUT_MS)
+    browser = pw.chromium.connect_over_cdp(
+        ws_url, headers=headers or None, timeout=_CONNECT_TIMEOUT_MS
+    )
     context = browser.contexts[0] if browser.contexts else browser.new_context()
     page = context.pages[0] if context.pages else context.new_page()
 
@@ -187,11 +189,7 @@ def new_tab(url: str = "about:blank", background: bool = False) -> str:
     page = _state["page"]
     blank = page is None or page.url in ("", "about:blank") or page.url.startswith("about:blank#")
     # Background opens always create a page so we never steal the focused tab.
-    reuse = (
-        not background
-        and page is not None
-        and not (url != "about:blank" and not blank)
-    )
+    reuse = not background and page is not None and not (url != "about:blank" and not blank)
     if not reuse:
         try:
             page = context.new_page()
@@ -262,7 +260,9 @@ def click_at_xy(x: float, y: float, button: str = "left", clicks: int = 1) -> No
 def _wait_for_element(selector: str, timeout: float, visible: bool) -> bool:
     page = _page()
     try:
-        page.wait_for_selector(selector, timeout=timeout * 1000, state="visible" if visible else "attached")
+        page.wait_for_selector(
+            selector, timeout=timeout * 1000, state="visible" if visible else "attached"
+        )
         return True
     except Exception:
         return False
@@ -357,10 +357,19 @@ def list_tabs(include_chrome: bool = True) -> list[dict]:
     out = []
     for page in context.pages:
         url = page.url
-        if not include_chrome and url.startswith(("chrome://", "chrome-untrusted://", "devtools://", "about:")):
+        if not include_chrome and url.startswith(
+            ("chrome://", "chrome-untrusted://", "devtools://", "about:")
+        ):
             continue
         _tab_ids[id(page)] = page
-        out.append({"targetId": str(id(page)), "target_id": str(id(page)), "title": page.title(), "url": url})
+        out.append(
+            {
+                "targetId": str(id(page)),
+                "target_id": str(id(page)),
+                "title": page.title(),
+                "url": url,
+            }
+        )
     return out
 
 

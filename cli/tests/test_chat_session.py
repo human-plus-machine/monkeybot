@@ -354,9 +354,7 @@ def test_attach_or_create_session_recreates_on_404() -> None:
 
         async def fake_post(url: str, json: object) -> httpx.Response:
             request = httpx.Request("POST", url)
-            return httpx.Response(
-                201, json={"session_id": "abc", "created_at": 1}, request=request
-            )
+            return httpx.Response(201, json={"session_id": "abc", "created_at": 1}, request=request)
 
         controller._client.get = fake_get
         controller._client.post = fake_post

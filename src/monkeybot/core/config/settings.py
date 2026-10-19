@@ -13,6 +13,7 @@ from monkeybot.core.config.yaml_loader import (
 )
 from monkeybot.core.llm.provider import Provider
 from monkeybot.providers.claude import ClaudeProvider
+from monkeybot.providers.fireworks import FireworksProvider
 from monkeybot.providers.gemini import GeminiProvider
 from monkeybot.providers.huggingface import HuggingFaceProvider
 from monkeybot.providers.nvidia import NvidiaProvider
@@ -221,6 +222,7 @@ def get_provider_config(
     temperature: float | None = None,
     max_tokens: int | None = None,
     thinking_budget: int | None = None,
+    reasoning_effort: str | None = None,
     config: RuntimeConfig | None = None,
 ) -> ProviderConfig:
     """Resolve a Provider and model id from a pinned snapshot, environment, or explicit parameters."""
@@ -236,7 +238,14 @@ def get_provider_config(
             "or use the gateway fake provider path."
         )
     resolved_model = _agent_model_name(config, model_name)
-    sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens, config=config)
+    sampling = resolve_model_sampling(
+        temperature=temperature,
+        max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort,
+        config=config,
+    )
+    # "" means "explicitly unset" so providers do not re-read a leftover process env var.
+    effort_arg = "" if sampling.reasoning_effort is None else sampling.reasoning_effort
     thinking_budget = (
         thinking_budget
         if thinking_budget is not None
@@ -248,6 +257,7 @@ def get_provider_config(
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
                 thinking_budget=thinking_budget,
+                reasoning_effort=effort_arg,
             ),
             resolved_model,
         )
@@ -263,6 +273,7 @@ def get_provider_config(
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
                 thinking_budget=thinking_budget,
+                reasoning_effort=effort_arg,
                 api_key=api_key,
             ),
             resolved_model,
@@ -272,6 +283,7 @@ def get_provider_config(
             OpenAIProvider(
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
+                reasoning_effort=effort_arg,
             ),
             resolved_model,
         )
@@ -280,6 +292,7 @@ def get_provider_config(
             ClaudeProvider(
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
+                reasoning_effort=effort_arg,
             ),
             resolved_model,
         )
@@ -305,6 +318,7 @@ def get_provider_config(
                 region=region,
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
+                reasoning_effort=effort_arg,
             ),
             resolved_model,
         )
@@ -313,6 +327,7 @@ def get_provider_config(
             HuggingFaceProvider(
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
+                reasoning_effort=effort_arg,
             ),
             resolved_model,
         )
@@ -325,6 +340,7 @@ def get_provider_config(
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
                 thinking_budget=thinking_budget,
+                reasoning_effort=effort_arg,
                 keep_alive=keep_alive,
                 num_ctx=num_ctx,
             ),
@@ -335,6 +351,7 @@ def get_provider_config(
             NvidiaProvider(
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
+                reasoning_effort=effort_arg,
             ),
             resolved_model,
         )
@@ -343,6 +360,16 @@ def get_provider_config(
             OpenRouterProvider(
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
+                reasoning_effort=effort_arg,
+            ),
+            resolved_model,
+        )
+    if provider_key == "fireworks":
+        return ProviderConfig(
+            FireworksProvider(
+                temperature=sampling.temperature,
+                max_tokens=sampling.max_tokens,
+                reasoning_effort=effort_arg,
             ),
             resolved_model,
         )
@@ -355,13 +382,14 @@ def get_provider_config(
                 aws_region=aws_region,
                 temperature=sampling.temperature,
                 max_tokens=sampling.max_tokens,
+                reasoning_effort=effort_arg,
             ),
             resolved_model,
         )
     raise ValueError(
         f"Unsupported model provider: {provider_key}. "
         "Supported providers: google_vertexai, openai, anthropic, vertex_anthropic, "
-        "huggingface, ollama, ollama-cloud, ollama-local, nvidia, openrouter, aws_bedrock"
+        "huggingface, ollama, ollama-cloud, ollama-local, nvidia, openrouter, fireworks, aws_bedrock"
     )
 
 
@@ -819,9 +847,7 @@ def ollama_options_from_config(config_path: str | None = None) -> tuple[str | No
     num_ctx: int | None
     if raw_num_ctx is None:
         num_ctx = None
-    elif isinstance(raw_num_ctx, bool) or not isinstance(raw_num_ctx, int):
-        raise ConfigError(f"model.num_ctx must be a positive integer, got {raw_num_ctx!r}")
-    elif raw_num_ctx < 1:
+    elif isinstance(raw_num_ctx, bool) or not isinstance(raw_num_ctx, int) or raw_num_ctx < 1:
         raise ConfigError(f"model.num_ctx must be a positive integer, got {raw_num_ctx!r}")
     else:
         num_ctx = raw_num_ctx

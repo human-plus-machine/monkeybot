@@ -10,6 +10,7 @@ from monkeybot.core.llm.provider import Message, ProviderCallHints, ProviderEven
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import (
+    anthropic_sampling_kwargs,
     anthropic_tool_defs,
     build_anthropic_messages,
     count_anthropic_input_tokens,
@@ -17,8 +18,8 @@ from monkeybot.providers._utils import (
     iter_anthropic_sdk_stream,
     prepare_anthropic_cached_payload,
     split_leading_system,
+    suppress_thinking_for_auxiliary_call,
 )
-from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.request_budget import trim_message_media_for_byte_budget
 from monkeybot.providers.sampling import resolve_model_sampling
 
@@ -43,6 +44,7 @@ class VertexClaudeProvider:
         region: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         from monkeybot.core.config.snapshot import current_env
 
@@ -54,9 +56,14 @@ class VertexClaudeProvider:
         )
         if not self._project_id:
             raise ValueError("ANTHROPIC_VERTEX_PROJECT_ID is not set (or pass project_id=)")
-        sampling = resolve_model_sampling(temperature=temperature, max_tokens=max_tokens)
+        sampling = resolve_model_sampling(
+            temperature=temperature,
+            max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
+        )
         self._temperature = sampling.temperature
         self._max_tokens = sampling.max_tokens
+        self._reasoning_effort = sampling.reasoning_effort
 
     async def count_input_tokens(
         self,
@@ -69,7 +76,6 @@ class VertexClaudeProvider:
     ) -> int:
         del thinking_budget, hints
         import anthropic  # noqa: PLC0415
-        from anthropic import AsyncAnthropicVertex  # noqa: PLC0415
 
         messages = trim_message_media_for_byte_budget(
             messages,
@@ -79,7 +85,7 @@ class VertexClaudeProvider:
         )
         system, msgs = split_leading_system(messages)
         converted_messages = build_anthropic_messages(msgs)
-        client = AsyncAnthropicVertex(project_id=self._project_id, region=self._region)
+        client = self._sdk_client()
         converted_tools = anthropic_tool_defs(tools) if tools else None
         try:
             return await count_anthropic_input_tokens(
@@ -117,12 +123,11 @@ class VertexClaudeProvider:
     ) -> AsyncIterator[ProviderEvent]:
         del thinking_budget
         import anthropic  # noqa: PLC0415
-        from anthropic import AsyncAnthropicVertex  # noqa: PLC0415
 
         retention = hints.cache_retention if hints is not None else "short"
         messages = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
         system, msgs = split_leading_system(messages)
-        client = AsyncAnthropicVertex(project_id=self._project_id, region=self._region)
+        client = self._sdk_client()
         system_param, converted_messages, tools_param = prepare_anthropic_cached_payload(
             system=system,
             messages=msgs,
@@ -131,15 +136,21 @@ class VertexClaudeProvider:
             not_given=anthropic.NOT_GIVEN,
         )
 
+        auxiliary = suppress_thinking_for_auxiliary_call(messages, tools)
         stream_kwargs: dict[str, Any] = {
             "model": model,
             "system": system_param,
             "messages": cast(Any, converted_messages),
             "tools": tools_param,
             "max_tokens": self._max_tokens,
+            **anthropic_sampling_kwargs(
+                model=model,
+                temperature=self._temperature,
+                thinking_budget=None,
+                reasoning_effort=None if auxiliary else self._reasoning_effort,
+                provider="vertex_claude",
+            ),
         }
-        if supports_param(model, "temperature"):
-            stream_kwargs["temperature"] = self._temperature
         async for event in iter_anthropic_sdk_stream(
             client,
             stream_kwargs,
@@ -147,5 +158,21 @@ class VertexClaudeProvider:
             error_message="Vertex Claude stream error: %s",
             n_messages=len(messages),
             n_tools=len(tools),
+            fallback_temperature=self._temperature,
         ):
             yield event
+
+    def _sdk_client(self) -> Any:
+        """One Vertex Claude client for this project and region."""
+        from anthropic import AsyncAnthropicVertex  # noqa: PLC0415
+
+        from monkeybot.providers._sdk_client import cached_sdk_client, sdk_env
+
+        project_id = self._project_id
+        region = self._region
+        return cached_sdk_client(
+            ("vertex-claude", project_id, region),
+            lambda: AsyncAnthropicVertex(project_id=project_id, region=region),
+            # ANTHROPIC_VERTEX_BASE_URL is read by the constructor.
+            fingerprint=sdk_env("ANTHROPIC_VERTEX_"),
+        )

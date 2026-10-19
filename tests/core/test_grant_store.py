@@ -132,7 +132,9 @@ def test_persist_hook_routes_read_file_to_path_grant(tmp_path: Path) -> None:
         assert hook(tool, f"/Users/x/{tool}") is True
     grants = load_grants(path)
     assert grants.commands == ()
-    assert {p.path for p in grants.paths} == {f"/Users/x/{t}" for t in ("read_file", "load_file", "glob", "grep")}
+    assert {p.path for p in grants.paths} == {
+        f"/Users/x/{t}" for t in ("read_file", "load_file", "glob", "grep")
+    }
 
 
 def test_persist_hook_noop_for_unowned_tool(tmp_path: Path) -> None:

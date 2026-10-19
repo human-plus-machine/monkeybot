@@ -262,7 +262,9 @@ def test_palace_uri_rejects_object_store() -> None:
         palace_path_from_uri("s3://bucket/prefix")
 
 
-def test_layout_falls_back_from_object_store_uri(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_layout_falls_back_from_object_store_uri(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from monkeybot.core.layout import AgentLayout, resolve_memory_storage_uri
 
     uri = resolve_memory_storage_uri("gcs://bucket/mem", tmp_path)
@@ -273,7 +275,9 @@ def test_layout_falls_back_from_object_store_uri(tmp_path: Path, monkeypatch: py
     assert layout.memory_storage_uri.startswith("local://")
 
 
-def test_create_palace_requires_memory_extra(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_create_palace_requires_memory_extra(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     from monkeybot.core.memory import palace as palace_mod
 
     monkeypatch.setattr(palace_mod, "mempalace_available", lambda: False)

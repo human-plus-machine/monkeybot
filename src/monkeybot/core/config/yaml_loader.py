@@ -7,7 +7,10 @@ import os
 from pathlib import Path
 from typing import Any
 
-from monkeybot.core.layout import resolve_agent_root, resolve_config_path as resolve_layout_config_path
+from monkeybot.core.layout import (
+    resolve_agent_root,
+    resolve_config_path as resolve_layout_config_path,
+)
 from monkeybot.core.config.runtime_env import _load_yaml_file, _merge_with_includes
 
 logger = logging.getLogger(__name__)
@@ -29,7 +32,9 @@ def resolve_monkeybot_config_path(
     return resolved
 
 
-def load_monkeybot_yaml_dict(config_path: str | Path | None = None) -> tuple[Path | None, dict[str, Any]]:
+def load_monkeybot_yaml_dict(
+    config_path: str | Path | None = None,
+) -> tuple[Path | None, dict[str, Any]]:
     """Load merged monkeybot.yaml (with includes) as a dict."""
     path = resolve_monkeybot_config_path(config_path)
     if path is None:

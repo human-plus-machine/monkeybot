@@ -480,9 +480,7 @@ def test_timestamps_toggle(tmp_path: Path) -> None:
             await pilot.pause()
             user = list(app.query(UserTurn))[0]
             assert user.show_timestamp is False
-            app.query_one("#prompt", Composer).post_message(
-                Composer.Submitted("/timestamps")
-            )
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("/timestamps"))
             await pilot.pause()
             assert app.show_timestamps is True
             assert user.show_timestamp is True
@@ -946,8 +944,12 @@ def test_restart_session_controller() -> None:
         assert list(controller._abandoned) == []
         assert controller.stream_alive is True
         client.post.assert_awaited()
-        assert any(e.kind == "session_ready" and e.payload.get("session_id") == "sess-2" for e in events)
-        assert any(e.kind == "connection_state" and e.payload.get("state") == "connected" for e in events)
+        assert any(
+            e.kind == "session_ready" and e.payload.get("session_id") == "sess-2" for e in events
+        )
+        assert any(
+            e.kind == "connection_state" and e.payload.get("state") == "connected" for e in events
+        )
         if controller._stream_task is not None:
             controller._stream_task.cancel()
             with __import__("contextlib").suppress(asyncio.CancelledError):
@@ -1631,6 +1633,7 @@ def test_send_user_message_sets_submit_in_flight_before_worker(tmp_path: Path) -
 
     app._submit_message = _capture_submit  # type: ignore[method-assign]
     app._mount_user = lambda _t: None  # type: ignore[method-assign]
+
     # Avoid Textual widget lookups outside run_test.
     class _Composer:
         def push_history(self, _line: str) -> None:
@@ -1709,9 +1712,7 @@ def test_slash_model_switch_failure_restores_previous(tmp_path: Path) -> None:
 
         app._controller.restart_session = flaky_restart  # type: ignore[method-assign]
         async with app.run_test() as pilot:
-            app.query_one("#prompt", Composer).post_message(
-                Composer.Submitted("/model bogus/nope")
-            )
+            app.query_one("#prompt", Composer).post_message(Composer.Submitted("/model bogus/nope"))
             await pilot.pause()
             assert app.provider == "fake"
             assert app.model == "m"
@@ -1738,7 +1739,9 @@ def test_slash_status_mounts_summary(tmp_path: Path) -> None:
             app.query_one("#prompt", Composer).post_message(Composer.Submitted("/status"))
             await pilot.pause()
             systems = [w.body for w in app.query(SystemLine)]
-            assert any("session" in body and "model" in body and "fake/m" in body for body in systems)
+            assert any(
+                "session" in body and "model" in body and "fake/m" in body for body in systems
+            )
 
     asyncio.run(_run())
 
@@ -1808,9 +1811,7 @@ def test_slash_config_uses_explicit_config_path(tmp_path: Path) -> None:
     asyncio.run(_run())
 
 
-def test_slash_config_edit_uses_explicit_config_path(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_slash_config_edit_uses_explicit_config_path(tmp_path: Path, monkeypatch) -> None:
     async def _run() -> None:
         custom = tmp_path / "elsewhere" / "monkeybot.yaml"
         custom.parent.mkdir()
@@ -2101,9 +2102,7 @@ def test_at_mention_shows_file_options_and_tab_inserts_without_submit(tmp_path: 
     asyncio.run(_run())
 
 
-def test_at_completion_failure_is_logged_not_swallowed_silently(
-    tmp_path: Path, caplog
-) -> None:
+def test_at_completion_failure_is_logged_not_swallowed_silently(tmp_path: Path, caplog) -> None:
     async def _run() -> None:
         (tmp_path / "readme.md").write_text("x")
         app = ChatApp(
@@ -2364,9 +2363,7 @@ def test_bye_prints_continue_hint_when_session_started(tmp_path: Path) -> None:
             await pilot.pause()
             systems = [w.body for w in app.query(SystemLine)]
             assert any("Goodbye" in body for body in systems)
-            assert any(
-                "monkeybot chat --continue" in body for body in systems
-            )
+            assert any("monkeybot chat --continue" in body for body in systems)
 
     asyncio.run(_run())
 

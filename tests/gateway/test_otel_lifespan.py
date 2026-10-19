@@ -59,6 +59,7 @@ async def test_asgi_lifespan_loads_agent_dotenv_before_observability(
 ) -> None:
     """ASGI imports defer bootstrap, but startup must load root .env first."""
     from monkeybot.core.mcp.mcp_client import MCPClient
+
     agent = tmp_path / "agent"
     config_dir = agent / "monkeybot_config"
     config_dir.mkdir(parents=True)

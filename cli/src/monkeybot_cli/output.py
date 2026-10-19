@@ -73,7 +73,9 @@ class CommandReport:
             if c.remediation and c.status == "fail":
                 print(f"      → {c.remediation}")
         s = self.summary
-        print(f"  summary: {s['passed']} passed, {s['warnings']} warnings, {s['failed']} failed, {s['skipped']} skipped")
+        print(
+            f"  summary: {s['passed']} passed, {s['warnings']} warnings, {s['failed']} failed, {s['skipped']} skipped"
+        )
 
     def emit(self, *, as_json: bool) -> int:
         self.compute_ok()

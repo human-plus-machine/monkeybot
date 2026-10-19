@@ -381,6 +381,13 @@ def _safe_spill_filename(call_id: str) -> str:
     return safe or "call"
 
 
+def _spill_file_matches(out_path: Path, text: str) -> bool:
+    try:
+        return out_path.is_file() and out_path.stat().st_size == len(text.encode("utf-8"))
+    except OSError:
+        return False
+
+
 def _spill_dir_for_thread(workspace_root: Path, thread_id: str) -> tuple[str, Path] | None:
     """Return ``(relative posix dir, absolute dir)`` under spill root, or None.
 
@@ -417,8 +424,13 @@ def write_spill_with_inventory(
     *,
     tool_name: str = "unknown",
     inline_budget: int = 0,
+    reuse_existing: bool = False,
 ) -> str:
     """Write raw ``text`` to spill file; return soft-spill history text.
+
+    ``reuse_existing`` skips the write when the spill file already holds the
+    same number of bytes. Only for content-addressed ``call_id`` values (e.g. a
+    content digest), where the same name always means the same payload.
 
     Persists the full payload when a contained directory exists. When the
     sanitized dir and the ``_`` fallback both escape the spill root, skip the
@@ -441,8 +453,9 @@ def write_spill_with_inventory(
             text, "(unavailable)", tool_name=tool_name, inline_budget=inline_budget
         )
         return f"{body_prefix}\n{note}" if body_prefix else note
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(text, encoding="utf-8")
+    if not (reuse_existing and _spill_file_matches(out_path, text)):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(text, encoding="utf-8")
     body_prefix, note = spill_inline_and_note(
         text, rel, tool_name=tool_name, inline_budget=inline_budget
     )

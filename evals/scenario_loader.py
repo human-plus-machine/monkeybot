@@ -24,7 +24,11 @@ def parse_scenario_yaml(text: str, *, sid: str | None) -> Scenario:
             raise ValueError("sessions must be a non-empty list of message lists")
         sessions = []
         for group in sessions_raw:
-            if not isinstance(group, list) or not group or not all(isinstance(m, str) for m in group):
+            if (
+                not isinstance(group, list)
+                or not group
+                or not all(isinstance(m, str) for m in group)
+            ):
                 raise ValueError("each sessions group must be a non-empty list of strings")
             sessions.append(list(group))
     elif not isinstance(messages, list) or not messages:
@@ -66,7 +70,9 @@ def load_disk_scenarios(root: Path = EVAL_ROOT / "scenarios") -> list[Scenario]:
     return scenarios
 
 
-def load_scenarios_by_id(scenario_ids: list[str], root: Path = EVAL_ROOT / "scenarios") -> list[Scenario]:
+def load_scenarios_by_id(
+    scenario_ids: list[str], root: Path = EVAL_ROOT / "scenarios"
+) -> list[Scenario]:
     """Load exactly the scenarios named in a suite manifest, in that order."""
     by_id = {s.id: s for s in load_disk_scenarios(root)}
     missing = [sid for sid in scenario_ids if sid not in by_id]

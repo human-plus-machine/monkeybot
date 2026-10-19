@@ -22,7 +22,13 @@ from report import compare_to_baseline, main  # noqa: E402
 
 
 def _agg(**kwargs) -> ScenarioAggregate:
-    base = {"scenario_id": "s", "status": "passed", "input_tokens": 100, "output_tokens": 50, "cost_usd": 0.01}
+    base = {
+        "scenario_id": "s",
+        "status": "passed",
+        "input_tokens": 100,
+        "output_tokens": 50,
+        "cost_usd": 0.01,
+    }
     base.update(kwargs)
     return ScenarioAggregate(**base)
 
@@ -37,11 +43,15 @@ def _record(scenarios: list[ScenarioAggregate]) -> RunRecord:
 
 
 def _baseline(scenarios: list[ScenarioAggregate]) -> BaselineFile:
-    return BaselineFile(suite="smoke", scenarios=scenarios, suite_aggregate=build_suite_aggregate(scenarios))
+    return BaselineFile(
+        suite="smoke", scenarios=scenarios, suite_aggregate=build_suite_aggregate(scenarios)
+    )
 
 
 def test_no_baseline_only_checks_current_run() -> None:
-    current = _record([_agg(status="passed"), _agg(scenario_id="t", status="failed", requirement_failures=["x"])])
+    current = _record(
+        [_agg(status="passed"), _agg(scenario_id="t", status="failed", requirement_failures=["x"])]
+    )
     hard, warn = compare_to_baseline(None, current)
     assert len(hard) == 1
     assert "t" in hard[0]
@@ -115,12 +125,32 @@ def test_cli_fail_on_regression_does_not_require_baseline() -> None:
 
         passing = _record([_agg(status="passed")])
         run_path = save_run(passing, runs_dir=tmp_path)
-        rc = main(["--suite", "smoke", "--run", str(run_path), "--baseline", str(no_baseline), "--fail-on-regression"])
+        rc = main(
+            [
+                "--suite",
+                "smoke",
+                "--run",
+                str(run_path),
+                "--baseline",
+                str(no_baseline),
+                "--fail-on-regression",
+            ]
+        )
         assert rc == 0
 
         failing = _record([_agg(status="failed", requirement_failures=["nope"])])
         run_path = save_run(failing, runs_dir=tmp_path)
-        rc = main(["--suite", "smoke", "--run", str(run_path), "--baseline", str(no_baseline), "--fail-on-regression"])
+        rc = main(
+            [
+                "--suite",
+                "smoke",
+                "--run",
+                str(run_path),
+                "--baseline",
+                str(no_baseline),
+                "--fail-on-regression",
+            ]
+        )
         assert rc == 1
 
 
@@ -130,10 +160,18 @@ def test_cli_require_baseline_hard_fails_when_missing() -> None:
         no_baseline = tmp_path / "does-not-exist.json"
         passing = _record([_agg(status="passed")])
         run_path = save_run(passing, runs_dir=tmp_path)
-        rc = main([
-            "--suite", "smoke", "--run", str(run_path), "--baseline", str(no_baseline),
-            "--fail-on-regression", "--require-baseline",
-        ])
+        rc = main(
+            [
+                "--suite",
+                "smoke",
+                "--run",
+                str(run_path),
+                "--baseline",
+                str(no_baseline),
+                "--fail-on-regression",
+                "--require-baseline",
+            ]
+        )
         assert rc == 1
 
 

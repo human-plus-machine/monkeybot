@@ -58,9 +58,7 @@ class MemoryHook:
             memory_duration_ms=round(timer.ms(), 1),
         )
         if lines:
-            heading = (
-                "Workspace conversation recall (verbatim; prefer `mempalace search` for older turns):"
-            )
+            heading = "Workspace conversation recall (verbatim; prefer `mempalace search` for older turns):"
             existing = (payload.inject_text or "").rstrip()
             payload.inject_text = f"{existing}\n\n{heading}" if existing else heading
             payload.inject_memory_lines = list(payload.inject_memory_lines) + lines

@@ -128,11 +128,7 @@ async def test_run_rejects_all_parse_error_batch_without_executing() -> None:
         events.append(e)
 
     assert exe.calls == []
-    errors = [
-        e.error
-        for e in events
-        if isinstance(e, ToolCallResult) and isinstance(e.error, str)
-    ]
+    errors = [e.error for e in events if isinstance(e, ToolCallResult) and isinstance(e.error, str)]
     assert errors == [
         "malformed tool args JSON: a",
         "malformed tool args JSON: b",

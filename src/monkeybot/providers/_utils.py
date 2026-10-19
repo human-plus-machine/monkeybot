@@ -31,7 +31,17 @@ from monkeybot.core.types.content_blocks import (
     ToolRequest,
     ToolResponse,
 )
+from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.pricing import estimate_cost
+from monkeybot.providers.rejected_sampling import (
+    blames_field_path,
+    is_status_400,
+    omit_known_rejected,
+    remember_rejected_sampling,
+    was_rejected,
+)
+from monkeybot.providers.sampling import REASONING_EFFORT_NONE, normalize_reasoning_effort
 
 _log = logging.getLogger(__name__)
 
@@ -103,20 +113,76 @@ async def count_anthropic_input_tokens(
 # can reject with HTTP 400. Model-specific cases are gated ahead of time via
 # ``model_capabilities.supports_param``; this is the fallback for a model that
 # table doesn't know about yet (e.g. released after this code was written).
-_STRIPPABLE_PARAMS = ("temperature", "thinking")
+_STRIPPABLE_PARAMS = ("temperature", "thinking", "output_config")
 
 
-def _rejects_param(msg: str, param: str) -> bool:
-    """True if ``msg`` blames ``param`` as a request field, not just mentions the word.
+def suppress_thinking_for_auxiliary_call(
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+) -> bool:
+    """True when this call is a known auxiliary job that must not use extended thinking.
 
-    Anthropic reports a rejected param as a field path — ``temperature: Extra
-    inputs are not permitted``, ``thinking.budget_tokens: ...``. A bare
-    substring test would also match unrelated 400s that merely name the
-    concept, e.g. the message-shaping error "When 'thinking' is enabled, a
-    final 'assistant' message must start with a thinking block" — stripping
-    there would silently disable extended thinking and hide a real bug.
+    Context curation and history summarization use ``tools=()`` and a fixed 2-message
+    shape. Extended thinking on those calls can stall the stream past the curator timeout.
     """
-    return re.search(rf"(?:^|[^a-z0-9_.]){re.escape(param)}(?:\.[a-z0-9_.]+)?:", msg) is not None
+    if tools:
+        return False
+    if len(messages) != 2 or messages[0].role != "system":
+        return False
+    sys_txt = "".join(b.text for b in messages[0].content if isinstance(b, Text))
+    markers = (
+        "You narrow context for another assistant",
+        "You compress prior agent conversation turns",
+        # Opening of ``history_compaction._COMPACTION_SUMMARY_SYSTEM``.
+        "Output exactly the Markdown structure shown inside <template>",
+    )
+    return any(marker in sys_txt for marker in markers)
+
+
+def anthropic_sampling_kwargs(
+    *,
+    model: str,
+    temperature: float,
+    thinking_budget: int | None,
+    reasoning_effort: str | None,
+    provider: str = "",
+) -> dict[str, Any]:
+    """Sampling fields for an Anthropic Messages request.
+
+    A set ``reasoning_effort`` uses adaptive thinking plus ``output_config.effort``
+    and omits temperature and ``budget_tokens``. ``off`` / ``none`` / ``disabled``
+    send neither. Otherwise temperature and a manual thinking budget are sent only
+    when the model is known to accept them. When ``provider`` already rejected
+    the effort fields for this model, the temperature path is used instead so
+    the configured temperature is not lost too.
+    """
+    effort = normalize_reasoning_effort(reasoning_effort) or ""
+    if effort == REASONING_EFFORT_NONE:
+        effort = ""
+        thinking_budget = None
+    if effort and (
+        was_rejected(provider, model, "output_config", {"effort": effort})
+        or was_rejected(provider, model, "thinking", {"type": "adaptive"})
+    ):
+        effort = ""
+    if effort:
+        return {
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": effort},
+        }
+    kwargs: dict[str, Any] = {}
+    if supports_param(model, "temperature"):
+        kwargs["temperature"] = temperature
+    if thinking_budget is not None and thinking_budget > 0 and supports_param(model, "thinking"):
+        kwargs["thinking"] = {
+            "type": "enabled",
+            "budget_tokens": thinking_budget,
+        }
+        # Anthropic requires temperature=1 when extended thinking is enabled —
+        # but only send it to models that accept a temperature at all.
+        if supports_param(model, "temperature"):
+            kwargs["temperature"] = 1
+    return kwargs
 
 
 _UNEXPECTED_KWARG = re.compile(r"unexpected keyword argument '([^']+)'")
@@ -154,10 +220,10 @@ def _strip_rejected_params(kwargs: dict[str, Any], exc: Exception) -> list[str]:
                 del kwargs[param]
                 return [param]
             return []
-    msg = str(exc).lower()
-    if "400" not in msg:
+    if not is_status_400(exc):
         return []
-    dropped = [p for p in _STRIPPABLE_PARAMS if p in kwargs and _rejects_param(msg, p)]
+    msg = str(exc).lower()
+    dropped = [p for p in _STRIPPABLE_PARAMS if p in kwargs and blames_field_path(msg, p)]
     for p in dropped:
         del kwargs[p]
     return dropped
@@ -188,8 +254,14 @@ async def iter_stream_with_param_retry(
         except Exception as exc:
             last_exc = exc
             if not started:
+                sent = dict(kwargs)
                 dropped = strip_rejected(kwargs, exc)
                 if dropped:
+                    remember_rejected_sampling(
+                        provider,
+                        str(model or ""),
+                        {name: sent.get(name) for name in dropped},
+                    )
                     _log.warning(
                         retry_message,
                         kv(provider=provider, model=model, dropped=dropped),
@@ -219,6 +291,7 @@ async def iter_anthropic_sdk_stream(
     error_message: str,
     n_messages: int | None = None,
     n_tools: int | None = None,
+    fallback_temperature: float | None = None,
 ) -> AsyncIterator[ProviderEvent]:
     """Stream an Anthropic ``messages.stream`` call, yielding provider events.
 
@@ -232,10 +305,27 @@ async def iter_anthropic_sdk_stream(
     already received deltas.
     """
     kwargs = dict(stream_kwargs)  # never mutate the caller's dict
+    model = str(kwargs.get("model") or "")
+    omit_known_rejected(provider, model, kwargs)
+
+    def strip_rejected(kw: dict[str, Any], exc: Exception) -> list[str]:
+        dropped = _strip_rejected_params(kw, exc)
+        # The effort path omits temperature. Once both effort fields are gone,
+        # send the configured ``fallback_temperature`` so this retry keeps it.
+        if (
+            fallback_temperature is not None
+            and {"thinking", "output_config"} & set(dropped)
+            and not {"thinking", "output_config", "temperature"} & kw.keys()
+            and supports_param(model, "temperature")
+            and not was_rejected(provider, model, "temperature", fallback_temperature)
+        ):
+            kw["temperature"] = fallback_temperature
+        return dropped
+
     async for event in iter_stream_with_param_retry(
         lambda kw: _stream_anthropic_once(client, kw, provider=provider),
         kwargs,
-        strip_rejected=_strip_rejected_params,
+        strip_rejected=strip_rejected,
         max_attempts=len(_STRIPPABLE_PARAMS) + 1,
         provider=provider,
         error_message=error_message,

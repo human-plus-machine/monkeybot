@@ -45,7 +45,9 @@ def test_kill_process_tree_swallows_permission_error(monkeypatch) -> None:
 
 
 def test_run_local_shell_timeout(tmp_path: Path) -> None:
-    out, code = run_local_shell(f"{sys.executable} -c 'import time; time.sleep(5)'", tmp_path, timeout=0.2)
+    out, code = run_local_shell(
+        f"{sys.executable} -c 'import time; time.sleep(5)'", tmp_path, timeout=0.2
+    )
     assert code is None
     assert "timed out" in out
 

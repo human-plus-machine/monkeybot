@@ -66,7 +66,9 @@ async def invocations(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse(status_code=400, content={"ok": False, "error": "invalid JSON body"})
     if not isinstance(body, dict):
-        return JSONResponse(status_code=400, content={"ok": False, "error": "body must be a JSON object"})
+        return JSONResponse(
+            status_code=400, content={"ok": False, "error": "body must be a JSON object"}
+        )
 
     message = _extract_message(body)
     if not message:

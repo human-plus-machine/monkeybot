@@ -65,9 +65,7 @@ class SessionAttachmentCatalog:
                 parsed = parse_attachment_descriptor_text(block.text)
                 if parsed is None:
                     continue
-                storage_path = attachment_workspace_path(
-                    self.session_id, parsed.attachment_id
-                )
+                storage_path = attachment_workspace_path(self.session_id, parsed.attachment_id)
                 self.records[parsed.attachment_id] = AttachmentRecord(
                     attachment_id=parsed.attachment_id,
                     filename=parsed.filename,

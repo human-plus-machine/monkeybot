@@ -65,9 +65,7 @@ def test_click_text_prefers_button_role(fixture_server: str, cdp_url: str) -> No
             observe="none",
         )
     )
-    result = json.loads(
-        server.browser_click_text("Submit", role="button", observe="full")
-    )
+    result = json.loads(server.browser_click_text("Submit", role="button", observe="full"))
     assert result["ok"] is True
     assert result["clicked"]["tagName"] == "button"
     status = json.loads(server.browser_js("!document.getElementById('status').hidden"))

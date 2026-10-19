@@ -166,9 +166,7 @@ def test_final_transcript_updates_buffer_after_audio_end() -> None:
     state.buffer.add_user_audio(chunk, fmt=state.realtime_session.input_format)
     state.buffer.mark_user_turn_boundary()
     assert state.buffer.current_user_text() == ""
-    state.apply_provider_event(
-        RealtimePartialTranscript(text="spoken question", is_final=True)
-    )
+    state.apply_provider_event(RealtimePartialTranscript(text="spoken question", is_final=True))
     assert state.buffer.current_user_text() == "spoken question"
     assert state.buffer.consume_user_text_for_commit() == "spoken question"
 

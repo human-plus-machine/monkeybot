@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from monkeybot_cli.commands.doctor import (
     _add_ollama_local_checks,
+    _add_reasoning_effort_check,
     _agent_defines_project_extra,
     _extra_remediation,
     _is_local_ollama_provider,
@@ -215,3 +216,54 @@ def test_ollama_local_thinking_default_pass_when_off() -> None:
         num_ctx=8192,
     )
     assert _doctor_by_id(report)["ollama.local.thinking_default"].status == "pass"
+
+
+def test_reasoning_effort_check_skips_when_unset() -> None:
+    report = CommandReport(command="doctor", ok=True, config_path=None)
+    _add_reasoning_effort_check(report, reasoning_effort=None)
+    assert _doctor_by_id(report)["model.reasoning_effort"].status == "skip"
+
+
+def test_reasoning_effort_check_passes_when_set() -> None:
+    report = CommandReport(command="doctor", ok=True, config_path=None)
+    _add_reasoning_effort_check(report, reasoning_effort=" High ")
+    result = _doctor_by_id(report)["model.reasoning_effort"]
+    assert result.status == "pass"
+    assert "high" in result.message
+
+
+def test_reasoning_effort_check_fails_for_bedrock_converse() -> None:
+    report = CommandReport(command="doctor", ok=True, config_path=None)
+    _add_reasoning_effort_check(
+        report,
+        reasoning_effort="high",
+        provider="aws_bedrock",
+        model_name="amazon.nova-pro-v1:0",
+    )
+    result = _doctor_by_id(report)["model.reasoning_effort"]
+    assert result.status == "fail"
+    assert result.severity == "warning"
+
+
+def test_reasoning_effort_check_passes_for_bedrock_claude() -> None:
+    report = CommandReport(command="doctor", ok=True, config_path=None)
+    _add_reasoning_effort_check(
+        report,
+        reasoning_effort="high",
+        provider="aws_bedrock",
+        model_name="anthropic.claude-sonnet-4-5",
+    )
+    assert _doctor_by_id(report)["model.reasoning_effort"].status == "pass"
+
+
+def test_reasoning_effort_check_off_passes_for_bedrock_converse() -> None:
+    report = CommandReport(command="doctor", ok=True, config_path=None)
+    _add_reasoning_effort_check(
+        report,
+        reasoning_effort=False,
+        provider="aws_bedrock",
+        model_name="amazon.nova-pro-v1:0",
+    )
+    result = _doctor_by_id(report)["model.reasoning_effort"]
+    assert result.status == "pass"
+    assert "off" in result.message

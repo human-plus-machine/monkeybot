@@ -625,9 +625,7 @@ async def test_verifier_reload_times_out_while_turn_in_flight(
         reset_runtime_env_state_for_tests()
 
 
-def test_close_verifier_stops_live_workers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_close_verifier_stops_live_workers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from monkeybot.core.config import apply_monkeybot_runtime_env, get_config_store
     from monkeybot.core.config.runtime_env import reset_runtime_env_state_for_tests
 

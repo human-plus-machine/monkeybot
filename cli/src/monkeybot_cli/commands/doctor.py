@@ -10,9 +10,12 @@ import tomllib
 from pathlib import Path
 
 import httpx
+from monkeybot.core.config.settings import normalize_model_provider
 from monkeybot.core.layout import AgentLayout, bootstrap_agent_layout
 from monkeybot.core.memory.config import memory_enabled_from_config
 from monkeybot.core.tools.sandbox_executor import SandboxConfig
+from monkeybot.providers._bedrock_converse import uses_anthropic_bedrock
+from monkeybot.providers.sampling import normalize_reasoning_effort
 
 from monkeybot_cli.compat import COMPATIBLE_CORE_RANGE
 from monkeybot_cli.config_resolve import (
@@ -226,6 +229,58 @@ def _strict_positive_int(raw: object) -> tuple[int | None, bool]:
     if raw < 1:
         return None, True
     return raw, False
+
+
+def _add_reasoning_effort_check(
+    report: CommandReport,
+    *,
+    reasoning_effort: object,
+    provider: str = "",
+    model_name: str = "",
+) -> None:
+    """Note a YAML effort value.
+
+    Severity stays ``warning``: the doctor schema has no ``info`` level, and a
+    passing check does not increment the warning summary. A non-Claude Bedrock
+    model fails this check because the Converse path does not send the field.
+    """
+    text = normalize_reasoning_effort(reasoning_effort) or ""
+    converse = (
+        normalize_model_provider(provider) in {"aws_bedrock", "bedrock"}
+        and bool(model_name)
+        and not uses_anthropic_bedrock(model_name)
+    )
+    if text == "none":
+        message = "reasoning_effort turns thinking off where the provider supports it."
+        passed = True
+    elif text and converse:
+        message = (
+            f"reasoning_effort {text!r} is not sent for this Bedrock model. "
+            "Only Claude ids receive it; Converse models ignore it."
+        )
+        passed = False
+    elif text:
+        message = (
+            f"reasoning_effort {text!r} is sent to the provider. "
+            "It wins over thinking_budget where the provider accepts an effort level. "
+            "Gemini only sends levels its SDK knows; other values use thinking_budget. "
+            "A level the API rejects is omitted on later turns."
+        )
+        passed = True
+    else:
+        message = "reasoning_effort unset"
+        passed = True
+    check(
+        report,
+        id="model.reasoning_effort",
+        category="provider",
+        severity="warning",
+        passed=passed,
+        skip=not text,
+        message=message,
+        field="model.reasoning_effort",
+        value=text or None,
+    )
 
 
 def _add_ollama_local_checks(
@@ -464,11 +519,19 @@ def run_doctor(args: argparse.Namespace) -> int:
             skip=True,
         )
 
+    effort_raw = model.get("reasoning_effort") if isinstance(model, dict) else None
+    model_name = str(model.get("name", "")).strip() if isinstance(model, dict) else ""
+    _add_reasoning_effort_check(
+        report,
+        reasoning_effort=effort_raw,
+        provider=provider,
+        model_name=model_name,
+    )
+
     thinking_raw = model.get("thinking_budget") if isinstance(model, dict) else None
     if thinking_raw is None:
         thinking_raw = "-1"
     num_ctx_raw = model.get("num_ctx") if isinstance(model, dict) else None
-    model_name = str(model.get("name", "")).strip() if isinstance(model, dict) else ""
     _add_ollama_local_checks(
         report,
         provider=provider,

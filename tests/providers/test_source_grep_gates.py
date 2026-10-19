@@ -23,7 +23,9 @@ def _rg_no_matches(args: list[str]) -> None:
         )
     except FileNotFoundError:
         if os.environ.get("CI") == "true" or os.environ.get("GITHUB_ACTIONS") == "true":
-            pytest.fail("ripgrep (rg) is required in CI for grep-gate tests; install it in the workflow.")
+            pytest.fail(
+                "ripgrep (rg) is required in CI for grep-gate tests; install it in the workflow."
+            )
         pytest.skip("ripgrep (rg) not installed")
     if proc.returncode == 1:
         return
@@ -57,7 +59,7 @@ def test_no_tool_calls_substring_in_provider_or_core() -> None:
     _rg_no_matches(
         [
             "-n",
-            "tool_calls\"",
+            'tool_calls"',
             str(_REPO_ROOT / "src/monkeybot/core"),
             str(_REPO_ROOT / "src/monkeybot/providers"),
             "--glob",

@@ -23,9 +23,7 @@ def _interactive_lines(tree: str) -> list[str]:
     return [ln for ln in tree.splitlines() if _INTERACTIVE.match(ln)]
 
 
-def test_viewport_default_and_contains_on_long_list(
-    fixture_server: str, cdp_url: str
-) -> None:
+def test_viewport_default_and_contains_on_long_list(fixture_server: str, cdp_url: str) -> None:
     from browser_mcp import server
 
     goto = json.loads(server.browser_goto(f"{fixture_server}/long_list.html"))
@@ -45,15 +43,11 @@ def test_viewport_default_and_contains_on_long_list(
     assert not any("Link " in ln for ln in buy_lines)
 
 
-def test_index_stable_after_inserting_nodes(
-    fixture_server: str, cdp_url: str, tree_index
-) -> None:
+def test_index_stable_after_inserting_nodes(fixture_server: str, cdp_url: str, tree_index) -> None:
     from browser_mcp import server
 
     json.loads(server.browser_goto(f"{fixture_server}/long_list.html"))
-    first = json.loads(
-        server.browser_get_elements(viewport_only=False, max_elements=1000)
-    )
+    first = json.loads(server.browser_get_elements(viewport_only=False, max_elements=1000))
     idx = tree_index(str(first.get("tree") or ""), "Button 0", prefer_tags=("button",))
     injected = json.loads(
         server.browser_js(
@@ -69,20 +63,14 @@ def test_index_stable_after_inserting_nodes(
         )
     )
     assert injected.get("result") == 50
-    second = json.loads(
-        server.browser_get_elements(viewport_only=False, max_elements=1000)
-    )
+    second = json.loads(server.browser_get_elements(viewport_only=False, max_elements=1000))
     idx2 = tree_index(str(second.get("tree") or ""), "Button 0", prefer_tags=("button",))
     assert idx2 == idx
-    inserted = tree_index(
-        str(second.get("tree") or ""), "Inserted 0", prefer_tags=("button",)
-    )
+    inserted = tree_index(str(second.get("tree") or ""), "Inserted 0", prefer_tags=("button",))
     assert inserted != idx
 
 
-def test_get_text_returns_article_body_only(
-    fixture_server: str, cdp_url: str
-) -> None:
+def test_get_text_returns_article_body_only(fixture_server: str, cdp_url: str) -> None:
     from browser_mcp import server
 
     json.loads(server.browser_goto(f"{fixture_server}/article.html"))

@@ -122,7 +122,9 @@ def test_normalize_sqlite_db_url_relative(tmp_path: Path) -> None:
     assert url == f"sqlite:///{(tmp_path / 'data' / 'monkeybot.db').resolve()}"
 
 
-def test_resolve_agent_project_root_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_agent_project_root_from_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
     assert resolve_agent_project_root() == tmp_path.resolve()
 
@@ -419,10 +421,7 @@ async def test_spawn_subagent_nonzero_exit_logs_warning(
 async def test_default_subprocess_exec_discards_stderr_to_avoid_deadlock(tmp_path: Path) -> None:
     script = tmp_path / "child.py"
     script.write_text(
-        "import sys\n"
-        "sys.stderr.write('x' * 200000)\n"
-        "sys.stderr.flush()\n"
-        "print('ok', flush=True)\n",
+        "import sys\nsys.stderr.write('x' * 200000)\nsys.stderr.flush()\nprint('ok', flush=True)\n",
         encoding="utf-8",
     )
     proc = await _default_subprocess_exec(sys.executable, "-u", str(script))
@@ -438,14 +437,12 @@ async def test_default_subprocess_exec_reads_ndjson_lines_over_64kib(
     """Regression: SystemPromptSnapshot NDJSON can exceed asyncio's default 64 KiB limit."""
     assert SUBAGENT_STDOUT_LINE_LIMIT > 65536
     big_text = "m" * (70 * 1024)
-    line = event_to_json(
-        SystemPromptSnapshot(request_id="r", inner_turn=1, text=big_text)
-    )
+    line = event_to_json(SystemPromptSnapshot(request_id="r", inner_turn=1, text=big_text))
     assert len(line.encode("utf-8")) > 65536
 
     script = tmp_path / "child.py"
     script.write_text(
-        "import sys\n" f"sys.stdout.write({line!r} + '\\n')\n" "sys.stdout.flush()\n",
+        f"import sys\nsys.stdout.write({line!r} + '\\n')\nsys.stdout.flush()\n",
         encoding="utf-8",
     )
     proc = await _default_subprocess_exec(sys.executable, "-u", str(script))
@@ -478,12 +475,15 @@ async def test_spawn_subagent_streams_oversized_system_prompt_snapshot(
     async def subprocess_exec(*_a: object, **_k: object) -> FakeProcess:
         return FakeProcess(lines, exit_code=0)
 
-    collected = [evt async for evt in spawn_subagent(
-        "s.py",
-        env,
-        scratch_dir=tmp_scratch,
-        subprocess_exec=subprocess_exec,
-    )]
+    collected = [
+        evt
+        async for evt in spawn_subagent(
+            "s.py",
+            env,
+            scratch_dir=tmp_scratch,
+            subprocess_exec=subprocess_exec,
+        )
+    ]
     assert isinstance(collected[0], Thinking)
     assert isinstance(collected[1], SystemPromptSnapshot)
     assert len(collected[1].text) == 70 * 1024

@@ -11,6 +11,7 @@ from monkeybot.providers.ollama import (
     _DUMMY_API_KEY,
     OllamaProvider,
     _ollama_max_request_bytes,
+    ollama_reasoning_effort,
     reasoning_effort_for_thinking_budget,
 )
 
@@ -19,6 +20,15 @@ def test_reasoning_effort_for_thinking_budget() -> None:
     assert reasoning_effort_for_thinking_budget(-1) is None
     assert reasoning_effort_for_thinking_budget(1024) is None
     assert reasoning_effort_for_thinking_budget(0) == "none"
+
+
+def test_ollama_reasoning_effort_prefers_explicit_and_maps_off_words() -> None:
+    assert ollama_reasoning_effort(None, -1) is None
+    assert ollama_reasoning_effort(None, 0) == "none"
+    assert ollama_reasoning_effort("high", 0) == "high"
+    assert ollama_reasoning_effort("off", -1) == "none"
+    assert ollama_reasoning_effort("disabled", 0) == "none"
+    assert ollama_reasoning_effort("none", 8) == "none"
 
 
 def test_resolve_base_url_default(monkeypatch: pytest.MonkeyPatch) -> None:

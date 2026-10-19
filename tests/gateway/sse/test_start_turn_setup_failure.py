@@ -1,0 +1,177 @@
+"""A setup failure before run_loop must not lose the user's prompt."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
+from monkeybot.core.memory.ingest import persist_message
+from monkeybot.core.types.content_blocks import Text
+from monkeybot.gateway.sse import app as gateway_app
+from monkeybot.gateway.sse.app import GatewayLoopPort
+from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
+
+
+class _NamedProvider:
+    name = "fake"
+
+
+def _wire(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> MagicMock:
+    async def _failing_build_context(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("memory backend unavailable")
+
+    run_loop = MagicMock()
+    agent_md = tmp_path / "AGENT.md"
+    agent_md.write_text("# agent\n", encoding="utf-8")
+
+    monkeypatch.setattr(gateway_app, "transcript_enabled_from_config", lambda: False)
+    monkeypatch.setattr(gateway_app, "build_context", _failing_build_context)
+    monkeypatch.setattr(gateway_app, "run_loop", run_loop)
+    monkeypatch.setattr(gateway_app, "_default_agent_path", lambda _bus: agent_md)
+    monkeypatch.setattr(
+        gateway_app,
+        "_resolved_workspace_paths",
+        lambda *_a, **_k: (tmp_path, tmp_path / "skills", tmp_path / "artifacts"),
+    )
+    runtime = gateway_app.gateway_runtime
+    mcp = MagicMock()
+    mcp.catalog_names.return_value = []
+    monkeypatch.setattr(runtime, "mcp", mcp)
+    monkeypatch.setattr(runtime, "provider", _NamedProvider())
+    monkeypatch.setattr(runtime, "inspectors", [])
+    monkeypatch.setattr(runtime, "hook_manager", None)
+    monkeypatch.setattr(runtime, "web_search_tool", None)
+
+    history = MagicMock()
+    history.load = AsyncMock(return_value=[])
+    history.append = AsyncMock()
+    storage = MagicMock()
+    storage.history.return_value = history
+    storage.branches.return_value.get_active = AsyncMock(return_value=None)
+    storage.usage.return_value = AsyncMock()
+    monkeypatch.setattr(gateway_app.app.state, "storage", storage, raising=False)
+    return history
+
+
+@pytest.mark.asyncio
+async def test_build_context_failure_keeps_user_message(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    published: list[str] = []
+
+    async def _capture(self: SessionBus, data_json: str, *, lane: str = "primary") -> int:
+        del self, lane
+        published.append(data_json)
+        return 1
+
+    monkeypatch.setattr(SessionBus, "publish_data", _capture)
+    history = _wire(monkeypatch, tmp_path)
+    persisted: list[dict[str, Any]] = []
+
+    async def _spy_persist(*args: Any, **kwargs: Any) -> None:
+        persisted.append(kwargs)
+        await persist_message(*args, **kwargs)
+
+    monkeypatch.setattr(gateway_app, "persist_message", _spy_persist)
+    registry = SessionRegistry()
+    registry.create("s1", agent_md=None, created_at_ms=0)
+
+    await GatewayLoopPort(registry).start_turn("s1", "req-1", [Text(text="my long prompt")])
+
+    assert history.append.await_count == 1
+    appended = history.append.await_args
+    assert appended.args[0] == "s1"
+    assert appended.kwargs["turn_id"] == "req-1"
+    message = appended.args[1]
+    assert message.role == "user"
+    assert message.content[0].text == "my long prompt"
+    assert persisted[0]["ingest"] is True
+    assert persisted[0]["thread_id"] == "s1"
+    assert persisted[0]["turn_id"] == "req-1"
+    assert [json.loads(p)["type"] for p in published] == ["Error", "TurnComplete"]
+
+
+@pytest.mark.asyncio
+async def test_setup_failure_records_transcript_and_user_hook(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    published: list[str] = []
+
+    async def _capture(self: SessionBus, data_json: str, *, lane: str = "primary") -> int:
+        del self, lane
+        published.append(data_json)
+        return 1
+
+    monkeypatch.setattr(SessionBus, "publish_data", _capture)
+    history = _wire(monkeypatch, tmp_path)
+    seen: list[HookPayload] = []
+
+    async def _on_user_message(payload: HookPayload) -> None:
+        seen.append(payload)
+
+    manager = HookManager()
+    manager.register(HookEvent.USER_MESSAGE, _on_user_message)
+    monkeypatch.setattr(gateway_app.gateway_runtime, "hook_manager", manager)
+    writer = MagicMock()
+    writer.ensure_manifest = AsyncMock()
+    writer.write_user_message = AsyncMock()
+    monkeypatch.setattr(gateway_app, "transcript_enabled_from_config", lambda: True)
+    monkeypatch.setattr(gateway_app, "TranscriptWriter", lambda *_a, **_k: writer)
+    registry = SessionRegistry()
+    registry.create("s1", agent_md=None, created_at_ms=0)
+
+    await GatewayLoopPort(registry).start_turn("s1", "req-1", [Text(text="my long prompt")])
+    await manager.drain_settlement()
+
+    message = history.append.await_args.args[1]
+    writer.write_user_message.assert_awaited_once_with(
+        request_id="req-1",
+        content="my long prompt",
+    )
+    assert len(seen) == 1
+    assert seen[0].thread_id == "s1"
+    assert seen[0].request_id == "req-1"
+    assert seen[0].user_message == "my long prompt"
+    assert seen[0].user_row_id == message.row_id
+    assert [json.loads(p)["type"] for p in published] == ["Error", "TurnComplete"]
+
+
+@pytest.mark.asyncio
+async def test_setup_failure_publishes_when_persist_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    published: list[str] = []
+
+    async def _capture(self: SessionBus, data_json: str, *, lane: str = "primary") -> int:
+        del self, lane
+        published.append(data_json)
+        return 1
+
+    monkeypatch.setattr(SessionBus, "publish_data", _capture)
+    history = _wire(monkeypatch, tmp_path)
+    history.append = AsyncMock(side_effect=RuntimeError("disk full"))
+    seen: list[str] = []
+
+    async def _on_user_message(payload: HookPayload) -> None:
+        seen.append(payload.user_message or "")
+
+    manager = HookManager()
+    manager.register(HookEvent.USER_MESSAGE, _on_user_message)
+    monkeypatch.setattr(gateway_app.gateway_runtime, "hook_manager", manager)
+    registry = SessionRegistry()
+    registry.create("s1", agent_md=None, created_at_ms=0)
+
+    await GatewayLoopPort(registry).start_turn("s1", "req-1", [Text(text="my long prompt")])
+    await manager.drain_settlement()
+
+    assert history.append.await_count == 1
+    assert seen == []
+    assert [json.loads(p)["type"] for p in published] == ["Error", "TurnComplete"]

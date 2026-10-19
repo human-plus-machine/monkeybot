@@ -18,7 +18,6 @@ from monkeybot.core.attachments.catalog import AttachmentRecord, SessionAttachme
 from monkeybot.core.context import SkillRef, TurnContext
 from monkeybot.core.llm.provider import (
     Done,
-    GroundingEvent as ProviderGroundingEvent,
     Message,
     ProviderEvent,
     TextDelta,
@@ -26,8 +25,14 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
+from monkeybot.core.llm.provider import (
+    GroundingEvent as ProviderGroundingEvent,
+)
 from monkeybot.core.llm.usage import Usage
+from monkeybot.core.messages.transform_context import transform_context
+from monkeybot.core.runtime.context_budget import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.events import (
+    AgentEvent,
     AssistantDelta,
     ContextSummarized,
     ContextSummarizing,
@@ -44,16 +49,29 @@ from monkeybot.core.runtime.events import (
     ToolConfirmationRequestEvent,
     TurnComplete,
 )
-from monkeybot.core.runtime.history_compaction import _compact_history_if_needed
+from monkeybot.core.runtime.history_compaction import (
+    _compact_history_if_needed,
+    _summarization_viable,
+)
 from monkeybot.core.runtime.loop import run
 from monkeybot.core.runtime.loop_messages import _messages_for_provider
 from monkeybot.core.runtime.loop_usage import _merge_usage_event, _usage_to_totals
 from monkeybot.core.runtime.tool_batch import _chunk_tool_calls
 from monkeybot.core.runtime.tool_dispatch import _media_events, _resolved_path_for_call
+from monkeybot.core.runtime.turn_loop import _token_pressure_should_summarize
 from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
 from monkeybot.core.tools.inspector import Decision
 from monkeybot.core.tools.types import ToolExecutionResult
-from monkeybot.core.types.content_blocks import File, Image, Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import (
+    AttachmentDescriptor,
+    File,
+    Image,
+    SystemNotification,
+    Text,
+    ToolRequest,
+    ToolResponse,
+)
+from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
 
 
@@ -159,7 +177,12 @@ class FakeHistory:
         return list(self.rows[-limit:]) if limit > 0 else []
 
     async def append(
-        self, thread_id: str, message: Message, *, turn_id: str | None = None, message_id: str | None = None
+        self,
+        thread_id: str,
+        message: Message,
+        *,
+        turn_id: str | None = None,
+        message_id: str | None = None,
     ) -> None:
         del thread_id, turn_id, message_id
         self.rows.append(message)
@@ -426,6 +449,7 @@ async def test_run_closes_thinking_block_when_tools_follow() -> None:
     complete = next(e for e in events if isinstance(e, ThinkingBlockComplete))
     tool_started = next(e for e in events if isinstance(e, ToolCallStarted))
     assert events.index(complete) < events.index(tool_started)
+
 
 def test_merge_usage_event_accumulates_cache_fields() -> None:
     usage = Usage()
@@ -764,20 +788,12 @@ async def test_run_cancellation_between_two_tools_second_skipped() -> None:
         if m.role == "user" and any(isinstance(b, ToolResponse) for b in m.content)
     ]
     assert len(tool_user_msgs) == 1
-    by_id = {
-        b.id: b
-        for b in tool_user_msgs[0].content
-        if isinstance(b, ToolResponse)
-    }
+    by_id = {b.id: b for b in tool_user_msgs[0].content if isinstance(b, ToolResponse)}
     assert set(by_id) == {"a", "b"}
     assert by_id["a"].is_error is False
-    assert any(
-        isinstance(block, Text) and "first-ok" in block.text for block in by_id["a"].result
-    )
+    assert any(isinstance(block, Text) and "first-ok" in block.text for block in by_id["a"].result)
     assert by_id["b"].is_error is True
-    cancel_text = " ".join(
-        block.text for block in by_id["b"].result if isinstance(block, Text)
-    )
+    cancel_text = " ".join(block.text for block in by_id["b"].result if isinstance(block, Text))
     assert 'Tool "run_command" was cancelled' in cancel_text
     assert "do not assume the tool never ran" in cancel_text
 
@@ -828,7 +844,9 @@ async def test_run_cancels_mid_provider_text_stream() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_cancel_after_stream_persists_assistant_text(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_cancel_after_stream_persists_assistant_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Stop after a finished stream must still persist text the user already saw."""
     cancel = asyncio.Event()
 
@@ -907,14 +925,10 @@ async def test_run_cancel_after_stream_settles_pending_tool_calls(
         if m.role == "user" and any(isinstance(b, ToolResponse) for b in m.content)
     ]
     assert len(tool_msgs) == 1
-    responses = {
-        b.id: b for b in tool_msgs[0].content if isinstance(b, ToolResponse)
-    }
+    responses = {b.id: b for b in tool_msgs[0].content if isinstance(b, ToolResponse)}
     assert "c1" in responses
     assert responses["c1"].is_error is True
-    cancel_text = " ".join(
-        t.text for t in responses["c1"].result if isinstance(t, Text)
-    )
+    cancel_text = " ".join(t.text for t in responses["c1"].result if isinstance(t, Text))
     assert "cancelled" in cancel_text.lower()
 
 
@@ -969,9 +983,7 @@ async def test_run_stop_during_confirm_settles_completed_tool_results() -> None:
             self.pending_responses[key] = fut
             return fut
 
-        def is_pending_or_terminal(
-            self, key: str
-        ) -> Literal["pending", "terminated", "unknown"]:
+        def is_pending_or_terminal(self, key: str) -> Literal["pending", "terminated", "unknown"]:
             if key in self.pending_responses:
                 return "pending"
             if key in self.terminated_pending_keys:
@@ -1066,22 +1078,13 @@ async def test_run_stop_during_confirm_settles_completed_tool_results() -> None:
         if m.role == "user" and any(isinstance(b, ToolResponse) for b in m.content)
     ]
     assert tool_msgs, "completed tool results must be settled into history on confirm-cancel"
-    responses = {
-        b.id: b
-        for m in tool_msgs
-        for b in m.content
-        if isinstance(b, ToolResponse)
-    }
+    responses = {b.id: b for m in tool_msgs for b in m.content if isinstance(b, ToolResponse)}
     assert "w1" in responses
     assert responses["w1"].is_error is False
-    assert "wrote-ok" in " ".join(
-        t.text for t in responses["w1"].result if isinstance(t, Text)
-    )
+    assert "wrote-ok" in " ".join(t.text for t in responses["w1"].result if isinstance(t, Text))
     assert "c1" in responses
     assert responses["c1"].is_error is True
-    cancel_text = " ".join(
-        t.text for t in responses["c1"].result if isinstance(t, Text)
-    )
+    cancel_text = " ".join(t.text for t in responses["c1"].result if isinstance(t, Text))
     assert 'Tool "run_command" was cancelled' in cancel_text
 
 
@@ -1103,9 +1106,7 @@ async def test_run_task_cancel_during_confirm_propagates() -> None:
             self.confirm_event.set()
             return fut
 
-        def is_pending_or_terminal(
-            self, key: str
-        ) -> Literal["pending", "terminated", "unknown"]:
+        def is_pending_or_terminal(self, key: str) -> Literal["pending", "terminated", "unknown"]:
             if key in self.pending_responses:
                 return "pending"
             if key in self.terminated_pending_keys:
@@ -1782,9 +1783,7 @@ async def test_run_emits_context_summarize_events_when_over_cap(
         for x in m.content
     )
     summarizing = next(e for e in events if isinstance(e, ContextSummarizing))
-    summarized_idx = next(
-        i for i, e in enumerate(events) if isinstance(e, ContextSummarized)
-    )
+    summarized_idx = next(i for i, e in enumerate(events) if isinstance(e, ContextSummarized))
     post_usage = next(
         (e for e in events[summarized_idx + 1 :] if isinstance(e, ContextUsage)),
         None,
@@ -1792,6 +1791,203 @@ async def test_run_emits_context_summarize_events_when_over_cap(
     assert post_usage is not None
     assert post_usage.estimated_tokens < summarizing.estimated_tokens
     assert post_usage.estimated_tokens > 0
+
+
+def _verdict_row() -> Message:
+    return Message(
+        role="user",
+        content=[SystemNotification(notification_type="verifierVerdict", msg="verdict-kept")],
+    )
+
+
+def _blocks(rows: list[Message], kind: type) -> list:
+    return [b for m in rows for b in m.content if isinstance(b, kind)]
+
+
+async def _run_over_cap(tmp_path: Path, preload: list[Message]) -> FakeHistory:
+    hist = FakeHistory(preload)
+    prov = FakeProvider(
+        [[TextDelta(text=" compressed summary "), Done()], [TextDelta(text="final"), Done()]]
+    )
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    async for _ in run(
+        "hello",
+        ctx,
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+    ):
+        pass
+    assert len(hist.reset_calls) == 1
+    return hist
+
+
+def _padded(n: int) -> list[Message]:
+    return [
+        Message(role="user" if i % 2 == 0 else "assistant", content=[Text(text="z" * 600)])
+        for i in range(n)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_token_pressure_compaction_keeps_verdict_row(tmp_path: Path) -> None:
+    preload = _padded(8)
+    preload.insert(3, _verdict_row())
+    hist = await _run_over_cap(tmp_path, preload)
+    persisted = hist.reset_calls[0][1]
+    assert _blocks(persisted, SystemNotification)
+    assert _blocks(hist.rows, SystemNotification)
+
+
+@pytest.mark.asyncio
+async def test_token_pressure_compaction_keeps_tail_thinking(tmp_path: Path) -> None:
+    preload = _padded(8)
+    preload[-1] = Message(
+        role="assistant",
+        content=[ThinkingBlock(thinking="deep", signature="s"), Text(text="z" * 600)],
+    )
+    hist = await _run_over_cap(tmp_path, preload)
+    assert _blocks(hist.reset_calls[0][1], ThinkingBlock)
+
+
+@pytest.mark.asyncio
+async def test_token_pressure_compaction_keeps_tail_attachment_descriptor(
+    tmp_path: Path,
+) -> None:
+    preload = _padded(8)
+    preload[-1] = Message(
+        role="user",
+        content=[
+            Text(text="z" * 600),
+            AttachmentDescriptor(attachment_id="a1", mime_type="image/png", description="d"),
+        ],
+    )
+    hist = await _run_over_cap(tmp_path, preload)
+    assert _blocks(hist.reset_calls[0][1], AttachmentDescriptor)
+
+
+@pytest.mark.asyncio
+async def test_token_pressure_compaction_does_not_persist_synthetic_repairs(
+    tmp_path: Path,
+) -> None:
+    preload = _padded(8)
+    preload.append(
+        Message(role="assistant", content=[ToolRequest(id="orphan", name="echo", args={})])
+    )
+    hist = await _run_over_cap(tmp_path, preload)
+    marker = "was interrupted or its result is missing"
+    for m in hist.reset_calls[0][1]:
+        for b in m.content:
+            if isinstance(b, ToolResponse):
+                assert marker not in " ".join(x.text for x in b.result if isinstance(x, Text))
+
+
+def _short(role: str) -> Message:
+    return Message(role=role, content=[Text(text="z" * 40)])
+
+
+# Raw rows viable, coalesced view (user + assistant) is not.
+_RAW_ONLY_VIABLE = [_short("user")] * 4 + [_short("assistant")]
+# Coalesced view viable (synthetic repair adds a row), raw rows are not.
+_VIEW_ONLY_VIABLE = [
+    _short("user"),
+    Message(role="assistant", content=[ToolRequest(id="orphan", name="echo", args={})]),
+    _short("assistant"),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(_RAW_ONLY_VIABLE, True), (_VIEW_ONLY_VIABLE, False)],
+    ids=["raw_only_viable", "view_only_viable"],
+)
+async def test_token_pressure_trigger_agrees_with_raw_compaction(
+    raw: list[Message], expected: bool
+) -> None:
+    """Trigger judges viability on raw rows, matching what compaction actually splits."""
+    view = transform_context(raw)
+    assert _summarization_viable(view, window_tokens=100) is not expected
+    hist = FakeHistory(raw)
+    fired = await _token_pressure_should_summarize(
+        history=hist, thread_id="t1", preflight=10, cap=10, window_tokens=100
+    )
+    assert fired is expected
+    turns = await _compact_history_if_needed(
+        thread_id="t1",
+        history=hist,
+        provider=FakeProvider([[TextDelta(text="summary"), Done()]]),
+        model="gemini-2.5-flash",
+        window_tokens=100,
+    )
+    assert (turns > 0) is expected
+
+
+@pytest.mark.asyncio
+async def test_token_pressure_trigger_skips_load_below_cap() -> None:
+    class NoLoadHistory(FakeHistory):
+        async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
+            raise AssertionError("history.load must not run below cap")
+
+    assert not await _token_pressure_should_summarize(
+        history=NoLoadHistory(_RAW_ONLY_VIABLE),
+        thread_id="t1",
+        preflight=9,
+        cap=10,
+        window_tokens=100,
+    )
+
+
+async def _run_over_cap_events(tmp_path: Path, hist: FakeHistory) -> list[AgentEvent]:
+    prov = FakeProvider([[TextDelta(text="final"), Done()]])
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    return [
+        e
+        async for e in run(
+            "hello",
+            ctx,
+            provider=prov,
+            history=hist,
+            inspectors=[],
+            tool_executor=RecordingExecutor(),
+            max_turns=4,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_over_cap_skips_summarizing_when_not_viable(tmp_path: Path) -> None:
+    hist = FakeHistory(_padded(1))
+    events = await _run_over_cap_events(tmp_path, hist)
+    assert any(
+        isinstance(e, ContextUsage) and e.estimated_tokens >= 800 * SUMMARY_TRIGGER_RATIO
+        for e in events
+    )
+    assert not any(isinstance(e, ContextSummarizing) for e in events)
+    assert not hist.reset_calls
+    assert not any(isinstance(e, Error) for e in events)
+    assert "".join(e.delta for e in events if isinstance(e, AssistantDelta)) == "final"
+
+
+@pytest.mark.asyncio
+async def test_run_over_cap_survives_trigger_history_load_failure(tmp_path: Path) -> None:
+    class FlakyHistory(FakeHistory):
+        loads = 0
+
+        async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
+            self.loads += 1
+            if self.loads == 2:
+                raise RuntimeError("database is locked")
+            return await super().load(thread_id, limit)
+
+    hist = FlakyHistory(_padded(8))
+    events = await _run_over_cap_events(tmp_path, hist)
+    assert hist.loads >= 2  # load 2 is the token-pressure trigger's
+    assert not any(isinstance(e, ContextSummarizing) for e in events)
+    assert not any(isinstance(e, Error) for e in events)
+    assert "".join(e.delta for e in events if isinstance(e, AssistantDelta)) == "final"
 
 
 @pytest.mark.asyncio
@@ -1822,9 +2018,7 @@ async def test_run_emits_context_usage_after_tools_without_compaction() -> None:
     assert not any(isinstance(e, ContextSummarizing) for e in events)
     assert not any(isinstance(e, ContextSummarized) for e in events)
 
-    tool_result_idx = next(
-        i for i, e in enumerate(events) if isinstance(e, ToolCallResult)
-    )
+    tool_result_idx = next(i for i, e in enumerate(events) if isinstance(e, ToolCallResult))
     post_tool_usage = next(
         (e for e in events[tool_result_idx + 1 :] if isinstance(e, ContextUsage)),
         None,
@@ -2068,6 +2262,7 @@ async def test_run_persists_load_max_tail_when_compact_fails(
         )
         for i in range(20)
     ]
+    preload.insert(1, _verdict_row())
     hist = FakeHistory(preload)
     prov = FakeProvider([[TextDelta(text="final"), Done()]])
     # Huge window: token compact won't fire; load-max still truncates oversize history.
@@ -2086,6 +2281,7 @@ async def test_run_persists_load_max_tail_when_compact_fails(
     assert hist.reset_calls, "expected durable truncate via history.reset"
     _thread, persisted = hist.reset_calls[-1]
     assert len(persisted) == 12
+    assert _blocks(persisted, SystemNotification), "pinned verdict must survive truncation"
     flat_persisted = [b.text for m in persisted for b in m.content if isinstance(b, Text)]
     assert "row-0" not in flat_persisted
     assert "row-19" in flat_persisted
@@ -2148,7 +2344,9 @@ def test_messages_for_provider_folds_update_into_trailing_user_message() -> None
         Message(role="assistant", content=[ToolRequest(id="c1", name="run_command", args={})]),
         tool_response_row,
     ]
-    out = _messages_for_provider(system, history, mid_conversation_update="## System context update\n...")
+    out = _messages_for_provider(
+        system, history, mid_conversation_update="## System context update\n..."
+    )
     roles = [m.role for m in out]
     assert all(a != b for a, b in zip(roles, roles[1:])), roles
     assert len(out) == len(history) + 1  # system + history rows, no extra message
@@ -2164,7 +2362,9 @@ def test_messages_for_provider_appends_update_after_trailing_assistant_message()
         Message(role="user", content=[Text(text="hi")]),
         Message(role="assistant", content=[Text(text="ok, thinking...")]),
     ]
-    out = _messages_for_provider(system, history, mid_conversation_update="## System context update\n...")
+    out = _messages_for_provider(
+        system, history, mid_conversation_update="## System context update\n..."
+    )
     roles = [m.role for m in out]
     assert roles == ["system", "user", "assistant", "user"]
     assert all(a != b for a, b in zip(roles, roles[1:]))
@@ -2292,9 +2492,7 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
     last = turn2[-1]
     assert last.role == "user"
     assert any(isinstance(b, ToolResponse) for b in last.content)
-    assert any(
-        isinstance(b, Text) and "new memory from tool" in b.text for b in last.content
-    )
+    assert any(isinstance(b, Text) and "new memory from tool" in b.text for b in last.content)
 
 
 @pytest.mark.asyncio
@@ -2346,9 +2544,7 @@ async def test_parallel_task_results_appended_in_submission_order() -> None:
     tool_resp_messages = [
         m
         for m in hist.rows
-        if m.role == "user"
-        and m.content
-        and isinstance(m.content[0], ToolResponse)
+        if m.role == "user" and m.content and isinstance(m.content[0], ToolResponse)
     ]
     assert len(tool_resp_messages) == 1, (
         "parallel task responses must be consolidated into one user Message"
@@ -2398,9 +2594,7 @@ async def test_serial_mixed_tool_results_consolidated_into_one_user_message() ->
     tool_resp_messages = [
         m
         for m in hist.rows
-        if m.role == "user"
-        and m.content
-        and isinstance(m.content[0], ToolResponse)
+        if m.role == "user" and m.content and isinstance(m.content[0], ToolResponse)
     ]
     assert len(tool_resp_messages) == 1, (
         "serial tool responses must be consolidated into one user Message"
@@ -2443,9 +2637,7 @@ async def test_loop_tool_only_assistant_history_no_placeholder_json() -> None:
     tool_only_assistant = next(
         m
         for m in hist.rows
-        if m.role == "assistant"
-        and len(m.content) == 1
-        and isinstance(m.content[0], ToolRequest)
+        if m.role == "assistant" and len(m.content) == 1 and isinstance(m.content[0], ToolRequest)
     )
     assert not any(isinstance(b, Text) for b in tool_only_assistant.content)
     serialized = json.dumps([b.to_dict() for b in tool_only_assistant.content])
@@ -2521,10 +2713,7 @@ async def test_loop_tool_success_user_row_shape() -> None:
     ):
         pass
     block = next(
-        b
-        for m in hist.rows
-        for b in m.content
-        if isinstance(b, ToolResponse) and b.id == "x1"
+        b for m in hist.rows for b in m.content if isinstance(b, ToolResponse) and b.id == "x1"
     )
     assert block.tool_name == "run_command"
     assert block.is_error is False
@@ -2562,10 +2751,7 @@ async def test_loop_tool_error_user_row_shape() -> None:
     ):
         pass
     block = next(
-        b
-        for m in hist.rows
-        for b in m.content
-        if isinstance(b, ToolResponse) and b.id == "e1"
+        b for m in hist.rows for b in m.content if isinstance(b, ToolResponse) and b.id == "e1"
     )
     assert block.is_error is True
     assert len(block.result) == 1
@@ -2601,10 +2787,7 @@ async def test_loop_inspector_deny_user_row_shape() -> None:
     ):
         pass
     block = next(
-        b
-        for m in hist.rows
-        for b in m.content
-        if isinstance(b, ToolResponse) and b.id == "d1"
+        b for m in hist.rows for b in m.content if isinstance(b, ToolResponse) and b.id == "d1"
     )
     assert block.is_error is True
     assert len(block.result) == 1
@@ -2649,8 +2832,7 @@ async def test_loop_follow_up_after_tool_uses_tool_response_detection() -> None:
     # Preflight per inner turn (3) + post-tool after the tool batch (1).
     assert len(usage_events) >= 4
     assert any(
-        m.role == "user" and any(isinstance(b, ToolResponse) for b in m.content)
-        for m in hist.rows
+        m.role == "user" and any(isinstance(b, ToolResponse) for b in m.content) for m in hist.rows
     )
 
 
@@ -2976,7 +3158,7 @@ async def test_loop_confirm_always_routes_to_grants_persist_and_turn_grant() -> 
 
 @pytest.mark.asyncio
 async def test_loop_confirm_allow_once_records_turn_grant_without_persist() -> None:
-    """"Allow once" (no ``always``) must still populate ``turn_command_grants``
+    """ "Allow once" (no ``always``) must still populate ``turn_command_grants``
     so a second call to the same binary later this turn does not re-ask, but
     must not durably persist anything."""
     prov = FakeProvider(
@@ -3113,8 +3295,7 @@ async def test_tool_budget_recounts_after_assistant_append() -> None:
     budget_messages = prov.count_snapshots[1]
     history_msgs = [m for m in budget_messages if m.role != "system"]
     assert any(
-        m.role == "assistant"
-        and any(isinstance(b, ToolRequest) for b in m.content)
+        m.role == "assistant" and any(isinstance(b, ToolRequest) for b in m.content)
         for m in history_msgs
     )
 
@@ -3203,7 +3384,10 @@ async def test_run_replays_repaired_history_to_provider() -> None:
         b for m in hist.rows for b in m.content if isinstance(b, ToolRequest) and b.id == "orphan-1"
     ]
     stored_tool_responses = [
-        b for m in hist.rows for b in m.content if isinstance(b, ToolResponse) and b.id == "orphan-1"
+        b
+        for m in hist.rows
+        for b in m.content
+        if isinstance(b, ToolResponse) and b.id == "orphan-1"
     ]
     assert len(stored_tool_requests) == 1
     assert stored_tool_responses == []

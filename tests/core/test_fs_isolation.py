@@ -455,13 +455,115 @@ class TestJailedArgv:
         assert "/home/x/ws/palace" in spec_json
 
 
+def test_seatbelt_profile_allows_headless_browser_and_child_signals():
+    profile = fs_isolation._seatbelt_jail_profile(
+        JailRoots(deny=(Path("/Users/x"),), read_write=(Path("/Users/x/ws"),))
+    )
+    for line in (
+        "(allow signal (target same-sandbox))",
+        '(allow iokit-open (iokit-user-client-class "RootDomainUserClient"))',
+        '(allow mach-register (global-name-regex #"^org\\.chromium\\."))',
+        "(allow ipc-posix-sem)",
+    ):
+        assert line in profile
+    # Headless Chromium needs one IOKit class and its own Mach names, not
+    # every user client and every bootstrap name.
+    assert "(allow iokit-open)" not in profile
+    assert "(allow mach-register)" not in profile
+
+
+def test_toolchain_cache_lives_in_the_workspace_even_with_monkeybot_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    # A cache shared through MONKEYBOT_HOME would let one agent plant
+    # executables (uv Pythons, the Playwright browser) that another runs.
+    monkeypatch.setenv("MONKEYBOT_HOME", str(tmp_path / "app"))
+    workspace = tmp_path / "workspace"
+    env = fs_isolation.toolchain_cache_env(workspace, environ={})
+    root = (workspace / ".monkeybot" / "tool-cache").resolve()
+    assert env["XDG_CACHE_HOME"] == str(root / "xdg")
+    assert env["UV_CACHE_DIR"] == str(root / "uv")
+    assert env["UV_TOOL_DIR"] == str(root / "uv-tools")
+    assert env["PLAYWRIGHT_BROWSERS_PATH"] == str(root / "playwright")
+    assert env["MPLCONFIGDIR"] == str(root / "matplotlib")
+    assert (root / "playwright").is_dir()
+    assert (root / "uv-python").is_dir()
+    assert not (tmp_path / "app").exists()
+
+
+def test_toolchain_cache_keeps_host_values_the_jail_can_use(tmp_path: Path):
+    home = tmp_path / "home"
+    workspace = home / "ws"
+    granted = home / "bundle" / "browsers"
+    shared = tmp_path / "shared-tmp"
+    roots = JailRoots(
+        deny=(home,), read_write=(workspace,), read_only=(granted,), shared_write=(shared,)
+    )
+    environ = {
+        # Browsers are only read, so a read-only grant is enough.
+        "PLAYWRIGHT_BROWSERS_PATH": str(granted),
+        # Readable (outside the denied home) but not writable in the jail.
+        "UV_CACHE_DIR": str(tmp_path / "opt" / "uv"),
+        # Writable: inside a read_write root, and inside shared_write.
+        "UV_PYTHON_INSTALL_DIR": str(workspace / "pythons"),
+        "UV_TOOL_DIR": str(shared / "uv-tools"),
+        # Read-only grant, but uv writes its cache.
+        "XDG_CACHE_HOME": str(granted / "xdg"),
+        "MPLCONFIGDIR": str(home / ".matplotlib"),
+        "UV_TOOL_BIN_DIR": "relative-bin",
+    }
+    env = fs_isolation.toolchain_cache_env(workspace, roots, environ=environ)
+    root = (workspace / ".monkeybot" / "tool-cache").resolve()
+    assert "PLAYWRIGHT_BROWSERS_PATH" not in env
+    assert "UV_PYTHON_INSTALL_DIR" not in env
+    assert "UV_TOOL_DIR" not in env
+    assert "UV_TOOL_BIN_DIR" not in env
+    assert env["UV_CACHE_DIR"] == str(root / "uv")
+    assert env["XDG_CACHE_HOME"] == str(root / "xdg")
+    assert env["MPLCONFIGDIR"] == str(root / "matplotlib")
+
+
+def test_toolchain_cache_puts_uv_tool_bin_on_path(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    env = fs_isolation.toolchain_cache_env(workspace, environ={"PATH": "/venv/bin:/usr/bin"})
+    bin_dir = str((workspace / ".monkeybot" / "tool-cache" / "uv-bin").resolve())
+    assert env["UV_TOOL_BIN_DIR"] == bin_dir
+    # Appended, so a binary planted there cannot shadow an existing command.
+    assert env["PATH"] == f"/venv/bin:/usr/bin{os.pathsep}{bin_dir}"
+
+
+def test_toolchain_cache_creates_its_dirs_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    workspace = tmp_path / "workspace"
+    first = fs_isolation.toolchain_cache_env(workspace, environ={})
+    calls: list[Path] = []
+    real_mkdir = Path.mkdir
+
+    def counting_mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        calls.append(self)
+        real_mkdir(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "mkdir", counting_mkdir)
+    assert fs_isolation.toolchain_cache_env(workspace, environ={}) == first
+    assert calls == []
+
+
+def test_toolchain_cache_skips_dirs_it_cannot_create(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # A file where the cache root should be makes every mkdir fail.
+    (workspace / ".monkeybot").write_text("not a dir", encoding="utf-8")
+    assert fs_isolation.toolchain_cache_env(workspace, environ={}) == {}
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="seatbelt jail is macOS-only")
 class TestMacJailBootstrap:
     """Real `sandbox-exec` subprocess tests — see fs_isolation.py's module
     docstring: this exact profile shape was validated by hand against real
     python3/git/bash invocations before being written into code."""
 
-    def _run(self, roots: JailRoots, argv: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self, roots: JailRoots, argv: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
         executable, args = jailed_argv(
             argv[0], argv[1:], roots, support=IsolationSupport("sandbox-exec", "test")
         )
@@ -495,9 +597,7 @@ class TestMacJailBootstrap:
         assert read.returncode == 0
         assert "workspace-content" in read.stdout
 
-        write = self._run(
-            roots, ["/bin/bash", "-c", "echo written > out.txt"], cwd=workspace
-        )
+        write = self._run(roots, ["/bin/bash", "-c", "echo written > out.txt"], cwd=workspace)
         assert write.returncode == 0
         assert (workspace / "out.txt").read_text(encoding="utf-8").strip() == "written"
 
@@ -514,9 +614,7 @@ class TestMacJailBootstrap:
         assert read.returncode == 0
         assert "# skill" in read.stdout
 
-        write = self._run(
-            roots, ["/bin/bash", "-c", f"echo x > {skills}/new.py"], cwd=workspace
-        )
+        write = self._run(roots, ["/bin/bash", "-c", f"echo x > {skills}/new.py"], cwd=workspace)
         assert write.returncode != 0
         assert not (skills / "new.py").exists()
 
@@ -580,19 +678,141 @@ class TestMacJailBootstrap:
         assert proc.returncode == 0
         assert "jail-ok" in proc.stdout
 
-    def test_git_commit_works_inside_jail(self, tmp_path):
+    def test_parent_can_signal_its_child(self, tmp_path: Path):
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+        marker = workspace / "signal.txt"
+        code = (
+            "import os, signal, time\n"
+            "pid = os.fork()\n"
+            "if pid == 0:\n"
+            "    time.sleep(2)\n"
+            "    os._exit(0)\n"
+            f"path = {str(marker)!r}\n"
+            "try:\n"
+            "    os.kill(pid, signal.SIGTERM)\n"
+            "    open(path, 'w').write('ok')\n"
+            "except OSError as exc:\n"
+            "    open(path, 'w').write('fail ' + str(exc.errno))\n"
+        )
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+        proc = self._run(roots, [sys.executable, "-c", code], cwd=workspace)
+        assert proc.returncode == 0, proc.stderr
+        assert marker.read_text(encoding="utf-8") == "ok"
+
+    def test_named_semaphore_is_allowed(self, tmp_path: Path):
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+        code = (
+            "import os\n"
+            "from _multiprocessing import SemLock\n"
+            "SemLock(0, 0, 1, name='/mb-jail-%s' % os.getpid(), unlink=True)\n"
+            "print('sem-ok')\n"
+        )
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+        proc = self._run(roots, [sys.executable, "-c", code], cwd=workspace)
+        assert proc.returncode == 0, proc.stderr
+        assert "sem-ok" in proc.stdout
+
+    def test_parent_can_signal_its_child_process_group(self, tmp_path: Path):
+        # Playwright starts the browser detached and kills its whole process
+        # group, which includes renderer/GPU grandchildren.
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+        survivor = workspace / "grandchild-survived.txt"
+        code = (
+            "import os, signal, time\n"
+            "pid = os.fork()\n"
+            "if pid == 0:\n"
+            "    os.setpgid(0, 0)\n"
+            "    if os.fork() == 0:\n"
+            "        time.sleep(1.5)\n"
+            f"        open({str(survivor)!r}, 'w').write('alive')\n"
+            "        os._exit(0)\n"
+            "    time.sleep(5)\n"
+            "    os._exit(0)\n"
+            "time.sleep(0.5)\n"
+            "os.killpg(pid, signal.SIGKILL)\n"
+            "os.waitpid(pid, 0)\n"
+            "time.sleep(2)\n"
+        )
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+        proc = self._run(roots, [sys.executable, "-c", code], cwd=workspace)
+        assert proc.returncode == 0, proc.stderr
+        assert not survivor.exists()
+
+    @pytest.mark.skipif(
+        not list(
+            Path.home().glob(
+                "Library/Caches/ms-playwright/chromium_headless_shell-*/*/chrome-headless-shell"
+            )
+        ),
+        reason="Playwright chromium-headless-shell is not installed",
+    )
+    def test_headless_chromium_renders_webgl_under_the_jail(self, tmp_path: Path):
+        shell = next(
+            Path.home().glob(
+                "Library/Caches/ms-playwright/chromium_headless_shell-*/*/chrome-headless-shell"
+            )
+        )
+        workspace = Path(tempfile.mkdtemp(prefix="mb-jail-chrome-", dir=str(Path.home())))
+        try:
+            roots = JailRoots(
+                deny=(Path.home(),),
+                read_write=(workspace,),
+                read_only=(shell.parent,),
+                shared_write=(Path(tempfile.gettempdir()).resolve(),),
+            )
+            page = (
+                "data:text/html,<body><script>"
+                "var g=document.createElement('canvas').getContext('webgl');"
+                "document.body.textContent='WEBGL='+(g?'ok':'none')</script>"
+            )
+            proc = self._run(
+                roots,
+                [
+                    str(shell),
+                    "--headless",
+                    "--no-sandbox",
+                    f"--user-data-dir={workspace / 'profile'}",
+                    "--dump-dom",
+                    page,
+                ],
+                cwd=workspace,
+            )
+            assert proc.returncode == 0, proc.stderr[-2000:]
+            assert "WEBGL=ok" in proc.stdout
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+
+    @pytest.mark.parametrize("inherited_git_env", [None, "GIT_OBJECT_DIRECTORY", "GIT_DIR"])
+    def test_git_commit_works_inside_jail(self, tmp_path, monkeypatch, inherited_git_env):
         """Regression test: git reads ~/.gitconfig unconditionally on
         startup; without the narrow _HOME_DOTFILE_READ_EXCEPTIONS carve-out
-        this fails even for `git --version`."""
+        this fails even for `git --version`.
+
+        Hooks can export any GIT_* variable, not only GIT_DIR. One pointing
+        outside the workspace must not leak into the jailed git."""
         if subprocess.run(["which", "git"], capture_output=True).returncode != 0:
             pytest.skip("git not installed")
         home = tmp_path / "home"
         workspace = home / "agent" / "workspace"
         workspace.mkdir(parents=True)
         (workspace / "in.txt").write_text("x", encoding="utf-8")
+        if inherited_git_env is not None:
+            outer = home / "outer-repo-objects"
+            outer.mkdir()
+            monkeypatch.setenv(inherited_git_env, str(outer))
 
         roots = JailRoots(deny=(home,), read_write=(workspace,))
+        # Hooks export GIT_DIR and other repo-local vars (git lists them).
+        # Left set, git writes to that repo instead of the temp workspace, and
+        # the jail correctly denies it.
         script = (
+            "unset $(git rev-parse --local-env-vars) && "
             "git init -q && "
             "git -c user.email=a@b.c -c user.name=a add in.txt && "
             "git -c user.email=a@b.c -c user.name=a commit -q -m test && "
@@ -624,9 +844,7 @@ class TestMacJailBootstrap:
         shared.mkdir()
 
         roots = JailRoots(deny=(home,), read_write=(workspace,), shared_write=(shared,))
-        proc = self._run(
-            roots, ["/bin/bash", "-c", f"echo x > {shared}/out.txt"], cwd=workspace
-        )
+        proc = self._run(roots, ["/bin/bash", "-c", f"echo x > {shared}/out.txt"], cwd=workspace)
 
         assert proc.returncode == 0, proc.stderr
         assert (shared / "out.txt").read_text(encoding="utf-8").strip() == "x"
@@ -645,9 +863,7 @@ class TestMacJailBootstrap:
         palace.mkdir(parents=True)
         (palace / "secret.txt").write_text("PALACE-SECRET", encoding="utf-8")
 
-        roots = JailRoots(
-            deny=(home, palace), read_write=(workspace,), shared_write=(shared,)
-        )
+        roots = JailRoots(deny=(home, palace), read_write=(workspace,), shared_write=(shared,))
         read = self._run(roots, ["/bin/cat", str(palace / "secret.txt")], cwd=workspace)
         assert read.returncode != 0
         assert "PALACE-SECRET" not in read.stdout
@@ -730,7 +946,9 @@ class TestLinuxJailBootstrap:
         if support.mechanism != "namespace":
             pytest.skip(support.detail)
 
-    def _run(self, roots: JailRoots, argv: list[str], *, cwd: Path) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self, roots: JailRoots, argv: list[str], *, cwd: Path
+    ) -> subprocess.CompletedProcess[str]:
         executable, args = jailed_argv(
             argv[0], argv[1:], roots, support=IsolationSupport("namespace", "test")
         )

@@ -17,21 +17,18 @@ def _write_agent(root: Path, *, uri: str = "local://./data/memory") -> None:
     cfg = root / "monkeybot_config"
     cfg.mkdir(parents=True)
     (cfg / "monkeybot.yaml").write_text(
-        "paths:\n"
-        f"  memory_storage_uri: {uri}\n"
-        "  workspace_root: ./workspace\n",
+        f"paths:\n  memory_storage_uri: {uri}\n  workspace_root: ./workspace\n",
         encoding="utf-8",
     )
     (cfg / "command_allowlist.yaml").write_text(
-        "allowed_path_prefixes:\n"
-        "  - ./data/memory/\n"
-        "  - ./data/memory\n"
-        "  - ./skills/\n",
+        "allowed_path_prefixes:\n  - ./data/memory/\n  - ./data/memory\n  - ./skills/\n",
         encoding="utf-8",
     )
     legacy = root / "data" / "memory"
     legacy.mkdir(parents=True)
-    (legacy / "INDEX.md").write_text("# idx\n- [[episodic/note.md]] | tags: | summary: hi\n", encoding="utf-8")
+    (legacy / "INDEX.md").write_text(
+        "# idx\n- [[episodic/note.md]] | tags: | summary: hi\n", encoding="utf-8"
+    )
     (legacy / "episodic").mkdir()
     (legacy / "episodic" / "note.md").write_text("hello\n", encoding="utf-8")
 
@@ -111,9 +108,7 @@ def test_migrate_rewrites_absolute_docker_uri(tmp_path: Path) -> None:
     assert "local:///tmp/monkeybot-memory" in yaml_text
 
 
-def test_migrate_all_default_only_include(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_migrate_all_default_only_include(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "home"
     agents = home / "agents"
     a = agents / "alpha"
@@ -138,9 +133,7 @@ def test_migrate_all_default_only_include(
     assert (outside / "memory" / "INDEX.md").is_file()
 
 
-def test_migrate_all_agents_when_flag_set(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_migrate_all_agents_when_flag_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "home"
     agents = home / "agents"
     a = agents / "alpha"
@@ -152,9 +145,7 @@ def test_migrate_all_agents_when_flag_set(
 
     monkeypatch.setenv("MONKEYBOT_HOME", str(home))
 
-    results = migrate_all_local_agent_memory_layouts(
-        include=outside, migrate_all=True
-    )
+    results = migrate_all_local_agent_memory_layouts(include=outside, migrate_all=True)
     by_name = {Path(r["agent_root"]).name: r for r in results}
     assert by_name["alpha"]["moved"] is True
     assert by_name["beta"]["moved"] is True

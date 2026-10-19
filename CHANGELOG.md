@@ -6,6 +6,31 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### CLI
+
+### Added
+
+- `monkeybot doctor` reports `model.reasoning_effort`, including when a non-Claude Bedrock model will not receive it.
+- `fireworks` is a scaffold provider choice and validates with `FIREWORKS_API_KEY`.
+
+## [core v3.9.0] - 2026-10-18
+
+### Added
+
+- `fireworks` model provider (`monkeybot[fireworks]`) for Fireworks AI's OpenAI-compatible API. Set `model.provider: fireworks` and `FIREWORKS_API_KEY`; `FIREWORKS_BASE_URL` overrides the default `https://api.fireworks.ai/inference/v1`. Model ids are passed through unchanged, e.g. `accounts/fireworks/models/llama-v3p3-70b-instruct`.
+- `model.reasoning_effort` sends an effort level on the provider's wire field. It wins over `thinking_budget` where the provider accepts it. `none` turns thinking off. A level the API rejects is omitted on later turns. Gemini only sends levels its SDK knows; other values stay on `thinking_budget`.
+
+### Fixed
+
+- Token-pressure compaction judges viability on raw stored rows and compacts that history, not the provider-facing view.
+- A turn that fails during setup still persists the user prompt.
+- Jailed commands can launch headless Chrome. Toolchain caches stay in the workspace and are not injected into direct mempalace calls.
+
+### Changed
+
+- Provider SDK clients are reused per endpoint and closed when the process shuts down.
+- PDF text extracts are sized by the read window, spills are reused, and markdown uploads are normalized.
+
 ## [cli v0.9.0] - 2026-10-07
 
 ### Added

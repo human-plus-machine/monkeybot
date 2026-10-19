@@ -133,9 +133,7 @@ def test_run_chat_continue_resolves_and_sets_session(
         "monkeybot_cli.commands.chat._resolve_continue_session_id",
         lambda base: "resolved-session-id",
     )
-    args = build_parser().parse_args(
-        ["chat", "--url", "http://127.0.0.1:65001", "--continue"]
-    )
+    args = build_parser().parse_args(["chat", "--url", "http://127.0.0.1:65001", "--continue"])
     run_chat(args)
     assert args.session == "resolved-session-id"
     assert "Continuing session resolved" in capsys.readouterr().out

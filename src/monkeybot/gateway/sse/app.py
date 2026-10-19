@@ -45,14 +45,15 @@ from monkeybot.core.config.snapshot import (
     env_value,
     get_config_store,
 )
-from monkeybot.core.context import LoopsToolRegistry, build_context
+from monkeybot.core.context import LoopsToolRegistry, TurnContext, build_context
 from monkeybot.core.context.common import text_from_blocks
 from monkeybot.core.context.slash_skills import apply_invoked_skill
-from monkeybot.core.hooks import HookManager
+from monkeybot.core.hooks import HookEvent, HookManager
 from monkeybot.core.hooks.evidence_guard import EvidencePathGuard
 from monkeybot.core.layout import AgentLayout, resolve_agent_path
 from monkeybot.core.llm.provider import (
     Done,
+    Message,
     Provider,
     ProviderEvent,
     TextDelta,
@@ -65,12 +66,14 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.mcp.mcp_client import MCPClient, mcp_file_env_refs
 from monkeybot.core.mcp.ports_mcp import MCPCatalogApplyResult
 from monkeybot.core.memory.config import memory_enabled_from_config
+from monkeybot.core.memory.ingest import persist_message
 from monkeybot.core.memory.subsystem import MemoryConfigurationError, MemorySubsystem
 from monkeybot.core.persistence.backends import (
     StorageBackend,
     UsageStore,
     create_storage_backend,
 )
+from monkeybot.core.persistence.row_ids import new_row_id
 from monkeybot.core.persistence.transcript import (
     TranscriptWriter,
     runtime_manifest_fields,
@@ -86,6 +89,8 @@ from monkeybot.core.runtime.events import Error as AgentError
 from monkeybot.core.runtime.history_rewrite import resolve_active_thread_id
 from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.loop import run as run_loop
+from monkeybot.core.runtime.loop_hooks import _fire_hook
+from monkeybot.core.runtime.loop_messages import _user_text_from_content
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
 from monkeybot.core.tools.background_jobs import jobs_killed_at_turn_end_error
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
@@ -485,6 +490,7 @@ class GatewayRuntime:
             "MODEL_TEMPERATURE",
             "MODEL_MAX_TOKENS",
             "MODEL_THINKING_BUDGET",
+            "MODEL_REASONING_EFFORT",
             "VERTEX_AI_PROJECT_ID",
             "VERTEX_AI_LOCATION",
             "ANTHROPIC_VERTEX_PROJECT_ID",
@@ -829,6 +835,73 @@ def _content_blocks_to_text(blocks: list[ContentBlock]) -> str:
     return "\n".join(parts)
 
 
+async def _record_user_prompt_after_setup_failure(
+    *,
+    history: Any,
+    user_content: list[ContentBlock],
+    thread_id: str,
+    request_id: str,
+    memory: Any | None,
+    transcript_writer: TranscriptWriter | None,
+    hook_manager: HookManager | None,
+    session_id: str,
+    model: str,
+) -> None:
+    """Keep a prompt that never reached ``run_loop``.
+
+    History is committed first, with the same memory ingest as a normal turn.
+    The transcript write and ``USER_MESSAGE`` hook then run best-effort. The
+    hook context is empty because ``build_context`` did not succeed; subscribers
+    use the payload's thread, text, and row id.
+    """
+    row_id = new_row_id()
+    try:
+        await persist_message(
+            history,
+            Message(role="user", content=list(user_content), row_id=row_id),
+            thread_id=thread_id,
+            turn_id=request_id,
+            memory=memory,
+            ingest=True,
+        )
+    except Exception:
+        logger.exception("persisting user message after setup failure failed")
+        return
+
+    if transcript_writer is not None:
+        try:
+            await transcript_writer.write_user_message(
+                request_id=request_id,
+                content=_content_blocks_to_text(user_content),
+            )
+        except Exception:
+            logger.exception("writing user message to transcript after setup failure failed")
+
+    try:
+        await _fire_hook(
+            hook_manager,
+            event=HookEvent.USER_MESSAGE,
+            ctx=TurnContext(
+                thread_id=thread_id,
+                request_id=request_id,
+                agent_md="",
+                memory_index=[],
+                skills=[],
+                tools=[],
+                user_id=None,
+                parent_run_id=None,
+                model=model,
+                memory=memory,
+                session=session_id,
+            ),
+            timeout_s=0,
+            user_message=_user_text_from_content(user_content),
+            user_row_id=row_id,
+        )
+    except Exception:
+        logger.exception("user-message hook after setup failure failed")
+
+
 def _default_agent_path(bus: SessionBus) -> Path:
     if bus.agent_md:
         return Path(bus.agent_md)
@@ -1017,6 +1090,7 @@ class GatewayLoopPort:
             loops_advertised = loops_available and loops_registry.advertised
             summarization_model = env_value(cfg, "CONTEXT_SUMMARIZATION_MODEL", "").strip() or None
 
+            thread_id: str | None = None
             try:
                 thread_id = await resolve_active_thread_id(backend, session_id)
                 if bus.attachment_catalog is not None:
@@ -1050,6 +1124,20 @@ class GatewayLoopPort:
                 )
             except Exception as exc:
                 logger.exception("build_context failed")
+                # run_loop never starts, so it will not persist the prompt. Keep
+                # it so a client that missed the error still finds its message.
+                if thread_id is not None:
+                    await _record_user_prompt_after_setup_failure(
+                        history=history,
+                        user_content=user_content,
+                        thread_id=thread_id,
+                        request_id=request_id,
+                        memory=getattr(serving.state, "memory", None),
+                        transcript_writer=transcript_writer,
+                        hook_manager=hook_manager,
+                        session_id=session_id,
+                        model=model_name,
+                    )
                 await bus.publish_data(
                     event_to_json(AgentError(request_id=request_id, error=str(exc)))
                 )
@@ -1320,6 +1408,16 @@ async def _startup(fastapi_app: FastAPI) -> None:
 
 
 async def _shutdown(fastapi_app: FastAPI) -> None:
+    """Tear down the gateway, then close SDK HTTP clients even if a step failed."""
+    from monkeybot.providers._sdk_client import aclose_sdk_clients
+
+    try:
+        await _teardown_runtime(fastapi_app)
+    finally:
+        await aclose_sdk_clients()
+
+
+async def _teardown_runtime(fastapi_app: FastAPI) -> None:
     """Tear down MCP sessions and storage backend."""
     fastapi_app.state.gateway_runtime = None
     from monkeybot.observability import shutdown_observability

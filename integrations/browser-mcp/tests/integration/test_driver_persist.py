@@ -32,9 +32,7 @@ def test_fast_fill_enables_submit_and_driver_survives_navigation(
     assert payload.get("ok") is True
     tree = str(payload.get("tree") or "")
     nick = tree_index(tree, "Nickname", prefer_tags=("input",))
-    filled = json.loads(
-        server.browser_input_by_index(nick, "fastnick", mode="fast")
-    )
+    filled = json.loads(server.browser_input_by_index(nick, "fastnick", mode="fast"))
     assert filled.get("ok") is True
     assert filled.get("mode_used") == "fast"
 

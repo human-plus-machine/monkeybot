@@ -69,9 +69,5 @@ async def _handle_async(request_json: dict[str, Any]) -> dict[str, Any]:
 
 def handler(request: Any) -> dict[str, Any]:
     """HTTP Cloud Function entrypoint."""
-    body = (
-        request.get_json(silent=True) or {}
-        if hasattr(request, "get_json")
-        else {}
-    )
+    body = request.get_json(silent=True) or {} if hasattr(request, "get_json") else {}
     return asyncio.run(_handle_async(body))

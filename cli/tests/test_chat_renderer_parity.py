@@ -16,9 +16,7 @@ def test_tui_handlers_cover_all_event_kinds() -> None:
 
 def test_plain_handlers_cover_all_event_kinds() -> None:
     plain = _PlainRenderer()
-    missing = [
-        kind for kind in sorted(EVENT_KINDS) if not hasattr(plain, f"_on_{kind}")
-    ]
+    missing = [kind for kind in sorted(EVENT_KINDS) if not hasattr(plain, f"_on_{kind}")]
     assert not missing, f"Plain renderer missing _on_* for: {missing}"
 
 

@@ -151,9 +151,7 @@ def _handle_navigated(handle: tabs.TabHandle) -> None:
     dom_indexing._register_driver_for_new_documents(handle)
 
 
-def _settle_post_action(
-    handle: tabs.TabHandle, *, quiet_ms: int, max_ms: int
-) -> dict[str, Any]:
+def _settle_post_action(handle: tabs.TabHandle, *, quiet_ms: int, max_ms: int) -> dict[str, Any]:
     started = time.monotonic()
     settled = dom_indexing.settle(handle, quiet_ms=quiet_ms, max_ms=max_ms)
     logger.debug(
@@ -223,9 +221,8 @@ def _diff_observation(
     diff = dom_indexing.diff_tree_lines(previous, lines)
     added = list(diff["added"])
     removed = list(diff["removed"])
-    oversized = (
-        len(lines) >= 8
-        and len(added) + len(removed) > results.DIFF_TO_FULL_RATIO * len(lines)
+    oversized = len(lines) >= 8 and len(added) + len(removed) > results.DIFF_TO_FULL_RATIO * len(
+        lines
     )
     if oversized:
         return None
@@ -374,9 +371,7 @@ def observe_after(
     quiet = _quiet_ms()
     budget = _settle_ms()
     started = time.monotonic()
-    before_lines = (
-        list(handle.state.last_tree) if handle.state and handle.state.last_tree else None
-    )
+    before_lines = list(handle.state.last_tree) if handle.state and handle.state.last_tree else None
     logger.debug(
         "observe_after start action=%s observe=%s retry=%s quiet_ms=%s settle_ms=%s "
         "before_url=%s last_tree_n=%s last_url=%s",
@@ -438,4 +433,3 @@ def observe_after(
         },
         "observation": observation,
     }
-

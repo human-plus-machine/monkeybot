@@ -132,9 +132,7 @@ def _agentcore_browser_harness(ctx: chat_context.ChatContext) -> tuple[Any, Any]
     return ctx.bh
 
 
-def _ensure_harness_daemon(
-    ctx: chat_context.ChatContext, endpoint: str | None
-) -> tuple[Any, Any]:
+def _ensure_harness_daemon(ctx: chat_context.ChatContext, endpoint: str | None) -> tuple[Any, Any]:
     """Start or reuse this context's daemon without touching any other chat's."""
     from browser_harness import admin, helpers
 
@@ -159,7 +157,11 @@ def _ensure_harness_daemon(
 
     env: dict[str, str] | None = None
     if ctx.isolated and endpoint:
-        env = {"BU_CDP_WS": endpoint} if endpoint.startswith(("ws://", "wss://")) else {"BU_CDP_URL": endpoint}
+        env = (
+            {"BU_CDP_WS": endpoint}
+            if endpoint.startswith(("ws://", "wss://"))
+            else {"BU_CDP_URL": endpoint}
+        )
     if name:
         admin.ensure_daemon(name=name, env=env)
     else:
@@ -184,7 +186,9 @@ def browser_harness() -> tuple[Any, Any]:
     in_app_cdp._apply_in_app_cdp_url()
     ctx = _ensure_active_context()
     endpoint = (
-        in_app_cdp.daemon_cdp_endpoint(ctx.thread_id) if ctx.isolated else in_app_cdp._apply_in_app_cdp_url()
+        in_app_cdp.daemon_cdp_endpoint(ctx.thread_id)
+        if ctx.isolated
+        else in_app_cdp._apply_in_app_cdp_url()
     )
 
     if agentcore.agentcore_backend_requested():
