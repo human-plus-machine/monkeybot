@@ -1,0 +1,16 @@
+description: >
+  Agent finds and fixes a real bug so a failing test passes, without editing the
+  test, and verifies by running the suite before it answers.
+tags: [coding, fix]
+workspace_fixture: fixtures/coding/calc_repo
+messages:
+  - >
+    The repository in `{workspace_subdir}/` has a failing test. Find the cause
+    and fix it. Do not change the tests. When you are done, say what you ran
+    and what the result was.
+assertions:
+  required_tools: [run_command]
+  max_tool_errors: 1
+  workspace_command_passes: python -m pytest -q
+  workspace_unchanged: [tests/test_ops.py]
+  verified_before_final: true

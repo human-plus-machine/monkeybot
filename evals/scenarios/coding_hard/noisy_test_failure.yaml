@@ -1,0 +1,16 @@
+description: >
+  The test run prints ~230 KB of infrastructure chatter before any result, so the failure details
+  sit at the very end of the command output.
+tags: [coding-hard, fix, long-output]
+workspace_fixture: fixtures/coding/shop_repo
+workspace_overlays: [fixtures/coding/overlays/noisy_tests]
+messages:
+  - >
+    The tests in `{workspace_subdir}/` are failing. Find out why and fix it.
+assertions:
+  max_tool_errors: 2
+  workspace_command_passes: python -m pytest -q
+  workspace_unchanged: [tests/test_taxes.py, tests/test_orders.py, tests/conftest.py]
+  workspace_file_contains:
+    shop/taxes.py: "round_cents("
+  verified_before_final: true

@@ -7,6 +7,12 @@ Caps (``max_*`` / ``min_score``) and requirements (``required_tools``, ``min_too
 straight from a scenario's ``assertions`` mapping; keys that aren't present are
 simply not checked.
 
+Coding scenarios (a ``workspace_fixture`` copied into the agent workspace) also check the
+resulting files: ``workspace_command_passes`` (command exits 0 in the copy),
+``workspace_file_contains`` (``{path: substring}``), ``workspace_unchanged`` (paths whose
+bytes still equal the fixture), ``final_text_regex`` (last turn's text) and
+``verified_before_final`` (the last verification command succeeded and nothing wrote after it).
+
 Nested ``verifier_off`` / ``verifier_on`` blocks are selected by
 ``EVAL_VERIFIER_MODE`` (``off`` or ``on``). When the env is unset, nested
 blocks are ignored and only the top-level keys apply.
@@ -15,14 +21,29 @@ blocks are ignored and only the top-level keys apply.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
+import json
 import os
 import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
 
-from models import EvalRun, Scenario
+from models import EvalRun, Scenario, ToolCallRecord
+from scenario_loader import fixture_file
 
 from monkeybot.core.config.settings import VERIFIER_SEVERITY_RANK
 
 _NESTED_ASSERTION_KEYS = frozenset({"verifier_off", "verifier_on"})
+
+# Mirrors the default ``coding.verification_gate.verify_commands``.
+DEFAULT_VERIFY_REGEX = (
+    r"\bpytest\b|\bnpm (run )?test\b|\bpnpm (run )?test\b|\bcargo test\b|\bgo test\b"
+    r"|\bmake (test|check)\b|\bruff\b|\bmypy\b|\btsc\b"
+)
+_WRITE_TOOLS = frozenset({"write_file", "replace_in_file", "apply_patch"})
+_WORKSPACE_COMMAND_TIMEOUT_SEC = 180
 
 
 def _as_list(value: object) -> list[str]:
@@ -49,6 +70,78 @@ def _path_args_from_run(run: EvalRun) -> list[str]:
         for call in turn.tool_calls:
             paths.extend(call.path_args)
     return paths
+
+
+def _file_digest(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _run_workspace_command(command: str, cwd: Path) -> tuple[bool, str]:
+    """Run ``command`` (argv-split, no shell) in ``cwd``; ``python`` means this interpreter."""
+    try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        return False, f"unparseable command: {exc}"
+    if not argv:
+        return False, "empty command"
+    if argv[0] in {"python", "python3"}:
+        argv[0] = sys.executable
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=_WORKSPACE_COMMAND_TIMEOUT_SEC,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    tail = (proc.stdout + proc.stderr).strip()[-400:]
+    return proc.returncode == 0, f"exit {proc.returncode}: {tail}"
+
+
+def _command_line(call: ToolCallRecord) -> str:
+    """``run_command`` args as one shell-ish line (``["npm","test"]`` -> ``npm test``)."""
+    try:
+        args = json.loads(call.args_summary)
+    except ValueError:
+        return call.args_summary
+    if not isinstance(args, dict):
+        return call.args_summary
+    argv = args.get("argv")
+    if isinstance(argv, list) and argv:
+        return " ".join(str(part) for part in argv)
+    for key in ("command", "cmd", "script", "shell"):
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            extra = args.get("args")
+            tail = " ".join(str(a) for a in extra) if isinstance(extra, list) else ""
+            return f"{value} {tail}".strip()
+    return call.args_summary
+
+
+def _verified_before_final(calls: list[ToolCallRecord], verify_regex: str) -> str | None:
+    """Failure text unless the last verify command passed and no write came after it."""
+    try:
+        pattern = re.compile(verify_regex)
+    except re.error as exc:
+        return f"invalid verify regex {verify_regex!r} ({exc})"
+    last_verify = None
+    for idx, call in enumerate(calls):
+        if call.tool == "run_command" and pattern.search(_command_line(call)):
+            last_verify = idx
+    if last_verify is None:
+        return "no verification command was run"
+    if calls[last_verify].ok is not True:
+        return "the last verification command did not pass"
+    wrote_after = [c.tool for c in calls[last_verify + 1 :] if c.tool in _WRITE_TOOLS]
+    if wrote_after:
+        return f"files were modified after the last passing verification ({wrote_after})"
+    return None
 
 
 def evaluate_assertions(scenario: Scenario, run: EvalRun) -> list[str]:
@@ -174,4 +267,57 @@ def evaluate_assertions(scenario: Scenario, run: EvalRun) -> list[str]:
         elif patterns and not matched:
             failures.append(f"response_regex: none of {patterns} matched the agent's output")
 
+    if "final_text_regex" in a:
+        final_text = run.turns[-1].output if run.turns else ""
+        patterns = _as_list(a["final_text_regex"])
+        try:
+            if not any(re.search(p, final_text) for p in patterns):
+                failures.append(f"final_text_regex: none of {patterns} matched the final answer")
+        except re.error as exc:
+            failures.append(f"final_text_regex: invalid pattern ({exc})")
+
+    if "verified_before_final" in a and a["verified_before_final"]:
+        flag = a["verified_before_final"]
+        verify_regex = flag if isinstance(flag, str) else DEFAULT_VERIFY_REGEX
+        calls = [c for t in run.turns for c in t.tool_calls]
+        problem = _verified_before_final(calls, verify_regex)
+        if problem:
+            failures.append(f"verified_before_final: {problem}")
+
+    workspace_keys = ("workspace_command_passes", "workspace_file_contains", "workspace_unchanged")
+    if any(key in a for key in workspace_keys):
+        failures.extend(_workspace_failures(scenario, run, a))
+
+    return failures
+
+
+def _workspace_failures(scenario: Scenario, run: EvalRun, a: dict) -> list[str]:
+    workspace = run.workspace_dir
+    if workspace is None or not workspace.is_dir():
+        return ["workspace_*: no workspace directory was provided for this run"]
+    failures: list[str] = []
+
+    for command in _as_list(a.get("workspace_command_passes", [])):
+        passed, detail = _run_workspace_command(command, workspace)
+        if not passed:
+            failures.append(f"workspace_command_passes: `{command}` failed ({detail})")
+
+    for rel, needle in (a.get("workspace_file_contains") or {}).items():
+        try:
+            text = (workspace / rel).read_text(encoding="utf-8")
+        except OSError:
+            failures.append(f"workspace_file_contains: {rel} is missing or unreadable")
+            continue
+        if str(needle) not in text:
+            failures.append(f"workspace_file_contains: {rel} does not contain {needle!r}")
+
+    if "workspace_unchanged" in a:
+        for rel in _as_list(a["workspace_unchanged"]):
+            pristine = fixture_file(scenario, rel)
+            original = _file_digest(pristine) if pristine is not None else None
+            current = _file_digest(workspace / rel)
+            if original is None:
+                failures.append(f"workspace_unchanged: {rel} is not in the fixture")
+            elif current != original:
+                failures.append(f"workspace_unchanged: {rel} was modified or deleted")
     return failures

@@ -69,3 +69,7 @@ code/
 
 # monkeythink
 .monkeythink/
+# Eval fixtures ship their own build/ decoy
+!/evals/fixtures/coding/calc_repo/build/
+!/evals/fixtures/coding/calc_repo_green/build/
+!/evals/fixtures/coding/shop_repo/build/
