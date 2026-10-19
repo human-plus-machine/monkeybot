@@ -48,6 +48,29 @@ def _doom_loop_texts(tool_name: str, threshold: int) -> tuple[str, str]:
     return error, note
 
 
+_PATH_ARG_KEYS = ("path", "file_path", "file")
+
+
+def _failing_path_key(name: str, args: dict[str, Any]) -> str | None:
+    """``tool:path`` when ``args`` target one file; the streak key for repeated failed edits."""
+    for key in _PATH_ARG_KEYS:
+        value = args.get(key)
+        if isinstance(value, str) and value.strip():
+            return f"{name}:{value.strip()}"
+    return None
+
+
+def _path_doom_loop_texts(tool_name: str, path: str, count: int) -> tuple[str, str]:
+    """Return ``(error_event_text, recovery_system_note)`` for repeated failures on one path."""
+    error = f"Doom loop detected: tool {tool_name!r} failed {count} times in a row on {path!r}"
+    note = (
+        f"[Harness] {error}. Guessing another variation of the same call is not working. "
+        "Re-read the file to see its current content, then make one corrected change, or "
+        "explain to the user what is blocking you."
+    )
+    return error, note
+
+
 def _doom_loop_exempt_names(tools: Sequence[ToolDef]) -> frozenset[str]:
     """Tool names marked ``doom_loop_exempt`` (identical-args polling is expected)."""
     return frozenset(t.name for t in tools if t.doom_loop_exempt)
@@ -60,6 +83,11 @@ class _DoomLoopTracker:
     Fingerprint is tool name + args. Outcome (ok vs error) does not reset the
     streak — successful no-progress loops (e.g. repeated screenshots) must trip
     the same guard as repeated failures.
+
+    A second detector catches the near-miss loop: the same tool failing on the same ``path``
+    ``threshold`` times in a row even though the other arguments differ (an edit retried with a
+    slightly different ``old_string`` each time). Only failures count there; any other call in
+    between, or a success, restarts the streak.
 
     Tools in ``exempt_names`` (from ``ToolDef.doom_loop_exempt``) are ignored so
     legitimate polling (e.g. ``loop_status``) does not force a recovery turn.
@@ -78,9 +106,11 @@ class _DoomLoopTracker:
     force_no_tools: bool = False
     recovery_note: str | None = None
     triggered_tool: str | None = None
+    path_streak_key: str | None = None
+    path_streak_count: int = 0
     _pending_error: str | None = None
 
-    def record(self, name: str, args: dict[str, Any]) -> None:
+    def record(self, name: str, args: dict[str, Any], *, failed: bool = False) -> None:
         if self.threshold <= 0 or self.triggered or name in self.exempt_names:
             return
         fp = _tool_call_fingerprint(name, args)
@@ -89,11 +119,21 @@ class _DoomLoopTracker:
         else:
             self.streak_fp = fp
             self.streak_count = 1
-        if self.streak_count < self.threshold:
+        path_key = _failing_path_key(name, args) if failed else None
+        if path_key is not None and path_key == self.path_streak_key:
+            self.path_streak_count += 1
+        else:
+            self.path_streak_key = path_key
+            self.path_streak_count = 1 if path_key is not None else 0
+        if self.streak_count >= self.threshold:
+            error, note = _doom_loop_texts(name, self.threshold)
+        elif path_key is not None and self.path_streak_count >= self.threshold:
+            path = path_key.split(":", 1)[1]
+            error, note = _path_doom_loop_texts(name, path, self.path_streak_count)
+        else:
             return
         self.triggered = True
         self.triggered_tool = name
-        error, note = _doom_loop_texts(name, self.threshold)
         self._pending_error = error
         self.force_no_tools = True
         self.recovery_note = note
@@ -114,5 +154,7 @@ class _DoomLoopTracker:
             self.triggered = False
             self.streak_fp = None
             self.streak_count = 0
+            self.path_streak_key = None
+            self.path_streak_count = 0
             self.triggered_tool = None
         return force, note

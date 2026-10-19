@@ -11,6 +11,7 @@ from typing import Any, cast
 
 from monkeybot.core.config.snapshot import current_env, env_value
 from monkeybot.core.context import TurnContext
+from monkeybot.core.hooks import HookEvent, HookManager
 from monkeybot.core.context.epoch import ContextEpochTracker
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta
 from monkeybot.core.llm.usage import Usage
@@ -36,6 +37,7 @@ from monkeybot.core.types.content_blocks import (
 )
 
 from .events import AgentEvent, ContextSummarized, ContextSummarizing, ContextUsage
+from .loop_hooks import _HOOK_READ_TIMEOUT_S, _fire_hook
 from .loop_messages import _load_agent_chat_history, _summary_line_for_message
 from .loop_usage import _prompt_input_tokens_for_history
 
@@ -55,6 +57,21 @@ def _intent_facts_from_ctx(ctx: TurnContext) -> str | None:
             exc_info=True,
         )
         return None
+
+
+async def _fire_history_compacted(
+    hook_manager: HookManager | None, ctx: TurnContext, *, turns_summarized: int
+) -> None:
+    """Tell hooks that older history was replaced by a summary (awaited, bounded, never raises)."""
+    if turns_summarized <= 0:
+        return
+    await _fire_hook(
+        hook_manager,
+        event=HookEvent.HISTORY_COMPACTED,
+        ctx=ctx,
+        timeout_s=_HOOK_READ_TIMEOUT_S,
+        turns_summarized=turns_summarized,
+    )
 
 
 # Fixed harness policy — not env/YAML tunable.
@@ -422,6 +439,7 @@ async def _append_budgeted_tool_responses(
     provider: Provider,
     vertex_google_search: bool = False,
     epoch: ContextEpochTracker | None = None,
+    hook_manager: HookManager | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Budget tool results against remaining context, append, compact if needed."""
     trimmed, needs_compaction = budgeter.fit_content_blocks(chunk_responses)
@@ -453,6 +471,7 @@ async def _append_budgeted_tool_responses(
                 exc_info=True,
             )
             turns_summarized = 0
+        await _fire_history_compacted(hook_manager, ctx, turns_summarized=turns_summarized)
         yield ContextSummarized(
             request_id=ctx.request_id,
             turns_summarized=turns_summarized,

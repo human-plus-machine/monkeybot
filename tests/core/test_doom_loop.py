@@ -513,3 +513,105 @@ async def test_run_injects_doom_loop_system_note(
 
     assert any("Doom loop detected" in s for s in snapshots)
     assert prov.stream_tools[-1] == []
+
+
+# --- same tool + same path failing, other args differing ---
+
+
+def _edit_args(old: str) -> dict[str, object]:
+    return {"path": "calc/ops.py", "old_string": old, "new_string": "x"}
+
+
+def test_path_failure_streak_triggers_even_when_other_args_differ() -> None:
+    tracker = _DoomLoopTracker(threshold=3)
+    for i in range(2):
+        tracker.record("replace_in_file", _edit_args(f"guess {i}"), failed=True)
+        assert not tracker.triggered
+    tracker.record("replace_in_file", _edit_args("guess 3"), failed=True)
+    assert tracker.triggered and tracker.force_no_tools
+    assert tracker.triggered_tool == "replace_in_file"
+    error = tracker.take_error()
+    assert error is not None and "failed 3 times in a row on 'calc/ops.py'" in error
+    assert tracker.recovery_note is not None
+    assert "Re-read the file" in tracker.recovery_note
+    # Same recovery path as the identical-call detector: one tool-less turn, then re-armed.
+    force, note = tracker.consume_recovery()
+    assert force and note and not tracker.triggered
+    assert tracker.path_streak_count == 0
+
+
+def test_path_failure_streak_is_broken_by_success_other_path_or_other_call() -> None:
+    def tracker_after(*steps: tuple[str, dict[str, object], bool]) -> _DoomLoopTracker:
+        t = _DoomLoopTracker(threshold=3)
+        for name, args, failed in steps:
+            t.record(name, args, failed=failed)
+        return t
+
+    fail_a = ("replace_in_file", _edit_args("a"), True)
+    fail_b = ("replace_in_file", _edit_args("b"), True)
+    ok = ("replace_in_file", _edit_args("c"), False)
+    other_path = ("replace_in_file", {"path": "calc/other.py", "old_string": "q"}, True)
+    other_tool = ("read_file", {"path": "calc/ops.py"}, False)
+    other_tool_failing = ("write_file", {"path": "calc/ops.py", "content": "z"}, True)
+
+    assert not tracker_after(fail_a, fail_b, ok, fail_a).triggered
+    assert not tracker_after(fail_a, fail_b, other_path, fail_a).triggered
+    assert not tracker_after(fail_a, fail_b, other_tool, fail_a).triggered
+    assert not tracker_after(fail_a, fail_b, other_tool_failing, fail_a).triggered
+    assert tracker_after(fail_a, fail_b, fail_a).triggered
+
+
+def test_path_streak_ignores_calls_without_a_path_or_that_succeed() -> None:
+    tracker = _DoomLoopTracker(threshold=2)
+    tracker.record("run_command", {"command": "a"}, failed=True)
+    tracker.record("run_command", {"command": "b"}, failed=True)
+    assert not tracker.triggered  # no path argument: only the identical-call detector applies
+    tracker.record("replace_in_file", _edit_args("a"), failed=False)
+    tracker.record("replace_in_file", _edit_args("b"), failed=False)
+    assert not tracker.triggered
+
+
+def test_path_streak_respects_disabled_threshold_and_exempt_tools() -> None:
+    off = _DoomLoopTracker(threshold=0)
+    for i in range(5):
+        off.record("replace_in_file", _edit_args(str(i)), failed=True)
+    assert not off.triggered
+    exempt = _DoomLoopTracker(threshold=2, exempt_names=frozenset({"replace_in_file"}))
+    for i in range(5):
+        exempt.record("replace_in_file", _edit_args(str(i)), failed=True)
+    assert not exempt.triggered
+
+
+def test_identical_calls_still_use_the_original_message() -> None:
+    tracker = _DoomLoopTracker(threshold=3)
+    for _ in range(3):
+        tracker.record("replace_in_file", _edit_args("same"), failed=True)
+    assert tracker.take_error() == _doom_loop_texts("replace_in_file", 3)[0]
+
+
+@pytest.mark.asyncio
+async def test_run_stops_a_retry_loop_of_slightly_different_failing_edits() -> None:
+    script = [
+        [ToolCall(call_id=f"c{i}", name="replace_in_file", args=_edit_args(f"guess {i}")), Done()]
+        for i in range(3)
+    ] + [[TextDelta(text="I'm stuck on calc/ops.py: re-read it and found the real text."), Done()]]
+    prov = ToolsRecordingProvider(script)
+    events = [
+        e
+        async for e in run(
+            "fix it",
+            _ctx(),
+            provider=prov,
+            history=FakeHistory(),
+            inspectors=[AllowInspector()],
+            tool_executor=RecordingExecutor((None, '{"ok": false, "error_kind": "validation"}')),
+            max_turns=8,
+        )
+    ]
+    gates = [
+        e for e in events if isinstance(e, HarnessIntervention) and e.intervention == "doom_loop"
+    ]
+    assert len(gates) == 1 and "failed 3 times in a row" in gates[0].detail
+    assert any(isinstance(e, Error) and "failed 3 times" in e.error for e in events)
+    assert prov.stream_tools[-1] == []  # the recovery turn has no tools
+    assert isinstance(events[-1], TurnComplete)
