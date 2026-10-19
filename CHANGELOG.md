@@ -6,12 +6,16 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### CLI
+## [cli v0.10.0] - 2026-10-18
 
 ### Added
 
 - `monkeybot doctor` reports `model.reasoning_effort`, including when a non-Claude Bedrock model will not receive it.
 - `fireworks` is a scaffold provider choice and validates with `FIREWORKS_API_KEY`.
+
+### Changed
+
+- Requires `monkeybot[cli]>=3.9.0,<4`. Doctor imports the reasoning-effort helpers added in core 3.9.0.
 
 ## [core v3.9.0] - 2026-10-18
 
