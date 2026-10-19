@@ -256,6 +256,189 @@ def test_verifier_mode_nested_blocks() -> None:
         os.environ.pop("EVAL_VERIFIER_MODE", None)
 
 
+def _coding_run(
+    calls: list[ToolCallRecord], workspace: Path | None = None, output: str = "done"
+) -> EvalRun:
+    run = _run(calls, output=output)
+    run.workspace_dir = workspace
+    return run
+
+
+def _pytest(ok: bool | None) -> ToolCallRecord:
+    return ToolCallRecord(
+        tool="run_command",
+        args_summary='{"argv": ["python", "-m", "pytest", "-q"]}',
+        ok=ok,
+    )
+
+
+def test_verified_before_final_passes_when_last_verify_ok_and_no_later_write() -> None:
+    calls = [
+        ToolCallRecord(tool="replace_in_file", args_summary="{}", ok=True),
+        _pytest(False),
+        ToolCallRecord(tool="replace_in_file", args_summary="{}", ok=True),
+        _pytest(True),
+        ToolCallRecord(tool="read_file", args_summary="{}", ok=True),
+    ]
+    failures = evaluate_assertions(_scenario({"verified_before_final": True}), _run(calls))
+    assert failures == [], failures
+
+
+def test_verified_before_final_fails_without_any_verify() -> None:
+    calls = [ToolCallRecord(tool="replace_in_file", args_summary="{}", ok=True)]
+    bad = evaluate_assertions(_scenario({"verified_before_final": True}), _run(calls))
+    assert len(bad) == 1 and "no verification command" in bad[0]
+
+
+def test_verified_before_final_fails_when_last_verify_failed_or_unresolved() -> None:
+    for ok in (False, None):
+        bad = evaluate_assertions(
+            _scenario({"verified_before_final": True}), _run([_pytest(True), _pytest(ok)])
+        )
+        assert len(bad) == 1 and "did not pass" in bad[0], ok
+
+
+def test_verified_before_final_fails_when_write_follows_passing_verify() -> None:
+    calls = [_pytest(True), ToolCallRecord(tool="write_file", args_summary="{}", ok=True)]
+    bad = evaluate_assertions(_scenario({"verified_before_final": True}), _run(calls))
+    assert len(bad) == 1 and "after the last passing verification" in bad[0]
+
+
+def test_verified_before_final_custom_regex() -> None:
+    cmd = ToolCallRecord(tool="run_command", args_summary='{"argv": ["./check.sh"]}', ok=True)
+    scenario = _scenario({"verified_before_final": "check\\.sh"})
+    assert evaluate_assertions(scenario, _run([cmd])) == []
+    assert evaluate_assertions(_scenario({"verified_before_final": True}), _run([cmd]))
+
+
+def test_verify_regex_matches_argv_list_and_command_forms() -> None:
+    for summary in (
+        '{"argv": ["npm", "test"]}',
+        '{"command": "cargo test --all"}',
+        '{"command": "make", "args": ["check"]}',
+        '{"argv": ["uv", "run", "ruff", "check", "."]}',
+    ):
+        call = ToolCallRecord(tool="run_command", args_summary=summary, ok=True)
+        scenario = _scenario({"verified_before_final": True})
+        assert evaluate_assertions(scenario, _run([call])) == [], summary
+    other = ToolCallRecord(tool="run_command", args_summary='{"argv": ["ls", "-la"]}', ok=True)
+    assert evaluate_assertions(_scenario({"verified_before_final": True}), _run([other]))
+
+
+def test_final_text_regex_checks_last_turn_only() -> None:
+    first = TurnResult(input="a", output="calc/ops.py:12", usage=UsageSummary())
+    last = TurnResult(input="b", output="nothing useful", usage=UsageSummary())
+    run = EvalRun(run_id="r", scenario_id="s", turns=[first, last])
+    bad = evaluate_assertions(_scenario({"final_text_regex": r"calc/ops\.py:\d+"}), run)
+    assert len(bad) == 1 and "final_text_regex" in bad[0]
+    run.turns[-1].output = "defined at calc/ops.py:17"
+    assert evaluate_assertions(_scenario({"final_text_regex": r"calc/ops\.py:\d+"}), run) == []
+
+
+def test_workspace_assertions_against_a_real_copy() -> None:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = Path(tmp)
+        (ws / "calc").mkdir()
+        (ws / "calc" / "ops.py").write_text("def power(a, b):\n    return a**b\n")
+        (ws / "tests").mkdir()
+        (ws / "tests" / "test_ops.py").write_text("def test_ok():\n    assert True\n")
+        scenario = Scenario(
+            id="c",
+            messages=["hi"],
+            workspace_fixture="fixtures/coding/calc_repo",
+            assertions={
+                "workspace_file_contains": {"calc/ops.py": "def power("},
+                "workspace_command_passes": "python -m pytest -q",
+            },
+        )
+        assert evaluate_assertions(scenario, _coding_run([], ws)) == []
+
+        scenario.assertions = {
+            "workspace_file_contains": {"calc/ops.py": "def cube(", "missing.py": "x"},
+            "workspace_command_passes": "python -c 'import sys; sys.exit(4)'",
+        }
+        bad = evaluate_assertions(scenario, _coding_run([], ws))
+        assert len(bad) == 3, bad
+        assert any("def cube(" in f for f in bad)
+        assert any("missing.py" in f for f in bad)
+        assert any("exit 4" in f for f in bad)
+
+
+def test_workspace_unchanged_compares_with_fixture() -> None:
+    import shutil
+    import tempfile
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "coding" / "calc_repo"
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = Path(tmp) / "copy"
+        shutil.copytree(fixture, ws)
+        scenario = Scenario(
+            id="c",
+            messages=["hi"],
+            workspace_fixture="fixtures/coding/calc_repo",
+            assertions={"workspace_unchanged": ["tests/test_ops.py"]},
+        )
+        assert evaluate_assertions(scenario, _coding_run([], ws)) == []
+        (ws / "tests" / "test_ops.py").write_text("# edited\n")
+        bad = evaluate_assertions(scenario, _coding_run([], ws))
+        assert len(bad) == 1 and "modified" in bad[0]
+        (ws / "tests" / "test_ops.py").unlink()
+        assert evaluate_assertions(scenario, _coding_run([], ws))
+
+
+def test_fixture_calc_repo_green_passes_and_navigate_regex_accepts_workspace_prefix() -> None:
+    import re
+    import shutil
+    import subprocess
+    import tempfile
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "coding" / "calc_repo_green"
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = Path(tmp) / "copy"
+        shutil.copytree(fixture, ws)
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+            cwd=ws,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stdout
+    rx = re.compile(r"(?<![\w/])(?:eval-[\w-]+/)?calc/ops\.py:\d+")
+    assert rx.search("`eval-coding-navigate_repo/calc/ops.py:16`")
+    assert rx.search("calc/ops.py:16")
+    assert not rx.search("build/calc/ops.py:12")
+    assert not rx.search("eval-x/build/calc/ops.py:12")
+
+
+def test_workspace_assertions_need_a_workspace() -> None:
+    scenario = _scenario({"workspace_command_passes": "true"})
+    bad = evaluate_assertions(scenario, _run())
+    assert len(bad) == 1 and "no workspace directory" in bad[0]
+
+
+def test_fixture_calc_repo_starts_with_exactly_one_failing_test() -> None:
+    import shutil
+    import subprocess
+    import tempfile
+
+    fixture = Path(__file__).resolve().parent / "fixtures" / "coding" / "calc_repo"
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = Path(tmp) / "copy"
+        shutil.copytree(fixture, ws)
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+            cwd=ws,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 1, proc.stdout
+        assert "1 failed, 4 passed" in proc.stdout
+
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items()) if k.startswith("test_")]
     for fn in fns:

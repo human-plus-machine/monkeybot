@@ -70,6 +70,7 @@ uv run pytest tests/ -q
 uv run python evals/test_assertions.py
 uv run python evals/test_report.py
 uv run python evals/test_runner_sse.py
+uv run python evals/test_coding_hard_oracle.py
 
 if [[ -z "$(git status --porcelain)" ]]; then
   printf '%s\n' "$head_sha" >"$stamp_file"

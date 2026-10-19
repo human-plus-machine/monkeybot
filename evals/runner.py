@@ -15,6 +15,13 @@ from models import Scenario, ToolCallRecord, TurnResult, UsageSummary, VerdictRe
 
 _log = logging.getLogger(__name__)
 
+# Evals have no human. A model that stops to ask would otherwise wait forever, so every
+# ask_user prompt gets this answer and the agent must decide or report on its own.
+NO_HUMAN_ANSWER = (
+    "No one is available to answer questions. Use your best judgment, do not wait for input, "
+    "and finish the task, or report clearly why you cannot."
+)
+
 
 def _parse_sse_blocks(buffer: str) -> tuple[list[dict[str, Any]], str]:
     """Split SSE buffer into JSON objects (same idea as a browser SSE client)."""
@@ -69,6 +76,20 @@ def _path_args(args: dict[str, Any]) -> list[str]:
         if isinstance(raw, str) and raw:
             out.extend(match.strip() for match in _PATCH_PATH_RE.findall(raw) if match.strip())
     return out
+
+
+def _result_ok(error: object, result: object) -> bool:
+    """Outcome of one tool call: a tool error, or a JSON result carrying ``ok: false``, is a failure."""
+    if error:
+        return False
+    if isinstance(result, str) and result.lstrip().startswith("{"):
+        try:
+            parsed = json.loads(result)
+        except json.JSONDecodeError:
+            return True
+        if isinstance(parsed, dict) and isinstance(parsed.get("ok"), bool):
+            return parsed["ok"]
+    return True
 
 
 def _verdict_from_event(ev: dict[str, Any]) -> VerdictRecord:
@@ -158,21 +179,42 @@ async def _collect_turn_output(
                             tool=str(ev.get("tool") or ""),
                             args_summary=_args_summary(args),
                             path_args=_path_args(args),
+                            call_id=str(ev.get("call_id") or ""),
                         )
                     )
                 elif et == "ToolCallResult":
                     tool = str(ev.get("tool") or "")
                     error = ev.get("error")
-                    # Match the most recent started-but-unresolved call for this tool, else append.
+                    ok = _result_ok(error, ev.get("result"))
+                    call_id = str(ev.get("call_id") or "")
+                    # Match by call_id when the gateway sends one, else the most recent
+                    # started-but-unresolved call for this tool; append when none is open.
                     for rec in reversed(tool_calls):
-                        if rec.tool == tool and rec.error is None:
-                            if error:
-                                rec.error = str(error)
-                            break
+                        if rec.ok is not None or rec.tool != tool:
+                            continue
+                        if call_id and rec.call_id and rec.call_id != call_id:
+                            continue
+                        if error:
+                            rec.error = str(error)
+                        rec.ok = ok
+                        break
                     else:
                         tool_calls.append(
-                            ToolCallRecord(tool=tool, error=str(error) if error else None)
+                            ToolCallRecord(
+                                tool=tool,
+                                error=str(error) if error else None,
+                                call_id=call_id,
+                                ok=ok,
+                            )
                         )
+                elif et == "AskUserRequest" and ev.get("tool_call_id"):
+                    answer = await client.post(
+                        f"{base}/sessions/{session_id}/ask-user/{ev['tool_call_id']}",
+                        json={"answer": NO_HUMAN_ANSWER},
+                        timeout=timeout,
+                    )
+                    if not answer.is_success:
+                        _log.warning("ask_user auto-answer failed: HTTP %s", answer.status_code)
                 elif et == "ContextSummarized":
                     summarizations_count += 1
                 elif et == "VerifierVerdict":

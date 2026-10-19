@@ -1,0 +1,17 @@
+description: >
+  Two failing tests whose cause is one module away (pricing), with a decoy copy of the
+  buggy function under shop/legacy and vendor/. The fix must follow the repo's rounding rule.
+tags: [coding-hard, fix]
+workspace_fixture: fixtures/coding/shop_repo
+workspace_overlays: [fixtures/coding/overlays/bug_discount]
+messages:
+  - >
+    Two tests in `{workspace_subdir}/` are failing: `test_coupon_discount_rounds_half_up` and
+    `test_apply_discount_rounds_half_up`. Please fix the problem.
+assertions:
+  max_tool_errors: 2
+  workspace_command_passes: python -m pytest -q
+  workspace_unchanged: [tests/test_orders.py, tests/test_pricing.py, shop/legacy/pricing_v1.py]
+  workspace_file_contains:
+    shop/pricing.py: "round_cents("
+  verified_before_final: true

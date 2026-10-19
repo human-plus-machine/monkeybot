@@ -1,0 +1,9 @@
+[project]
+name = "calc"
+version = "0.1.0"
+description = "Tiny arithmetic library used as a live-eval fixture."
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
