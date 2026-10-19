@@ -104,6 +104,7 @@ from monkeybot.core.tools.background_jobs import (
 from monkeybot.core.tools.command_executor import BackgroundCommandExecutor
 from monkeybot.core.tools.fs_isolation import (
     JailRoots,
+    isolation_support,
     local_whisper_model_dirs,
     memory_hidden_paths,
     readable_bin_dirs_under_deny,
@@ -125,6 +126,7 @@ from monkeybot.core.tools.terminal import (
     CommandTimeoutError,
     SecurityError,
     TerminalExecutor,
+    build_skill_runtime_env,
 )
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.tools.workspace_service import (
@@ -1921,14 +1923,14 @@ class CoreToolExecutor(ToolExecutorPort):
         (read+write), the per-workspace toolchain cache (read+write — uv,
         Playwright, and matplotlib must not write ``~/.cache``), the memory
         palace when memory is on (read+write, it's a sibling of the
-        workspace, not under it), OS temp dirs (read+write, many toolchains stage there), skills
-        and the interpreter's own install prefix (read-only — the interpreter
-        can live under $HOME for a bundled desktop app), PATH ``bin``
-        directories that sit inside the denied home (read-only — onefile tools
-        such as bundled ``yt-dlp`` have to read their own executable), an
-        installed on-device Whisper model directory (read-only), and any
-        folder the user has granted read access to, durably or for this turn
-        (read-only).
+        workspace, not under it), OS temp dirs (read+write, many toolchains
+        stage there), skills and the interpreter's own install prefix
+        (read-only — the interpreter can live under $HOME for a bundled
+        desktop app), PATH ``bin`` directories that sit inside the denied home
+        (read-only — onefile tools such as bundled ``yt-dlp`` have to read
+        their own executable), an installed on-device Whisper model directory
+        (read-only), and any folder the user has granted read access to,
+        durably or for this turn (read-only).
         """
         read_write: list[Path] = [
             self._workspace.repo_root,
@@ -2028,8 +2030,15 @@ class CoreToolExecutor(ToolExecutorPort):
                 jail_roots = self._jail_roots(ctx)
                 execute_kwargs["jail_roots"] = jail_roots
                 # Same boundary: default caches live under the denied home.
-                # The container path keeps the host environment instead.
-                env_overrides = toolchain_cache_env(self._workspace.repo_root, jail_roots)
+                # The container path keeps the host environment instead, and so
+                # does a host where the jail fails open (~/.cache is reachable).
+                env_overrides: dict[str, str] = {}
+                if (await asyncio.to_thread(isolation_support)).available:
+                    env_overrides = toolchain_cache_env(
+                        self._workspace.repo_root,
+                        jail_roots,
+                        environ=build_skill_runtime_env(cwd=cwd),
+                    )
                 if cmd == "mempalace" and self._memory is not None:
                     env_overrides["MEMPALACE_PALACE_PATH"] = str(self._memory.palace_path)
                     env_overrides["MEMPALACE_BACKEND"] = self._memory.backend

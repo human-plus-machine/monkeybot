@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -16,7 +18,7 @@ from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.mcp.mcp_client import MCPDiagnosticError, MCPServerNotConnectedError
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
-from monkeybot.core.tools.fs_isolation import isolation_support
+from monkeybot.core.tools.fs_isolation import IsolationSupport, isolation_support
 from monkeybot.core.tools.types import unwrap_tool_execution_result
 from monkeybot.core.types.types_tools import ToolDef
 from tests.core.memory.helpers import make_memory_subsystem
@@ -1639,6 +1641,11 @@ async def test_run_command_points_toolchain_caches_at_the_granted_directory(
         return ExecutionResult(stdout="ok", stderr="", exit_code=0)
 
     monkeypatch.setattr(TerminalExecutor, "execute", fake_execute)
+    monkeypatch.setattr(
+        "monkeybot.core.tools.core_tool_executor.isolation_support",
+        lambda: IsolationSupport("sandbox-exec", "test"),
+        raising=False,
+    )
     executor = CoreToolExecutor(
         workspace_root=workspace,
         memory=None,
@@ -1666,6 +1673,56 @@ async def test_run_command_points_toolchain_caches_at_the_granted_directory(
     assert env["PLAYWRIGHT_BROWSERS_PATH"] == str(cache / "playwright")
     assert env["MPLCONFIGDIR"] == str(cache / "matplotlib")
     assert env["XDG_CACHE_HOME"] == str(cache / "xdg")
+    # uv tool binaries resolve after the interpreter's own bin dir.
+    path_parts = env["PATH"].split(os.pathsep)
+    assert path_parts[-1] == str(cache / "uv-bin")
+    assert path_parts[0] == str(Path(sys.executable).resolve().parent)
+
+
+@pytest.mark.asyncio
+async def test_run_command_leaves_caches_alone_when_the_jail_fails_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.tools.terminal import ExecutionResult, TerminalExecutor
+
+    for key in ("XDG_CACHE_HOME", "UV_CACHE_DIR", "PLAYWRIGHT_BROWSERS_PATH", "MPLCONFIGDIR"):
+        monkeypatch.delenv(key, raising=False)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    skills = workspace / "skills"
+    skills.mkdir()
+    seen: dict[str, object] = {}
+
+    async def fake_execute(self, command, args, timeout=60, **kwargs):
+        del self, command, args, timeout
+        seen["env"] = dict(kwargs.get("env_overrides") or {})
+        return ExecutionResult(stdout="ok", stderr="", exit_code=0)
+
+    monkeypatch.setattr(TerminalExecutor, "execute", fake_execute)
+    # No jail mechanism: commands run unwrapped and ~/.cache is reachable,
+    # so redirecting would only throw away warm caches.
+    monkeypatch.setattr(
+        "monkeybot.core.tools.core_tool_executor.isolation_support",
+        lambda: IsolationSupport("none", "no sandbox-exec"),
+        raising=False,
+    )
+    executor = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=None,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await executor.execute(
+            call=ToolCall(call_id="cache", name="run_command", args={"argv": ["echo", "ok"]}),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    env = seen["env"]
+    assert isinstance(env, dict)
+    for key in ("XDG_CACHE_HOME", "UV_CACHE_DIR", "PLAYWRIGHT_BROWSERS_PATH", "PATH"):
+        assert key not in env
 
 
 @pytest.mark.skipif(
@@ -2788,7 +2845,6 @@ async def test_read_file_non_spill_uses_workspace_defaults(tmp_path: Path) -> No
 # Sandbox executor selection and aclose() lifecycle
 # ---------------------------------------------------------------------------
 
-import sys
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock, patch
 

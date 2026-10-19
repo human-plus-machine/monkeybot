@@ -460,12 +460,16 @@ def test_seatbelt_profile_allows_headless_browser_and_child_signals():
         JailRoots(deny=(Path("/Users/x"),), read_write=(Path("/Users/x/ws"),))
     )
     for line in (
-        "(allow signal (target children))",
-        "(allow iokit-open)",
-        "(allow mach-register)",
+        "(allow signal (target same-sandbox))",
+        '(allow iokit-open (iokit-user-client-class "RootDomainUserClient"))',
+        '(allow mach-register (global-name-regex #"^org\\.chromium\\."))',
         "(allow ipc-posix-sem)",
     ):
         assert line in profile
+    # Headless Chromium needs one IOKit class and its own Mach names, not
+    # every user client and every bootstrap name.
+    assert "(allow iokit-open)" not in profile
+    assert "(allow mach-register)" not in profile
 
 
 def test_toolchain_cache_lives_in_the_workspace_even_with_monkeybot_home(
@@ -487,24 +491,60 @@ def test_toolchain_cache_lives_in_the_workspace_even_with_monkeybot_home(
     assert not (tmp_path / "app").exists()
 
 
-def test_toolchain_cache_keeps_host_values_the_jail_can_read(tmp_path: Path):
+def test_toolchain_cache_keeps_host_values_the_jail_can_use(tmp_path: Path):
     home = tmp_path / "home"
     workspace = home / "ws"
     granted = home / "bundle" / "browsers"
-    roots = JailRoots(deny=(home,), read_write=(workspace,), read_only=(granted,))
+    shared = tmp_path / "shared-tmp"
+    roots = JailRoots(
+        deny=(home,), read_write=(workspace,), read_only=(granted,), shared_write=(shared,)
+    )
     environ = {
+        # Browsers are only read, so a read-only grant is enough.
         "PLAYWRIGHT_BROWSERS_PATH": str(granted),
+        # Readable (outside the denied home) but not writable in the jail.
         "UV_CACHE_DIR": str(tmp_path / "opt" / "uv"),
+        # Writable: inside a read_write root, and inside shared_write.
+        "UV_PYTHON_INSTALL_DIR": str(workspace / "pythons"),
+        "UV_TOOL_DIR": str(shared / "uv-tools"),
+        # Read-only grant, but uv writes its cache.
+        "XDG_CACHE_HOME": str(granted / "xdg"),
         "MPLCONFIGDIR": str(home / ".matplotlib"),
-        "XDG_CACHE_HOME": "relative-cache",
+        "UV_TOOL_BIN_DIR": "relative-bin",
     }
     env = fs_isolation.toolchain_cache_env(workspace, roots, environ=environ)
-    # Readable host values stay; the one aimed into the denied home is redirected.
-    assert "PLAYWRIGHT_BROWSERS_PATH" not in env
-    assert "UV_CACHE_DIR" not in env
-    assert "XDG_CACHE_HOME" not in env
     root = (workspace / ".monkeybot" / "tool-cache").resolve()
+    assert "PLAYWRIGHT_BROWSERS_PATH" not in env
+    assert "UV_PYTHON_INSTALL_DIR" not in env
+    assert "UV_TOOL_DIR" not in env
+    assert "UV_TOOL_BIN_DIR" not in env
+    assert env["UV_CACHE_DIR"] == str(root / "uv")
+    assert env["XDG_CACHE_HOME"] == str(root / "xdg")
     assert env["MPLCONFIGDIR"] == str(root / "matplotlib")
+
+
+def test_toolchain_cache_puts_uv_tool_bin_on_path(tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    env = fs_isolation.toolchain_cache_env(workspace, environ={"PATH": "/venv/bin:/usr/bin"})
+    bin_dir = str((workspace / ".monkeybot" / "tool-cache" / "uv-bin").resolve())
+    assert env["UV_TOOL_BIN_DIR"] == bin_dir
+    # Appended, so a binary planted there cannot shadow an existing command.
+    assert env["PATH"] == f"/venv/bin:/usr/bin{os.pathsep}{bin_dir}"
+
+
+def test_toolchain_cache_creates_its_dirs_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    workspace = tmp_path / "workspace"
+    first = fs_isolation.toolchain_cache_env(workspace, environ={})
+    calls: list[Path] = []
+    real_mkdir = Path.mkdir
+
+    def counting_mkdir(self: Path, *args: object, **kwargs: object) -> None:
+        calls.append(self)
+        real_mkdir(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "mkdir", counting_mkdir)
+    assert fs_isolation.toolchain_cache_env(workspace, environ={}) == first
+    assert calls == []
 
 
 def test_toolchain_cache_skips_dirs_it_cannot_create(tmp_path: Path):
@@ -675,6 +715,78 @@ class TestMacJailBootstrap:
         proc = self._run(roots, [sys.executable, "-c", code], cwd=workspace)
         assert proc.returncode == 0, proc.stderr
         assert "sem-ok" in proc.stdout
+
+    def test_parent_can_signal_its_child_process_group(self, tmp_path: Path):
+        # Playwright starts the browser detached and kills its whole process
+        # group, which includes renderer/GPU grandchildren.
+        home = tmp_path / "home"
+        workspace = home / "agent" / "workspace"
+        workspace.mkdir(parents=True)
+        survivor = workspace / "grandchild-survived.txt"
+        code = (
+            "import os, signal, time\n"
+            "pid = os.fork()\n"
+            "if pid == 0:\n"
+            "    os.setpgid(0, 0)\n"
+            "    if os.fork() == 0:\n"
+            "        time.sleep(1.5)\n"
+            f"        open({str(survivor)!r}, 'w').write('alive')\n"
+            "        os._exit(0)\n"
+            "    time.sleep(5)\n"
+            "    os._exit(0)\n"
+            "time.sleep(0.5)\n"
+            "os.killpg(pid, signal.SIGKILL)\n"
+            "os.waitpid(pid, 0)\n"
+            "time.sleep(2)\n"
+        )
+        roots = JailRoots(deny=(home,), read_write=(workspace,))
+        proc = self._run(roots, [sys.executable, "-c", code], cwd=workspace)
+        assert proc.returncode == 0, proc.stderr
+        assert not survivor.exists()
+
+    @pytest.mark.skipif(
+        not list(
+            Path.home().glob(
+                "Library/Caches/ms-playwright/chromium_headless_shell-*/*/chrome-headless-shell"
+            )
+        ),
+        reason="Playwright chromium-headless-shell is not installed",
+    )
+    def test_headless_chromium_renders_webgl_under_the_jail(self, tmp_path: Path):
+        shell = next(
+            Path.home().glob(
+                "Library/Caches/ms-playwright/chromium_headless_shell-*/*/chrome-headless-shell"
+            )
+        )
+        workspace = Path(tempfile.mkdtemp(prefix="mb-jail-chrome-", dir=str(Path.home())))
+        try:
+            roots = JailRoots(
+                deny=(Path.home(),),
+                read_write=(workspace,),
+                read_only=(shell.parent,),
+                shared_write=(Path(tempfile.gettempdir()).resolve(),),
+            )
+            page = (
+                "data:text/html,<body><script>"
+                "var g=document.createElement('canvas').getContext('webgl');"
+                "document.body.textContent='WEBGL='+(g?'ok':'none')</script>"
+            )
+            proc = self._run(
+                roots,
+                [
+                    str(shell),
+                    "--headless",
+                    "--no-sandbox",
+                    f"--user-data-dir={workspace / 'profile'}",
+                    "--dump-dom",
+                    page,
+                ],
+                cwd=workspace,
+            )
+            assert proc.returncode == 0, proc.stderr[-2000:]
+            assert "WEBGL=ok" in proc.stdout
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
 
     @pytest.mark.parametrize("inherited_git_env", [None, "GIT_OBJECT_DIRECTORY", "GIT_DIR"])
     def test_git_commit_works_inside_jail(self, tmp_path, monkeypatch, inherited_git_env):
