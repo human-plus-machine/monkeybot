@@ -6,7 +6,14 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Core
+### CLI
+
+### Added
+
+- `monkeybot doctor` reports `model.reasoning_effort`, including when a non-Claude Bedrock model will not receive it.
+- `fireworks` is a scaffold provider choice and validates with `FIREWORKS_API_KEY`.
+
+## [core v3.9.0] - 2026-10-18
 
 ### Added
 
@@ -23,13 +30,6 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 - Provider SDK clients are reused per endpoint and closed when the process shuts down.
 - PDF text extracts are sized by the read window, spills are reused, and markdown uploads are normalized.
-
-### CLI
-
-### Added
-
-- `monkeybot doctor` reports `model.reasoning_effort`, including when a non-Claude Bedrock model will not receive it.
-- `fireworks` is a scaffold provider choice and validates with `FIREWORKS_API_KEY`.
 
 ## [cli v0.9.0] - 2026-10-07
 
