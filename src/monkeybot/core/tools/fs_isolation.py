@@ -42,6 +42,7 @@ refuses to run" rather than a silent bypass.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -581,6 +582,15 @@ def _seatbelt_jail_profile(roots: JailRoots) -> str:
         "(allow process-fork)",
         "(allow process-exec)",
         "(allow signal (target self))",
+        # Playwright kills the browser's whole process group, renderer and
+        # GPU grandchildren included. `same-sandbox` reaches every jailed
+        # descendant and nothing outside the jail (pid 1 stays denied).
+        "(allow signal (target same-sandbox))",
+        # Headless Chromium (cadgen snapshot) SIGSEGVs under deny-default
+        # without these. Measured against chromium-headless-shell with WebGL
+        # (SwiftShader): one IOKit class and its own bootstrap names suffice.
+        '(allow iokit-open (iokit-user-client-class "RootDomainUserClient"))',
+        '(allow mach-register (global-name-regex #"^org\\.chromium\\."))',
         "(allow mach-lookup)",
         "(allow sysctl-read)",
         "(allow file-read-metadata)",
@@ -589,6 +599,9 @@ def _seatbelt_jail_profile(roots: JailRoots) -> str:
         # unpacking. process-exec alone is not enough; without this the
         # binary dies with "Failed to initialize sync semaphore".
         "(allow ipc-sysv-sem)",
+        # joblib / numpy probe a named posix semaphore at import and otherwise
+        # fall back to serial mode with EPERM.
+        "(allow ipc-posix-sem)",
     ]
     if deny:
         lines.append(f'(allow file-read* (require-all (subpath "/") {deny_excludes}))')
@@ -818,6 +831,110 @@ def _namespace_jail_argv(executable: str, args: Sequence[str], roots: JailRoots)
         executable,
         *args,
     ]
+
+
+# (env var, cache subdir, whether the tool writes there). Playwright only
+# reads its browsers; everything else is a cache the tool fills itself.
+_TOOLCHAIN_CACHE_DIRS: tuple[tuple[str, str, bool], ...] = (
+    ("XDG_CACHE_HOME", "xdg", True),
+    ("UV_CACHE_DIR", "uv", True),
+    ("UV_PYTHON_INSTALL_DIR", "uv-python", True),
+    ("UV_TOOL_DIR", "uv-tools", True),
+    ("UV_TOOL_BIN_DIR", "uv-bin", True),
+    ("PLAYWRIGHT_BROWSERS_PATH", "playwright", False),
+    ("MPLCONFIGDIR", "matplotlib", True),
+)
+
+
+def toolchain_cache_directory(workspace: Path) -> Path:
+    """One writable cache root for toolchains the home-directory deny would block.
+
+    Always inside the workspace, which is already a read-write root. It is
+    deliberately not shared across agents: the cache holds executables (uv
+    Pythons, uv tool bins, the Playwright browser) that later commands run,
+    so a shared writable copy would let one agent plant code in another's jail.
+    """
+    return (Path(workspace) / ".monkeybot" / "tool-cache").resolve()
+
+
+def _jail_allows(value: str, roots: JailRoots, *, write: bool) -> bool:
+    """True when a host-configured cache path stays usable inside ``roots``.
+
+    Mirrors the jail: ``always_deny`` wins; ``read_write`` grants beat
+    ``deny``; ``shared_write`` is writable only outside ``deny``; reads
+    outside ``deny`` are open. Relative values (Playwright's ``0`` sentinel,
+    a cwd-relative dir) are not aimed at the denied home, so they are left
+    alone.
+    """
+    raw = Path(value).expanduser()
+    if not raw.is_absolute():
+        return True
+    try:
+        path = raw.resolve()
+    except (OSError, RuntimeError):
+        return False
+
+    def under(paths: Sequence[Path]) -> bool:
+        return any(path.is_relative_to(r) for r in _resolved_deny_roots(paths))
+
+    if under(roots.always_deny):
+        return False
+    if under(roots.read_write):
+        return True
+    denied = under(roots.deny)
+    if write:
+        return under(roots.shared_write) and not denied
+    return under(roots.read_only) or not denied
+
+
+@functools.cache
+def _created_cache_dirs(root: Path) -> frozenset[str]:
+    """Create the cache subdirs once per process; names that failed are left out."""
+    created: set[str] = set()
+    for key, name, _ in _TOOLCHAIN_CACHE_DIRS:
+        path = root / name
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logger.warning("toolchain cache dir %s unavailable for %s: %s", path, key, exc)
+            continue
+        created.add(name)
+    return frozenset(created)
+
+
+def toolchain_cache_env(
+    workspace: Path,
+    roots: JailRoots | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Point uv, Playwright, matplotlib, and XDG caches at :func:`toolchain_cache_directory`.
+
+    A host value the jail can still use (writable for caches, readable for
+    ``PLAYWRIGHT_BROWSERS_PATH``) is kept; only unset values, or ones the jail
+    would block, are redirected. A directory that cannot be created is
+    skipped and the host value left in place rather than failing the
+    command. When ``UV_TOOL_BIN_DIR`` is redirected it is appended to
+    ``environ``'s ``PATH`` so installed tools resolve without shadowing
+    anything already on it.
+    """
+    if environ is None:
+        environ = os.environ
+    root = toolchain_cache_directory(workspace)
+    created = _created_cache_dirs(root)
+    env: dict[str, str] = {}
+    for key, name, write in _TOOLCHAIN_CACHE_DIRS:
+        host = (environ.get(key) or "").strip()
+        if host and roots is not None and _jail_allows(host, roots, write=write):
+            continue
+        if name not in created:
+            continue
+        env[key] = str(root / name)
+    if "UV_TOOL_BIN_DIR" in env:
+        base_path = environ.get("PATH", "")
+        bin_dir = env["UV_TOOL_BIN_DIR"]
+        env["PATH"] = f"{base_path}{os.pathsep}{bin_dir}" if base_path else bin_dir
+    return env
 
 
 def jailed_argv(
