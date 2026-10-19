@@ -1,0 +1,32 @@
+# Deep-merged over monkeybot.example.yaml by `monkeybot new --template coding`.
+# Edit the generated monkeybot_config/monkeybot.yaml, not this file.
+#
+# Point the agent at the repository you want it to work on:
+#   paths:
+#     workspace_root: /absolute/path/to/your/repo
+# (or clone the repo into ./workspace).
+
+coding:
+  enabled: true
+  # Reject a final answer that follows unverified edits, once per message.
+  verification_gate:
+    enabled: true
+
+# Deterministic in-loop drift signals (no extra model calls except the goal ledger).
+verifier:
+  enabled: true
+  ledger:
+    enabled: true
+  tracker:
+    enabled: true
+  judge:
+    enabled: false
+  escalation:
+    max_severity: nudge
+
+runtime:
+  transcript_enabled: true
+
+model:
+  context_window: 200000
+  max_turns: 100

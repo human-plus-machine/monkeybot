@@ -34,6 +34,11 @@ RUNTIME_NOTES_HEADING = "\n\n## Runtime notes\n"
 VERIFIER_HEADING = "\n\n## Verifier\n"
 SYSTEM_CONTEXT_UPDATE_HEADING = "\n\n## System context update\n"
 
+#: Stable (cacheable) coding-mode sections. Deliberately NOT in ``VOLATILE_SECTION_HEADINGS``:
+#: they sit between the harness and the volatile tail, so they cache with the prefix.
+PROJECT_INSTRUCTIONS_HEADING = "\n\n## Project instructions\n"
+REPO_OVERVIEW_HEADING = "\n\n## Repo overview\n"
+
 #: Every heading that starts the volatile (non-cacheable) tail of a prompt.
 VOLATILE_SECTION_HEADINGS = (
     CURRENT_DATE_HEADING,

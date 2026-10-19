@@ -1,0 +1,40 @@
+description: "Scripted read -> edit -> verify -> report run against a real executor and the calc_repo fixture"
+executor: real
+coding: true
+workspace_fixture: fixtures/coding/calc_repo
+user_message: "The divide-by-zero test fails. Fix calc/ops.py without touching the tests."
+scripted_turns:
+  - - type: tool_call
+      call_id: c1
+      name: read_file
+      args:
+        path: calc/ops.py
+    - type: done
+  - - type: tool_call
+      call_id: c2
+      name: replace_in_file
+      args:
+        path: calc/ops.py
+        old_string: "    return a / b\n"
+        new_string: "    if b == 0:\n        raise ValueError(\"division by zero\")\n    return a / b\n"
+    - type: done
+  - - type: tool_call
+      call_id: c3
+      name: run_command
+      args:
+        argv: ["python", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+    - type: done
+  - - type: text_delta
+      text: "Fixed divide() to raise ValueError on zero. Ran python -m pytest -q: 5 passed."
+    - type: done
+assertions:
+  tool_categories_used:
+    - write
+    - shell
+  workspace_file_contains:
+    calc/ops.py: "division by zero"
+  workspace_command_passes:
+    - python -m pytest -q -p no:cacheprovider
+  turn_completed: true
+  no_errors: true
+  max_turns: 6

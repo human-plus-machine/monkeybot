@@ -17,6 +17,13 @@ _DEFAULTS_PKG: Final = "monkeybot_cli.scaffold_defaults"
 # Matches packaged monkeybot.example.yaml default when ``--provider`` is omitted.
 _DEFAULT_PROVIDER: Final = "gemini"
 
+TEMPLATES: Final[tuple[str, ...]] = ("default", "coding")
+DEFAULT_TEMPLATE: Final = "default"
+_TEMPLATES_DIR: Final = "templates"
+_OVERRIDES_FILE: Final = "monkeybot.overrides.yaml"
+# Files a template replaces in the base bundle (same output names).
+_TEMPLATE_FILES: Final[tuple[str, ...]] = ("AGENT.md", "command_allowlist.yaml", "permissions.yaml")
+
 # (filename in packaged defaults, output name under <dest>/monkeybot_config/)
 _CONFIG_BUNDLE: Final[tuple[tuple[str, str], ...]] = (
     ("monkeybot.example.yaml", "monkeybot.example.yaml"),
@@ -39,6 +46,49 @@ _MISSING_YAML_BANNER: Final = (
 )
 
 
+def _validate_template(template: str) -> str:
+    if template not in TEMPLATES:
+        raise ValueError(f"unknown template {template!r}; choose from {', '.join(TEMPLATES)}")
+    return template
+
+
+def _template_resource(template: str, name: str) -> Traversable:
+    return resources.files(_DEFAULTS_PKG) / _TEMPLATES_DIR / template / name
+
+
+def _config_bundle(template: str = DEFAULT_TEMPLATE) -> tuple[tuple[Traversable, str], ...]:
+    """``(source, output name)`` pairs for ``monkeybot_config/``, with template overlays applied."""
+    _validate_template(template)
+    out: list[tuple[Traversable, str]] = []
+    for src_name, dest_name in _CONFIG_BUNDLE:
+        if template != DEFAULT_TEMPLATE and dest_name in _TEMPLATE_FILES:
+            out.append((_template_resource(template, dest_name), dest_name))
+        else:
+            out.append((resources.files(_DEFAULTS_PKG) / src_name, dest_name))
+    return tuple(out)
+
+
+def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in overlay.items():
+        current = merged.get(key)
+        if isinstance(current, dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(current, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _template_overrides(template: str) -> dict[str, Any]:
+    if template == DEFAULT_TEMPLATE:
+        return {}
+    resource = _template_resource(template, _OVERRIDES_FILE)
+    if not resource.is_file():
+        return {}
+    loaded = yaml.safe_load(resource.read_text(encoding="utf-8"))
+    return loaded if isinstance(loaded, dict) else {}
+
+
 def _install_file(dest: Path, src: Traversable, *, force: bool) -> str:
     # ponytail: read_bytes() avoids resources.as_file() temp-file lifetime issue in zip distributions
     if dest.exists() and not force:
@@ -48,16 +98,14 @@ def _install_file(dest: Path, src: Traversable, *, force: bool) -> str:
     return "overwritten" if existed else "created"
 
 
-def install_config_bundle(cfg_dir: Path, *, force: bool) -> list[str]:
-    """Copy packaged defaults into ``cfg_dir``; return report lines."""
+def install_config_bundle(
+    cfg_dir: Path, *, force: bool, template: str = DEFAULT_TEMPLATE
+) -> list[str]:
+    """Copy packaged defaults (with ``template`` overlays) into ``cfg_dir``; return report lines."""
     cfg_dir.mkdir(parents=True, exist_ok=True)
     lines: list[str] = []
-    for src_name, dest_name in _CONFIG_BUNDLE:
-        status = _install_file(
-            cfg_dir / dest_name,
-            resources.files(_DEFAULTS_PKG) / src_name,
-            force=force,
-        )
+    for source, dest_name in _config_bundle(template):
+        status = _install_file(cfg_dir / dest_name, source, force=force)
         lines.append(f"  monkeybot_config/{dest_name}: {status}")
     return lines
 
@@ -68,8 +116,14 @@ def write_active_config(
     provider: str | None = None,
     model: str | None = None,
     force: bool = False,
+    template: str = DEFAULT_TEMPLATE,
 ) -> str:
-    """Create or update ``monkeybot.yaml`` from the packaged example."""
+    """Create or update ``monkeybot.yaml`` from the packaged example.
+
+    A non-default ``template`` deep-merges its ``monkeybot.overrides.yaml`` over the example
+    when the file is (re)created; an existing config is never re-templated.
+    """
+    _validate_template(template)
     active = cfg_dir / "monkeybot.yaml"
     if active.exists() and not force:
         if provider or model:
@@ -90,9 +144,11 @@ def write_active_config(
         encoding="utf-8"
     )
     active.write_text(example_text, encoding="utf-8")
-    if provider or model:
+    overrides = _template_overrides(template)
+    if provider or model or overrides:
         doc = yaml.safe_load(active.read_text(encoding="utf-8")) or {}
         if isinstance(doc, dict):
+            doc = _deep_merge(doc, overrides)
             model_sec = doc.setdefault("model", {})
             if isinstance(model_sec, dict):
                 if provider:
@@ -102,7 +158,7 @@ def write_active_config(
             active.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
     if existed:
         return "overwritten"
-    if provider or model:
+    if provider or model or overrides:
         return "created"
     return "created (from monkeybot.example.yaml)"
 
@@ -417,8 +473,12 @@ def run_new(
     provider: str | None = None,
     model: str | None = None,
     extras: list[str] | None = None,
+    template: str = DEFAULT_TEMPLATE,
 ) -> list[str]:
     """Full scaffold: config bundle, empty skills root, writable state, and image files.
+
+    ``template`` selects the persona/policy overlay: ``default`` (general agent) or ``coding``
+    (repo workflow: coding mode, verification gate, toolchain allowlist, ask-before-push rules).
 
     Optional capability skills (``browser``, ``image-generator``, ``loop``) are packaged
     under ``scaffold_defaults`` but not installed into new agents for now —
@@ -427,12 +487,13 @@ def run_new(
     them again. The ``goal`` skill is installed because native goal tools are
     intentionally exposed only for explicit ``/goal`` invocations.
     """
+    _validate_template(template)
     cfg_dir = dest / "monkeybot_config"
-    report = install_config_bundle(cfg_dir, force=force)
-    report.append(
-        f"  monkeybot_config/monkeybot.yaml: "
-        f"{write_active_config(cfg_dir, provider=provider, model=model, force=force)}"
+    report = install_config_bundle(cfg_dir, force=force, template=template)
+    active_status = write_active_config(
+        cfg_dir, provider=provider, model=model, force=force, template=template
     )
+    report.append(f"  monkeybot_config/monkeybot.yaml: {active_status}")
     report.extend(ensure_memory(dest, force=force))
     report.extend(ensure_workspace(dest, force=force))
     report.append(f"  skills/goal/SKILL.md: {install_goal_skill(dest, force=force)}")

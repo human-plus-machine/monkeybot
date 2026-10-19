@@ -171,6 +171,70 @@ def norm_run_command_line(args: dict[str, object]) -> str | None:
 
 
 _SHELL_OPERATOR_TOKENS = frozenset({"&&", "||", ";", "|", "&"})
+_SHELL_BINARIES = frozenset({"bash", "sh", "zsh", "dash"})
+_SHELL_C_FLAG_RE = re.compile(r"^-[A-Za-z]*c[A-Za-z]*$")
+_SHELL_PUNCTUATION = frozenset("();<>|&")
+_MAX_SHELL_NESTING = 3
+
+
+def _split_shell_script(script: str, depth: int = 0) -> list[str]:
+    """Return each simple command in ``script`` as its own normalized line."""
+    segments: list[str] = []
+    for raw_line in script.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        try:
+            tokens = list(lexer)
+        except ValueError:
+            segments.append(line)
+            continue
+        current: list[str] = []
+        for token in [*tokens, ";"]:
+            if all(ch in _SHELL_PUNCTUATION for ch in token):
+                if current:
+                    segments.extend(_command_lines(current, depth))
+                current = []
+            else:
+                current.append(token)
+    return segments
+
+
+def _command_lines(argv: list[str], depth: int) -> list[str]:
+    lines = [shlex.join(argv)]
+    nested = shell_script_arg(argv)
+    if nested is not None and depth < _MAX_SHELL_NESTING:
+        lines.extend(_split_shell_script(nested, depth + 1))
+    return lines
+
+
+def shell_script_arg(argv: list[str]) -> str | None:
+    """Script text of ``bash|sh|zsh -c <script>``; ``None`` for any other argv."""
+    if len(argv) < 3 or Path(argv[0]).name not in _SHELL_BINARIES:
+        return None
+    for idx, arg in enumerate(argv[1:-1], start=1):
+        if _SHELL_C_FLAG_RE.match(arg):
+            return argv[idx + 1]
+        if not arg.startswith("-"):
+            return None
+    return None
+
+
+def shell_script_segments(args: dict[str, object]) -> list[str]:
+    """Commands hidden inside a ``bash -c "..."`` call, one normalized line each.
+
+    The whole-call line from ``norm_run_command_line`` quotes the script as a
+    single token, so line-anchored deny patterns never see the commands inside.
+    """
+    try:
+        binary, rest = parse_run_command(args)
+    except ValueError:
+        return []
+    argv = [binary, *rest]
+    script = shell_script_arg(argv)
+    return _split_shell_script(script) if script is not None else []
 
 
 def _needs_shell_wrapper(stripped: str, parts: list[str]) -> bool:
@@ -338,8 +402,9 @@ class CommandTierInspector:
                 message="run_command policy check needs argv, command, or shell/script",
             )
 
+        lines = [cmd_norm, *shell_script_segments(call.args)]
         for rx in self._deny_regexes:
-            if rx.search(cmd_norm):
+            if any(rx.search(line) for line in lines):
                 return Decision(kind="deny", message="denied by run_command deny_patterns policy")
 
         try:

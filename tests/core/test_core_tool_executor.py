@@ -423,13 +423,65 @@ def test_glob_paths_matches_directories(tmp_path: Path) -> None:
     (checkout / "README.md").write_text("hi\n", encoding="utf-8")
     svc = WorkspaceFileService(root)
 
-    exact = svc.glob_paths("EPCAP/agentic-platform-monorepo", root="repos")
+    exact = svc.glob_paths("EPCAP/agentic-platform-monorepo", root="repos", files_only=False)
     assert exact["ok"] is True
     assert "repos/EPCAP/agentic-platform-monorepo" in exact["paths"]
 
-    wildcard = svc.glob_paths("EPCAP/*", root="repos")
+    wildcard = svc.glob_paths("EPCAP/*", root="repos", files_only=False)
     assert wildcard["ok"] is True
     assert "repos/EPCAP/agentic-platform-monorepo" in wildcard["paths"]
+
+    # Default is files only: the directory is not listed.
+    assert svc.glob_paths("EPCAP/*", root="repos")["paths"] == []
+
+
+def _noisy_repo(root: Path) -> None:
+    (root / "src" / "pkg").mkdir(parents=True)
+    (root / "src" / "pkg" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "app.py").write_text("y = 2\n", encoding="utf-8")
+    for noise in ("node_modules/left-pad", ".venv/lib", "build", ".git/objects"):
+        (root / noise).mkdir(parents=True)
+        (root / noise / "noise.py").write_text("z = 3\n", encoding="utf-8")
+    (root / "node_modules" / "left-pad" / "package.json").write_text("{}", encoding="utf-8")
+
+
+def test_glob_skips_noise_directories(tmp_path: Path) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService
+
+    _noisy_repo(tmp_path)
+    svc = WorkspaceFileService(tmp_path)
+    assert svc.glob_paths("**/*.py")["paths"] == ["app.py", "src/pkg/mod.py"]
+    assert svc.glob_paths("*/*.py")["paths"] == []
+    assert svc.glob_paths("**/*")["paths"] == ["app.py", "src/pkg/mod.py"]
+
+
+def test_glob_names_noise_directory_explicitly(tmp_path: Path) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService
+
+    _noisy_repo(tmp_path)
+    svc = WorkspaceFileService(tmp_path)
+    assert svc.glob_paths("node_modules/**/package.json")["paths"] == [
+        "node_modules/left-pad/package.json"
+    ]
+    assert svc.glob_paths("**/*.json", root="node_modules")["paths"] == [
+        "node_modules/left-pad/package.json"
+    ]
+
+
+def test_glob_dir_walk_semantics(tmp_path: Path) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService
+
+    _noisy_repo(tmp_path)
+    svc = WorkspaceFileService(tmp_path)
+    assert svc.glob_paths("src/**/mod.py")["paths"] == ["src/pkg/mod.py"]
+    assert svc.glob_paths("src/**", files_only=False)["paths"] == [
+        "src",
+        "src/pkg",
+        "src/pkg/mod.py",
+    ]
+    assert "src/pkg" in svc.glob_paths("src/*", files_only=False)["paths"]
+    assert svc.glob_paths("src/pkg/mod.py")["paths"] == ["src/pkg/mod.py"]
+    assert svc.glob_paths("app.p?")["paths"] == ["app.py"]
 
 
 @pytest.mark.asyncio
@@ -1870,7 +1922,7 @@ async def test_run_command_blocked_path_returns_policy_envelope(
             call=ToolCall(
                 call_id="1",
                 name="run_command",
-                args={"argv": ["cat", "./forbidden/x.txt"]},
+                args={"argv": ["cat", "../forbidden/x.txt"]},
             ),
             ctx=_ctx(),
         )
@@ -2147,6 +2199,111 @@ async def test_run_command_timeout_spills_partial_output_from_real_terminal(
 
 
 @pytest.mark.asyncio
+async def test_run_command_large_output_keeps_exit_code_and_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Big streams must not hide exit_code/stderr/tail behind a raw-JSON prefix."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "mem").mkdir()
+    (tmp_path / "skills").mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+    )
+    script = (
+        "import sys\n"
+        "print('x' * 200000)\n"
+        "print('=== 1 failed, 4 passed in 0.12s ===')\n"
+        "sys.stderr.write('E   AssertionError: boom\\n')\n"
+        "sys.exit(3)\n"
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="big1", name="run_command", args={"argv": ["python3", "-c", script]}
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)  # must stay valid JSON, not a truncated prefix
+    assert payload["ok"] is False
+    assert payload["exit_code"] == 3
+    assert "1 failed, 4 passed" in payload["stdout_tail"]
+    assert "AssertionError: boom" in payload["stderr_tail"]
+    assert payload["stdout_chars"] > 200000
+    assert len(out) < 32_768
+    spilled = (tmp_path / payload["output_path"]).read_text(encoding="utf-8")
+    assert "exit_code=3" in spilled
+    assert "1 failed, 4 passed" in spilled
+    assert "x" * 200000 in spilled
+
+
+@pytest.mark.asyncio
+async def test_run_command_allows_workspace_relative_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``pytest ./tests`` style argv: ``./`` and workspace-absolute paths are the agent's tree."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "mem").mkdir()
+    (tmp_path / "skills").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_ops.py").write_text("x\n", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+    )
+
+    async def run(argv: list[str]) -> tuple[str | None, str | None]:
+        return unwrap_tool_execution_result(
+            await ex.execute(
+                call=ToolCall(call_id="p", name="run_command", args={"argv": argv}),
+                ctx=_ctx(),
+            )
+        )
+
+    for argv in (["ls", "./tests"], ["ls", str(tmp_path / "tests")]):
+        out, err = await run(argv)
+        assert err is None and out is not None, argv
+        assert "test_ops.py" in json.loads(out)["stdout"]
+
+    out, err = await run(["cat", "../outside.txt"])
+    assert out is None and err is not None
+    assert json.loads(err)["error_kind"] == "policy"
+
+
+@pytest.mark.asyncio
+async def test_run_command_small_output_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "mem").mkdir()
+    (tmp_path / "skills").mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="small1",
+                name="run_command",
+                args={"argv": ["python3", "-c", "print('hi')"]},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    assert json.loads(out) == {"ok": True, "stdout": "hi\n", "stderr": "", "exit_code": 0}
+
+
+@pytest.mark.asyncio
 async def test_unknown_tool(tmp_path: Path) -> None:
     ex = CoreToolExecutor(
         workspace_root=tmp_path,
@@ -2326,6 +2483,76 @@ async def test_task_tool_resolves_subagent_type_agent_md(
     )
     assert err is None and out is not None
     assert seen_agent_md == [str(impl_md.resolve())]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("persona_model", "persona_location", "expected_model", "expected_location"),
+    [
+        ("claude-haiku-5-5", "europe-west4", "claude-haiku-5-5", "europe-west4"),
+        (None, None, "gemini-2.5-flash", None),
+    ],
+)
+async def test_task_tool_persona_overrides_model_and_vertex_location(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    persona_model: str | None,
+    persona_location: str | None,
+    expected_model: str,
+    expected_location: str | None,
+) -> None:
+    agents = tmp_path / "monkeybot_config" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "scout.md").write_text("# scout\n", encoding="utf-8")
+    (tmp_path / "monkeybot_config" / "AGENT.md").write_text("# parent\n", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    async def fake_run_inline(**kwargs: object) -> dict[str, object]:
+        seen["model"] = kwargs["envelope"].model  # type: ignore[attr-defined]
+        seen["location"] = kwargs["child_env"].get("VERTEX_AI_LOCATION")  # type: ignore[attr-defined]
+        return {"ok": True, "errors": []}
+
+    monkeypatch.setattr(
+        "monkeybot.core.tools.core_tool_executor._run_inline_subagent_with_progress",
+        fake_run_inline,
+    )
+    monkeypatch.delenv("VERTEX_AI_LOCATION", raising=False)
+    _stub_agent_md_for_tasks(tmp_path, monkeypatch)
+    (tmp_path / "mem").mkdir()
+    (tmp_path / "skills").mkdir()
+    worker = tmp_path / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
+
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        subagent_registry={
+            "scout": SubagentConfig(
+                name="scout",
+                description="d",
+                skills=[],
+                agent_md="./monkeybot_config/agents/scout.md",
+                model=persona_model,
+                vertex_location=persona_location,
+            )
+        },
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-model",
+                name="task",
+                args={"task": "look around", "subagent_type": "scout"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    assert seen == {"model": expected_model, "location": expected_location}
 
 
 @pytest.mark.asyncio
@@ -4907,3 +5134,306 @@ async def test_egress_scan_exempts_read_only_browser_tools(
         ctx=ctx,
     )
     assert result.error is None or "credential_egress_blocked" not in (result.error or "")
+
+
+# --- Phase 2: edit ergonomics, list_dir, grep modes, read-before-write ledger ---
+
+
+async def _call(ex: CoreToolExecutor, name: str, args: dict, call_id: str = "c") -> tuple:
+    return unwrap_tool_execution_result(
+        await ex.execute(call=ToolCall(call_id=call_id, name=name, args=args), ctx=_ctx())
+    )
+
+
+def _ledger_executor(tmp_path: Path):
+    from monkeybot.core.tools.read_ledger import FileReadLedger
+
+    mem = tmp_path / "mem"
+    mem.mkdir(exist_ok=True)
+    skills = tmp_path / "skills"
+    skills.mkdir(exist_ok=True)
+    ledger = FileReadLedger()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path / "ws",
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        read_ledger=ledger,
+    )
+    return ex, ledger
+
+
+def _ws(tmp_path: Path) -> Path:
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    return ws
+
+
+@pytest.mark.asyncio
+async def test_replace_in_file_returns_line_and_numbered_snippet(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    (ws / "m.py").write_text("".join(f"line{i}\n" for i in range(1, 21)), encoding="utf-8")
+    ex = _make_executor(ws)
+    out, err = await _call(
+        ex,
+        "replace_in_file",
+        {"path": "m.py", "old_string": "line10\n", "new_string": "ten\nTEN\n"},
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["line"] == 10
+    rows = payload["snippet"].splitlines()
+    assert rows[0] == "     7|line7"  # three lines of leading context
+    assert "    10|ten" in rows and "    11|TEN" in rows
+    assert rows[-1] == "    14|line13"  # three lines after the two replaced ones
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_update_returns_line_and_snippet(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    (ws / "a.txt").write_text("one\ntwo\nthree\nfour\nfive\n", encoding="utf-8")
+    ex = _make_executor(ws)
+    patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-three\n+THREE\n*** End Patch\n"
+    out, err = await _call(ex, "apply_patch", {"patch_text": patch})
+    assert err is None and out is not None
+    entry = json.loads(out)["files"][0]
+    assert entry["action"] == "update" and entry["line"] == 3
+    assert "     3|THREE" in entry["snippet"].splitlines()
+
+
+@pytest.mark.asyncio
+async def test_list_dir_lists_names_and_flags_truncation(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    (ws / "src").mkdir()
+    (ws / "tests").mkdir()
+    (ws / "README.md").write_text("x", encoding="utf-8")
+    ex, _ledger = _ledger_executor(tmp_path)  # keeps mem/ and skills/ outside the workspace
+    out, err = await _call(ex, "list_dir", {})
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["dirs"] == ["src", "tests"] and payload["files"] == ["README.md"]
+    assert payload["truncated"] is False
+    out, err = await _call(ex, "list_dir", {"path": "nope"})
+    assert out is None and err is not None and json.loads(err)["error_kind"] == "validation"
+    for i in range(310):
+        (ws / "src" / f"f{i:03d}.py").write_text("", encoding="utf-8")
+    out, _ = await _call(ex, "list_dir", {"path": "src"})
+    big = json.loads(out)
+    assert big["count"] == 310 and big["truncated"] is True and len(big["files"]) == 300
+
+
+@pytest.mark.asyncio
+async def test_read_before_write_blocks_blind_edits_then_allows_after_read(tmp_path: Path) -> None:
+    ex, _ledger = _ledger_executor(tmp_path)
+    ws = _ws(tmp_path)
+    (ws / "f.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+    edit = {"path": "f.txt", "old_string": "alpha", "new_string": "ALPHA"}
+    out, err = await _call(ex, "replace_in_file", edit)
+    assert out is None and err is not None
+    envelope = json.loads(err)
+    assert envelope["error_kind"] == "policy"
+    assert envelope["details"] == {"code": "read_before_write", "path": "f.txt"}
+    assert "read_file" in envelope["hint"]
+    assert (ws / "f.txt").read_text(encoding="utf-8") == "alpha\nbeta\n"
+
+    await _call(ex, "read_file", {"path": "f.txt"})
+    out, err = await _call(ex, "replace_in_file", edit)
+    assert err is None and out is not None
+    # The agent's own edit keeps the file "seen": a second edit needs no re-read.
+    out, err = await _call(
+        ex, "replace_in_file", {"path": "f.txt", "old_string": "beta", "new_string": "BETA"}
+    )
+    assert err is None, err
+    assert (ws / "f.txt").read_text(encoding="utf-8") == "ALPHA\nBETA\n"
+
+
+@pytest.mark.asyncio
+async def test_stale_read_detected_when_file_changes_underneath(tmp_path: Path) -> None:
+    ex, _ledger = _ledger_executor(tmp_path)
+    ws = _ws(tmp_path)
+    (ws / "f.txt").write_text("alpha\n", encoding="utf-8")
+    await _call(ex, "read_file", {"path": "f.txt"})
+    (ws / "f.txt").write_text("alpha plus an outside change\n", encoding="utf-8")
+    out, err = await _call(
+        ex, "replace_in_file", {"path": "f.txt", "old_string": "alpha", "new_string": "A"}
+    )
+    assert out is None and err is not None
+    assert json.loads(err)["details"]["code"] == "stale_read"
+    await _call(ex, "read_file", {"path": "f.txt"})
+    out, err = await _call(
+        ex, "replace_in_file", {"path": "f.txt", "old_string": "alpha", "new_string": "A"}
+    )
+    assert err is None, err
+
+
+@pytest.mark.asyncio
+async def test_new_files_are_free_but_overwriting_unread_files_is_not(tmp_path: Path) -> None:
+    ex, _ledger = _ledger_executor(tmp_path)
+    ws = _ws(tmp_path)
+    out, err = await _call(ex, "write_file", {"path": "new.txt", "content": "v1\n"})
+    assert err is None, err
+    out, err = await _call(ex, "write_file", {"path": "new.txt", "content": "v2\n"})
+    assert err is None, err  # the agent authored v1, so it may overwrite it
+    (ws / "old.txt").write_text("pre-existing\n", encoding="utf-8")
+    out, err = await _call(ex, "write_file", {"path": "old.txt", "content": "clobbered\n"})
+    assert out is None and json.loads(err)["details"]["code"] == "read_before_write"
+    assert (ws / "old.txt").read_text(encoding="utf-8") == "pre-existing\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_update_and_delete_require_prior_read(tmp_path: Path) -> None:
+    ex, _ledger = _ledger_executor(tmp_path)
+    ws = _ws(tmp_path)
+    (ws / "a.txt").write_text("one\ntwo\n", encoding="utf-8")
+    (ws / "b.txt").write_text("bye\n", encoding="utf-8")
+    update = "*** Begin Patch\n*** Update File: a.txt\n@@\n-two\n+TWO\n*** End Patch\n"
+    delete = "*** Begin Patch\n*** Delete File: b.txt\n*** End Patch\n"
+    add = "*** Begin Patch\n*** Add File: c.txt\n+fresh\n*** End Patch\n"
+
+    for patch in (update, delete):
+        out, err = await _call(ex, "apply_patch", {"patch_text": patch})
+        assert out is None and json.loads(err)["details"]["code"] == "read_before_write"
+    assert (ws / "a.txt").read_text(encoding="utf-8") == "one\ntwo\n"
+    assert (ws / "b.txt").exists()
+
+    out, err = await _call(ex, "apply_patch", {"patch_text": add})
+    assert err is None, err  # adding a file needs nothing read
+
+    await _call(ex, "read_file", {"path": "a.txt"})
+    await _call(ex, "read_file", {"path": "b.txt"})
+    for patch in (update, delete):
+        out, err = await _call(ex, "apply_patch", {"patch_text": patch})
+        assert err is None, err
+    assert not (ws / "b.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_ledger_clear_forces_re_read_but_remembers_writes(tmp_path: Path) -> None:
+    ex, ledger = _ledger_executor(tmp_path)
+    ws = _ws(tmp_path)
+    (ws / "f.txt").write_text("alpha\n", encoding="utf-8")
+    await _call(ex, "read_file", {"path": "f.txt"})
+    await _call(ex, "replace_in_file", {"path": "f.txt", "old_string": "alpha", "new_string": "A"})
+    ledger.clear()
+    out, err = await _call(
+        ex, "replace_in_file", {"path": "f.txt", "old_string": "A", "new_string": "B"}
+    )
+    assert out is None and json.loads(err)["details"]["code"] == "read_before_write"
+    assert ledger.written == {"f.txt"}
+
+
+@pytest.mark.asyncio
+async def test_without_a_ledger_edits_are_not_gated(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    (ws / "f.txt").write_text("alpha\n", encoding="utf-8")
+    ex = _make_executor(ws)
+    out, err = await _call(
+        ex, "replace_in_file", {"path": "f.txt", "old_string": "alpha", "new_string": "A"}
+    )
+    assert err is None, err
+
+
+@pytest.mark.asyncio
+async def test_ledger_records_run_command_lines_for_the_verify_trailer(tmp_path: Path) -> None:
+    ex, ledger = _ledger_executor(tmp_path)
+    _ws(tmp_path)
+    await _call(ex, "run_command", {"argv": ["python3", "-c", "import sys; sys.exit(2)"]})
+    record = ledger.last_command_matching((r"\bpython3\b",))
+    assert record is not None and record.exit_code == 2 and record.command.startswith("python3")
+    assert ledger.last_command_matching((r"\bpytest\b",)) is None
+
+
+def _grep_repo(ws: Path) -> None:
+    (ws / "src").mkdir()
+    (ws / "src" / "a.py").write_text("one\ntwo\nNEEDLE here\nfour\nfive\n", encoding="utf-8")
+    (ws / "src" / "b.py").write_text("NEEDLE first\nsecond\n", encoding="utf-8")
+    (ws / "out").mkdir()
+    (ws / "out" / "gen.py").write_text("NEEDLE generated\n", encoding="utf-8")
+    (ws / "src" / "sub").mkdir()
+    (ws / "src" / "sub" / "keep.py").write_text("NEEDLE nested\n", encoding="utf-8")
+    (ws / "src" / "sub" / "skip.tmp").write_text("NEEDLE temp\n", encoding="utf-8")
+    (ws / ".gitignore").write_text("out/\n*.tmp\n!src/sub/keep.tmp\n", encoding="utf-8")
+
+
+@pytest.fixture(params=["python", "rg"])
+def grep_engine(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    import shutil
+
+    real_which = shutil.which
+    if request.param == "python":
+        monkeypatch.setattr(
+            shutil,
+            "which",
+            lambda name, *a, **k: None if name == "rg" else real_which(name, *a, **k),
+        )
+    elif real_which("rg") is None:
+        pytest.skip("ripgrep not installed")
+    return request.param
+
+
+@pytest.mark.asyncio
+async def test_grep_context_lines(tmp_path: Path, grep_engine: str) -> None:
+    ws = _ws(tmp_path)
+    _grep_repo(ws)
+    ex = _make_executor(ws)
+    out, err = await _call(ex, "grep", {"pattern": "NEEDLE here", "context": 2})
+    assert err is None and out is not None
+    (match,) = json.loads(out)["matches"]
+    assert match["path"] == "src/a.py" and match["line"] == 3
+    assert match["before"] == ["one", "two"] and match["after"] == ["four", "five"]
+
+    out, _ = await _call(ex, "grep", {"pattern": "NEEDLE first", "context": 3})
+    (first,) = json.loads(out)["matches"]
+    assert "before" not in first and first["after"] == ["second"]
+
+    out, err = await _call(ex, "grep", {"pattern": "NEEDLE", "context": 9})
+    assert out is None and "context must be between" in json.loads(err)["message"]
+
+
+@pytest.mark.asyncio
+async def test_grep_files_only(tmp_path: Path, grep_engine: str) -> None:
+    ws = _ws(tmp_path)
+    _grep_repo(ws)
+    (ws / "src" / "a.py").write_text("NEEDLE\nNEEDLE\nNEEDLE\n", encoding="utf-8")
+    ex = _make_executor(ws)
+    out, err = await _call(ex, "grep", {"pattern": "NEEDLE", "files_only": True})
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert sorted(payload["files"]) == ["src/a.py", "src/b.py", "src/sub/keep.py"]
+    assert payload["matches"] == []
+    assert payload["total_match_count"] == 3 and payload["scan_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_grep_respects_gitignore_by_default(tmp_path: Path, grep_engine: str) -> None:
+    ws = _ws(tmp_path)
+    _grep_repo(ws)
+    ex = _make_executor(ws)
+    out, _ = await _call(ex, "grep", {"pattern": "NEEDLE", "files_only": True})
+    ignored = json.loads(out)["files"]
+    assert "out/gen.py" not in ignored and "src/sub/skip.tmp" not in ignored
+
+    out, _ = await _call(
+        ex, "grep", {"pattern": "NEEDLE", "files_only": True, "respect_gitignore": False}
+    )
+    everything = json.loads(out)["files"]
+    assert "out/gen.py" in everything and "src/sub/skip.tmp" in everything
+
+
+@pytest.mark.asyncio
+async def test_grep_nested_gitignore_scopes_to_its_directory(
+    tmp_path: Path, grep_engine: str
+) -> None:
+    ws = _ws(tmp_path)
+    (ws / "pkg").mkdir()
+    (ws / "pkg" / ".gitignore").write_text("secret.txt\n/local.txt\n", encoding="utf-8")
+    for rel in ("pkg/secret.txt", "pkg/local.txt", "pkg/ok.txt", "secret.txt", "other/secret.txt"):
+        target = ws / rel
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("NEEDLE\n", encoding="utf-8")
+    ex = _make_executor(ws)
+    out, _ = await _call(ex, "grep", {"pattern": "NEEDLE", "files_only": True})
+    assert sorted(json.loads(out)["files"]) == ["other/secret.txt", "pkg/ok.txt", "secret.txt"]
+    # Searching from inside pkg still honours pkg/.gitignore.
+    out, _ = await _call(ex, "grep", {"pattern": "NEEDLE", "files_only": True, "root": "pkg"})
+    assert json.loads(out)["files"] == ["pkg/ok.txt"]

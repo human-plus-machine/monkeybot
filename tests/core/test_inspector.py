@@ -281,3 +281,54 @@ async def test_inspector_skill_script_argv_allowed(tmp_path: Path) -> None:
     )
     d = await inspector.check(call, _minimal_ctx())
     assert d.kind == "allow"
+
+
+def _anchored_policy(tmp_path: Path) -> Path:
+    path = tmp_path / "anchored.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "allowed_commands": ["bash", "sh", "ls", "echo", "rm", "python3"],
+                "deny_patterns": [r"^rm\s", r"(^|\s)uv\s+add"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"argv": ["bash", "-c", "rm -rf build"]},
+        {"argv": ["bash", "-lc", "ls && rm -rf build"]},
+        {"argv": ["sh", "-c", "echo hi;rm -rf build"]},
+        {"argv": ["bash", "-c", "uv add requests"]},
+        {"argv": ["bash", "-c", "ls\nrm x"]},
+        {"argv": ["bash", "-c", "bash -c 'rm -rf build'"]},
+        {"command": "bash -c 'rm -rf build'"},
+    ],
+)
+async def test_inspector_denies_commands_hidden_in_shell_c(
+    tmp_path: Path, args: dict[str, object]
+) -> None:
+    inspector = CommandTierInspector(_anchored_policy(tmp_path))
+    d = await inspector.check(InspectorToolCall("1", "run_command", args), _minimal_ctx())
+    assert d.kind == "deny"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"argv": ["bash", "-c", "ls && echo done"]},
+        {"argv": ["bash", "-c", "echo 'rm -rf is dangerous'"]},
+        {"argv": ["bash", "script.sh"]},
+        {"argv": ["bash", "-c", "echo 'unbalanced"]},
+    ],
+)
+async def test_inspector_allows_benign_shell_c(tmp_path: Path, args: dict[str, object]) -> None:
+    inspector = CommandTierInspector(_anchored_policy(tmp_path))
+    d = await inspector.check(InspectorToolCall("1", "run_command", args), _minimal_ctx())
+    assert d.kind == "allow"

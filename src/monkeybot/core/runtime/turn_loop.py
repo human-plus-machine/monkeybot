@@ -91,7 +91,9 @@ from .history_compaction import (
     HISTORY_LOAD_MAX,
     _await_history_write,
     _compact_history_if_needed,
+    _fire_history_compacted,
     _intent_facts_from_ctx,
+    _workspace_trailer_from_ctx,
     _summarization_model_id,
     _summarization_viable,
     protect_recent_count,
@@ -154,6 +156,8 @@ _EMPTY_COMPLETION_EXHAUSTED_ERROR = (
     "Empty model completion after recovery: ending turn with no reply"
 )
 _BACKGROUND_JOB_NUDGES = 3
+# Upper bound on PRE_FINAL_ANSWER refusals per user message; hooks apply their own, lower cap.
+_FINAL_ANSWER_REJECTIONS = 3
 
 
 def _require_prompt(state: _TurnState) -> tuple[Message, EpochAdmit]:
@@ -489,6 +493,9 @@ class _TurnState:
     # While background jobs run, a text-only reply may be blocked by the nudge,
     # so assistant text events are held back until the turn knows it may finish.
     hold_assistant_text: bool = False
+    # Set by BEFORE_PROVIDER_REQUEST hooks for the next stream (see ``HookPayload``).
+    hold_for_hooks: bool = False
+    final_answer_rejections_left: int = _FINAL_ANSWER_REJECTIONS
     held_text_events: list[AgentEvent] = dataclasses.field(default_factory=list)
     turn_input_text: str = ""
     turn_output_text: str = ""
@@ -688,6 +695,7 @@ async def _run_history_summarization(
     vertex_google_search: bool,
     estimated_tokens: int,
     recount_after: bool,
+    hook_manager: HookManager | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Shared summarize body: events, LLM compact, reload, optional post-token recount."""
     from monkeybot.observability.spans import set_summarize_turns, span_summarize
@@ -721,6 +729,7 @@ async def _run_history_summarization(
                 model=_summarization_model_id(state.ctx),
                 window_tokens=state.ctx.context_window_tokens,
                 intent_facts=_intent_facts_from_ctx(state.ctx),
+                workspace_trailer=_workspace_trailer_from_ctx(state.ctx),
             )
         except Exception:
             logger.warning(
@@ -733,6 +742,7 @@ async def _run_history_summarization(
             )
             turns_summarized = 0
         set_summarize_turns(turns_summarized)
+    await _fire_history_compacted(hook_manager, state.ctx, turns_summarized=turns_summarized)
     yield ContextSummarized(
         request_id=state.ctx.request_id,
         turns_summarized=turns_summarized,
@@ -780,6 +790,7 @@ async def _maybe_summarize_on_token_pressure(
     vertex_google_search: bool,
     preflight: int,
     cap: int,
+    hook_manager: HookManager | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Compact when prompt tokens hit the context-window ratio threshold."""
     if not _token_pressure_should_summarize(
@@ -799,6 +810,7 @@ async def _maybe_summarize_on_token_pressure(
         vertex_google_search=vertex_google_search,
         estimated_tokens=preflight,
         recount_after=True,
+        hook_manager=hook_manager,
     ):
         yield evt
 
@@ -886,6 +898,7 @@ async def _apply_pressure_and_before_provider(
         provider_messages=list(state.provider_messages),
         inner_turn=state.turn_index,
     )
+    state.hold_for_hooks = bool(before_payload is not None and before_payload.hold_assistant_text)
     prev_msg_count = len(state.provider_messages)
     state.provider_messages, state.turn_tools, tools_replaced = _apply_before_provider_hook(
         before_payload, state.provider_messages, state.turn_tools
@@ -955,6 +968,7 @@ async def _maybe_compact_and_shape(
         vertex_google_search=vertex_google_search,
         preflight=preflight,
         cap=cap,
+        hook_manager=hook_manager,
     ):
         yield evt
     async for evt in _apply_history_load_max_safety(
@@ -1249,13 +1263,18 @@ async def _consume_provider_stream_body(
             inner_turn=state.turn_index,
             assistant_text=state.assistant_text,
             thinking_text=state.thinking_text,
-            provider_error=str(exc),
+            provider_error=_provider_error_text(exc),
         )
-        yield Error(request_id=state.ctx.request_id, error=str(exc))
+        yield Error(request_id=state.ctx.request_id, error=_provider_error_text(exc))
         state.needs_followup_after_tools = False
         state.provider_stream_failed = True
         state.action = "return"
         return
+
+
+def _provider_error_text(exc: Exception) -> str:
+    """Error text for a failed provider call; never blank (``httpx.ReadTimeout`` stringifies to "")."""
+    return str(exc).strip() or f"Provider request failed ({type(exc).__name__})"
 
 
 def _thinking_block(state: _TurnState) -> ContentBlock | None:
@@ -1433,6 +1452,7 @@ async def _stream_provider_turn(
     except Exception:
         # Unknown job state: hold, the turn-end check fails closed anyway.
         state.hold_assistant_text = True
+    state.hold_assistant_text = state.hold_assistant_text or state.hold_for_hooks
     async for evt in _scan_outbound_before_provider_call(state):
         yield evt
     if state.action == "return":
@@ -1526,18 +1546,76 @@ async def _nudge_or_error_on_background_jobs(
     state.action = "break"
 
 
+async def _gate_final_answer(
+    state: _TurnState,
+    *,
+    hook_manager: HookManager | None,
+    candidate: str,
+) -> AsyncIterator[AgentEvent]:
+    """Let ``PRE_FINAL_ANSWER`` hooks refuse ``candidate`` once the tools are done.
+
+    On refusal sets ``state.action = "continue"`` with the hook's note queued as the next
+    runtime note. A hook that errors or times out is a pass-through (``_fire_hook``
+    never raises), and refusals are capped per message so a hook cannot spin the turn.
+    """
+    if (
+        hook_manager is None
+        or not candidate
+        or state.final_answer_rejections_left <= 0
+        or state.turn_index >= state.effective_max
+    ):
+        return
+    payload = await _fire_hook(
+        hook_manager,
+        event=HookEvent.PRE_FINAL_ANSWER,
+        ctx=state.ctx,
+        timeout_s=_HOOK_READ_TIMEOUT_S,
+        assistant_text=candidate,
+        inner_turn=state.turn_index,
+    )
+    note = (payload.reject_final_answer or "").strip() if payload is not None else ""
+    if not note:
+        return
+    # The refused answer is never shown or persisted; the model answers again after the note.
+    _discard_held_text(state)
+    state.final_answer_rejections_left -= 1
+    state.pre_tool_extra_next = _combine_extras(state.pre_tool_extra_next, note)
+    yield HarnessIntervention(
+        request_id=state.ctx.request_id,
+        intervention="final_answer_gate",
+        inner_turn=state.turn_index,
+        detail=note,
+    )
+    logger.warning(
+        "final answer rejected by hook %s",
+        kv(
+            request_id=state.ctx.request_id,
+            thread_id=state.ctx.thread_id,
+            turn=state.turn_index,
+            rejections_left=state.final_answer_rejections_left,
+        ),
+    )
+    state.needs_followup_after_tools = False
+    state.action = "continue"
+
+
 async def _handle_empty_or_final_text(
     state: _TurnState,
     *,
     history: HistoryStore,
     last_assistant: list[str],
     tool_executor: object | None = None,
+    hook_manager: HookManager | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """No tool calls: final assistant write, empty-completion retry, or exhausted Error."""
     cleaned_text = (state.assistant_text or "").strip()
     async for evt in _nudge_or_error_on_background_jobs(state, tool_executor):
         yield evt
     if state.action in ("continue", "break"):
+        return
+    async for evt in _gate_final_answer(state, hook_manager=hook_manager, candidate=cleaned_text):
+        yield evt
+    if state.action == "continue":
         return
     for evt in _release_held_text(state):
         yield evt
@@ -1873,6 +1951,7 @@ async def _run_inner_core(
                     history=history,
                     last_assistant=last_assistant,
                     tool_executor=tool_executor,
+                    hook_manager=hook_manager,
                 ):
                     yield evt
                 if state.action == "continue":

@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from datetime import date
 
 from monkeybot.core.attachments.catalog import AttachmentRecord
-from monkeybot.core.context import TurnContext
+from monkeybot.core.context import SkillRef, TurnContext
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.prompts.harness_prompt import (
     emission_style_terse_from_env,
@@ -17,6 +17,8 @@ from monkeybot.core.prompts.headings import (
     CURRENT_REQUEST_HEADING,
     INVOKED_SKILL_HEADING,
     MEMORY_INDEX_HEADING,
+    PROJECT_INSTRUCTIONS_HEADING,
+    REPO_OVERVIEW_HEADING,
     SKILLS_HEADING,
     TODO_LIST_HEADING,
 )
@@ -25,6 +27,8 @@ from monkeybot.core.types.content_blocks import Text
 
 # Cap injected user text so long pastes do not dominate the context window.
 _MAX_CURRENT_REQUEST_CHARS = 8000
+# One-line skill summaries; the full procedure stays in SKILL.md.
+_MAX_SKILL_DESCRIPTION_CHARS = 200
 
 
 def _user_text_flat(m: Message) -> str:
@@ -109,8 +113,15 @@ def _memory_block(ctx: TurnContext) -> str:
     return mem_block
 
 
+def _skill_line(skill: SkillRef) -> str:
+    description = " ".join(skill.description.split())
+    if len(description) > _MAX_SKILL_DESCRIPTION_CHARS:
+        description = description[: _MAX_SKILL_DESCRIPTION_CHARS - 1].rstrip() + "…"
+    return f"- {skill.name} — {description}" if description else f"- {skill.name}"
+
+
 def _skills_section(ctx: TurnContext) -> str:
-    skill_lines = [f"- {s.name}" for s in ctx.skills]
+    skill_lines = [_skill_line(s) for s in ctx.skills]
     skills_block = "\n".join(skill_lines)
     return f"{SKILLS_HEADING}{skills_block}" if skills_block else ""
 
@@ -147,7 +158,18 @@ def _harness_text(ctx: TurnContext) -> str:
         subagent_personas=ctx.subagent_personas,
         emission_style=emission_style_terse_from_env(ctx.config),
         catalog_mcp_servers=ctx.catalog_mcp_servers,
+        coding_mode=ctx.config is not None and ctx.config.coding.enabled,
     )
+
+
+def _coding_context_blocks(ctx: TurnContext) -> str:
+    """Coding-mode project instructions + repo overview (stable, so they cache with the prefix)."""
+    out = ""
+    if ctx.project_instructions:
+        out += f"{PROJECT_INSTRUCTIONS_HEADING}{ctx.project_instructions}"
+    if ctx.repo_overview:
+        out += f"{REPO_OVERVIEW_HEADING}{ctx.repo_overview}"
+    return out
 
 
 def compose_stable_baseline(
@@ -155,10 +177,11 @@ def compose_stable_baseline(
     *,
     attachment_catalog: Sequence[AttachmentRecord] | None = None,
 ) -> str:
-    """Cacheable prefix: AGENT.md + harness + session attachments."""
+    """Cacheable prefix: AGENT.md + harness + project context + session attachments."""
     harness = _harness_text(ctx)
+    coding_context = _coding_context_blocks(ctx)
     attachments = _session_attachments_block(attachment_catalog)
-    return f"{ctx.agent_md}\n\n{harness}{attachments}"
+    return f"{ctx.agent_md}\n\n{harness}{coding_context}{attachments}"
 
 
 def compose_volatile_tail(

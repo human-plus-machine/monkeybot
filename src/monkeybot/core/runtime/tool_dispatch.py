@@ -870,6 +870,7 @@ async def _post_batch_budget_and_registry(
     vertex_google_search: bool,
     epoch_tracker: ContextEpochTracker,
     inner_turn: int,
+    hook_manager: HookManager | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Doom-loop error, budgeted history append, and MCP/loops registry refresh."""
     ctx = state.ctx
@@ -943,6 +944,7 @@ async def _post_batch_budget_and_registry(
             provider=provider,
             vertex_google_search=vertex_google_search,
             epoch=epoch_tracker,
+            hook_manager=hook_manager,
         ):
             yield budget_evt
 
@@ -1065,7 +1067,7 @@ async def dispatch_tool_batch(
         t0 = state.started_at.pop(call.call_id, None) if call.call_id else None
         duration_ms = int((time.monotonic() - t0) * 1000) if t0 is not None else None
         event, response = _tool_outcome(call, ctx.request_id, result, duration_ms=duration_ms)
-        doom_tracker.record(call.name, dict(call.args))
+        doom_tracker.record(call.name, dict(call.args), failed=result.error is not None)
         return event, response
 
     # One user Message for the whole model tool-call turn (all chunks).
@@ -1183,5 +1185,6 @@ async def dispatch_tool_batch(
         vertex_google_search=vertex_google_search,
         epoch_tracker=epoch_tracker,
         inner_turn=turn_index,
+        hook_manager=hook_manager,
     ):
         yield evt

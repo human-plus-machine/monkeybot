@@ -226,3 +226,134 @@ def test_refresh_allowlist_does_not_emit_yaml_document_end(tmp_path: Path) -> No
     text = (cfg / "command_allowlist.yaml").read_text(encoding="utf-8")
     assert "..." not in text
     assert "officecli" in text
+
+
+# --- coding template ---
+
+
+def test_default_template_is_unchanged_by_the_coding_template(tmp_path: Path) -> None:
+    run_new(dest=tmp_path, force=False, template="default")
+    cfg = tmp_path / "monkeybot_config"
+    assert "Making files and code changes" in (cfg / "AGENT.md").read_text(encoding="utf-8")
+    doc = yaml.safe_load((cfg / "monkeybot.yaml").read_text(encoding="utf-8"))
+    assert "coding" not in doc
+    assert doc["model"]["context_window"] == 1000000
+
+
+def test_coding_template_installs_overlay_files(tmp_path: Path) -> None:
+    run_new(dest=tmp_path, force=False, template="coding")
+    cfg = tmp_path / "monkeybot_config"
+    agent_md = (cfg / "AGENT.md").read_text(encoding="utf-8")
+    assert "Explore before editing" in agent_md and "verified by running" in agent_md
+    assert "Making files and code changes" not in agent_md
+
+    allow = yaml.safe_load((cfg / "command_allowlist.yaml").read_text(encoding="utf-8"))
+    for binary in (
+        "pytest",
+        "uv",
+        "node",
+        "npm",
+        "pnpm",
+        "npx",
+        "make",
+        "cargo",
+        "go",
+        "ruff",
+        "mypy",
+        "tsc",
+        "sed",
+        "awk",
+        "find",
+        "head",
+        "tail",
+        "wc",
+        "diff",
+    ):
+        assert binary in allow["allowed_commands"], binary
+    assert "./" in allow["allowed_path_prefixes"]
+    assert any("pip" in p and "install" in p for p in allow["deny_patterns"])  # install deny kept
+
+    perms = yaml.safe_load((cfg / "permissions.yaml").read_text(encoding="utf-8"))
+    rules = {(r["pattern"], r["effect"]) for r in perms["rules"] if r["tool"] == "run_command"}
+    assert {
+        ("rm *", "deny"),
+        ("git push *", "ask"),
+        ("git reset --hard *", "ask"),
+        ("git commit *", "allow"),
+    } <= rules
+    # The overrides file itself is a template input, never copied into the agent.
+    assert not (cfg / "monkeybot.overrides.yaml").exists()
+
+
+def test_coding_template_merges_overrides_into_active_config(tmp_path: Path) -> None:
+    run_new(dest=tmp_path, force=False, template="coding", provider="anthropic", model="claude-x")
+    doc = yaml.safe_load(
+        (tmp_path / "monkeybot_config" / "monkeybot.yaml").read_text(encoding="utf-8")
+    )
+    assert doc["coding"] == {"enabled": True, "verification_gate": {"enabled": True}}
+    assert doc["verifier"]["enabled"] is True
+    assert doc["verifier"]["ledger"]["enabled"] is True
+    assert doc["verifier"]["tracker"]["enabled"] is True
+    assert doc["verifier"]["judge"]["enabled"] is False
+    assert doc["verifier"]["escalation"]["max_severity"] == "nudge"
+    assert doc["runtime"]["transcript_enabled"] is True
+    assert doc["model"]["context_window"] == 200000
+    assert doc["model"]["max_turns"] == 100
+    # --provider/--model still win over the template, and unrelated keys survive the merge.
+    assert doc["model"]["provider"] == "anthropic" and doc["model"]["name"] == "claude-x"
+    assert doc["paths"]["workspace_root"] == "./workspace"
+    assert doc["runtime"]["port"] == 8080
+
+
+def test_coding_template_config_is_accepted_by_the_core_loader(tmp_path: Path) -> None:
+    from monkeybot.core.config.settings import get_coding_config, get_verifier_config
+
+    run_new(dest=tmp_path, force=False, template="coding", provider="anthropic")
+    cfg_path = str(tmp_path / "monkeybot_config" / "monkeybot.yaml")
+    coding = get_coding_config(cfg_path)
+    assert coding.enabled and coding.verification_gate.enabled
+    verifier = get_verifier_config(cfg_path)
+    assert verifier.enabled and verifier.tracker.enabled and not verifier.judge.enabled
+
+
+def test_coding_template_command_allowlist_loads_and_blocks_find_delete(tmp_path: Path) -> None:
+    from monkeybot.core.tools.inspector import load_command_tier_policy
+
+    run_new(dest=tmp_path, force=False, template="coding")
+    policy = load_command_tier_policy(tmp_path / "monkeybot_config" / "command_allowlist.yaml")
+    import re
+
+    denied = [re.compile(p, re.IGNORECASE) for p in policy.deny_patterns]
+    assert any(rx.search("find . -name '*.pyc' -delete") for rx in denied)
+    assert not any(rx.search("find src -name '*.py'") for rx in denied)
+    assert any(rx.search("npm install left-pad") for rx in denied)
+
+
+def test_coding_template_does_not_retemplate_an_existing_config(tmp_path: Path) -> None:
+    run_new(dest=tmp_path, force=False)
+    run_new(dest=tmp_path, force=False, template="coding")
+    cfg = tmp_path / "monkeybot_config"
+    doc = yaml.safe_load((cfg / "monkeybot.yaml").read_text(encoding="utf-8"))
+    assert "coding" not in doc  # existing live config is never rewritten without --force
+    run_new(dest=tmp_path, force=True, template="coding")
+    doc = yaml.safe_load((cfg / "monkeybot.yaml").read_text(encoding="utf-8"))
+    assert doc["coding"]["enabled"] is True
+
+
+def test_unknown_template_is_rejected_before_writing(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="unknown template 'bogus'"):
+        run_new(dest=tmp_path, force=False, template="bogus")
+    assert not (tmp_path / "monkeybot_config").exists()
+
+
+def test_refresh_keeps_coding_toolchain_entries(tmp_path: Path) -> None:
+    run_new(dest=tmp_path, force=False, template="coding")
+    run_refresh(dest=tmp_path)
+    allow = yaml.safe_load(
+        (tmp_path / "monkeybot_config" / "command_allowlist.yaml").read_text(encoding="utf-8")
+    )
+    assert "pytest" in allow["allowed_commands"] and "./" in allow["allowed_path_prefixes"]
+    doc = yaml.safe_load(
+        (tmp_path / "monkeybot_config" / "monkeybot.yaml").read_text(encoding="utf-8")
+    )
+    assert doc["coding"]["enabled"] is True

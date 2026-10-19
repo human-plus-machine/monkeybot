@@ -25,13 +25,17 @@ SCENARIO_FILES = [
     "tool_load_file.yaml",
     "tool_web_search.yaml",
     "tool_todo_list.yaml",
+    "coding_fix_failing_test.yaml",
+    "coding_read_before_write.yaml",
+    "coding_gate_rejects_unverified.yaml",
+    "coding_gate_passes_when_verified.yaml",
 ]
 
 
 @pytest.mark.parametrize("scenario_file", SCENARIO_FILES)
 @pytest.mark.asyncio
-async def test_scenario(scenario_file: str) -> None:
+async def test_scenario(scenario_file: str, tmp_path: Path) -> None:
     path = SCENARIO_DIR / scenario_file
     scenario = load_scenario(path)
-    record = await run_scenario(scenario)
+    record = await run_scenario(scenario, workspace_root=tmp_path)
     check_assertions(record, scenario.assertions)

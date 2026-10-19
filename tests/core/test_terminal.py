@@ -1164,3 +1164,34 @@ class TestTerminalExecutorJailUnavailableFallback:
 
         warnings = [r for r in caplog.records if "WITHOUT the workspace jail" in r.message]
         assert len(warnings) == 1
+
+
+class TestWorkspaceRelativePrefix:
+    """``./`` as an allowed prefix admits the working tree and nothing above it."""
+
+    @pytest.fixture
+    def workspace_executor(self):
+        return TerminalExecutor(
+            allowed_commands=["ls", "cat"],
+            allowed_path_prefixes=["./"],
+        )
+
+    @pytest.mark.asyncio
+    async def test_dot_slash_subdirectory_allowed(self, workspace_executor, tmp_path):
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_ops.py").write_text("x\n")
+        result = await workspace_executor.execute("ls", ["./tests"], cwd=tmp_path)
+        assert result.exit_code == 0
+        assert "test_ops.py" in result.stdout
+
+    @pytest.mark.asyncio
+    async def test_parent_directory_still_denied(self, workspace_executor, tmp_path):
+        (tmp_path.parent / "outside.txt").write_text("secret\n")
+        with pytest.raises(SecurityError):
+            await workspace_executor.execute("cat", ["../outside.txt"], cwd=tmp_path)
+
+    @pytest.mark.asyncio
+    async def test_dot_dot_escape_through_subdir_denied(self, workspace_executor, tmp_path):
+        (tmp_path / "tests").mkdir()
+        with pytest.raises(SecurityError):
+            await workspace_executor.execute("cat", ["./tests/../../x"], cwd=tmp_path)

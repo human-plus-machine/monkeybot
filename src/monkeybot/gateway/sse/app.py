@@ -24,7 +24,12 @@ from monkeybot.computer import build_computer_tools, should_enable_computer_tool
 from monkeybot.computer.permissions import build_computer_permission_inspector, build_persist_hook
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
-from monkeybot.core.config.runtime_env import SUBAGENTS_DIFF_KEY, VERIFIER_DIFF_KEY, ConfigTier
+from monkeybot.core.config.runtime_env import (
+    CODING_DIFF_KEY,
+    SUBAGENTS_DIFF_KEY,
+    VERIFIER_DIFF_KEY,
+    ConfigTier,
+)
 from monkeybot.core.config.settings import (
     ConfigError,
     SubagentConfig,
@@ -47,6 +52,9 @@ from monkeybot.core.config.snapshot import (
 )
 from monkeybot.core.context import LoopsToolRegistry, TurnContext, build_context
 from monkeybot.core.context.common import text_from_blocks
+from monkeybot.core.coding.git_context_hook import GitContextHook
+from monkeybot.core.coding.read_ledger_hook import ReadLedgerCompactionHook
+from monkeybot.core.coding.verification_gate import VerificationGate
 from monkeybot.core.context.slash_skills import apply_invoked_skill
 from monkeybot.core.hooks import HookEvent, HookManager
 from monkeybot.core.hooks.evidence_guard import EvidencePathGuard
@@ -99,6 +107,7 @@ from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector,
 from monkeybot.core.tools.loop_inspector import LoopStartInspector
 from monkeybot.core.tools.path_grant_inspector import PathGrantInspector
 from monkeybot.core.tools.permission import try_load_permission_inspector
+from monkeybot.core.tools.read_ledger import FileReadLedger
 from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.core.verifier.actuator import NudgeActuator
 from monkeybot.core.verifier.binding import (
@@ -452,6 +461,11 @@ class GatewayRuntime:
             self.progress_tracker.register(mgr)
         if self.nudge_actuator is not None:
             self.nudge_actuator.register(mgr)
+        if cfg is not None and cfg.coding.enabled:
+            GitContextHook().register(mgr)
+            ReadLedgerCompactionHook().register(mgr)
+            if cfg.coding.verification_gate.enabled:
+                VerificationGate(cfg.coding.verification_gate).register(mgr)
         self.hook_manager = mgr
         if fastapi_app is None:
             return
@@ -555,6 +569,13 @@ class GatewayRuntime:
             logger.info(
                 "config slice rebuilt %s",
                 kv(slice="memory_hooks", revision=cfg.revision),
+            )
+        if CODING_DIFF_KEY in diff.changed_env_keys:
+            self.rebuild_hooks(cfg, fastapi_app)
+            applied.append(CODING_DIFF_KEY)
+            logger.info(
+                "config slice rebuilt %s",
+                kv(slice="coding", revision=cfg.revision),
             )
         if VERIFIER_DIFF_KEY in diff.changed_env_keys:
             storage = (
@@ -1085,6 +1106,12 @@ class GatewayLoopPort:
                 todo_store = bus.todo_store
                 extra_tools.append(TodoListTool(todo_store))
 
+            read_ledger: FileReadLedger | None = None
+            if cfg is not None and cfg.coding.enabled:
+                if bus.read_ledger is None:
+                    bus.read_ledger = FileReadLedger()
+                read_ledger = bus.read_ledger
+
             storage_backend = getattr(serving.state, "storage", None)
             loops_available = storage_backend is not None
             loops_advertised = loops_available and loops_registry.advertised
@@ -1121,6 +1148,7 @@ class GatewayLoopPort:
                     config=cfg,
                     goal_ledger=gateway_runtime.goal_ledger,
                     verdict_mailbox=gateway_runtime.verdict_mailbox,
+                    read_ledger=read_ledger,
                 )
             except Exception as exc:
                 logger.exception("build_context failed")
@@ -1166,6 +1194,7 @@ class GatewayLoopPort:
                 loops_registry=loops_registry,
                 config=cfg,
                 grants_path=grants_path,
+                read_ledger=read_ledger,
             )
             if transcript_writer is not None:
                 await transcript_writer.write_user_message(

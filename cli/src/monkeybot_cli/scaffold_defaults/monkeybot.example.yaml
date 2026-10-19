@@ -254,6 +254,21 @@ scheduler:
 #   escalation:
 #     max_severity: nudge
 
+# Coding mode (YAML-only). Off by default; `monkeybot new --template coding` turns it on.
+# When enabled the agent gets an editing & verification protocol in its prompt, edits are
+# refused unless the file was read first (and unchanged since), AGENTS.md / CLAUDE.md and a
+# short repo overview join the cached prompt prefix, and git state appears in runtime notes.
+# coding:
+#   enabled: true
+#   # Reject a final answer that follows unverified edits (once per message by default):
+#   verification_gate:
+#     enabled: true
+#     max_rejections: 1
+#     # Regexes matched against `run_command` lines that count as "ran the tests/lint":
+#     # verify_commands: ['\bpytest\b', '\bnpm (run )?test\b', '\bmake (test|check)\b']
+#   # First file found under workspace_root is injected into the prompt (12k chars max):
+#   project_instructions_files: [AGENTS.md, CLAUDE.md, .monkeybot/AGENTS.md]
+
 # Optional JSON for model.provider: fake tests (env: MONKEYBOT_FAKE_PROVIDER_EVENTS)
 # fake_provider:
 #   events_json: '[[]]'

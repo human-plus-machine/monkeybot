@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -184,6 +185,46 @@ class VerifierConfig:
 
 
 _DEFAULT_VERIFIER_CONFIG = VerifierConfig()
+
+
+# ``run_command`` lines that count as "ran the project's tests/lint" for the verification gate.
+DEFAULT_VERIFY_COMMANDS: tuple[str, ...] = (
+    r"\bpytest\b",
+    r"\bnpm (run )?test\b",
+    r"\bpnpm (run )?test\b",
+    r"\bcargo test\b",
+    r"\bgo test\b",
+    r"\bmake (test|check)\b",
+    r"\bruff\b",
+    r"\bmypy\b",
+    r"\btsc\b",
+)
+DEFAULT_PROJECT_INSTRUCTIONS_FILES: tuple[str, ...] = (
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".monkeybot/AGENTS.md",
+)
+
+
+@dataclass(frozen=True)
+class VerificationGateConfig:
+    """``coding.verification_gate`` — reject a final answer that follows unverified edits."""
+
+    enabled: bool = False
+    verify_commands: tuple[str, ...] = DEFAULT_VERIFY_COMMANDS
+    max_rejections: int = 1
+
+
+@dataclass(frozen=True)
+class CodingConfig:
+    """YAML-only ``coding:`` section. Absent or empty → coding mode off."""
+
+    enabled: bool = False
+    verification_gate: VerificationGateConfig = field(default_factory=VerificationGateConfig)
+    project_instructions_files: tuple[str, ...] = DEFAULT_PROJECT_INSTRUCTIONS_FILES
+
+
+_DEFAULT_CODING_CONFIG = CodingConfig()
 
 
 @dataclass(frozen=True)
@@ -734,6 +775,91 @@ def verifier_config_from_section(section: dict[str, Any]) -> VerifierConfig:
         ),
         escalation=VerifierEscalationConfig(max_severity=severity),
     )
+
+
+def _coding_section(doc: dict[str, Any]) -> dict[str, Any]:
+    """Return the ``coding:`` mapping, or empty dict when absent."""
+    section = doc.get("coding")
+    if section is None:
+        return {}
+    if not isinstance(section, dict):
+        raise ConfigError(f"coding must be a mapping, got {type(section).__name__}")
+    return section
+
+
+def _coding_str_list(raw: Any, label: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    if raw is None:
+        return default
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError(f"{label} must be a non-empty list of strings, got {raw!r}")
+    out: list[str] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigError(f"{label}[{index}] must be a non-empty string, got {item!r}")
+        out.append(item.strip())
+    return tuple(out)
+
+
+def coding_config_from_section(section: dict[str, Any]) -> CodingConfig:
+    """Parse a ``coding:`` mapping into :class:`CodingConfig`.
+
+    ``coding.verification_gate.enabled`` defaults to off even when coding mode is on:
+    the gate holds back final answers, so it is an explicit opt-in.
+    """
+    defaults = _DEFAULT_CODING_CONFIG
+    gate_raw = section.get("verification_gate")
+    if gate_raw is None:
+        gate_raw = {}
+    if not isinstance(gate_raw, dict):
+        raise ConfigError(
+            f"coding.verification_gate must be a mapping, got {type(gate_raw).__name__}"
+        )
+    verify_commands = _coding_str_list(
+        gate_raw.get("verify_commands"),
+        "coding.verification_gate.verify_commands",
+        defaults.verification_gate.verify_commands,
+    )
+    for pattern in verify_commands:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise ConfigError(
+                f"coding.verification_gate.verify_commands has an invalid regex {pattern!r}: {exc}"
+            ) from exc
+    return CodingConfig(
+        enabled=_verifier_bool(section.get("enabled"), "coding.enabled", defaults.enabled),
+        verification_gate=VerificationGateConfig(
+            enabled=_verifier_bool(
+                gate_raw.get("enabled"),
+                "coding.verification_gate.enabled",
+                defaults.verification_gate.enabled,
+            ),
+            verify_commands=verify_commands,
+            max_rejections=_verifier_int(
+                gate_raw.get("max_rejections"),
+                "coding.verification_gate.max_rejections",
+                defaults.verification_gate.max_rejections,
+                min_value=0,
+            ),
+        ),
+        project_instructions_files=_coding_str_list(
+            section.get("project_instructions_files"),
+            "coding.project_instructions_files",
+            defaults.project_instructions_files,
+        ),
+    )
+
+
+def get_coding_config(
+    config_path: str | None = None,
+    *,
+    config: RuntimeConfig | None = None,
+) -> CodingConfig:
+    """``coding:`` section from monkeybot.yaml (a pinned snapshot wins when given)."""
+    if config is not None:
+        return config.coding
+    _, doc = load_monkeybot_yaml_dict(config_path)
+    return coding_config_from_section(_coding_section(doc))
 
 
 def get_verifier_config(

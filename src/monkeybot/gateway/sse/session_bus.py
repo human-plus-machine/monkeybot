@@ -20,6 +20,7 @@ from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.input_admission import InputAdmission
 from monkeybot.core.tools.permission import SessionApprovals
 from monkeybot.gateway.pending_response_bus import TERMINATED_PENDING_KEYS_MAXLEN
+from monkeybot.core.tools.read_ledger import FileReadLedger
 from monkeybot.todo_list.store import TodoListStore
 
 from .sse import format_data_event
@@ -106,6 +107,8 @@ class SessionBus:
         self.attachment_catalog: SessionAttachmentCatalog | None = None
         self.todo_store: TodoListStore | None = None
         """Process-local session todo list (not shared across gateway replicas)."""
+        self.read_ledger: FileReadLedger | None = None
+        """Coding-mode read/write ledger; per session because ``CoreToolExecutor`` is per request."""
         self.transcript_writer: TranscriptWriter | None = None
         """Lazily-created ``TranscriptWriter`` (internal debugging only); None when disabled."""
         self.admission = InputAdmission()

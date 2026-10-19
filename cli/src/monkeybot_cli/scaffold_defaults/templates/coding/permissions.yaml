@@ -1,0 +1,30 @@
+# Soft permission ruleset for the coding template (last-match-wins).
+# Hard execution constraints remain in command_allowlist.yaml + sandbox.
+#
+# Effects: allow | ask | deny
+default: allow
+
+rules:
+  - tool: run_command
+    pattern: "rm *"
+    effect: deny
+    message: "Destructive rm is blocked; delete files with apply_patch instead."
+  - tool: run_command
+    pattern: "git commit *"
+    effect: allow
+  - tool: run_command
+    pattern: "git push *"
+    effect: ask
+    message: "Approve pushing to a remote?"
+  - tool: run_command
+    pattern: "git reset --hard *"
+    effect: ask
+    message: "Approve discarding local changes?"
+  - tool: run_command
+    pattern: "git clean *"
+    effect: ask
+    message: "Approve deleting untracked files?"
+  - tool: run_command
+    pattern: "npx *"
+    effect: ask
+    message: "npx can download and run code. Approve?"
