@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -21,6 +22,11 @@ class Scenario(BaseModel):
     # organizer (POST_TURN hook) has time to promote writes before the next session probes.
     session_pause_sec: float = 5.0
     assertions: dict[str, Any] = Field(default_factory=dict)
+    # Directory under ``evals/`` copied into the agent workspace before the run (coding scenarios).
+    # Messages may reference the copy as ``{workspace_subdir}``.
+    workspace_fixture: str | None = None
+    # Directories under ``evals/`` copied over the fixture, in order (e.g. a seeded bug).
+    workspace_overlays: list[str] = Field(default_factory=list)
 
     def message_groups(self) -> list[list[str]]:
         """Resolve ``sessions`` (if set) or wrap ``messages`` as a single session."""
@@ -46,6 +52,10 @@ class ToolCallRecord(BaseModel):
     args_summary: str = ""
     path_args: list[str] = Field(default_factory=list)
     error: str | None = None
+    call_id: str = ""
+    # Outcome once the result arrives: False on a tool error or a JSON result with ``ok: false``
+    # (e.g. a failing ``run_command``); None while the call is still unresolved.
+    ok: bool | None = None
 
 
 class VerdictRecord(BaseModel):
@@ -71,6 +81,8 @@ class EvalRun(BaseModel):
     scenario_id: str
     turns: list[TurnResult] = Field(default_factory=list)
     scores: dict[str, float] = Field(default_factory=dict)
+    # Per-run copy of the scenario's ``workspace_fixture`` that the agent worked in.
+    workspace_dir: Path | None = None
 
     def tool_calls_count(self) -> int:
         return sum(len(t.tool_calls) for t in self.turns)
