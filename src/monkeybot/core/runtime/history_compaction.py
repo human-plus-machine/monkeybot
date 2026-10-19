@@ -353,13 +353,20 @@ def truncate_history_preserving_pins(
     return trimmed
 
 
+def _middle_summary_lines(middle: Sequence[Message], *, window_tokens: int) -> list[str]:
+    return [
+        line for m in middle if (line := _summary_line_for_message(m, window_tokens=window_tokens))
+    ]
+
+
 def _summarization_viable(
     messages: Sequence[Message],
     *,
     window_tokens: int,
 ) -> bool:
+    """True when ``_summarize_history`` on these raw rows would compact something."""
     _, middle, _ = split_messages_for_compaction(messages, window_tokens=window_tokens)
-    return any(is_provider_visible(m) for m in middle)
+    return bool(_middle_summary_lines(middle, window_tokens=window_tokens))
 
 
 def _summarization_model_id(ctx: TurnContext) -> str:
@@ -490,9 +497,7 @@ async def _summarize_history(
     """
     messages = await history.load(thread_id)
     head, middle, tail = split_messages_for_compaction(messages, window_tokens=window_tokens)
-    lines = [
-        line for m in middle if (line := _summary_line_for_message(m, window_tokens=window_tokens))
-    ]
+    lines = _middle_summary_lines(middle, window_tokens=window_tokens)
     if not lines:
         return 0
     logger.debug(
