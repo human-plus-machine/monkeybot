@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -15,9 +16,12 @@ from monkeybot.core.mcp.oauth_flow import login_mcp_server
 
 logger = logging.getLogger(__name__)
 
+CLIENT_SECRET_ENV = "MONKEYBOT_MCP_CLIENT_SECRET"
+
 
 def run_mcp_login(args: argparse.Namespace) -> int:
     """Sign in, print JSON progress on stdout, and return 0 when the attempt finishes."""
+    client_secret = args.client_secret or os.environ.get(CLIENT_SECRET_ENV, "")
     try:
         result = asyncio.run(
             login_mcp_server(
@@ -25,7 +29,8 @@ def run_mcp_login(args: argparse.Namespace) -> int:
                 Path(args.storage).expanduser(),
                 open_browser=not args.no_browser,
                 client_id=args.client_id,
-                client_secret=args.client_secret,
+                client_secret=client_secret,
+                redirect_port=args.redirect_port,
             )
         )
     except (MCPAuthError, OAuthFlowError) as exc:
@@ -62,6 +67,15 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     command.add_argument(
         "--client-secret",
         default="",
-        help="OAuth client secret, when that client requires one",
+        help=(
+            f"OAuth client secret, when that client requires one. Prefer {CLIENT_SECRET_ENV}: "
+            "command-line arguments are visible to other processes."
+        ),
+    )
+    command.add_argument(
+        "--redirect-port",
+        type=int,
+        default=None,
+        help="Loopback port for the sign-in redirect, for a client registered with an exact URI",
     )
     command.set_defaults(func=run_mcp_login)

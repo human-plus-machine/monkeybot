@@ -8,15 +8,19 @@ later connects can present them. Tokens never go in ``mcp.json``.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import fcntl
 import hashlib
 import json
 import logging
 import os
-from collections.abc import AsyncGenerator
+import tempfile
+import weakref
+from collections.abc import AsyncGenerator, AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import httpx
 
@@ -29,6 +33,14 @@ _ENV_DIR = "MONKEYBOT_MCP_OAUTH_DIR"
 _LOGIN_TIMEOUT_S = 180.0
 _PROBE_TIMEOUT_S = 8.0
 _LEGACY_GRANTS = frozenset({"client_credentials", "password"})
+_CALLBACK_PATH = "/callback"
+_METADATA_PATH = "/.well-known/oauth-protected-resource"
+
+# Keyed by event loop: an asyncio.Lock that has waited on one loop cannot be
+# awaited on another.
+_TOKEN_LOCKS: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[Path, asyncio.Lock]] = (
+    weakref.WeakKeyDictionary()
+)
 
 _PAGE_OK = b"<html><body><p>You can close this window and return to Spaces.</p></body></html>"
 _PAGE_FAIL = (
@@ -138,23 +150,28 @@ class FileTokenStorage:
         data["client_info"] = client_info.model_dump(mode="json")
         self._write(data)
 
-    def drop_client_if_redirect_mismatch(self, redirect_uri: str) -> None:
-        """Forget a registration whose callback URL is a different loopback port.
-
-        The SDK only registers a client when none is stored. A previous login
-        pinned the old port, so a new login would send the browser to a port
-        that is no longer listening.
-        """
-        data = self._read()
-        raw = data.get("client_info")
-        if not isinstance(raw, dict):
-            return
-        redirects = raw.get("redirect_uris") or []
-        if redirect_uri in {str(item) for item in redirects}:
-            return
-        data["client_info"] = None
-        data["tokens"] = None
-        self._write(data)
+    async def save_login(
+        self,
+        client_info: Any,
+        tokens: Any,
+        *,
+        token_endpoint: str | None,
+        resource: str | None,
+    ) -> None:
+        """Store a finished sign-in in one write. A corrupt file is replaced."""
+        async with self._locked():
+            try:
+                data = self._read()
+            except MCPAuthError:
+                data = {}
+            data["server_url"] = self.url
+            data["client_info"] = client_info.model_dump(mode="json")
+            data["tokens"] = tokens.model_dump(mode="json")
+            if token_endpoint:
+                data["token_endpoint"] = token_endpoint
+            if resource:
+                data["resource"] = resource
+            self._write(data)
 
     def remember_refresh_target(self, *, token_endpoint: str | None, resource: str | None) -> None:
         """Remember where a later connect can refresh this server's token."""
@@ -166,39 +183,53 @@ class FileTokenStorage:
         data["server_url"] = self.url
         self._write(data)
 
-    async def refresh_access_token(self) -> str | None:
+    async def refresh_access_token(self, stale_access_token: str | None = None) -> str | None:
         """Exchange a stored refresh token.
 
         Returns the new access token, or None when nothing is stored to refresh.
+        When the stored access token no longer matches ``stale_access_token``,
+        another caller already refreshed, and that token is returned instead.
         A failed exchange raises ``MCPAuthError``.
         """
+        async with self._locked():
+            return await self._refresh_locked(stale_access_token)
+
+    async def _refresh_locked(self, stale_access_token: str | None) -> str | None:
         data = self._read()
         raw_tokens = data.get("tokens")
         raw_client = data.get("client_info")
         tokens: dict[str, Any] = raw_tokens if isinstance(raw_tokens, dict) else {}
         client: dict[str, Any] = raw_client if isinstance(raw_client, dict) else {}
+        current = str(tokens.get("access_token") or "").strip()
+        if stale_access_token and current and current != stale_access_token:
+            return current
         refresh = str(tokens.get("refresh_token") or "").strip()
         endpoint = str(data.get("token_endpoint") or "").strip()
         client_id = str(client.get("client_id") or "").strip()
         if not refresh or not endpoint or not client_id:
             return None
-        form = {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh,
-            "client_id": client_id,
-        }
+        form = {"grant_type": "refresh_token", "refresh_token": refresh}
+        request_headers = {"Content-Type": "application/x-www-form-urlencoded"}
         secret = str(client.get("client_secret") or "").strip()
-        if secret:
-            form["client_secret"] = secret
+        if secret and client.get("token_endpoint_auth_method") == "client_secret_basic":
+            # RFC 6749 section 2.3.1: form-encode the id and secret before Basic.
+            credentials = f"{quote(client_id, safe='')}:{quote(secret, safe='')}"
+            request_headers["Authorization"] = (
+                "Basic " + base64.b64encode(credentials.encode()).decode()
+            )
+        else:
+            form["client_id"] = client_id
+            if secret:
+                form["client_secret"] = secret
         resource = str(data.get("resource") or "").strip()
         if resource:
             form["resource"] = resource
         try:
-            async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as http:
+            async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as http:
                 response = await http.post(
                     endpoint,
                     data=form,
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    headers=request_headers,
                 )
         except httpx.HTTPError as exc:
             raise self._refresh_failed(error=type(exc).__name__) from exc
@@ -253,16 +284,36 @@ class FileTokenStorage:
             )
         return raw
 
-    def _write(self, data: dict[str, Any]) -> None:
+    @contextlib.asynccontextmanager
+    async def _locked(self) -> AsyncIterator[None]:
+        """Serialize token changes for this server across tasks and processes."""
+        locks = _TOKEN_LOCKS.setdefault(asyncio.get_running_loop(), {})
+        async with locks.setdefault(self.path, asyncio.Lock()):
+            self._ensure_directory()
+            with self.path.with_suffix(".lock").open("a+b") as handle:
+                await asyncio.to_thread(fcntl.flock, handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def _ensure_directory(self) -> None:
         self.directory.mkdir(parents=True, mode=0o700, exist_ok=True)
         with contextlib.suppress(OSError):
             self.directory.chmod(0o700)
+
+    def _write(self, data: dict[str, Any]) -> None:
+        self._ensure_directory()
         payload = json.dumps(data, indent=2) + "\n"
-        tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(payload, encoding="utf-8")
-        with contextlib.suppress(OSError):
-            tmp.chmod(0o600)
-        tmp.replace(self.path)
+        fd, tmp_name = tempfile.mkstemp(dir=self.directory, prefix=".", suffix=".tmp")
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+            tmp.replace(self.path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
 
 class StoredBearerAuth(httpx.Auth):
@@ -281,20 +332,27 @@ class StoredBearerAuth(httpx.Auth):
         self, request: httpx.Request
     ) -> AsyncGenerator[httpx.Request, httpx.Response]:
         tokens = await self.storage.get_tokens()
-        if tokens is not None and tokens.access_token:
-            request.headers["Authorization"] = f"Bearer {tokens.access_token}"
+        sent = tokens.access_token if tokens is not None else None
+        if sent:
+            request.headers["Authorization"] = f"Bearer {sent}"
         response = yield request
         if response.status_code != 401:
             return
-        refreshed = await self.storage.refresh_access_token()
+        refreshed = await self.storage.refresh_access_token(stale_access_token=sent)
         if not refreshed:
-            raise MCPAuthError(
-                "mcp",
-                "This tool needs you to sign in.",
-                remedy="Use Sign in on the tool in Studio.",
-            )
+            raise _needs_sign_in()
         request.headers["Authorization"] = f"Bearer {refreshed}"
-        yield request
+        retry = yield request
+        if retry.status_code == 401:
+            raise _needs_sign_in()
+
+
+def _needs_sign_in() -> MCPAuthError:
+    return MCPAuthError(
+        "mcp",
+        "This tool needs you to sign in.",
+        remedy="Use Sign in on the tool in Studio.",
+    )
 
 
 def oauth_auth_for_connect(url: str) -> StoredBearerAuth | None:
@@ -330,17 +388,24 @@ async def looks_like_oauth_challenge(url: str) -> bool:
     lowered = challenge.lower()
     if "bearer" in lowered or "resource_metadata" in lowered:
         return True
-    # A 401 with no challenge still often means OAuth. Confirm the metadata URL.
+    # A 401 with no challenge still often means OAuth. Confirm the metadata URL,
+    # path-specific first (RFC 9728 section 3.1), then at the origin.
     parsed = urlparse(url)
     if not parsed.scheme or not parsed.netloc:
         return False
-    metadata = f"{parsed.scheme}://{parsed.netloc}/.well-known/oauth-protected-resource"
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    candidates = [f"{origin}{_METADATA_PATH}"]
+    path = parsed.path.rstrip("/")
+    if path:
+        candidates.insert(0, f"{origin}{_METADATA_PATH}{path}")
     try:
         async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT_S, follow_redirects=True) as client:
-            meta = await client.get(metadata)
+            for metadata in candidates:
+                if (await client.get(metadata)).status_code == 200:
+                    return True
     except httpx.HTTPError:
         return False
-    return meta.status_code == 200
+    return False
 
 
 class _LoopbackCallback:
@@ -350,16 +415,26 @@ class _LoopbackCallback:
         self._server: asyncio.Server | None = None
         self._future: asyncio.Future[tuple[str, str | None]] | None = None
 
-    async def start(self) -> str:
-        """Bind a free port and return the redirect URI the browser will hit."""
+    async def start(self, preferred_port: int | None = None) -> str:
+        """Bind ``preferred_port`` (or any free port) and return the redirect URI."""
         loop = asyncio.get_running_loop()
         self._future = loop.create_future()
-        self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        self._server = None
+        if preferred_port:
+            try:
+                self._server = await asyncio.start_server(self._handle, "127.0.0.1", preferred_port)
+            except OSError as exc:
+                logger.info(
+                    "mcp oauth redirect port unavailable %s",
+                    kv(port=preferred_port, error=type(exc).__name__),
+                )
+        if self._server is None:
+            self._server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
         sock = next(iter(self._server.sockets or ()), None)
         if sock is None:
             raise MCPAuthError("mcp", "Could not listen for the sign-in redirect.")
         port = sock.getsockname()[1]
-        return f"http://127.0.0.1:{port}/callback"
+        return f"http://127.0.0.1:{port}{_CALLBACK_PATH}"
 
     async def wait(self) -> tuple[str, str | None]:
         """Block until the browser hits the callback, or the login times out."""
@@ -381,12 +456,16 @@ class _LoopbackCallback:
         await self._server.wait_closed()
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        page = _PAGE_FAIL
+        status, page = b"200 OK", _PAGE_FAIL
         try:
             raw = await asyncio.wait_for(reader.read(8192), timeout=5)
             head = raw.split(b"\r\n", 1)[0].decode("latin1", errors="replace")
             target = head.split(" ")[1] if head.startswith("GET ") and " " in head else "/"
-            query = parse_qs(urlparse(target).query)
+            parsed = urlparse(target)
+            if parsed.path != _CALLBACK_PATH:
+                status, page = b"404 Not Found", b""
+                return
+            query = parse_qs(parsed.query)
             code = (query.get("code") or [""])[0]
             state_values = query.get("state")
             state = state_values[0] if state_values else None
@@ -403,7 +482,7 @@ class _LoopbackCallback:
                 self._future.set_exception(exc)
         finally:
             body = (
-                b"HTTP/1.1 200 OK\r\n"
+                b"HTTP/1.1 " + status + b"\r\n"
                 b"Content-Type: text/html; charset=utf-8\r\n"
                 b"Connection: close\r\n\r\n" + page
             )
@@ -445,42 +524,118 @@ def _oauth_flow_message(exc: BaseException) -> str | None:
     return None
 
 
-def _quiet_sdk_logs() -> None:
+@contextlib.contextmanager
+def _quiet_sdk_logs() -> Iterator[None]:
     """Keep the MCP SDK from writing a traceback to stderr during sign-in."""
-    logging.getLogger("mcp").setLevel(logging.CRITICAL)
+    sdk_logger = logging.getLogger("mcp")
+    previous = sdk_logger.level
+    sdk_logger.setLevel(logging.CRITICAL)
+    try:
+        yield
+    finally:
+        sdk_logger.setLevel(previous)
 
 
-async def remember_preregistered_client(
-    storage: FileTokenStorage,
-    redirect_uri: str,
-    client_id: str,
-    client_secret: str | None = None,
-) -> None:
-    """Store a client the user already registered with this server.
+class _StagedTokenStorage:
+    """SDK token storage for one sign-in.
+
+    Nothing reaches disk until ``commit``, so a cancelled or failed sign-in
+    leaves the previous one usable.
+    """
+
+    def __init__(
+        self, storage: FileTokenStorage, client_info: Any | None, *, keep_tokens: bool
+    ) -> None:
+        self.storage = storage
+        self._client_info = client_info
+        self._keep_tokens = keep_tokens
+        self._tokens: Any | None = None
+
+    @property
+    def has_new_tokens(self) -> bool:
+        return self._tokens is not None
+
+    async def get_tokens(self) -> Any | None:
+        if self._tokens is not None or not self._keep_tokens:
+            return self._tokens
+        return await self.storage.get_tokens()
+
+    async def set_tokens(self, tokens: Any) -> None:
+        self._tokens = tokens
+
+    async def get_client_info(self) -> Any | None:
+        return self._client_info
+
+    async def set_client_info(self, client_info: Any) -> None:
+        self._client_info = client_info
+
+    async def commit(self, *, token_endpoint: str | None, resource: str | None) -> None:
+        if self._tokens is None or self._client_info is None:
+            return
+        await self.storage.save_login(
+            self._client_info,
+            self._tokens,
+            token_endpoint=token_endpoint,
+            resource=resource,
+        )
+
+
+def _preregistered_client(
+    redirect_uri: str, client_id: str, client_secret: str | None = None
+) -> Any:
+    """Client information for an app the user already registered with this server.
 
     The browser flow then skips dynamic registration and uses this client.
-    A different client id drops any tokens from the previous one.
     """
     from mcp.shared.auth import OAuthClientInformationFull
     from pydantic import AnyUrl
 
     secret = (client_secret or "").strip() or None
-    current = await storage.get_client_info()
-    if current is None or current.client_id != client_id:
-        data = storage._read()
-        data["tokens"] = None
-        storage._write(data)
-    await storage.set_client_info(
-        OAuthClientInformationFull(
-            client_id=client_id,
-            client_secret=secret,
-            redirect_uris=[AnyUrl(redirect_uri)],
-            grant_types=["authorization_code", "refresh_token"],
-            response_types=["code"],
-            token_endpoint_auth_method="client_secret_post" if secret else "none",
-            client_name="Spaces",
-        )
+    return OAuthClientInformationFull(
+        client_id=client_id,
+        client_secret=secret,
+        redirect_uris=[AnyUrl(redirect_uri)],
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        token_endpoint_auth_method="client_secret_post" if secret else "none",
+        client_name="Spaces",
     )
+
+
+def _redirect_uris(client_info: Any | None) -> set[str]:
+    if client_info is None:
+        return set()
+    return {str(item) for item in client_info.redirect_uris or ()}
+
+
+def _stored_redirect_port(client_info: Any | None) -> int | None:
+    """Loopback port of a previous sign-in, so its registration stays valid."""
+    for uri in sorted(_redirect_uris(client_info)):
+        parsed = urlparse(uri)
+        if parsed.hostname == "127.0.0.1" and parsed.path == _CALLBACK_PATH and parsed.port:
+            return parsed.port
+    return None
+
+
+def _stage_login(
+    storage: FileTokenStorage,
+    stored_client: Any | None,
+    redirect_uri: str,
+    client_id: str,
+    client_secret: str | None,
+) -> _StagedTokenStorage:
+    if client_id:
+        same_client = stored_client is not None and stored_client.client_id == client_id
+        return _StagedTokenStorage(
+            storage,
+            _preregistered_client(redirect_uri, client_id, client_secret),
+            keep_tokens=same_client,
+        )
+    if redirect_uri in _redirect_uris(stored_client):
+        return _StagedTokenStorage(storage, stored_client, keep_tokens=True)
+    # The SDK only registers when no client is stored, and the stored one
+    # points the browser at a port that is not listening.
+    return _StagedTokenStorage(storage, None, keep_tokens=False)
 
 
 def _initialize_call() -> tuple[dict[str, str], dict[str, Any]]:
@@ -522,46 +677,52 @@ async def login_mcp_server(
     open_browser: bool = False,
     client_id: str | None = None,
     client_secret: str | None = None,
+    redirect_port: int | None = None,
 ) -> dict[str, Any]:
     """Run one interactive OAuth login. Prints ``{"url": ...}`` when the browser should open.
 
     Returns ``{"ok": True, "signed_in": True}`` after tokens are stored, or
     ``signed_in`` false when the server accepted the connection without OAuth.
     ``open_browser`` opens the system browser from this process. The app passes
-    false and opens the URL itself.
+    false and opens the URL itself. ``redirect_port`` pins the loopback port for
+    a client registered with an exact redirect URI; otherwise the previous
+    sign-in's port is reused when free.
     """
     from mcp.client.auth import OAuthClientProvider
 
-    _quiet_sdk_logs()
     cleaned = url.strip()
     if not cleaned:
         raise MCPAuthError("mcp", "This tool has no URL to sign in to.")
     storage = FileTokenStorage(storage_dir, cleaned)
-    supplied_client_id = (client_id or "").strip()
-    loopback = _LoopbackCallback()
     try:
-        redirect_uri = await loopback.start()
-        if supplied_client_id:
-            await remember_preregistered_client(
+        stored_client = await storage.get_client_info()
+    except MCPAuthError:
+        stored_client = None
+    loopback = _LoopbackCallback()
+    with _quiet_sdk_logs():
+        try:
+            redirect_uri = await loopback.start(
+                redirect_port or _stored_redirect_port(stored_client)
+            )
+            staged = _stage_login(
                 storage,
+                stored_client,
                 redirect_uri,
-                supplied_client_id,
+                (client_id or "").strip(),
                 client_secret,
             )
-        else:
-            storage.drop_client_if_redirect_mismatch(redirect_uri)
-        provider = OAuthClientProvider(
-            server_url=cleaned,
-            client_metadata=_client_metadata(redirect_uri),
-            storage=storage,
-            redirect_handler=lambda auth_url: _open_authorization(auth_url, open_browser),
-            callback_handler=loopback.wait,
-            timeout=_LOGIN_TIMEOUT_S,
-        )
-        response = await _post_initialize(cleaned, provider)
-        return await _login_result(storage, provider, response, cleaned)
-    finally:
-        await loopback.close()
+            provider = OAuthClientProvider(
+                server_url=cleaned,
+                client_metadata=_client_metadata(redirect_uri),
+                storage=staged,
+                redirect_handler=lambda auth_url: _open_authorization(auth_url, open_browser),
+                callback_handler=loopback.wait,
+                timeout=_LOGIN_TIMEOUT_S,
+            )
+            response = await _post_initialize(cleaned, provider)
+            return await _login_result(staged, provider, response, cleaned)
+        finally:
+            await loopback.close()
 
 
 async def _open_authorization(auth_url: str, open_browser: bool) -> None:
@@ -591,7 +752,7 @@ async def _post_initialize(url: str, provider: Any) -> httpx.Response:
 
 
 async def _login_result(
-    storage: FileTokenStorage,
+    staged: _StagedTokenStorage,
     provider: Any,
     response: httpx.Response,
     url: str,
@@ -602,15 +763,14 @@ async def _login_result(
             "Sign-in did not grant access to this tool.",
             remedy="Try Sign in again.",
         )
-    tokens = await storage.get_tokens()
-    signed_in = tokens is not None and bool(tokens.access_token)
-    if signed_in:
+    if staged.has_new_tokens:
         meta = provider.context.oauth_metadata
-        endpoint = str(meta.token_endpoint) if meta is not None else None
-        storage.remember_refresh_target(
-            token_endpoint=endpoint,
+        await staged.commit(
+            token_endpoint=str(meta.token_endpoint) if meta is not None else None,
             resource=provider.context.get_resource_url(),
         )
+    tokens = await staged.get_tokens()
+    signed_in = tokens is not None and bool(tokens.access_token)
     logger.info(
         "mcp oauth sign-in finished %s",
         kv(host=_host_of(url), signed_in=signed_in),

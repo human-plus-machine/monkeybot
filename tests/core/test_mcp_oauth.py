@@ -16,7 +16,7 @@ from monkeybot.core.mcp.oauth_flow import (
     StoredBearerAuth,
     _LoopbackCallback,
     _oauth_flow_message,
-    remember_preregistered_client,
+    _stage_login,
     server_uses_browser_oauth,
     token_filename,
 )
@@ -54,7 +54,7 @@ def test_server_uses_browser_oauth_skips_legacy_grants() -> None:
     )
 
 
-async def test_storage_roundtrip_and_redirect_mismatch(tmp_path) -> None:
+async def test_storage_roundtrip(tmp_path) -> None:
     storage = FileTokenStorage(tmp_path, "https://mcp.example.com/mcp")
     await storage.set_tokens(OAuthToken(access_token="access", refresh_token="refresh"))
     await storage.set_client_info(
@@ -73,12 +73,26 @@ async def test_storage_roundtrip_and_redirect_mismatch(tmp_path) -> None:
     mode = stat.S_IMODE(storage.path.stat().st_mode)
     assert mode == 0o600
 
-    storage.drop_client_if_redirect_mismatch("http://127.0.0.1:9/callback")
-    assert await storage.get_client_info() is not None
 
-    storage.drop_client_if_redirect_mismatch("http://127.0.0.1:10/callback")
-    assert await storage.get_client_info() is None
-    assert await storage.get_tokens() is None
+async def test_login_on_a_new_port_registers_a_fresh_client(tmp_path) -> None:
+    storage = FileTokenStorage(tmp_path, "https://mcp.example.com/mcp")
+    await storage.set_tokens(OAuthToken(access_token="access"))
+    await storage.set_client_info(
+        OAuthClientInformationFull(
+            client_id="client",
+            redirect_uris=[AnyUrl("http://127.0.0.1:9/callback")],
+        )
+    )
+    stored = await storage.get_client_info()
+
+    same_port = _stage_login(storage, stored, "http://127.0.0.1:9/callback", "", None)
+    assert (await same_port.get_client_info()).client_id == "client"
+    assert (await same_port.get_tokens()).access_token == "access"
+
+    new_port = _stage_login(storage, stored, "http://127.0.0.1:10/callback", "", None)
+    assert await new_port.get_client_info() is None
+    assert await new_port.get_tokens() is None
+    assert (await storage.get_tokens()).access_token == "access"
 
 
 async def test_refresh_keeps_the_old_refresh_token(
@@ -184,21 +198,17 @@ async def test_loopback_callback_returns_the_code() -> None:
     assert state == "xyz"
 
 
-async def test_preregistered_client_is_reused_for_any_server(tmp_path) -> None:
+async def test_new_preregistered_client_does_not_reuse_old_tokens(tmp_path) -> None:
     storage = FileTokenStorage(tmp_path, "https://mcp.example.com/mcp")
     await storage.set_tokens(OAuthToken(access_token="old"))
-    await remember_preregistered_client(
-        storage,
-        "http://127.0.0.1:9/callback",
-        "client",
-        "secret",
-    )
-    info = await storage.get_client_info()
+    staged = _stage_login(storage, None, "http://127.0.0.1:9/callback", "client", "secret")
+    info = await staged.get_client_info()
     assert info is not None
     assert info.client_id == "client"
     assert info.client_secret == "secret"
     assert info.token_endpoint_auth_method == "client_secret_post"
-    assert await storage.get_tokens() is None
+    assert await staged.get_tokens() is None
+    assert (await storage.get_tokens()).access_token == "old"
     assert server_uses_browser_oauth(
         {"url": "https://mcp.example.com/mcp", "auth": {"client_id": "client"}}
     )

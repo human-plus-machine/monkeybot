@@ -113,6 +113,13 @@ class MCPConnectivityError(MCPDiagnosticError):
     pass
 
 
+def _auth_error_for(server_name: str, exc: MCPAuthError) -> MCPAuthError:
+    """``exc`` attributed to ``server_name``; OAuth helpers raise before they know it."""
+    if exc.server_name == server_name:
+        return exc
+    return MCPAuthError(server_name, str(exc), remedy=exc.remedy)
+
+
 _ENV_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 # Unprefixed tool name that cloud-browser MCP servers (e.g. browser-harness) expose
@@ -826,14 +833,18 @@ class MCPClient:
             raise
         except MCPAuthError as exc:
             await stack.aclose()
-            self._record_connect_failure(name, exc)
-            raise
+            auth_exc = _auth_error_for(name, exc)
+            self._record_connect_failure(name, auth_exc)
+            if auth_exc is exc:
+                raise
+            raise auth_exc from exc
         except Exception as exc:
             await stack.aclose()
             from monkeybot.core.mcp.oauth_flow import find_auth_error
 
-            auth_exc = find_auth_error(exc)
-            if auth_exc is not None:
+            found = find_auth_error(exc)
+            if found is not None:
+                auth_exc = _auth_error_for(name, found)
                 self._record_connect_failure(name, auth_exc)
                 raise auth_exc from exc
             wrapped = MCPConnectionError(name, str(exc))
@@ -1128,15 +1139,19 @@ class MCPClient:
                 headers_out.pop("Authorization", None)
                 headers_out.pop("authorization", None)
             had_stored_oauth = False
-            if browser_oauth:
-                stored_auth = oauth_auth_for_connect(url.strip())
-                if stored_auth is not None:
-                    auth_handler = stored_auth
-                    had_stored_oauth = True
-                    headers_out.pop("Authorization", None)
-                    headers_out.pop("authorization", None)
-
             try:
+                if browser_oauth:
+                    try:
+                        stored_auth = oauth_auth_for_connect(url.strip())
+                    except MCPAuthError as exc:
+                        auth_exc = _auth_error_for(server_name, exc)
+                        self._record_connect_failure(server_name, auth_exc)
+                        raise auth_exc from exc
+                    if stored_auth is not None:
+                        auth_handler = stored_auth
+                        had_stored_oauth = True
+                        headers_out.pop("Authorization", None)
+                        headers_out.pop("authorization", None)
                 defs = await self.connect_streamable_http(
                     server_name,
                     url.strip(),
