@@ -659,8 +659,22 @@ async def _token_pressure_should_summarize(
         return False
     # Judge viability on the raw stored rows ``_summarize_history`` splits, not the
     # coalesced ``transform_context`` view in ``state.chat_messages`` (fewer rows).
-    raw = await history.load(thread_id)
-    return _summarization_viable(raw, window_tokens=window_tokens)
+    try:
+        raw = await history.load(thread_id)
+    except Exception:
+        logger.warning(
+            "summarization skipped: history load failed %s",
+            kv(thread_id=thread_id),
+            exc_info=True,
+        )
+        return False
+    if _summarization_viable(raw, window_tokens=window_tokens):
+        return True
+    logger.debug(
+        "summarization skipped: nothing compactable %s",
+        kv(thread_id=thread_id, preflight=preflight, cap=cap, message_count=len(raw)),
+    )
+    return False
 
 
 async def _preflight_prompt_tokens(

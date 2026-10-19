@@ -30,7 +30,9 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.messages.transform_context import transform_context
+from monkeybot.core.runtime.context_budget import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.events import (
+    AgentEvent,
     AssistantDelta,
     ContextSummarized,
     ContextSummarizing,
@@ -1936,6 +1938,56 @@ async def test_token_pressure_trigger_skips_load_below_cap() -> None:
         cap=10,
         window_tokens=100,
     )
+
+
+async def _run_over_cap_events(tmp_path: Path, hist: FakeHistory) -> list[AgentEvent]:
+    prov = FakeProvider([[TextDelta(text="final"), Done()]])
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    return [
+        e
+        async for e in run(
+            "hello",
+            ctx,
+            provider=prov,
+            history=hist,
+            inspectors=[],
+            tool_executor=RecordingExecutor(),
+            max_turns=4,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_over_cap_skips_summarizing_when_not_viable(tmp_path: Path) -> None:
+    hist = FakeHistory(_padded(1))
+    events = await _run_over_cap_events(tmp_path, hist)
+    assert any(
+        isinstance(e, ContextUsage) and e.estimated_tokens >= 800 * SUMMARY_TRIGGER_RATIO
+        for e in events
+    )
+    assert not any(isinstance(e, ContextSummarizing) for e in events)
+    assert not hist.reset_calls
+    assert not any(isinstance(e, Error) for e in events)
+    assert "".join(e.delta for e in events if isinstance(e, AssistantDelta)) == "final"
+
+
+@pytest.mark.asyncio
+async def test_run_over_cap_survives_trigger_history_load_failure(tmp_path: Path) -> None:
+    class FlakyHistory(FakeHistory):
+        loads = 0
+
+        async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
+            self.loads += 1
+            if self.loads == 2:
+                raise RuntimeError("database is locked")
+            return await super().load(thread_id, limit)
+
+    hist = FlakyHistory(_padded(8))
+    events = await _run_over_cap_events(tmp_path, hist)
+    assert hist.loads >= 2  # load 2 is the token-pressure trigger's
+    assert not any(isinstance(e, ContextSummarizing) for e in events)
+    assert not any(isinstance(e, Error) for e in events)
+    assert "".join(e.delta for e in events if isinstance(e, AssistantDelta)) == "final"
 
 
 @pytest.mark.asyncio
