@@ -95,7 +95,7 @@ class HarnessIntervention:
 
     ``intervention`` is one of ``doom_loop``, ``truncated_batch``,
     ``empty_completion``, ``post_tool_empty``, ``background_jobs_nudge``,
-    ``compaction_fallback``, ``max_turns``, ``verifier_replan``.
+    ``compaction_fallback``, ``max_turns``, ``verifier_replan``, ``final_answer_gate``.
     """
 
     kind: Literal["HarnessIntervention"] = "HarnessIntervention"

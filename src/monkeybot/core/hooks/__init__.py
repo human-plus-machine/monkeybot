@@ -44,9 +44,11 @@ class HookEvent(StrEnum):
     """Lifecycle points at which hooks may fire.
 
     Read-side events (``USER_MESSAGE``, ``PRE_TURN``, ``PRE_TOOL``,
-    ``TOOL_DEFINITION``, ``BEFORE_PROVIDER_REQUEST``) run synchronously with a
+    ``TOOL_DEFINITION``, ``BEFORE_PROVIDER_REQUEST``, ``PRE_FINAL_ANSWER``) run synchronously with a
     short timeout and may mutate the payload (injection fields, tools, or
-    provider messages). Write-side events (``POST_TOOL``, ``POST_TURN``,
+    provider messages). ``HISTORY_COMPACTED`` is awaited on that same timeout after a
+    summary replaces older history, so a hook can reset state before the next provider
+    call. Write-side events (``POST_TOOL``, ``POST_TURN``,
     ``SESSION_END``, ``AFTER_PROVIDER_RESPONSE``) are fire-and-forget; their
     return values are ignored.
     """
@@ -60,6 +62,8 @@ class HookEvent(StrEnum):
     TOOL_DEFINITION = "tool.definition"
     BEFORE_PROVIDER_REQUEST = "before_provider_request"
     AFTER_PROVIDER_RESPONSE = "after_provider_response"
+    PRE_FINAL_ANSWER = "pre_final_answer"
+    HISTORY_COMPACTED = "history_compacted"
 
 
 @dataclass
@@ -77,6 +81,13 @@ class HookPayload:
     ``TOOL_DEFINITION`` / ``BEFORE_PROVIDER_REQUEST`` may replace ``tools``
     and/or ``provider_messages`` (``Message`` is frozen — replace list entries,
     do not assign to message fields).
+
+    ``PRE_FINAL_ANSWER`` fires when the model ends a turn with text and no tool calls,
+    before that text is persisted; a hook may set ``reject_final_answer``.
+
+    ``HISTORY_COMPACTED`` fires (awaited, bounded) after older history was replaced by a
+    summary, with ``turns_summarized`` set. State that depends on earlier history being
+    visible to the model — e.g. which files it has read — must be reset here.
     """
 
     event: HookEvent
@@ -106,6 +117,16 @@ class HookPayload:
 
     inject_text: str | None = None
     inject_memory_lines: list[str] = field(default_factory=list)
+
+    # BEFORE_PROVIDER_REQUEST: ask the loop to buffer this call's assistant text instead of
+    # streaming it, so a PRE_FINAL_ANSWER hook can still reject it unseen.
+    hold_assistant_text: bool = False
+    # PRE_FINAL_ANSWER (``assistant_text`` carries the candidate answer): set to a harness note
+    # to refuse the answer. The loop discards it, shows the model the note, and asks again; it
+    # honors a small per-message cap so a hook cannot loop a turn forever.
+    reject_final_answer: str | None = None
+    # HISTORY_COMPACTED: how many history rows the summary replaced.
+    turns_summarized: int | None = None
 
 
 HookFn = Callable[[HookPayload], Awaitable[None]]

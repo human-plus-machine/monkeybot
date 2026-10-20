@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Hooks: `PRE_FINAL_ANSWER` (a hook may refuse a final answer once the tools are done; `BEFORE_PROVIDER_REQUEST` may hold the text until then) and `HISTORY_COMPACTED` (awaited after history is summarized). A tool failing on the same file repeatedly trips doom-loop recovery even when its other arguments, or the path's spelling, change.
+
 ## [cli v0.10.0] - 2026-10-18
 
 ### Added
