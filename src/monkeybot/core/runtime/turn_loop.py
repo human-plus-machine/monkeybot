@@ -1448,9 +1448,25 @@ def _release_held_text(state: _TurnState) -> list[AgentEvent]:
     return released
 
 
-def _discard_held_text(state: _TurnState) -> None:
+def _reset_uncommitted_reply(state: _TurnState) -> None:
+    """Drop assistant output this attempt has not committed to history.
+
+    A rejected final answer, a reply blocked because jobs are still running, and
+    the previous attempt's text must not be what abort persistence writes. The
+    next provider stream fills these fields from its own events.
+    """
     state.hold_assistant_text = False
     state.held_text_events.clear()
+    state.assistant_text = ""
+    state.thinking_text = ""
+    state.thinking_signature = None
+    state.pending = {}
+    state.stream_truncated = False
+
+
+def _discard_held_text(state: _TurnState) -> None:
+    """Drop a reply the user was not shown and that must not be persisted."""
+    _reset_uncommitted_reply(state)
 
 
 async def _stream_provider_turn(
@@ -1465,7 +1481,9 @@ async def _stream_provider_turn(
     cancelled: asyncio.Event | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Stream provider events; fill ``state.pending`` / text fields. May set action=return."""
-    state.held_text_events.clear()
+    # Previous attempt's text is not this call's partial output. Clearing it here
+    # covers every early return, including a rejected answer the gate already dropped.
+    _reset_uncommitted_reply(state)
     try:
         state.hold_assistant_text = bool(_running_background_jobs(tool_executor))
     except Exception:

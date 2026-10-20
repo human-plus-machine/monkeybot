@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Hooks: `PRE_FINAL_ANSWER` (a hook may refuse a final answer once the tools are done; `BEFORE_PROVIDER_REQUEST` may hold the text until then) and `HISTORY_COMPACTED` (awaited after history is summarized). A tool failing on the same file repeatedly trips doom-loop recovery even when its other arguments, or the path's spelling, change.
+
 ## [cli v0.10.0] - 2026-10-18
 
 ### Added
@@ -22,7 +26,6 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - New `list_dir` tool. `grep` gains `context`, `files_only` and `respect_gitignore`; `glob` takes `files_only` and no longer walks `node_modules`, `.git`, `build` and similar. `replace_in_file` and `apply_patch` return the edited `line` and a numbered `snippet`. Skills appear in the prompt as `name — description`.
-- Hooks: `PRE_FINAL_ANSWER` (a hook may refuse a final answer once the tools are done; `BEFORE_PROVIDER_REQUEST` may hold the text until then) and `HISTORY_COMPACTED`. Compaction summaries end with a harness-generated workspace-state block, and a tool failing on the same path repeatedly now trips the doom-loop recovery even when its other arguments change.
 - Live eval suites `coding` and `coding_hard` (`evals/suites/`) over fixture repos, with workspace-checked assertions (`workspace_command_passes`, `workspace_file_contains`, `workspace_unchanged`, `final_text_regex`, `verified_before_final`), seeded-bug overlays, and `python -m evals.trials` to run a suite repeatedly and compare configurations. The eval runner answers `ask_user` prompts so a run cannot hang waiting for a human.
 - `fireworks` model provider (`monkeybot[fireworks]`) for Fireworks AI's OpenAI-compatible API. Set `model.provider: fireworks` and `FIREWORKS_API_KEY`; `FIREWORKS_BASE_URL` overrides the default `https://api.fireworks.ai/inference/v1`. Model ids are passed through unchanged, e.g. `accounts/fireworks/models/llama-v3p3-70b-instruct`.
 - `model.reasoning_effort` sends an effort level on the provider's wire field. It wins over `thinking_budget` where the provider accepts it. `none` turns thinking off. A level the API rejects is omitted on later turns. Gemini only sends levels its SDK knows; other values stay on `thinking_budget`.

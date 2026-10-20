@@ -615,3 +615,91 @@ async def test_run_stops_a_retry_loop_of_slightly_different_failing_edits() -> N
     assert any(isinstance(e, Error) and "failed 3 times" in e.error for e in events)
     assert prov.stream_tools[-1] == []  # the recovery turn has no tools
     assert isinstance(events[-1], TurnComplete)
+
+
+def test_path_streak_treats_workspace_spellings_as_the_same_file() -> None:
+    tracker = _DoomLoopTracker(threshold=3)
+    variants = (
+        {"path": "./calc/ops.py", "old_string": "a"},
+        {"file_path": "calc/./ops.py", "old_string": "b"},
+        {"file": "calc\\ops.py", "old_string": "c"},
+        {"path": "calc/../calc/ops.py", "old_string": "d"},
+    )
+    for args in variants[:2]:
+        tracker.record("replace_in_file", args, failed=True)
+        assert not tracker.triggered
+    tracker.record("replace_in_file", variants[2], failed=True)
+    assert tracker.triggered
+    error = tracker.take_error()
+    assert error is not None and "failed 3 times in a row on 'calc/ops.py'" in error
+    # Re-armed, a parent-relative spelling is still that file.
+    tracker.consume_recovery()
+    for args in variants[1:]:
+        tracker.record("replace_in_file", args, failed=True)
+    assert tracker.triggered
+    assert "calc/ops.py" in (tracker.take_error() or "")
+
+
+def test_absolute_path_does_not_share_a_streak_with_the_relative_spelling() -> None:
+    tracker = _DoomLoopTracker(threshold=2)
+    tracker.record(
+        "replace_in_file",
+        {"path": "/calc/ops.py", "old_string": "a"},
+        failed=True,
+    )
+    tracker.record(
+        "replace_in_file",
+        {"path": "calc/ops.py", "old_string": "b"},
+        failed=True,
+    )
+    assert not tracker.triggered
+
+
+def test_exempt_polling_does_not_hide_or_trip_a_path_streak() -> None:
+    tracker = _DoomLoopTracker(threshold=3, exempt_names=frozenset({"loop_status"}))
+    tracker.record("replace_in_file", _edit_args("a"), failed=True)
+    tracker.record("loop_status", {}, failed=False)
+    tracker.record("replace_in_file", _edit_args("b"), failed=True)
+    tracker.record("loop_status", {"loop_id": "x"}, failed=True)
+    assert not tracker.triggered
+    tracker.record("replace_in_file", _edit_args("c"), failed=True)
+    assert tracker.triggered
+
+
+def _patch(path: str, old: str) -> dict[str, object]:
+    return {
+        "patch_text": (f"*** Begin Patch\n*** Update File: {path}\n@@\n-{old}\n+y\n*** End Patch\n")
+    }
+
+
+def test_apply_patch_retries_on_one_file_trip_the_path_streak() -> None:
+    tracker = _DoomLoopTracker(threshold=3)
+    for spelling, old in (
+        ("./calc/ops.py", "a"),
+        ("calc/./ops.py", "b"),
+        ("calc/../calc/ops.py", "c"),
+    ):
+        tracker.record("apply_patch", _patch(spelling, old), failed=True)
+    assert tracker.triggered
+    assert "calc/ops.py" in (tracker.take_error() or "")
+
+
+def test_multi_file_patch_breaks_a_single_file_streak() -> None:
+    tracker = _DoomLoopTracker(threshold=2)
+    tracker.record("apply_patch", _patch("calc/ops.py", "a"), failed=True)
+    tracker.record(
+        "apply_patch",
+        {
+            "patch_text": (
+                "*** Begin Patch\n"
+                "*** Update File: calc/ops.py\n"
+                "@@\n-a\n+b\n"
+                "*** Update File: calc/other.py\n"
+                "@@\n-c\n+d\n"
+                "*** End Patch\n"
+            )
+        },
+        failed=True,
+    )
+    tracker.record("apply_patch", _patch("calc/ops.py", "e"), failed=True)
+    assert not tracker.triggered

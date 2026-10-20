@@ -6,6 +6,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 from collections.abc import Sequence
 from typing import Any
 
@@ -49,14 +50,80 @@ def _doom_loop_texts(tool_name: str, threshold: int) -> tuple[str, str]:
 
 
 _PATH_ARG_KEYS = ("path", "file_path", "file")
+# One file section inside a Codex-style patch. ``*** Move to:`` is not a second target.
+_PATCH_FILE_HEADER = re.compile(r"(?m)^\*\*\* (?:Add|Delete|Update) File: ([^\r\n]+?)\s*$")
 
 
-def _failing_path_key(name: str, args: dict[str, Any]) -> str | None:
-    """``tool:path`` when ``args`` target one file; the streak key for repeated failed edits."""
+def _canonical_tool_path(value: str) -> str:
+    """Identity of the file a tool call targets.
+
+    Relative spellings the workspace treats as one file (``./a``, ``a/./b``,
+    ``a\\\\b``, ``a/../b``) share a streak. A leading ``/`` or ``~``, or a Windows
+    drive, stays distinct so an absolute path does not collapse into a
+    repo-relative one. ``..`` that would escape a relative path is kept, so
+    repeated escapes still group together.
+    """
+    raw = value.strip()
+    if not raw:
+        return ""
+    s = raw.replace("\\", "/")
+    drive = ""
+    if len(s) >= 2 and s[0].isalpha() and s[1] == ":":
+        drive = s[:2]
+        s = s[2:]
+    absolute = bool(drive) or raw.startswith("/") or raw.startswith("~")
+    leading_slash = s.startswith("/")
+    stack: list[str] = []
+    for part in s.split("/"):
+        if not part or part == ".":
+            continue
+        if part == ".." and stack and stack[-1] not in ("..", "~"):
+            stack.pop()
+            continue
+        stack.append(part)
+    body = "/".join(stack)
+    if drive:
+        return f"{drive}/{body}" if body else drive
+    if raw.startswith("~"):
+        return body or "~"
+    if absolute and leading_slash:
+        return f"/{body}" if body else "/"
+    return body
+
+
+def _single_patch_path(patch_text: str) -> str | None:
+    """The one file a patch edits, or ``None`` when it names zero or several."""
+    found: list[str] = []
+    for match in _PATCH_FILE_HEADER.finditer(patch_text):
+        path = _canonical_tool_path(match.group(1))
+        if path and path not in found:
+            found.append(path)
+        if len(found) > 1:
+            return None
+    return found[0] if found else None
+
+
+def _failing_path_key(name: str, args: dict[str, Any]) -> tuple[str, str] | None:
+    """``(tool, canonical path)`` when ``args`` target one file.
+
+    Direct path arguments win. A patch with exactly one file section counts as
+    that file, so a retry with a different hunk is still the same path.
+    """
+    saw_path_arg = False
     for key in _PATH_ARG_KEYS:
         value = args.get(key)
         if isinstance(value, str) and value.strip():
-            return f"{name}:{value.strip()}"
+            saw_path_arg = True
+            path = _canonical_tool_path(value)
+            if path:
+                return (name, path)
+    if saw_path_arg:
+        return None
+    patch_text = args.get("patch_text")
+    if isinstance(patch_text, str):
+        patch_path = _single_patch_path(patch_text)
+        if patch_path:
+            return (name, patch_path)
     return None
 
 
@@ -84,10 +151,12 @@ class _DoomLoopTracker:
     streak — successful no-progress loops (e.g. repeated screenshots) must trip
     the same guard as repeated failures.
 
-    A second detector catches the near-miss loop: the same tool failing on the same ``path``
+    A second detector catches the near-miss loop: the same tool failing on the same file
     ``threshold`` times in a row even though the other arguments differ (an edit retried with a
-    slightly different ``old_string`` each time). Only failures count there; any other call in
-    between, or a success, restarts the streak.
+    slightly different ``old_string`` or hunk, or the same file spelled ``./a`` and ``a``).
+    Only failures count there. A success, or any other non-exempt call, restarts the streak.
+    Exempt tools are invisible to both detectors, so polling between failures does not
+    hide the loop or trip it.
 
     Tools in ``exempt_names`` (from ``ToolDef.doom_loop_exempt``) are ignored so
     legitimate polling (e.g. ``loop_status``) does not force a recovery turn.
@@ -106,7 +175,7 @@ class _DoomLoopTracker:
     force_no_tools: bool = False
     recovery_note: str | None = None
     triggered_tool: str | None = None
-    path_streak_key: str | None = None
+    path_streak_key: tuple[str, str] | None = None
     path_streak_count: int = 0
     _pending_error: str | None = None
 
@@ -128,8 +197,7 @@ class _DoomLoopTracker:
         if self.streak_count >= self.threshold:
             error, note = _doom_loop_texts(name, self.threshold)
         elif path_key is not None and self.path_streak_count >= self.threshold:
-            path = path_key.split(":", 1)[1]
-            error, note = _path_doom_loop_texts(name, path, self.path_streak_count)
+            error, note = _path_doom_loop_texts(name, path_key[1], self.path_streak_count)
         else:
             return
         self.triggered = True

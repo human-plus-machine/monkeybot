@@ -939,3 +939,86 @@ async def test_pre_final_answer_is_skipped_for_tool_turns_and_empty_text() -> No
     ]
     await _run_collect(CapturingProvider(script), mgr)
     assert candidates == ["final"]  # tool-calling turns never reach the gate
+
+
+@pytest.mark.asyncio
+async def test_rejected_final_answer_is_not_persisted_when_the_next_attempt_aborts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused answer is not history, even if the follow-up dies before streaming.
+
+    Abort persistence used to write whatever ``assistant_text`` still held. The
+    gate drops that text, and the next provider attempt starts blank, so a
+    credential block (which returns before the model speaks) cannot resurrect it.
+    """
+    from monkeybot.core.runtime import loop_hooks
+
+    monkeypatch.setattr(loop_hooks, "get_scanner", lambda: _MarkerScanner())
+    monkeypatch.setenv("MONKEYBOT_RUN_KIND", "routine")
+
+    mgr = HookManager()
+
+    async def before(p: HookPayload) -> None:
+        p.hold_assistant_text = True
+        if p.inner_turn == 2 and p.provider_messages is not None:
+            p.provider_messages = [
+                *p.provider_messages,
+                Message(role="assistant", content=[Text(text=_MarkerScanner.MARKER)]),
+            ]
+
+    async def gate(p: HookPayload) -> None:
+        if p.assistant_text == "leaked answer":
+            p.reject_final_answer = "[Harness] nope"
+
+    mgr.register(HookEvent.BEFORE_PROVIDER_REQUEST, before)
+    mgr.register(HookEvent.PRE_FINAL_ANSWER, gate)
+    hist = FakeHistory()
+    prov = CapturingProvider(_answer_script("leaked answer", "should not run"))
+    events = await _run_collect(prov, mgr, hist=hist)
+
+    assert prov._idx == 1
+    assert _deltas(events) == ""
+    assert any(getattr(e, "kind", None) == "CredentialEgressBlocked" for e in events)
+    texts = [
+        b.text for m in hist.rows if m.role == "assistant" for b in m.content if isinstance(b, Text)
+    ]
+    assert texts == []
+
+
+@pytest.mark.asyncio
+async def test_prior_tool_preamble_is_not_rewritten_when_the_next_attempt_aborts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Abort persistence writes this attempt only, not the previous tool turn's prose."""
+    from monkeybot.core.runtime import loop_hooks
+
+    monkeypatch.setattr(loop_hooks, "get_scanner", lambda: _MarkerScanner())
+    monkeypatch.setenv("MONKEYBOT_RUN_KIND", "routine")
+
+    mgr = HookManager()
+
+    async def before(p: HookPayload) -> None:
+        if p.inner_turn == 2 and p.provider_messages is not None:
+            p.provider_messages = [
+                *p.provider_messages,
+                Message(role="assistant", content=[Text(text=_MarkerScanner.MARKER)]),
+            ]
+
+    mgr.register(HookEvent.BEFORE_PROVIDER_REQUEST, before)
+    hist = FakeHistory()
+    script: list[list[ProviderEvent]] = [
+        [
+            TextDelta(text="preamble"),
+            ToolCall(call_id="c1", name="run_command", args={}),
+            Done(),
+        ],
+        [TextDelta(text="should not run"), Done()],
+    ]
+    prov = CapturingProvider(script)
+    await _run_collect(prov, mgr, hist=hist)
+
+    assert prov._idx == 1
+    texts = [
+        b.text for m in hist.rows if m.role == "assistant" for b in m.content if isinstance(b, Text)
+    ]
+    assert texts.count("preamble") == 1

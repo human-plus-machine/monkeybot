@@ -46,7 +46,9 @@ class HookEvent(StrEnum):
     Read-side events (``USER_MESSAGE``, ``PRE_TURN``, ``PRE_TOOL``,
     ``TOOL_DEFINITION``, ``BEFORE_PROVIDER_REQUEST``, ``PRE_FINAL_ANSWER``) run synchronously with a
     short timeout and may mutate the payload (injection fields, tools, or
-    provider messages). Write-side events (``POST_TOOL``, ``POST_TURN``,
+    provider messages). ``HISTORY_COMPACTED`` is awaited on that same timeout after a
+    summary replaces older history, so a hook can reset state before the next provider
+    call. Write-side events (``POST_TOOL``, ``POST_TURN``,
     ``SESSION_END``, ``AFTER_PROVIDER_RESPONSE``) are fire-and-forget; their
     return values are ignored.
     """
