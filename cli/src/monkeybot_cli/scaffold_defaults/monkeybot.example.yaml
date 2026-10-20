@@ -264,8 +264,9 @@ scheduler:
 #   verification_gate:
 #     enabled: true
 #     max_rejections: 1
-#     # Regexes matched against `run_command` lines that count as "ran the tests/lint":
-#     # verify_commands: ['\bpytest\b', '\bnpm (run )?test\b', '\bmake (test|check)\b']
+#     # verify_commands replaces the built-in list (pytest, npm/pnpm/yarn test,
+#     # cargo test, go test, make test|check, ruff, mypy, tsc). A background
+#     # start and a command that masks the exit (`pytest || true`) do not count.
 #   # First file found under workspace_root is injected into the prompt (12k chars max):
 #   project_instructions_files: [AGENTS.md, CLAUDE.md, .monkeybot/AGENTS.md]
 

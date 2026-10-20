@@ -74,6 +74,14 @@ def test_cli_wheel_includes_scaffold_defaults(tmp_path: Path) -> None:
         assert any(n.endswith("scaffold_defaults/loop/SKILL.md") for n in names)
         assert any(n.endswith("scaffold_defaults/goal/SKILL.md") for n in names)
         assert any(n.endswith("scaffold_defaults/Dockerfile") for n in names)
+        assert any(n.endswith("scaffold_defaults/templates/coding/AGENT.md") for n in names)
+        assert any(
+            n.endswith("scaffold_defaults/templates/coding/command_allowlist.yaml") for n in names
+        )
+        assert any(n.endswith("scaffold_defaults/templates/coding/permissions.yaml") for n in names)
+        assert any(
+            n.endswith("scaffold_defaults/templates/coding/monkeybot.overrides.yaml") for n in names
+        )
         meta = next(n for n in names if n.endswith("METADATA"))
         requires = [
             line

@@ -17,6 +17,7 @@ allowed_commands:
   - node
   - npm
   - pnpm
+  - yarn
   - npx
   - make
   - cargo
@@ -65,6 +66,9 @@ deny_patterns:
   - "^curl\\s+"
   - "^wget\\s+"
   - "^rm\\s+-rf"
+  # Any rm invocation, including inside `bash -c` (the screener checks each
+  # command, so a commit message that mentions rm is not this pattern).
+  - "^rm(\\s|$)"
   - "^sudo\\s+"
   - ".*>\\s*/etc/.*"
   - "(^|\\s)find\\s.*(-delete|-exec|-execdir|-ok)\\b"

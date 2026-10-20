@@ -1,10 +1,10 @@
 # Deep-merged over monkeybot.example.yaml by `monkeybot new --template coding`.
 # Edit the generated monkeybot_config/monkeybot.yaml, not this file.
 #
-# Point the agent at the repository you want it to work on:
-#   paths:
-#     workspace_root: /absolute/path/to/your/repo
-# (or clone the repo into ./workspace).
+# Clone the repository into ./workspace. command_allowlist.yaml prefixes are
+# resolved from paths.workspace_root, so ../memory is this agent's memory only
+# while the workspace stays ./workspace. Pointing workspace_root at another
+# directory requires updating those prefixes.
 
 coding:
   enabled: true

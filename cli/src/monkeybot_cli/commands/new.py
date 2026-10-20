@@ -206,9 +206,10 @@ def run_new_command(args: argparse.Namespace) -> int:
     print("  monkeybot chat")
     if template == "coding":
         print()
-        print("Coding template: point the agent at your repository by setting")
-        print("  paths.workspace_root: /absolute/path/to/your/repo")
-        print("in monkeybot_config/monkeybot.yaml (or clone the repo into ./workspace).")
+        print("Coding template: clone the repository into ./workspace.")
+        print("Path prefixes in command_allowlist.yaml are relative to paths.workspace_root,")
+        print("so ../memory is the agent memory only while that stays ./workspace.")
+        print("If you set paths.workspace_root to another directory, update those prefixes.")
     return 0
 
 

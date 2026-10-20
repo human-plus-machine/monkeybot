@@ -238,6 +238,29 @@ def test_new_scaffold_allows_tests_and_src_prefixes(tmp_path: Path) -> None:
     assert "./" not in prefixes
 
 
+def _permission_effect(path: Path, line: str) -> str:
+    from monkeybot.core.tools.permission import evaluate, load_permissions
+
+    ruleset = load_permissions(path)
+    rule = evaluate("run_command", line, ruleset.rules)
+    return rule.effect if rule is not None else ruleset.default
+
+
+def _command_denied(path: Path, args: dict[str, object]) -> bool:
+    import re
+
+    from monkeybot.core.tools.inspector import (
+        load_command_tier_policy,
+        norm_run_command_line,
+        shell_script_segments,
+    )
+
+    policy = load_command_tier_policy(path)
+    lines = [norm_run_command_line(args) or "", *shell_script_segments(args)]
+    regexes = [re.compile(pattern, re.IGNORECASE) for pattern in policy.deny_patterns]
+    return any(rx.search(line) for rx in regexes for line in lines if line)
+
+
 # --- coding template ---
 
 
@@ -248,6 +271,11 @@ def test_default_template_is_unchanged_by_the_coding_template(tmp_path: Path) ->
     doc = yaml.safe_load((cfg / "monkeybot.yaml").read_text(encoding="utf-8"))
     assert "coding" not in doc
     assert doc["model"]["context_window"] == 1000000
+    allow = yaml.safe_load((cfg / "command_allowlist.yaml").read_text(encoding="utf-8"))
+    assert "pytest" not in allow["allowed_commands"]
+    assert "./" not in allow["allowed_path_prefixes"]
+    perms = yaml.safe_load((cfg / "permissions.yaml").read_text(encoding="utf-8"))
+    assert not perms.get("rules")
 
 
 def test_coding_template_installs_overlay_files(tmp_path: Path) -> None:
@@ -264,6 +292,7 @@ def test_coding_template_installs_overlay_files(tmp_path: Path) -> None:
         "node",
         "npm",
         "pnpm",
+        "yarn",
         "npx",
         "make",
         "cargo",
@@ -283,16 +312,20 @@ def test_coding_template_installs_overlay_files(tmp_path: Path) -> None:
     assert "./" in allow["allowed_path_prefixes"]
     assert any("pip" in p and "install" in p for p in allow["deny_patterns"])  # install deny kept
 
-    perms = yaml.safe_load((cfg / "permissions.yaml").read_text(encoding="utf-8"))
-    rules = {(r["pattern"], r["effect"]) for r in perms["rules"] if r["tool"] == "run_command"}
-    assert {
-        ("rm *", "deny"),
-        ("git push *", "ask"),
-        ("git reset --hard *", "ask"),
-        ("git commit *", "allow"),
-    } <= rules
     # The overrides file itself is a template input, never copied into the agent.
     assert not (cfg / "monkeybot.overrides.yaml").exists()
+    assert _permission_effect(cfg / "permissions.yaml", "git commit -m msg") == "allow"
+    assert _permission_effect(cfg / "permissions.yaml", "git push") == "ask"
+    assert _permission_effect(cfg / "permissions.yaml", "git push origin main") == "ask"
+    assert _permission_effect(cfg / "permissions.yaml", "git commit -m msg && git push") == "ask"
+    assert _permission_effect(cfg / "permissions.yaml", "bash -c 'git push origin'") == "ask"
+    assert _permission_effect(cfg / "permissions.yaml", "git reset --hard") == "ask"
+    assert _permission_effect(cfg / "permissions.yaml", "git reset --hard HEAD") == "ask"
+    assert _permission_effect(cfg / "permissions.yaml", "git clean -fd") == "ask"
+    assert _permission_effect(cfg / "permissions.yaml", "npx eslint") == "ask"
+    assert _permission_effect(cfg / "permissions.yaml", "bash -c 'npx eslint'") == "ask"
+    assert _permission_effect(cfg / "permissions.yaml", "rm -rf dist") == "deny"
+    assert _permission_effect(cfg / "permissions.yaml", "pytest -q") == "allow"
 
 
 def test_coding_template_merges_overrides_into_active_config(tmp_path: Path) -> None:
@@ -327,24 +360,36 @@ def test_coding_template_config_is_accepted_by_the_core_loader(tmp_path: Path) -
 
 
 def test_coding_template_command_allowlist_loads_and_blocks_find_delete(tmp_path: Path) -> None:
-    from monkeybot.core.tools.inspector import load_command_tier_policy
-
     run_new(dest=tmp_path, force=False, template="coding")
-    policy = load_command_tier_policy(tmp_path / "monkeybot_config" / "command_allowlist.yaml")
-    import re
-
-    denied = [re.compile(p, re.IGNORECASE) for p in policy.deny_patterns]
-    assert any(rx.search("find . -name '*.pyc' -delete") for rx in denied)
-    assert not any(rx.search("find src -name '*.py'") for rx in denied)
-    assert any(rx.search("npm install left-pad") for rx in denied)
+    policy_path = tmp_path / "monkeybot_config" / "command_allowlist.yaml"
+    assert _command_denied(policy_path, {"argv": ["find", ".", "-name", "*.pyc", "-delete"]})
+    assert not _command_denied(policy_path, {"argv": ["find", "src", "-name", "*.py"]})
+    assert _command_denied(policy_path, {"argv": ["npm", "install", "left-pad"]})
+    assert _command_denied(policy_path, {"argv": ["bash", "-c", "rm notes.txt"]})
+    assert _command_denied(policy_path, {"argv": ["bash", "-c", "rm -rf dist"]})
+    assert not _command_denied(
+        policy_path, {"argv": ["bash", "-c", "git commit -m 'rm the helper'"]}
+    )
+    assert not _command_denied(policy_path, {"argv": ["yarn", "test"]})
+    assert _command_denied(policy_path, {"argv": ["yarn", "install"]})
 
 
 def test_coding_template_does_not_retemplate_an_existing_config(tmp_path: Path) -> None:
     run_new(dest=tmp_path, force=False)
-    run_new(dest=tmp_path, force=False, template="coding")
+    run_new(
+        dest=tmp_path,
+        force=False,
+        template="coding",
+        provider="anthropic",
+        model="claude-x",
+    )
     cfg = tmp_path / "monkeybot_config"
     doc = yaml.safe_load((cfg / "monkeybot.yaml").read_text(encoding="utf-8"))
-    assert "coding" not in doc  # existing live config is never rewritten without --force
+    # Existing live config is never re-templated without --force, but an explicit
+    # provider/model on a later `new` still updates those fields.
+    assert "coding" not in doc
+    assert doc["model"]["provider"] == "anthropic"
+    assert doc["model"]["name"] == "claude-x"
     run_new(dest=tmp_path, force=True, template="coding")
     doc = yaml.safe_load((cfg / "monkeybot.yaml").read_text(encoding="utf-8"))
     assert doc["coding"]["enabled"] is True
@@ -362,7 +407,14 @@ def test_refresh_keeps_coding_toolchain_entries(tmp_path: Path) -> None:
     allow = yaml.safe_load(
         (tmp_path / "monkeybot_config" / "command_allowlist.yaml").read_text(encoding="utf-8")
     )
-    assert "pytest" in allow["allowed_commands"] and "./" in allow["allowed_path_prefixes"]
+    assert "pytest" in allow["allowed_commands"] and "yarn" in allow["allowed_commands"]
+    assert "./" in allow["allowed_path_prefixes"]
+    policy_path = tmp_path / "monkeybot_config" / "command_allowlist.yaml"
+    assert _command_denied(policy_path, {"argv": ["bash", "-c", "rm notes.txt"]})
+    assert _command_denied(policy_path, {"argv": ["find", ".", "-delete"]})
+    assert (
+        _permission_effect(tmp_path / "monkeybot_config" / "permissions.yaml", "git push") == "ask"
+    )
     doc = yaml.safe_load(
         (tmp_path / "monkeybot_config" / "monkeybot.yaml").read_text(encoding="utf-8")
     )
