@@ -6,6 +6,8 @@ requires-python = ">=3.11"
 dependencies = [
     "monkeybot[ollama,memory,web-search]",
     "monkeybot-cli",
+    # Coding eval scenarios run `python -m pytest` inside the copied fixture repo.
+    "pytest",
 ]
 
 [tool.uv.sources]

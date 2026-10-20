@@ -38,7 +38,12 @@ from persistence import (  # noqa: E402
     utc_now_iso,
 )
 from runner import run_scenario_live  # noqa: E402
-from scenario_loader import EVAL_ROOT, load_scenarios_by_id, load_suite  # noqa: E402
+from scenario_loader import (  # noqa: E402
+    EVAL_ROOT,
+    load_scenarios_by_id,
+    load_suite,
+    materialize_workspace,
+)
 from scorer import (  # noqa: E402
     _read_agent_model_config,
     judge_expected,
@@ -59,6 +64,7 @@ def _model_metadata() -> tuple[str, str, str, str]:
 async def _run_scenario(scenario: Scenario, agent_url: str) -> ScenarioAggregate:
     run_id = str(uuid.uuid4())
     try:
+        scenario, workspace_dir = materialize_workspace(scenario)
         turns = await run_scenario_live(scenario, agent_url)
     except Exception as exc:
         return ScenarioAggregate(
@@ -71,7 +77,13 @@ async def _run_scenario(scenario: Scenario, agent_url: str) -> ScenarioAggregate
 
     scores, details, pass_rate = await asyncio.to_thread(score_scenario, scenario, turns)
     reasons = {d["metric"]: d["reason"] for d in details if d.get("reason")}
-    run = EvalRun(run_id=run_id, scenario_id=scenario.id, turns=turns, scores=scores)
+    run = EvalRun(
+        run_id=run_id,
+        scenario_id=scenario.id,
+        turns=turns,
+        scores=scores,
+        workspace_dir=workspace_dir,
+    )
     requirement_failures = evaluate_assertions(scenario, run)
     if judge_expected(scenario) and not scores:
         requirement_failures.append(

@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from datetime import date
 
 from monkeybot.core.attachments.catalog import AttachmentRecord
-from monkeybot.core.context import TurnContext
+from monkeybot.core.context import SkillRef, TurnContext
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.prompts.harness_prompt import (
     emission_style_terse_from_env,
@@ -25,6 +25,10 @@ from monkeybot.core.types.content_blocks import Text
 
 # Cap injected user text so long pastes do not dominate the context window.
 _MAX_CURRENT_REQUEST_CHARS = 8000
+# One-line skill summaries; the full procedure stays in SKILL.md.
+_MAX_SKILL_DESCRIPTION_CHARS = 200
+# Total budget for skill descriptions; skills past it are listed by name only.
+_MAX_SKILL_DESCRIPTIONS_TOTAL_CHARS = 4000
 
 
 def _user_text_flat(m: Message) -> str:
@@ -109,8 +113,23 @@ def _memory_block(ctx: TurnContext) -> str:
     return mem_block
 
 
+def _skill_line(skill: SkillRef, *, with_description: bool = True) -> str:
+    description = " ".join(skill.description.split()) if with_description else ""
+    if len(description) > _MAX_SKILL_DESCRIPTION_CHARS:
+        description = description[: _MAX_SKILL_DESCRIPTION_CHARS - 1].rstrip() + "…"
+    return f"- {skill.name} — {description}" if description else f"- {skill.name}"
+
+
 def _skills_section(ctx: TurnContext) -> str:
-    skill_lines = [f"- {s.name}" for s in ctx.skills]
+    skill_lines: list[str] = []
+    used = 0
+    for s in ctx.skills:
+        line = _skill_line(s)
+        if used + len(line) > _MAX_SKILL_DESCRIPTIONS_TOTAL_CHARS:
+            line = _skill_line(s, with_description=False)
+        else:
+            used += len(line)
+        skill_lines.append(line)
     skills_block = "\n".join(skill_lines)
     return f"{SKILLS_HEADING}{skills_block}" if skills_block else ""
 

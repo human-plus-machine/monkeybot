@@ -25,7 +25,11 @@ from typing import TYPE_CHECKING, Literal
 
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.tools.text_normalize import normalize_unicode_punctuation
-from monkeybot.core.tools.workspace_service import WorkspaceError
+from monkeybot.core.tools.workspace_service import (
+    WorkspaceError,
+    changed_line_range,
+    snippet_around,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -569,6 +573,16 @@ def _rollback_ops(
     return reverted, dirty
 
 
+def _with_snippet(entry: dict[str, object], op: _PlannedOp) -> dict[str, object]:
+    """Add ``line`` + numbered ``snippet`` of the first changed region to an update/move entry."""
+    if op.content is None or op.old_content is None:
+        return entry
+    first, last = changed_line_range(op.old_content, op.content)
+    entry["line"] = first
+    entry["snippet"] = snippet_around(op.content, first, last)
+    return entry
+
+
 def _apply_ops(
     workspace: WorkspaceFileService, planned: list[_PlannedOp]
 ) -> list[dict[str, object]]:
@@ -585,7 +599,7 @@ def _apply_ops(
                 if op.content is None:
                     raise PatchError("update op missing content", code="internal")
                 workspace.write_file(op.path, op.content)
-                files.append({"path": op.path, "action": "update"})
+                files.append(_with_snippet({"path": op.path, "action": "update"}, op))
             elif op.action == "move":
                 if op.content is None or op.move_path is None:
                     raise PatchError("move op missing content or move_path", code="internal")
@@ -593,7 +607,9 @@ def _apply_ops(
                 workspace.write_file(op.move_path, op.content)
                 done.append(op)
                 workspace.delete_file(op.path)
-                files.append({"path": op.move_path, "action": "move", "from": op.path})
+                files.append(
+                    _with_snippet({"path": op.move_path, "action": "move", "from": op.path}, op)
+                )
                 continue
             elif op.action == "delete":
                 workspace.delete_file(op.path)

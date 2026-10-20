@@ -48,6 +48,7 @@ SANITIZE_SKIP_TOOL_NAMES = frozenset(
         "write_file",
         "replace_in_file",
         "glob",
+        "list_dir",
         "list_skills",
     }
 )

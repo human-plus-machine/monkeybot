@@ -426,13 +426,65 @@ def test_glob_paths_matches_directories(tmp_path: Path) -> None:
     (checkout / "README.md").write_text("hi\n", encoding="utf-8")
     svc = WorkspaceFileService(root)
 
-    exact = svc.glob_paths("EPCAP/agentic-platform-monorepo", root="repos")
+    exact = svc.glob_paths("EPCAP/agentic-platform-monorepo", root="repos", files_only=False)
     assert exact["ok"] is True
     assert "repos/EPCAP/agentic-platform-monorepo" in exact["paths"]
 
-    wildcard = svc.glob_paths("EPCAP/*", root="repos")
+    wildcard = svc.glob_paths("EPCAP/*", root="repos", files_only=False)
     assert wildcard["ok"] is True
     assert "repos/EPCAP/agentic-platform-monorepo" in wildcard["paths"]
+
+    # Default is files only: the directory is not listed.
+    assert svc.glob_paths("EPCAP/*", root="repos")["paths"] == []
+
+
+def _noisy_repo(root: Path) -> None:
+    (root / "src" / "pkg").mkdir(parents=True)
+    (root / "src" / "pkg" / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    (root / "app.py").write_text("y = 2\n", encoding="utf-8")
+    for noise in ("node_modules/left-pad", ".venv/lib", "build", ".git/objects"):
+        (root / noise).mkdir(parents=True)
+        (root / noise / "noise.py").write_text("z = 3\n", encoding="utf-8")
+    (root / "node_modules" / "left-pad" / "package.json").write_text("{}", encoding="utf-8")
+
+
+def test_glob_skips_noise_directories(tmp_path: Path) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService
+
+    _noisy_repo(tmp_path)
+    svc = WorkspaceFileService(tmp_path)
+    assert svc.glob_paths("**/*.py")["paths"] == ["app.py", "src/pkg/mod.py"]
+    assert svc.glob_paths("*/*.py")["paths"] == []
+    assert svc.glob_paths("**/*")["paths"] == ["app.py", "src/pkg/mod.py"]
+
+
+def test_glob_names_noise_directory_explicitly(tmp_path: Path) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService
+
+    _noisy_repo(tmp_path)
+    svc = WorkspaceFileService(tmp_path)
+    assert svc.glob_paths("node_modules/**/package.json")["paths"] == [
+        "node_modules/left-pad/package.json"
+    ]
+    assert svc.glob_paths("**/*.json", root="node_modules")["paths"] == [
+        "node_modules/left-pad/package.json"
+    ]
+
+
+def test_glob_dir_walk_semantics(tmp_path: Path) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService
+
+    _noisy_repo(tmp_path)
+    svc = WorkspaceFileService(tmp_path)
+    assert svc.glob_paths("src/**/mod.py")["paths"] == ["src/pkg/mod.py"]
+    assert svc.glob_paths("src/**", files_only=False)["paths"] == [
+        "src",
+        "src/pkg",
+        "src/pkg/mod.py",
+    ]
+    assert "src/pkg" in svc.glob_paths("src/*", files_only=False)["paths"]
+    assert svc.glob_paths("src/pkg/mod.py")["paths"] == ["src/pkg/mod.py"]
+    assert svc.glob_paths("app.p?")["paths"] == ["app.py"]
 
 
 @pytest.mark.asyncio
@@ -5250,6 +5302,175 @@ async def test_egress_scan_exempts_read_only_browser_tools(
     assert result.error is None or "credential_egress_blocked" not in (result.error or "")
 
 
+# --- Phase 2: edit ergonomics, list_dir, grep modes, read-before-write ledger ---
+
+
+async def _call(ex: CoreToolExecutor, name: str, args: dict, call_id: str = "c") -> tuple:
+    return unwrap_tool_execution_result(
+        await ex.execute(call=ToolCall(call_id=call_id, name=name, args=args), ctx=_ctx())
+    )
+
+
+def _ws(tmp_path: Path) -> Path:
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    return ws
+
+
+@pytest.mark.asyncio
+async def test_replace_in_file_returns_line_and_numbered_snippet(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    (ws / "m.py").write_text("".join(f"line{i}\n" for i in range(1, 21)), encoding="utf-8")
+    ex = _make_executor(ws)
+    out, err = await _call(
+        ex,
+        "replace_in_file",
+        {"path": "m.py", "old_string": "line10\n", "new_string": "ten\nTEN\n"},
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["line"] == 10
+    rows = payload["snippet"].splitlines()
+    assert rows[0] == "     7|line7"  # three lines of leading context
+    assert "    10|ten" in rows and "    11|TEN" in rows
+    assert rows[-1] == "    14|line13"  # three lines after the two replaced ones
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_update_returns_line_and_snippet(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    (ws / "a.txt").write_text("one\ntwo\nthree\nfour\nfive\n", encoding="utf-8")
+    ex = _make_executor(ws)
+    patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-three\n+THREE\n*** End Patch\n"
+    out, err = await _call(ex, "apply_patch", {"patch_text": patch})
+    assert err is None and out is not None
+    entry = json.loads(out)["files"][0]
+    assert entry["action"] == "update" and entry["line"] == 3
+    assert "     3|THREE" in entry["snippet"].splitlines()
+
+
+@pytest.mark.asyncio
+async def test_list_dir_lists_names_and_flags_truncation(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    (ws / "src").mkdir()
+    (ws / "tests").mkdir()
+    (ws / "README.md").write_text("x", encoding="utf-8")
+    mem = tmp_path / "mem"
+    mem.mkdir(exist_ok=True)
+    skills = tmp_path / "skills"
+    skills.mkdir(exist_ok=True)
+    # mem/ and skills/ stay outside the workspace so they do not show up in the listing
+    ex = CoreToolExecutor(workspace_root=ws, memory=_mem_sub(mem), skills_path=skills, mcp=_NoMCP())
+    out, err = await _call(ex, "list_dir", {})
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["dirs"] == ["src", "tests"] and payload["files"] == ["README.md"]
+    assert payload["truncated"] is False
+    out, err = await _call(ex, "list_dir", {"path": "nope"})
+    assert out is None and err is not None and json.loads(err)["error_kind"] == "validation"
+    for i in range(310):
+        (ws / "src" / f"f{i:03d}.py").write_text("", encoding="utf-8")
+    out, _ = await _call(ex, "list_dir", {"path": "src"})
+    big = json.loads(out)
+    assert big["count"] == 310 and big["truncated"] is True and len(big["files"]) == 300
+
+
+def _grep_repo(ws: Path) -> None:
+    (ws / "src").mkdir()
+    (ws / "src" / "a.py").write_text("one\ntwo\nNEEDLE here\nfour\nfive\n", encoding="utf-8")
+    (ws / "src" / "b.py").write_text("NEEDLE first\nsecond\n", encoding="utf-8")
+    (ws / "out").mkdir()
+    (ws / "out" / "gen.py").write_text("NEEDLE generated\n", encoding="utf-8")
+    (ws / "src" / "sub").mkdir()
+    (ws / "src" / "sub" / "keep.py").write_text("NEEDLE nested\n", encoding="utf-8")
+    (ws / "src" / "sub" / "skip.tmp").write_text("NEEDLE temp\n", encoding="utf-8")
+    (ws / ".gitignore").write_text("out/\n*.tmp\n!src/sub/keep.tmp\n", encoding="utf-8")
+
+
+@pytest.fixture(params=["python", "rg"])
+def grep_engine(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    import shutil
+
+    real_which = shutil.which
+    if request.param == "python":
+        monkeypatch.setattr(
+            shutil,
+            "which",
+            lambda name, *a, **k: None if name == "rg" else real_which(name, *a, **k),
+        )
+    elif real_which("rg") is None:
+        pytest.skip("ripgrep not installed")
+    return request.param
+
+
+@pytest.mark.asyncio
+async def test_grep_context_lines(tmp_path: Path, grep_engine: str) -> None:
+    ws = _ws(tmp_path)
+    _grep_repo(ws)
+    ex = _make_executor(ws)
+    out, err = await _call(ex, "grep", {"pattern": "NEEDLE here", "context": 2})
+    assert err is None and out is not None
+    (match,) = json.loads(out)["matches"]
+    assert match["path"] == "src/a.py" and match["line"] == 3
+    assert match["before"] == ["one", "two"] and match["after"] == ["four", "five"]
+
+    out, _ = await _call(ex, "grep", {"pattern": "NEEDLE first", "context": 3})
+    (first,) = json.loads(out)["matches"]
+    assert "before" not in first and first["after"] == ["second"]
+
+    out, err = await _call(ex, "grep", {"pattern": "NEEDLE", "context": 9})
+    assert out is None and "context must be between" in json.loads(err)["message"]
+
+
+@pytest.mark.asyncio
+async def test_grep_files_only(tmp_path: Path, grep_engine: str) -> None:
+    ws = _ws(tmp_path)
+    _grep_repo(ws)
+    (ws / "src" / "a.py").write_text("NEEDLE\nNEEDLE\nNEEDLE\n", encoding="utf-8")
+    ex = _make_executor(ws)
+    out, err = await _call(ex, "grep", {"pattern": "NEEDLE", "files_only": True})
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert sorted(payload["files"]) == ["src/a.py", "src/b.py", "src/sub/keep.py"]
+    assert payload["matches"] == []
+    assert payload["total_match_count"] == 3 and payload["scan_complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_grep_respects_gitignore_by_default(tmp_path: Path, grep_engine: str) -> None:
+    ws = _ws(tmp_path)
+    _grep_repo(ws)
+    ex = _make_executor(ws)
+    out, _ = await _call(ex, "grep", {"pattern": "NEEDLE", "files_only": True})
+    ignored = json.loads(out)["files"]
+    assert "out/gen.py" not in ignored and "src/sub/skip.tmp" not in ignored
+
+    out, _ = await _call(
+        ex, "grep", {"pattern": "NEEDLE", "files_only": True, "respect_gitignore": False}
+    )
+    everything = json.loads(out)["files"]
+    assert "out/gen.py" in everything and "src/sub/skip.tmp" in everything
+
+
+@pytest.mark.asyncio
+async def test_grep_nested_gitignore_scopes_to_its_directory(
+    tmp_path: Path, grep_engine: str
+) -> None:
+    ws = _ws(tmp_path)
+    (ws / "pkg").mkdir()
+    (ws / "pkg" / ".gitignore").write_text("secret.txt\n/local.txt\n", encoding="utf-8")
+    for rel in ("pkg/secret.txt", "pkg/local.txt", "pkg/ok.txt", "secret.txt", "other/secret.txt"):
+        target = ws / rel
+        target.parent.mkdir(exist_ok=True)
+        target.write_text("NEEDLE\n", encoding="utf-8")
+    ex = _make_executor(ws)
+    out, _ = await _call(ex, "grep", {"pattern": "NEEDLE", "files_only": True})
+    assert sorted(json.loads(out)["files"]) == ["other/secret.txt", "pkg/ok.txt", "secret.txt"]
+    # Searching from inside pkg still honours pkg/.gitignore.
+    out, _ = await _call(ex, "grep", {"pattern": "NEEDLE", "files_only": True, "root": "pkg"})
+    assert json.loads(out)["files"] == ["pkg/ok.txt"]
+
+
 # --- Finding 4: configured path prefixes widened to the whole workspace -----------
 
 
@@ -5333,3 +5554,32 @@ async def test_run_command_spill_write_error_keeps_result(
     assert payload["exit_code"] == 0
     assert "output_path" not in payload
     assert "DONE-TAIL" in payload["stdout_tail"]
+
+
+async def test_glob_trailing_slash_returns_dirs_and_reports_skipped_dirs(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    (ws / "src" / "pkg").mkdir(parents=True)
+    (ws / "vendor").mkdir()
+    (ws / "src" / "pkg" / "a.py").write_text("", encoding="utf-8")
+    (ws / "vendor" / "v.py").write_text("", encoding="utf-8")
+    ex = _make_executor(ws)
+    out, _ = await _call(ex, "glob", {"pattern": "src/*/"})
+    assert json.loads(out)["paths"] == ["src/pkg"]
+    out, _ = await _call(ex, "glob", {"pattern": "**/*.py"})
+    payload = json.loads(out)
+    assert payload["paths"] == ["src/pkg/a.py"]
+    assert payload["skipped_dirs"] == ["vendor"]
+    out, _ = await _call(ex, "glob", {"pattern": "**/*.py", "files_only": "true"})
+    assert json.loads(out)["paths"] == ["src/pkg/a.py"]
+
+
+async def test_grep_subdir_ignores_parent_gitignore(tmp_path: Path, grep_engine: str) -> None:
+    ws = _ws(tmp_path)
+    (ws / "src").mkdir()
+    (ws / "src" / "a.log").write_text("NEEDLE\n", encoding="utf-8")
+    (ws / ".gitignore").write_text("*.log\n", encoding="utf-8")
+    ex = _make_executor(ws)
+    out, _ = await _call(ex, "grep", {"pattern": "NEEDLE", "files_only": True, "root": "src"})
+    assert json.loads(out)["files"] == ["src/a.log"]
+    out, _ = await _call(ex, "grep", {"pattern": "NEEDLE", "files_only": True})
+    assert json.loads(out)["files"] == []
