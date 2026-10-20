@@ -139,6 +139,7 @@ async def test_passing_verify_command_clears_failing_one_does_not() -> None:
         {"argv": ["mypy", "src"]},
         {"argv": ["tsc", "--noEmit"]},
         {"argv": ["bash", "-c", "cd sub && pytest -x"]},
+        {"argv": ["bash", "-c", "pytest -q 2>&1"]},
     ],
 )
 async def test_default_verify_commands_are_recognised(args: dict[str, Any]) -> None:
@@ -157,6 +158,21 @@ async def test_default_verify_commands_are_recognised(args: dict[str, Any]) -> N
         ({"argv": ["pytest"]}, "not json"),  # no explicit ok:true -> not evidence
         ({"argv": ["pytest"]}, json.dumps({"ok": "yes"})),
         ({"argv": ["echo", "pytest passed"]}, PYTEST_OK),
+        # Exit 0 does not mean the check passed.
+        ({"argv": ["bash", "-c", "pytest || true"]}, PYTEST_OK),
+        ({"argv": ["bash", "-c", "pytest; echo ok"]}, PYTEST_OK),
+        ({"argv": ["bash", "-c", "echo $(pytest)"]}, PYTEST_OK),
+        ({"argv": ["timeout", "30", "bash", "-c", "pytest || true"]}, PYTEST_OK),
+        ({"argv": ["python", "-c", "print('pytest')"]}, PYTEST_OK),
+        ({"argv": ["cd", "pytest"]}, PYTEST_OK),
+        ({"argv": ["bash", "-c", "pytest &"]}, PYTEST_OK),
+        ({"argv": ["bash", "-c", 'echo "$(pytest)"']}, PYTEST_OK),
+        ({"argv": ["bash", "-c", "echo `pytest`"]}, PYTEST_OK),
+        # Starting a job is not a finished run.
+        (
+            {"argv": ["pytest"], "background": True},
+            json.dumps({"ok": True, "background": True, "job_id": "j1", "status": "running"}),
+        ),
     ],
 )
 async def test_non_verifying_commands_do_not_clear_unverified_edits(
@@ -227,6 +243,29 @@ async def test_new_user_message_resets_everything() -> None:
     assert (await _final(gate)).reject_final_answer is None
     await _tool(gate, "write_file", {"path": "b.py"}, '{"ok": true}')
     assert (await _final(gate)).reject_final_answer is not None  # rejection budget is per message
+
+
+@pytest.mark.asyncio
+async def test_user_messages_cannot_grow_thread_state_without_bound() -> None:
+    from monkeybot.core.coding.verification_gate import _THREAD_STATE_CAP
+
+    gate, _ = _gate()
+    await _tool(gate, "write_file", {"path": "a.py"}, '{"ok": true}')
+    for index in range(_THREAD_STATE_CAP + 10):
+        payload = _payload(HookEvent.USER_MESSAGE, user_message="next")
+        payload.thread_id = f"other-{index}"
+        await gate.on_user_message(payload)
+    assert len(gate._by_thread) <= _THREAD_STATE_CAP
+    # The oldest thread was evicted, so its unverified edit no longer blocks.
+    assert (await _final(gate)).reject_final_answer is None
+    latest = _payload(HookEvent.POST_TOOL, tool_name="write_file", tool_args={"path": "b.py"})
+    latest.thread_id = f"other-{_THREAD_STATE_CAP + 9}"
+    latest.tool_result = '{"ok": true}'
+    await gate.on_post_tool(latest)
+    final = _payload(HookEvent.PRE_FINAL_ANSWER, assistant_text="done")
+    final.thread_id = latest.thread_id
+    await gate.on_pre_final_answer(final)
+    assert final.reject_final_answer is not None
 
 
 @pytest.mark.asyncio

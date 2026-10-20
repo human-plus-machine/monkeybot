@@ -19,6 +19,20 @@ logger = logging.getLogger(__name__)
 # Well under the hook manager's 2s read-hook bound, so a slow repo costs one second, not a stall.
 GIT_STATUS_TIMEOUT_S = 1.0
 _MAX_LISTED_PATHS = 5
+# These override ``git -C <workspace>`` and would report some other repo (pre-commit and
+# direnv export ``GIT_DIR``). Status is always about the workspace we were given.
+_GIT_REPO_ENV = frozenset(
+    {
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+        "GIT_PREFIX",
+    }
+)
 
 
 def _display_path(raw: str) -> str:
@@ -62,11 +76,19 @@ def format_git_status(porcelain: str) -> str | None:
     return "git: " + ", ".join(parts)
 
 
+def git_workspace_env() -> dict[str, str]:
+    """Environment for a git command about a chosen directory, not the ambient repo."""
+    env = {key: value for key, value in os.environ.items() if key not in _GIT_REPO_ENV}
+    env["GIT_OPTIONAL_LOCKS"] = "0"
+    env["LC_ALL"] = "C"
+    return env
+
+
 async def git_status_note(
     workspace_root: Path, *, timeout_s: float = GIT_STATUS_TIMEOUT_S
 ) -> str | None:
     """One-line git state of ``workspace_root``; ``None`` when not a repo, git is missing, or slow."""
-    env = {**os.environ, "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"}
+    env = git_workspace_env()
     try:
         proc = await asyncio.create_subprocess_exec(
             "git",
@@ -84,11 +106,11 @@ async def git_status_note(
         return None
     try:
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
         # A grandchild can keep the pipe open past the kill; never let reaping stall the turn.
-        with contextlib.suppress(asyncio.TimeoutError):
+        with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(proc.wait(), timeout=0.5)
         logger.debug("git status timed out in %s", workspace_root)
         return None

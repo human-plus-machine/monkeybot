@@ -15,6 +15,7 @@ from monkeybot.core.coding.git_context_hook import (
     GitContextHook,
     format_git_status,
     git_status_note,
+    git_workspace_env,
 )
 from monkeybot.core.config import reset_runtime_env_state_for_tests
 from monkeybot.core.config.settings import DEFAULT_VERIFY_COMMANDS
@@ -337,6 +338,16 @@ def test_changed_instructions_open_a_new_epoch_but_volatile_noise_does_not() -> 
     assert admit("Source: AGENTS.md\n\nv2").kind == "new_epoch"
 
 
+def _git(repo: Path, *args: str) -> None:
+    """Run git in ``repo``. Ambient ``GIT_DIR`` (pre-commit) must not retarget ``-C``."""
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+        check=True,
+        capture_output=True,
+        env=git_workspace_env(),
+    )
+
+
 def test_format_git_status_variants() -> None:
     assert format_git_status("## main...origin/main\n") == "git: branch main, clean"
     assert (
@@ -356,22 +367,47 @@ def test_format_git_status_variants() -> None:
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
 @pytest.mark.asyncio
 async def test_git_status_note_on_a_real_repo(tmp_path: Path) -> None:
-    def git(*args: str) -> None:
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "-c", "user.email=t@t", "-c", "user.name=t", *args],
-            check=True,
-            capture_output=True,
-        )
-
     assert await git_status_note(tmp_path) is None  # not a repo yet
-    git("init", "-q", "-b", "main")
+    _git(tmp_path, "init", "-q", "-b", "main")
     (tmp_path / "a.py").write_text("1\n", encoding="utf-8")
-    git("add", "a.py")
-    git("commit", "-q", "-m", "init")
+    _git(tmp_path, "add", "a.py")
+    _git(tmp_path, "commit", "-q", "-m", "init")
     assert await git_status_note(tmp_path) == "git: branch main, clean"
     (tmp_path / "a.py").write_text("2\n", encoding="utf-8")
     (tmp_path / "new.py").write_text("x\n", encoding="utf-8")
     assert await git_status_note(tmp_path) == "git: branch main, 1 modified (a.py), 1 untracked"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+@pytest.mark.asyncio
+async def test_git_status_note_uses_the_workspace_when_git_dir_is_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ambient ``GIT_DIR`` (pre-commit, direnv) must not retarget ``-C workspace``."""
+
+    other = tmp_path / "other"
+    workspace = tmp_path / "workspace"
+    other.mkdir()
+    workspace.mkdir()
+    _git(other, "init", "-q", "-b", "other-branch")
+    (other / "only_other.py").write_text("o\n", encoding="utf-8")
+    _git(other, "add", "only_other.py")
+    _git(other, "commit", "-q", "-m", "other")
+    (other / "only_other.py").write_text("changed\n", encoding="utf-8")
+    _git(workspace, "init", "-q", "-b", "workspace-branch")
+    (workspace / "only_workspace.py").write_text("w\n", encoding="utf-8")
+    _git(workspace, "add", "only_workspace.py")
+    _git(workspace, "commit", "-q", "-m", "workspace")
+    (workspace / "only_workspace.py").write_text("changed\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+
+    note = await git_status_note(workspace)
+    assert note is not None
+    assert "workspace-branch" in note
+    assert "only_workspace.py" in note
+    assert "only_other.py" not in note
+    assert "other-branch" not in note
 
 
 @pytest.mark.asyncio

@@ -14,20 +14,31 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shlex
 from collections import OrderedDict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from monkeybot.core.config.settings import VerificationGateConfig
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
-from monkeybot.core.tools.inspector import norm_run_command_line, shell_script_segments
+from monkeybot.core.tools.inspector import (
+    UnscreenableScript,
+    _split_shell_script,
+    _strip_command_prefixes,
+    parse_run_command,
+    shell_script_arg,
+    shell_script_segments,
+)
+from monkeybot.core.tools.read_ledger import CommandRecord
 from monkeybot.core.verifier.match import WRITE_TOOLS, path_args
 
 logger = logging.getLogger(__name__)
 
 _THREAD_STATE_CAP = 256
 _MAX_LISTED = 5
-# Commands that read, list or move files never run a project's checks, even when a file or
-# string they handle is called "pytest" or "ruff.toml".
+# Commands that read, list, move, or only set up the shell never run a project's checks,
+# even when an argument is called "pytest" or "ruff.toml".
 _NON_EXECUTING = frozenset(
     {
         "cat",
@@ -54,8 +65,20 @@ _NON_EXECUTING = frozenset(
         "mv",
         "rm",
         "git",
+        "cd",
+        "pushd",
+        "popd",
+        "pwd",
+        "true",
+        "false",
+        "export",
+        "unset",
+        "alias",
+        "wait",
+        ":",
     }
 )
+_MAX_SHELL_WALK = 8
 
 
 @dataclass
@@ -101,6 +124,154 @@ def _preview(items: list[str]) -> str:
     return shown
 
 
+def _unquoted_exit_is_masked(script: str) -> bool:
+    """True when a zero exit of ``script`` does not prove each part of it succeeded.
+
+    ``&&`` chains are safe: every part ran and succeeded. ``||``, ``;``, pipes, background
+    ``&``, and command substitutions can exit 0 while the check failed or never ran.
+    """
+    quote = ""
+    i = 0
+    n = len(script)
+    while i < n:
+        ch = script[i]
+        if quote == "'":
+            if ch == "'":
+                quote = ""
+            i += 1
+            continue
+        if quote == '"':
+            # Command substitution still runs inside double quotes.
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if script.startswith("$(", i) or ch == "`":
+                return True
+            if ch == '"':
+                quote = ""
+            i += 1
+            continue
+        if ch in "'\"":
+            quote = ch
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if script.startswith("&&", i):
+            i += 2
+            continue
+        if ch == "&":
+            prev = script[i - 1] if i else ""
+            nxt = script[i + 1] if i + 1 < n else ""
+            # ``2>&1`` and ``&>file`` are redirects. A bare ``&`` backgrounds the command.
+            if prev in {"<", ">"} or nxt in {"<", ">"}:
+                i += 1
+                continue
+            return True
+        if script.startswith("||", i) or script.startswith("$(", i) or ch in ";|\n`":
+            return True
+        i += 1
+    return bool(quote)
+
+
+def _argv_masks_exit(argv: list[str], depth: int = 0) -> bool:
+    """True when ``argv`` (after wrappers) hides a check behind shell control flow."""
+    if depth > _MAX_SHELL_WALK:
+        return True
+    script = shell_script_arg(_strip_command_prefixes(argv))
+    if script is None:
+        return False
+    if _unquoted_exit_is_masked(script):
+        return True
+    try:
+        lines = _split_shell_script(script, depth)
+    except (ValueError, UnscreenableScript):
+        return True
+    for line in lines:
+        try:
+            nested = shlex.split(line)
+        except ValueError:
+            return True
+        if _argv_masks_exit(nested, depth + 1):
+            return True
+    return False
+
+
+def _pattern_matches_argv(patterns: Sequence[re.Pattern[str]], argv: list[str]) -> bool:
+    """True when a pattern covers whole argv tokens, not a substring of one token.
+
+    ``python -m pytest`` matches. ``python -c "print('pytest')"`` does not: ``pytest`` sits
+    inside the code token, so a successful python process is not a test run.
+    """
+    if not argv:
+        return False
+    line = " ".join(argv)
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    for index, token in enumerate(argv):
+        spans.append((pos, pos + len(token)))
+        pos += len(token) + (0 if index == len(argv) - 1 else 1)
+    starts = {start for start, _ in spans}
+    ends = {end for _, end in spans}
+    return any(
+        match.start() in starts and match.end() in ends
+        for pattern in patterns
+        for match in pattern.finditer(line)
+    )
+
+
+def _segment_is_verify(argv: list[str], patterns: Sequence[re.Pattern[str]]) -> bool:
+    if not argv or Path(argv[0]).name in _NON_EXECUTING:
+        return False
+    return _pattern_matches_argv(patterns, argv)
+
+
+def command_args_prove_verification(
+    args: dict[str, object], patterns: Sequence[re.Pattern[str]]
+) -> bool:
+    """True when this ``run_command`` exiting 0 means a verify command exited 0.
+
+    Shared by the gate and the compaction trailer so a masked ``pytest || true`` cannot
+    count as a passing run in one place and a failure in the other.
+    """
+    try:
+        binary, rest = parse_run_command(args)
+    except ValueError:
+        return False
+    if _argv_masks_exit([binary, *rest]):
+        return False
+    try:
+        segments = shell_script_segments(args)
+    except (ValueError, UnscreenableScript):
+        return False
+    for segment in segments:
+        try:
+            argv = shlex.split(segment)
+        except ValueError:
+            return False
+        if _segment_is_verify(argv, patterns):
+            return True
+    return False
+
+
+def last_proven_verification(
+    records: Sequence[CommandRecord], patterns: Sequence[str]
+) -> CommandRecord | None:
+    """Newest recorded command whose exit code is the verify command's own exit code."""
+    if not patterns:
+        return None
+    try:
+        compiled = [re.compile(pattern) for pattern in patterns]
+    except re.error:
+        logger.warning("verification command pattern failed to compile", exc_info=True)
+        return None
+    for record in reversed(records):
+        if command_args_prove_verification({"command": record.command}, compiled):
+            return record
+    return None
+
+
 class VerificationGate:
     """Holds back and, once, refuses a final answer that follows unverified edits."""
 
@@ -115,20 +286,22 @@ class VerificationGate:
         manager.register(HookEvent.BEFORE_PROVIDER_REQUEST, self.on_before_provider)
         manager.register(HookEvent.PRE_FINAL_ANSWER, self.on_pre_final_answer)
 
+    def _put(self, thread_id: str, state: _MessageState) -> _MessageState:
+        self._by_thread[thread_id] = state
+        self._by_thread.move_to_end(thread_id)
+        while len(self._by_thread) > _THREAD_STATE_CAP:
+            self._by_thread.popitem(last=False)
+        return state
+
     def _state(self, thread_id: str) -> _MessageState:
         state = self._by_thread.get(thread_id)
         if state is None:
-            state = _MessageState()
-            self._by_thread[thread_id] = state
-            while len(self._by_thread) > _THREAD_STATE_CAP:
-                self._by_thread.popitem(last=False)
-        else:
-            self._by_thread.move_to_end(thread_id)
+            return self._put(thread_id, _MessageState())
+        self._by_thread.move_to_end(thread_id)
         return state
 
     async def on_user_message(self, payload: HookPayload) -> None:
-        self._by_thread[payload.thread_id] = _MessageState()
-        self._by_thread.move_to_end(payload.thread_id)
+        self._put(payload.thread_id, _MessageState())
 
     async def on_post_tool(self, payload: HookPayload) -> None:
         try:
@@ -149,23 +322,20 @@ class VerificationGate:
                 state.unverified[path] = None
         elif name == "run_command" and self._is_verify_command(payload):
             result = _tool_result_json(payload)
-            # Anything but an explicit ``ok: true`` (non-JSON, failure, timeout) is not evidence.
-            if result is not None and result.get("ok") is True:
+            # Anything but an explicit foreground ``ok: true`` is not evidence. A background
+            # start reports ok because the job was spawned, not because the check passed.
+            if (
+                result is not None
+                and result.get("ok") is True
+                and result.get("background") is not True
+            ):
                 state.unverified.clear()
 
     def _is_verify_command(self, payload: HookPayload) -> bool:
         args = payload.tool_args or {}
-        try:
-            lines = shell_script_segments(args) or [norm_run_command_line(args) or ""]
-        except ValueError:
+        if args.get("background") is True:
             return False
-        for line in lines:
-            first = line.split(" ", 1)[0].rsplit("/", 1)[-1]
-            if first in _NON_EXECUTING:
-                continue
-            if any(rx.search(line) for rx in self._verify):
-                return True
-        return False
+        return command_args_prove_verification(args, self._verify)
 
     @staticmethod
     def _open_todos(payload: HookPayload, state: _MessageState) -> list[str]:

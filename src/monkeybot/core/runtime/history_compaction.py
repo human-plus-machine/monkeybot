@@ -9,10 +9,11 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
 from typing import Any, cast
 
+from monkeybot.core.coding.verification_gate import last_proven_verification
 from monkeybot.core.config.snapshot import current_env, env_value
 from monkeybot.core.context import TurnContext
-from monkeybot.core.hooks import HookEvent, HookManager
 from monkeybot.core.context.epoch import ContextEpochTracker
+from monkeybot.core.hooks import HookEvent, HookManager
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
@@ -82,7 +83,7 @@ def _workspace_trailer_from_ctx(ctx: TurnContext) -> str | None:
         lines.append(f"- Files written this session: {shown}")
     config = ctx.config
     patterns = config.coding.verification_gate.verify_commands if config is not None else ()
-    verify = ledger.last_command_matching(tuple(patterns)) if patterns else None
+    verify = last_proven_verification(ledger.recent_commands, patterns) if patterns else None
     if verify is not None:
         outcome = "passed" if verify.exit_code == 0 else "FAILED"
         lines.append(

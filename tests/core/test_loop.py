@@ -3661,6 +3661,20 @@ async def test_compaction_appends_harness_generated_workspace_trailer(tmp_path: 
     assert text.count("Standing instructions (still in effect") == 1
 
 
+def test_compaction_trailer_ignores_exits_that_do_not_prove_the_check(tmp_path: Path) -> None:
+    from monkeybot.core.runtime.history_compaction import _workspace_trailer_from_ctx
+    from monkeybot.core.tools.read_ledger import FileReadLedger
+
+    ledger = FileReadLedger()
+    ledger.record_write("a.py", (1, 1))
+    ledger.record_command("python -m pytest -q", 1)
+    ledger.record_command("bash -c 'pytest || true'", 0)
+    text = _workspace_trailer_from_ctx(_ledger_ctx(tmp_path, ledger))
+    assert text is not None
+    assert "`python -m pytest -q` → exit 1 (FAILED)" in text
+    assert "pytest || true" not in text
+
+
 @pytest.mark.asyncio
 async def test_compaction_trailer_replaces_an_echoed_older_trailer(tmp_path: Path) -> None:
     from monkeybot.core.tools.read_ledger import FileReadLedger

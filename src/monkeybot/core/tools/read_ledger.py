@@ -78,6 +78,11 @@ class FileReadLedger:
         """Forget every read — called when history compaction drops file contents."""
         self._seen.clear()
 
+    @property
+    def recent_commands(self) -> tuple[CommandRecord, ...]:
+        """Commands recorded this session, oldest first. Survives :meth:`clear`."""
+        return tuple(self._commands)
+
     def record_command(self, command: str, exit_code: int) -> None:
         self._commands.append(CommandRecord(command=command, exit_code=exit_code))
 
