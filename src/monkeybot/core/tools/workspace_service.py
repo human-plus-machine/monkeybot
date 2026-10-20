@@ -95,6 +95,7 @@ class ReplaceResult(TypedDict):
     match_mode: str
     line: NotRequired[int]
     snippet: NotRequired[str]
+    snippet_note: NotRequired[str]
 
 
 class DeleteResult(TypedDict):
@@ -117,6 +118,7 @@ class GlobResult(TypedDict):
     paths: list[str]
     count: int
     duration_ms: int
+    skipped_dirs: NotRequired[list[str]]
 
 
 class GrepResult(TypedDict):
@@ -462,10 +464,14 @@ def changed_line_range(old: str, new: str) -> tuple[int, int]:
     """1-based ``(first, last)`` line range of ``new`` that differs from ``old``.
 
     Common leading and trailing lines are trimmed; a pure deletion yields the line at the
-    deletion point. Returns ``(1, 1)`` for identical text.
+    deletion point. When only line endings / the final newline differ (identical line lists),
+    points at the last line.
     """
     old_lines = old.splitlines()
     new_lines = new.splitlines()
+    if old_lines == new_lines:
+        last_line = max(1, len(new_lines))
+        return last_line, last_line
     prefix = 0
     limit = min(len(old_lines), len(new_lines))
     while prefix < limit and old_lines[prefix] == new_lines[prefix]:
@@ -1255,7 +1261,7 @@ class WorkspaceFileService:
             raise WorkspaceError(f"Write failed: {e}", code="write_failed") from e
         first_line = text.count("\n", 0, spans[0][0]) + 1
         replaced_lines = max(1, len(new_string.splitlines()))
-        return {
+        result: ReplaceResult = {
             "ok": True,
             "path": self._as_repo_rel(fp),
             "replacements": len(spans),
@@ -1264,8 +1270,13 @@ class WorkspaceFileService:
             "line": first_line,
             "snippet": snippet_around(new_text, first_line, first_line + replaced_lines - 1),
         }
+        if len(spans) > 1:
+            result["snippet_note"] = f"snippet shows the first of {len(spans)} replacements"
+        return result
 
-    def _iter_glob(self, base: Path, pattern: str, deadline: float) -> Iterator[Path]:
+    def _iter_glob(
+        self, base: Path, pattern: str, deadline: float, skipped: set[str] | None = None
+    ) -> Iterator[Path]:
         """``Path.glob`` semantics, but never descends noise directories.
 
         ``_GREP_IGNORE_DIRS`` (``node_modules``, ``.git``, ``build``, ...) are
@@ -1284,10 +1295,17 @@ class WorkspaceFileService:
             except OSError:
                 return []
 
+        def note_skipped(name: str) -> None:
+            if skipped is not None:
+                skipped.add(name)
+
         def descendable(entry: os.DirEntry[str]) -> bool:
-            return entry.is_dir(follow_symlinks=False) and (
-                entry.name not in _GREP_IGNORE_DIRS or entry.name in explicit
-            )
+            if not entry.is_dir(follow_symlinks=False):
+                return False
+            if entry.name in _GREP_IGNORE_DIRS and entry.name not in explicit:
+                note_skipped(entry.name)
+                return False
+            return True
 
         def descendants(directory: Path) -> Iterator[Path]:
             for entry in children(directory):
@@ -1323,6 +1341,7 @@ class WorkspaceFileService:
                 if not fnmatch.fnmatchcase(entry.name, seg):
                     continue
                 if entry.name in _GREP_IGNORE_DIRS and entry.name not in explicit:
+                    note_skipped(entry.name)
                     continue
                 if rest:
                     if entry.is_dir():
@@ -1359,13 +1378,16 @@ class WorkspaceFileService:
         max_paths = self._settings.WORKSPACE_GLOB_MAX_PATHS
         paths: list[str] = []
         stop_reason: str | None = None
+        skipped_dirs: set[str] = set()
+        # A trailing ``/`` asks for directories explicitly, whatever ``files_only`` says.
+        include_dirs = not files_only or effective_pattern.endswith("/")
         t0 = time.monotonic()
         try:
-            for p in self._iter_glob(base, effective_pattern, deadline):
+            for p in self._iter_glob(base, effective_pattern, deadline, skipped_dirs):
                 if time.monotonic() > deadline:
                     stop_reason = "timeout"
                     break
-                if not (p.is_file() or (p.is_dir() and not files_only)):
+                if not (p.is_file() or (p.is_dir() and include_dirs)):
                     continue
                 # ``Path.glob`` can yield the search root for patterns like ``.`` / ``*``.
                 if p.resolve() == base.resolve():
@@ -1408,7 +1430,7 @@ class WorkspaceFileService:
                     "duration_ms": duration_ms,
                 },
             )
-        return {
+        result: GlobResult = {
             "ok": True,
             "root": self._as_repo_rel(base) if base != self._root else ".",
             "pattern": pattern,
@@ -1416,6 +1438,9 @@ class WorkspaceFileService:
             "count": len(paths),
             "duration_ms": duration_ms,
         }
+        if skipped_dirs:
+            result["skipped_dirs"] = sorted(skipped_dirs)
+        return result
 
     def grep(
         self,
@@ -1536,29 +1561,6 @@ class WorkspaceFileService:
             payload["next_offset"] = next_offset
         return payload
 
-    def _gitignore_anchor(self, base: Path) -> Path:
-        """Directory ``.gitignore`` paths are scoped against: the workspace root when ``base``
-        lies inside it, else ``base`` itself (skills/artifacts roots, granted folders)."""
-        try:
-            base.resolve().relative_to(self._root)
-        except ValueError:
-            return base if base.is_dir() else base.parent
-        return self._root
-
-    def _initial_gitignore_rules(self, anchor: Path, start_dir: Path) -> GitignoreRules:
-        """Rules from every ``.gitignore`` between ``anchor`` and ``start_dir`` inclusive."""
-        rules = GitignoreRules()
-        directory = anchor
-        rules = rules.with_directory(directory, "")
-        try:
-            parts = start_dir.resolve().relative_to(anchor.resolve()).parts
-        except ValueError:
-            return rules
-        for part in parts:
-            directory = directory / part
-            rules = rules.with_directory(directory, directory.relative_to(anchor).as_posix())
-        return rules
-
     def _iter_grep_candidates(
         self,
         base: Path,
@@ -1572,11 +1574,13 @@ class WorkspaceFileService:
             walk_iter = iter([(str(base.parent), [], [base.name])])
         else:
             walk_iter = os.walk(base)
-        anchor = self._gitignore_anchor(base)
-        start_dir = base if base.is_dir() else base.parent
+        # Mirror rg (--no-ignore-parent): rules come only from .gitignore files at or below the
+        # searched directory, and an explicitly named file is never filtered.
+        respect_gitignore = respect_gitignore and not base.is_file()
+        anchor = base if base.is_dir() else base.parent
         rules_by_dir: dict[str, GitignoreRules] = {}
         if respect_gitignore:
-            rules_by_dir[str(start_dir)] = self._initial_gitignore_rules(anchor, start_dir)
+            rules_by_dir[str(anchor)] = GitignoreRules().with_directory(anchor, "")
         for dirpath, dirnames, filenames in walk_iter:
             rules = rules_by_dir.get(dirpath) if respect_gitignore else None
             if respect_gitignore and rules is None:

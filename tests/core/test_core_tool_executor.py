@@ -5554,3 +5554,32 @@ async def test_run_command_spill_write_error_keeps_result(
     assert payload["exit_code"] == 0
     assert "output_path" not in payload
     assert "DONE-TAIL" in payload["stdout_tail"]
+
+
+async def test_glob_trailing_slash_returns_dirs_and_reports_skipped_dirs(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    (ws / "src" / "pkg").mkdir(parents=True)
+    (ws / "vendor").mkdir()
+    (ws / "src" / "pkg" / "a.py").write_text("", encoding="utf-8")
+    (ws / "vendor" / "v.py").write_text("", encoding="utf-8")
+    ex = _make_executor(ws)
+    out, _ = await _call(ex, "glob", {"pattern": "src/*/"})
+    assert json.loads(out)["paths"] == ["src/pkg"]
+    out, _ = await _call(ex, "glob", {"pattern": "**/*.py"})
+    payload = json.loads(out)
+    assert payload["paths"] == ["src/pkg/a.py"]
+    assert payload["skipped_dirs"] == ["vendor"]
+    out, _ = await _call(ex, "glob", {"pattern": "**/*.py", "files_only": "true"})
+    assert json.loads(out)["paths"] == ["src/pkg/a.py"]
+
+
+async def test_grep_subdir_ignores_parent_gitignore(tmp_path: Path, grep_engine: str) -> None:
+    ws = _ws(tmp_path)
+    (ws / "src").mkdir()
+    (ws / "src" / "a.log").write_text("NEEDLE\n", encoding="utf-8")
+    (ws / ".gitignore").write_text("*.log\n", encoding="utf-8")
+    ex = _make_executor(ws)
+    out, _ = await _call(ex, "grep", {"pattern": "NEEDLE", "files_only": True, "root": "src"})
+    assert json.loads(out)["files"] == ["src/a.log"]
+    out, _ = await _call(ex, "grep", {"pattern": "NEEDLE", "files_only": True})
+    assert json.loads(out)["files"] == []

@@ -1592,7 +1592,7 @@ class CoreToolExecutor(ToolExecutorPort):
         shown = entries[:_LIST_DIR_MAX_ENTRIES]
         payload: dict[str, Any] = {
             "ok": True,
-            "path": path if path != "." else ".",
+            "path": path,
             "dirs": [e["name"] for e in shown if e["kind"] == "dir"],
             "files": [e["name"] for e in shown if e["kind"] == "file"],
             "count": len(entries),
@@ -1613,17 +1613,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 ),
             )
         root = _str_arg(args, "root")
-        files_only = args.get("files_only", True)
-        if not isinstance(files_only, bool):
-            return (
-                None,
-                _built_in_tool_error(
-                    "validation",
-                    "files_only must be a boolean",
-                    "Pass files_only as true or false (a JSON boolean, not a string).",
-                    {"files_only": files_only},
-                ),
-            )
+        files_only = _bool_arg(args.get("files_only"), default=True)
         try:
             payload = self._workspace.glob_paths(pattern, root=root, files_only=files_only)
             return (_j(payload), None)

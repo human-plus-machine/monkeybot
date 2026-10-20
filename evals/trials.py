@@ -72,6 +72,7 @@ async def _run(args: argparse.Namespace) -> dict:
         trials.append(rows)
         done = sum(1 for r in rows if r["status"] == "passed")
         print(f"[{args.label}] trial {n + 1}/{args.trials}: {done}/{len(rows)} passed", flush=True)
+        Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out).write_text(
             json.dumps(_summarize(args.label, suite_id, trials), indent=2), encoding="utf-8"
         )
