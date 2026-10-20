@@ -192,6 +192,7 @@ DEFAULT_VERIFY_COMMANDS: tuple[str, ...] = (
     r"\bpytest\b",
     r"\bnpm (run )?test\b",
     r"\bpnpm (run )?test\b",
+    r"\byarn (run )?test\b",
     r"\bcargo test\b",
     r"\bgo test\b",
     r"\bmake (test|check)\b",

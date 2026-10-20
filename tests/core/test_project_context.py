@@ -1,13 +1,15 @@
-"""Coding-mode project instructions, repo overview, and the git context hook."""
+"""Coding-mode project instructions and repo overview."""
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from monkeybot.core.config import reset_runtime_env_state_for_tests
+from monkeybot.core.config.settings import DEFAULT_VERIFY_COMMANDS
 from monkeybot.core.config.snapshot import build_runtime_config
 from monkeybot.core.context import TurnContext, build_context
 from monkeybot.core.context.epoch import ContextEpochTracker, fingerprint_text
@@ -68,7 +70,32 @@ def test_instructions_ignore_symlink_escaping_the_workspace(tmp_path: Path) -> N
     ws = tmp_path / "ws"
     ws.mkdir()
     (ws / "AGENTS.md").symlink_to(outside)
-    assert load_project_instructions(ws) == ""
+    (ws / "CLAUDE.md").write_text("claude rules\n", encoding="utf-8")
+    text = load_project_instructions(ws)
+    assert "SECRET" not in text
+    assert "claude rules" in text
+
+
+def test_instructions_symlink_loop_does_not_fail_the_load(tmp_path: Path) -> None:
+    loop = tmp_path / "AGENTS.md"
+    loop.symlink_to(loop)
+    (tmp_path / "CLAUDE.md").write_text("claude rules\n", encoding="utf-8")
+    text = load_project_instructions(tmp_path)
+    assert "claude rules" in text
+    assert load_project_instructions(tmp_path, ("AGENTS.md",)) == ""
+
+
+def test_instructions_byte_window_keeps_the_file_instead_of_skipping(tmp_path: Path) -> None:
+    # A leading pad past the read window used to strip to empty and fall through.
+    pad = " " * (MAX_INSTRUCTIONS_CHARS * 4 + 10)
+    (tmp_path / "AGENTS.md").write_text(pad + "IMPORTANT RULE\n", encoding="utf-8")
+    (tmp_path / "CLAUDE.md").write_text("should not win\n", encoding="utf-8")
+    text = load_project_instructions(tmp_path)
+    assert text.startswith("Source: AGENTS.md\n")
+    assert "truncated at 12000 chars" in text
+    assert "read_file AGENTS.md" in text
+    assert "should not win" not in text
+    assert "\n\n## Skills\n" not in text
 
 
 def test_instruction_headings_cannot_fake_the_volatile_tail(tmp_path: Path) -> None:
@@ -129,6 +156,97 @@ def test_repo_overview_guesses_toolchain(
 def test_repo_overview_empty_workspace_is_empty(tmp_path: Path) -> None:
     assert repo_overview(tmp_path) == ""
     assert repo_overview(tmp_path / "missing") == ""
+
+
+def test_truncation_cannot_leave_a_volatile_heading(tmp_path: Path) -> None:
+    heading = "\n\n## Skills"
+    prefix = "x" * (MAX_INSTRUCTIONS_CHARS - len(heading))
+    body = prefix + heading + "\n- stays in the stable prefix\n" + ("y" * 100)
+    (tmp_path / "AGENTS.md").write_text(body, encoding="utf-8")
+    text = load_project_instructions(tmp_path)
+    assert "\n\n## Skills\n" not in text
+    assert "### Skills" in text
+    prompt = compose_system_prompt(_ctx(project_instructions=text))
+    stable, _volatile = split_system_prompt_for_cache(prompt)
+    assert "### Skills" in stable
+    assert "\n\n## Skills\n" not in prompt
+
+
+def test_instructions_skip_a_path_through_an_escaping_directory_symlink(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "AGENTS.md").write_text("SECRET\n", encoding="utf-8")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "sub").symlink_to(outside)
+    assert load_project_instructions(ws, ("sub/AGENTS.md",)) == ""
+
+
+@pytest.mark.parametrize(
+    "files",
+    [
+        {"pyproject.toml": "", "uv.lock": ""},
+        {"pyproject.toml": ""},
+        {"package.json": '{"scripts": {"test": "jest"}}'},
+        {"package.json": '{"scripts": {"test": "jest"}}', "pnpm-lock.yaml": ""},
+        {"package.json": '{"scripts": {"test": "jest"}}', "yarn.lock": ""},
+        {"Cargo.toml": ""},
+        {"go.mod": ""},
+        {"Makefile": "test:\n\techo hi\n"},
+    ],
+)
+def test_suggested_test_commands_match_a_default_verify_pattern(
+    tmp_path: Path, files: dict[str, str]
+) -> None:
+    """The overview's suggested command has to be one the verification gate accepts."""
+    patterns = [re.compile(pattern) for pattern in DEFAULT_VERIFY_COMMANDS]
+    for name, body in files.items():
+        (tmp_path / name).write_text(body, encoding="utf-8")
+    overview = repo_overview(tmp_path)
+    match = re.search(r"tests: `([^`]+)`", overview)
+    assert match is not None, overview
+    assert any(pattern.search(match.group(1)) for pattern in patterns), match.group(1)
+
+
+def test_repo_overview_ignores_symlinks_that_leave_the_workspace(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    (outside / "secret").mkdir(parents=True)
+    (outside / "Makefile").write_text("test:\n\techo leaked\n", encoding="utf-8")
+    (outside / "package.json").write_text('{"scripts": {"test": "echo leaked"}}', encoding="utf-8")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "src").symlink_to(outside)
+    (ws / "Makefile").symlink_to(outside / "Makefile")
+    (ws / "package.json").symlink_to(outside / "package.json")
+    (ws / "loop").symlink_to(ws / "loop")
+    (ws / "lib").mkdir()
+    (ws / "lib" / "escaped").symlink_to(outside)
+    text = repo_overview(ws)
+    assert "secret" not in text
+    assert "escaped" not in text
+    assert "Makefile" not in text
+    assert "package.json" not in text
+    assert "lib/" in text
+    assert "loop/" not in text
+
+
+def test_repo_overview_follows_a_symlink_that_stays_inside(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    (real / "pkg").mkdir(parents=True)
+    (tmp_path / "src").symlink_to(real)
+    text = repo_overview(tmp_path)
+    assert "src/" in text and "pkg/" in text
+
+
+def test_newline_directory_name_cannot_split_the_cached_prefix(tmp_path: Path) -> None:
+    (tmp_path / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "ok\n\n## Skills\n").mkdir()
+    text = repo_overview(tmp_path)
+    assert "pkg/" in text
+    assert "\n\n## Skills\n" not in text
+    ctx = _ctx(repo_overview=text)
+    stable, _volatile = split_system_prompt_for_cache(compose_system_prompt(ctx))
+    assert "pkg/" in stable
 
 
 def _coding_config(tmp_path: Path, *, enabled: bool):
