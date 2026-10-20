@@ -5311,6 +5311,24 @@ async def _call(ex: CoreToolExecutor, name: str, args: dict, call_id: str = "c")
     )
 
 
+def _ledger_executor(tmp_path: Path):
+    from monkeybot.core.tools.read_ledger import FileReadLedger
+
+    mem = tmp_path / "mem"
+    mem.mkdir(exist_ok=True)
+    skills = tmp_path / "skills"
+    skills.mkdir(exist_ok=True)
+    ledger = FileReadLedger()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path / "ws",
+        memory=_mem_sub(mem),
+        skills_path=skills,
+        mcp=_NoMCP(),
+        read_ledger=ledger,
+    )
+    return ex, ledger
+
+
 def _ws(tmp_path: Path) -> Path:
     ws = tmp_path / "ws"
     ws.mkdir(exist_ok=True)
@@ -5373,6 +5391,127 @@ async def test_list_dir_lists_names_and_flags_truncation(tmp_path: Path) -> None
     out, _ = await _call(ex, "list_dir", {"path": "src"})
     big = json.loads(out)
     assert big["count"] == 310 and big["truncated"] is True and len(big["files"]) == 300
+
+
+@pytest.mark.asyncio
+async def test_read_before_write_blocks_blind_edits_then_allows_after_read(tmp_path: Path) -> None:
+    ex, _ledger = _ledger_executor(tmp_path)
+    ws = _ws(tmp_path)
+    (ws / "f.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+    edit = {"path": "f.txt", "old_string": "alpha", "new_string": "ALPHA"}
+    out, err = await _call(ex, "replace_in_file", edit)
+    assert out is None and err is not None
+    envelope = json.loads(err)
+    assert envelope["error_kind"] == "policy"
+    assert envelope["details"] == {"code": "read_before_write", "path": "f.txt"}
+    assert "read_file" in envelope["hint"]
+    assert (ws / "f.txt").read_text(encoding="utf-8") == "alpha\nbeta\n"
+
+    await _call(ex, "read_file", {"path": "f.txt"})
+    out, err = await _call(ex, "replace_in_file", edit)
+    assert err is None and out is not None
+    # The agent's own edit keeps the file "seen": a second edit needs no re-read.
+    out, err = await _call(
+        ex, "replace_in_file", {"path": "f.txt", "old_string": "beta", "new_string": "BETA"}
+    )
+    assert err is None, err
+    assert (ws / "f.txt").read_text(encoding="utf-8") == "ALPHA\nBETA\n"
+
+
+@pytest.mark.asyncio
+async def test_stale_read_detected_when_file_changes_underneath(tmp_path: Path) -> None:
+    ex, _ledger = _ledger_executor(tmp_path)
+    ws = _ws(tmp_path)
+    (ws / "f.txt").write_text("alpha\n", encoding="utf-8")
+    await _call(ex, "read_file", {"path": "f.txt"})
+    (ws / "f.txt").write_text("alpha plus an outside change\n", encoding="utf-8")
+    out, err = await _call(
+        ex, "replace_in_file", {"path": "f.txt", "old_string": "alpha", "new_string": "A"}
+    )
+    assert out is None and err is not None
+    assert json.loads(err)["details"]["code"] == "stale_read"
+    await _call(ex, "read_file", {"path": "f.txt"})
+    out, err = await _call(
+        ex, "replace_in_file", {"path": "f.txt", "old_string": "alpha", "new_string": "A"}
+    )
+    assert err is None, err
+
+
+@pytest.mark.asyncio
+async def test_new_files_are_free_but_overwriting_unread_files_is_not(tmp_path: Path) -> None:
+    ex, _ledger = _ledger_executor(tmp_path)
+    ws = _ws(tmp_path)
+    out, err = await _call(ex, "write_file", {"path": "new.txt", "content": "v1\n"})
+    assert err is None, err
+    out, err = await _call(ex, "write_file", {"path": "new.txt", "content": "v2\n"})
+    assert err is None, err  # the agent authored v1, so it may overwrite it
+    (ws / "old.txt").write_text("pre-existing\n", encoding="utf-8")
+    out, err = await _call(ex, "write_file", {"path": "old.txt", "content": "clobbered\n"})
+    assert out is None and json.loads(err)["details"]["code"] == "read_before_write"
+    assert (ws / "old.txt").read_text(encoding="utf-8") == "pre-existing\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_update_and_delete_require_prior_read(tmp_path: Path) -> None:
+    ex, _ledger = _ledger_executor(tmp_path)
+    ws = _ws(tmp_path)
+    (ws / "a.txt").write_text("one\ntwo\n", encoding="utf-8")
+    (ws / "b.txt").write_text("bye\n", encoding="utf-8")
+    update = "*** Begin Patch\n*** Update File: a.txt\n@@\n-two\n+TWO\n*** End Patch\n"
+    delete = "*** Begin Patch\n*** Delete File: b.txt\n*** End Patch\n"
+    add = "*** Begin Patch\n*** Add File: c.txt\n+fresh\n*** End Patch\n"
+
+    for patch in (update, delete):
+        out, err = await _call(ex, "apply_patch", {"patch_text": patch})
+        assert out is None and json.loads(err)["details"]["code"] == "read_before_write"
+    assert (ws / "a.txt").read_text(encoding="utf-8") == "one\ntwo\n"
+    assert (ws / "b.txt").exists()
+
+    out, err = await _call(ex, "apply_patch", {"patch_text": add})
+    assert err is None, err  # adding a file needs nothing read
+
+    await _call(ex, "read_file", {"path": "a.txt"})
+    await _call(ex, "read_file", {"path": "b.txt"})
+    for patch in (update, delete):
+        out, err = await _call(ex, "apply_patch", {"patch_text": patch})
+        assert err is None, err
+    assert not (ws / "b.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_ledger_clear_forces_re_read_but_remembers_writes(tmp_path: Path) -> None:
+    ex, ledger = _ledger_executor(tmp_path)
+    ws = _ws(tmp_path)
+    (ws / "f.txt").write_text("alpha\n", encoding="utf-8")
+    await _call(ex, "read_file", {"path": "f.txt"})
+    await _call(ex, "replace_in_file", {"path": "f.txt", "old_string": "alpha", "new_string": "A"})
+    ledger.clear()
+    out, err = await _call(
+        ex, "replace_in_file", {"path": "f.txt", "old_string": "A", "new_string": "B"}
+    )
+    assert out is None and json.loads(err)["details"]["code"] == "read_before_write"
+    assert ledger.written == {"f.txt"}
+
+
+@pytest.mark.asyncio
+async def test_without_a_ledger_edits_are_not_gated(tmp_path: Path) -> None:
+    ws = _ws(tmp_path)
+    (ws / "f.txt").write_text("alpha\n", encoding="utf-8")
+    ex = _make_executor(ws)
+    out, err = await _call(
+        ex, "replace_in_file", {"path": "f.txt", "old_string": "alpha", "new_string": "A"}
+    )
+    assert err is None, err
+
+
+@pytest.mark.asyncio
+async def test_ledger_records_run_command_lines_for_the_verify_trailer(tmp_path: Path) -> None:
+    ex, ledger = _ledger_executor(tmp_path)
+    _ws(tmp_path)
+    await _call(ex, "run_command", {"argv": ["python3", "-c", "import sys; sys.exit(2)"]})
+    record = ledger.last_command_matching((r"\bpython3\b",))
+    assert record is not None and record.exit_code == 2 and record.command.startswith("python3")
+    assert ledger.last_command_matching((r"\bpytest\b",)) is None
 
 
 def _grep_repo(ws: Path) -> None:

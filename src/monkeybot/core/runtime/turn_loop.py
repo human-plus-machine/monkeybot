@@ -93,6 +93,7 @@ from .history_compaction import (
     _compact_history_if_needed,
     _fire_history_compacted,
     _intent_facts_from_ctx,
+    _workspace_trailer_from_ctx,
     _summarization_model_id,
     _summarization_viable,
     protect_recent_count,
@@ -748,6 +749,7 @@ async def _run_history_summarization(
                 model=_summarization_model_id(state.ctx),
                 window_tokens=state.ctx.context_window_tokens,
                 intent_facts=_intent_facts_from_ctx(state.ctx),
+                workspace_trailer=_workspace_trailer_from_ctx(state.ctx),
             )
         except Exception:
             logger.warning(

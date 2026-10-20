@@ -2,12 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
+import shutil
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from monkeybot.core.coding.git_context_hook import (
+    GitContextHook,
+    format_git_status,
+    git_status_note,
+    git_workspace_env,
+)
 from monkeybot.core.config import reset_runtime_env_state_for_tests
 from monkeybot.core.config.settings import DEFAULT_VERIFY_COMMANDS
 from monkeybot.core.config.snapshot import build_runtime_config
@@ -18,6 +27,7 @@ from monkeybot.core.context.project_context import (
     load_project_instructions,
     repo_overview,
 )
+from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.prompts.prompt import compose_stable_baseline, compose_system_prompt
 from monkeybot.providers._utils import split_system_prompt_for_cache
 from tests.core.test_context import FakeMCPClient
@@ -326,3 +336,119 @@ def test_changed_instructions_open_a_new_epoch_but_volatile_noise_does_not() -> 
     assert admit("Source: AGENTS.md\n\nv1").kind == "unchanged"
     assert admit("Source: AGENTS.md\n\nv1", skills="s2").kind == "volatile_updated"
     assert admit("Source: AGENTS.md\n\nv2").kind == "new_epoch"
+
+
+def _git(repo: Path, *args: str) -> None:
+    """Run git in ``repo``. Ambient ``GIT_DIR`` (pre-commit) must not retarget ``-C``."""
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+        check=True,
+        capture_output=True,
+        env=git_workspace_env(),
+    )
+
+
+def test_format_git_status_variants() -> None:
+    assert format_git_status("## main...origin/main\n") == "git: branch main, clean"
+    assert (
+        format_git_status(
+            "## feat/x...origin/feat/x [ahead 2]\n M a.py\nA  b.py\n?? c.py\n?? d.py\n"
+        )
+        == "git: branch feat/x [ahead 2], 2 modified (a.py, b.py), 2 untracked"
+    )
+    many = "## main\n" + "".join(f" M f{i}.py\n" for i in range(8))
+    assert "8 modified (f0.py, f1.py, f2.py, f3.py, f4.py, +3 more)" in format_git_status(many)
+    assert "new.py" in format_git_status("## main\nR  old.py -> new.py\n")
+    assert "branch (detached HEAD)" in format_git_status("## HEAD (no branch)\n")
+    assert "main (no commits yet)" in format_git_status("## No commits yet on main\n")
+    assert format_git_status("") is None and format_git_status("garbage") is None
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+@pytest.mark.asyncio
+async def test_git_status_note_on_a_real_repo(tmp_path: Path) -> None:
+    assert await git_status_note(tmp_path) is None  # not a repo yet
+    _git(tmp_path, "init", "-q", "-b", "main")
+    (tmp_path / "a.py").write_text("1\n", encoding="utf-8")
+    _git(tmp_path, "add", "a.py")
+    _git(tmp_path, "commit", "-q", "-m", "init")
+    assert await git_status_note(tmp_path) == "git: branch main, clean"
+    (tmp_path / "a.py").write_text("2\n", encoding="utf-8")
+    (tmp_path / "new.py").write_text("x\n", encoding="utf-8")
+    assert await git_status_note(tmp_path) == "git: branch main, 1 modified (a.py), 1 untracked"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+@pytest.mark.asyncio
+async def test_git_status_note_uses_the_workspace_when_git_dir_is_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ambient ``GIT_DIR`` (pre-commit, direnv) must not retarget ``-C workspace``."""
+
+    other = tmp_path / "other"
+    workspace = tmp_path / "workspace"
+    other.mkdir()
+    workspace.mkdir()
+    _git(other, "init", "-q", "-b", "other-branch")
+    (other / "only_other.py").write_text("o\n", encoding="utf-8")
+    _git(other, "add", "only_other.py")
+    _git(other, "commit", "-q", "-m", "other")
+    (other / "only_other.py").write_text("changed\n", encoding="utf-8")
+    _git(workspace, "init", "-q", "-b", "workspace-branch")
+    (workspace / "only_workspace.py").write_text("w\n", encoding="utf-8")
+    _git(workspace, "add", "only_workspace.py")
+    _git(workspace, "commit", "-q", "-m", "workspace")
+    (workspace / "only_workspace.py").write_text("changed\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+
+    note = await git_status_note(workspace)
+    assert note is not None
+    assert "workspace-branch" in note
+    assert "only_workspace.py" in note
+    assert "only_other.py" not in note
+    assert "other-branch" not in note
+
+
+@pytest.mark.asyncio
+async def test_git_status_note_gives_up_when_git_is_slow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    script = fake / "git"
+    script.write_text("#!/bin/sh\nsleep 5\n", encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}:{__import__('os').environ['PATH']}")
+    started = asyncio.get_running_loop().time()
+    assert await git_status_note(tmp_path, timeout_s=0.2) is None
+    assert asyncio.get_running_loop().time() - started < 2
+
+
+@pytest.mark.asyncio
+async def test_git_hook_appends_to_existing_inject_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_note(root: Path, **_: object) -> str:
+        return f"git: branch main, clean ({root.name})"
+
+    monkeypatch.setattr("monkeybot.core.coding.git_context_hook.git_status_note", fake_note)
+    mgr = HookManager()
+
+    async def earlier(p: HookPayload) -> None:
+        p.inject_text = "earlier note"
+
+    mgr.register(HookEvent.PRE_TURN, earlier)
+    GitContextHook().register(mgr)
+    payload = HookPayload(
+        event=HookEvent.PRE_TURN,
+        thread_id="t",
+        request_id="r",
+        ctx=_ctx(workspace_root=tmp_path),
+    )
+    await mgr.fire(payload)
+    assert payload.inject_text == f"earlier note\ngit: branch main, clean ({tmp_path.name})"
+
+    no_root = HookPayload(event=HookEvent.PRE_TURN, thread_id="t", request_id="r", ctx=_ctx())
+    await mgr.fire(no_root)
+    assert no_root.inject_text == "earlier note"

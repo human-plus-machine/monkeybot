@@ -112,7 +112,8 @@ from monkeybot.core.tools.fs_isolation import (
     toolchain_cache_env,
 )
 from monkeybot.core.tools.grant_store import PATH_GRANT_TOOLS, GrantStoreCache
-from monkeybot.core.tools.inspector import parse_run_command
+from monkeybot.core.tools.inspector import norm_run_command_line, parse_run_command
+from monkeybot.core.tools.read_ledger import FileReadLedger, WriteProblem, stamp_of
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.spill_inventory import (
     partial_output_tail,
@@ -725,6 +726,17 @@ def _bool_arg(raw: object, *, default: bool) -> bool:
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _read_ledger_error(problem: WriteProblem, key: str) -> str:
+    """Policy envelope for an edit refused by the read-before-write ledger."""
+    if problem == "read_before_write":
+        message = f"{key} has not been read in this context; refusing to edit it blind."
+        hint = f"Call read_file on {key}, then repeat the edit against what you read."
+    else:
+        message = f"{key} changed on disk since you last read it (a command, another process, or a compaction)."
+        hint = f"Call read_file on {key} again, then redo the edit against its current content."
+    return _built_in_tool_error("policy", message, hint, {"code": problem, "path": key})
+
+
 # Credential broker phase 5.3: tool calls that can route a secret out of the
 # process without ever touching the LLM provider (a shell command, a file
 # write, a browser navigation/input, or an outbound web request) get their
@@ -971,6 +983,7 @@ class CoreToolExecutor(ToolExecutorPort):
         loops_registry: LoopsToolRegistry | None = None,
         config: RuntimeConfig | None = None,
         grants_path: Path | None = None,
+        read_ledger: FileReadLedger | None = None,
     ) -> None:
         ws_settings = workspace_settings_from_config()
         self._skills_path = Path(skills_path).resolve()
@@ -985,6 +998,8 @@ class CoreToolExecutor(ToolExecutorPort):
         )
         self._memory = memory
         self._mcp = mcp
+        # Coding mode only: with a ledger, edits require a prior read of the same bytes.
+        self._read_ledger = read_ledger
         self._attachment_store = attachment_store
         self._run_store = run_store
         self._scheduled_loop_store = scheduled_loop_store
@@ -1516,6 +1531,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 max_chars=max_chars,
                 apply_default_limit=not spill_path,
             )
+            self._note_read(path)
             return (_j(payload), None)
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
@@ -1537,8 +1553,12 @@ class CoreToolExecutor(ToolExecutorPort):
             content = args.get("body", "")
         if not isinstance(content, str):
             content = str(content)
+        guard = self._edit_guard(path)
+        if guard is not None:
+            return (None, guard)
         try:
             payload = self._workspace.write_file(path, content)
+            self._note_write(path)
             return (_j(payload), None)
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
@@ -1575,13 +1595,59 @@ class CoreToolExecutor(ToolExecutorPort):
         replace_all = args.get("replace_all", False)
         if not isinstance(replace_all, bool):
             replace_all = str(replace_all).strip().lower() in ("1", "true", "yes", "on")
+        guard = self._edit_guard(path)
+        if guard is not None:
+            return (None, guard)
         try:
             payload = self._workspace.replace_in_file(
                 path, old_string, new_string, replace_all=replace_all
             )
+            self._note_write(path)
             return (_j(payload), None)
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
+
+    def _ledger_key(self, path: str) -> tuple[str, Path] | None:
+        """Ledger key and physical path for a writable workspace path, or ``None`` if invalid."""
+        try:
+            fp = self._workspace.require_writable_path(path)
+            return self._workspace.repo_rel(fp), fp
+        except WorkspaceError:
+            return None
+
+    def _note_read(self, path: str) -> None:
+        ledger = self._read_ledger
+        if ledger is None:
+            return
+        try:
+            fp = self._workspace.resolve_read_path(path)
+            key = self._workspace.repo_rel(fp)
+        except WorkspaceError:
+            return
+        ledger.record_read(key, stamp_of(fp))
+
+    def _note_write(self, path: str) -> None:
+        ledger = self._read_ledger
+        keyed = self._ledger_key(path) if ledger is not None else None
+        if ledger is not None and keyed is not None:
+            ledger.record_write(keyed[0], stamp_of(keyed[1]))
+
+    def _note_forgotten(self, path: str) -> None:
+        keyed = self._ledger_key(path) if self._read_ledger is not None else None
+        if self._read_ledger is not None and keyed is not None:
+            self._read_ledger.forget(keyed[0])
+
+    def _edit_guard(self, path: str) -> str | None:
+        """Error envelope when an edit to existing ``path`` breaks the read-before-write rule."""
+        ledger = self._read_ledger
+        if ledger is None:
+            return None
+        keyed = self._ledger_key(path)
+        if keyed is None or not keyed[1].is_file():
+            return None  # invalid path or a new file: the tool reports / allows it itself
+        key, fp = keyed
+        problem = ledger.check_write(key, stamp_of(fp))
+        return None if problem is None else _read_ledger_error(problem, key)
 
     def _tool_list_dir(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         path = _str_arg(args, "path", "root", "dir") or "."
@@ -1700,7 +1766,13 @@ class CoreToolExecutor(ToolExecutorPort):
             return (None, _workspace_error_envelope(exc))
 
     def _tool_apply_patch(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        from monkeybot.core.tools.patch import PatchError, parse_patch, plan_and_apply_patch
+        from monkeybot.core.tools.patch import (
+            DeleteHunk,
+            PatchError,
+            UpdateHunk,
+            parse_patch,
+            plan_and_apply_patch,
+        )
 
         patch_text = args.get("patch_text")
         if patch_text is None:
@@ -1719,7 +1791,13 @@ class CoreToolExecutor(ToolExecutorPort):
             )
         try:
             hunks = parse_patch(patch_text)
+            for hunk in hunks:
+                if isinstance(hunk, (UpdateHunk, DeleteHunk)):
+                    guard = self._edit_guard(hunk.path)
+                    if guard is not None:
+                        return (None, guard)
             payload = plan_and_apply_patch(self._workspace, hunks)
+            self._note_patch_applied(payload)
             return (_j(payload), None)
         except PatchError as exc:
             code = getattr(exc, "code", "patch_error")
@@ -1750,6 +1828,21 @@ class CoreToolExecutor(ToolExecutorPort):
             )
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
+
+    def _note_patch_applied(self, payload: dict[str, object]) -> None:
+        if self._read_ledger is None:
+            return
+        files = payload.get("files")
+        for entry in files if isinstance(files, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            action, path = entry.get("action"), str(entry.get("path", ""))
+            if action in ("add", "update", "move"):
+                self._note_write(path)
+            if action == "delete":
+                self._note_forgotten(path)
+            if action == "move" and entry.get("from"):
+                self._note_forgotten(str(entry["from"]))
 
     def _tool_list_skills(self, ctx: TurnContext) -> tuple[str | None, str | None]:
         rows = [{"name": s.name, "description": s.description} for s in ctx.skills]
@@ -2164,6 +2257,8 @@ class CoreToolExecutor(ToolExecutorPort):
                     {"tool": "run_command", "command": cmd, "argv": list(argv)},
                 ),
             )
+        if self._read_ledger is not None:
+            self._read_ledger.record_command(norm_run_command_line(args) or cmd, result.exit_code)
         ok = result.exit_code == 0
         payload = _j(
             {
