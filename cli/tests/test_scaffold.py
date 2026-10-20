@@ -162,6 +162,8 @@ def test_run_refresh_adds_template_commands_and_keeps_extras(tmp_path: Path) -> 
     assert "- mempalace\n" in text
     assert "officecli" in text
     assert "./custom-data/" in text
+    assert "- ./tests/\n" not in text  # create-only prefixes are not re-added by refresh
+    assert "- ./\n" not in text  # the whole workspace is never allowed by default
     assert "../memory/mempalace/" in text
     assert "my-custom-deny" in text
     assert agent_md.read_text(encoding="utf-8") == "custom persona\n"
@@ -226,3 +228,11 @@ def test_refresh_allowlist_does_not_emit_yaml_document_end(tmp_path: Path) -> No
     text = (cfg / "command_allowlist.yaml").read_text(encoding="utf-8")
     assert "..." not in text
     assert "officecli" in text
+
+
+def test_new_scaffold_allows_tests_and_src_prefixes(tmp_path: Path) -> None:
+    run_new(dest=tmp_path, force=False)
+    text = (tmp_path / "monkeybot_config" / "command_allowlist.yaml").read_text(encoding="utf-8")
+    prefixes = yaml.safe_load(text)["allowed_path_prefixes"]
+    assert "./tests/" in prefixes and "./src/" in prefixes
+    assert "./" not in prefixes

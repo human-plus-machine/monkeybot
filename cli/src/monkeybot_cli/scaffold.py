@@ -301,6 +301,11 @@ def _list_extras(existing: list[str], template: list[str]) -> list[str]:
     return [item for item in existing if item not in present]
 
 
+# Convenience prefixes written on first scaffold only; refresh must not re-add them
+# to a file whose operator removed them.
+_CREATE_ONLY_PREFIXES = frozenset({"./tests/", "./src/"})
+
+
 def refresh_command_allowlist(cfg_dir: Path) -> str:
     """Rewrite from the packaged template, then re-append agent-only extras.
 
@@ -325,7 +330,11 @@ def refresh_command_allowlist(cfg_dir: Path) -> str:
             _as_str_list(existing.get(key)),
             _as_str_list(tmpl_map.get(key)),
         )
-        merged[key] = [*_as_str_list(tmpl_map.get(key)), *extras]
+        base = _as_str_list(tmpl_map.get(key))
+        if key == "allowed_path_prefixes":
+            have = set(_as_str_list(existing.get(key)))
+            base = [item for item in base if item not in _CREATE_ONLY_PREFIXES or item in have]
+        merged[key] = [*base, *extras]
     text = yaml.safe_dump(
         merged,
         sort_keys=False,

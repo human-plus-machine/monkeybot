@@ -525,8 +525,13 @@ def _write_run_command_spill(
     out_path = out_dir / filename
     if _spill_path_contained(spill_root(workspace_root), out_path) is None:
         return ""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(body, encoding="utf-8")
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(body, encoding="utf-8")
+    except OSError as exc:
+        # The command already ran; losing the spill must not lose its result.
+        logger.warning("run_command %s spill failed %s", suffix, kv(path=rel, error=str(exc)))
+        return ""
     logger.debug(
         "run_command %s spill %s",
         suffix,
@@ -596,27 +601,38 @@ def _head_chars(text: str, max_chars: int) -> str:
     return head[:max_chars]
 
 
-def shape_run_command_streams(
-    stdout: str,
-    stderr: str,
+def collapse_run_command_streams(stdout: str, stderr: str) -> tuple[str, str]:
+    """Collapse repeated lines (same shaper as the log budget) in both streams."""
+    return (
+        shape_logs(stdout, max_lines=None, keep_patterns=(), collapse_repeated=True),
+        shape_logs(stderr, max_lines=None, keep_patterns=(), collapse_repeated=True),
+    )
+
+
+def slice_run_command_streams(
+    collapsed: tuple[str, str],
     *,
+    stdout_chars: int,
+    stderr_chars: int,
     unit_chars: int,
 ) -> dict[str, Any]:
-    """Head/tail views of ``run_command`` streams that always keep the tail.
+    """Head/tail views of collapsed ``run_command`` streams that always keep the tail.
 
-    Repeated lines are collapsed first (same shaper as the log budget) so noisy
-    progress output does not eat the tail budget. ``stdout_head`` is a handful
-    of leading lines; the tails are what carry test summaries and tracebacks.
+    ``stdout_head`` is a handful of leading lines, left out when the tail already
+    holds all of stdout; the tails carry test summaries and tracebacks.
     """
-    shaped_out = shape_logs(stdout, max_lines=None, keep_patterns=(), collapse_repeated=True)
-    shaped_err = shape_logs(stderr, max_lines=None, keep_patterns=(), collapse_repeated=True)
-    return {
-        "stdout_head": _head_chars(shaped_out, unit_chars),
-        "stdout_tail": _tail_chars(shaped_out, unit_chars * 2),
-        "stderr_tail": _tail_chars(shaped_err, unit_chars * 2),
-        "stdout_chars": len(stdout),
-        "stderr_chars": len(stderr),
-    }
+    shaped_out, shaped_err = collapsed
+    tail_chars = unit_chars * 2
+    shaped: dict[str, Any] = {}
+    if len(shaped_out) > tail_chars:
+        shaped["stdout_head"] = _head_chars(shaped_out, unit_chars)
+    shaped.update(
+        stdout_tail=_tail_chars(shaped_out, tail_chars),
+        stderr_tail=_tail_chars(shaped_err, tail_chars),
+        stdout_chars=stdout_chars,
+        stderr_chars=stderr_chars,
+    )
+    return shaped
 
 
 def spill_root(workspace_root: Path) -> Path:

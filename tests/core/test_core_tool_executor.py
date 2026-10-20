@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import pathlib
 import os
 import sys
 import tempfile
@@ -2435,9 +2436,11 @@ async def test_run_command_allows_workspace_relative_paths(
         assert err is None and out is not None, argv
         assert "test_ops.py" in json.loads(out)["stdout"]
 
-    out, err = await run(["cat", "../outside.txt"])
-    assert out is None and err is not None
-    assert json.loads(err)["error_kind"] == "policy"
+    (tmp_path / ".env").write_text("K=v\n", encoding="utf-8")
+    for argv in (["cat", "../outside.txt"], ["cat", "./.env"], ["cat", str(tmp_path / ".env")]):
+        out, err = await run(argv)
+        assert out is None and err is not None, argv
+        assert json.loads(err)["error_kind"] == "policy"
 
 
 @pytest.mark.asyncio
@@ -5466,3 +5469,88 @@ async def test_grep_nested_gitignore_scopes_to_its_directory(
     # Searching from inside pkg still honours pkg/.gitignore.
     out, _ = await _call(ex, "grep", {"pattern": "NEEDLE", "files_only": True, "root": "pkg"})
     assert json.loads(out)["files"] == ["pkg/ok.txt"]
+
+
+# --- Finding 4: configured path prefixes widened to the whole workspace -----------
+
+
+def _executor_with(tmp_path: Path, **kwargs: object) -> CoreToolExecutor:
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    return CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+async def _run_argv(ex: CoreToolExecutor, argv: list[str]) -> tuple[str | None, str | None]:
+    return unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="spike", name="run_command", args={"argv": argv}),
+            ctx=_ctx(),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_command_configured_path_prefixes_are_not_widened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "code").mkdir()
+    (tmp_path / "secret.txt").write_text("s3cret\n", encoding="utf-8")
+    ex = _executor_with(
+        tmp_path,
+        run_command_allowed_commands=["cat"],
+        run_command_allowed_path_prefixes=["./code/"],
+    )
+    out, err = await _run_argv(ex, ["cat", "./secret.txt"])
+    assert out is None and err is not None, out
+    assert json.loads(err)["error_kind"] == "policy"
+
+
+# --- Finding 5: shaped JSON can still exceed the inline hard cap ------------------
+
+
+@pytest.mark.asyncio
+async def test_run_command_control_char_output_stays_valid_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    ex = _executor_with(tmp_path)
+    script = "for i in range(3000):\n    print(str(i) + '\\x01' * 200)\nprint('SUMMARY-END')\n"
+    out, err = await _run_argv(ex, ["python3", "-c", script])
+    assert err is None and out is not None
+    payload = json.loads(out)  # a cap cut mid-JSON fails here
+    assert payload["exit_code"] == 0
+    assert "SUMMARY-END" in payload["stdout_tail"]
+    assert "note" in payload
+
+
+# --- Finding 6: a failed spill write fails a finished command ---------------------
+
+
+@pytest.mark.asyncio
+async def test_run_command_spill_write_error_keeps_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    real_write_text = pathlib.Path.write_text
+
+    def failing_write_text(self: Path, *args: object, **kwargs: object) -> int:
+        if ".monkeybot" in self.parts and "spill" in self.parts:
+            raise OSError(28, "No space left on device")
+        return real_write_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(pathlib.Path, "write_text", failing_write_text)
+    ex = _executor_with(tmp_path)
+    script = "print('x' * 200000)\nprint('DONE-TAIL')\n"
+    out, err = await _run_argv(ex, ["python3", "-c", script])
+    assert err is None and out is not None, err
+    payload = json.loads(out)
+    assert payload["exit_code"] == 0
+    assert "output_path" not in payload
+    assert "DONE-TAIL" in payload["stdout_tail"]

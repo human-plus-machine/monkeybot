@@ -40,7 +40,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - `run_command` output over the spill threshold no longer hides `exit_code`, `stderr` and the end of the output behind a truncated JSON prefix. The result stays valid JSON with head/tail excerpts and the full streams at `output_path`.
-- `run_command` accepts `./tests`-style and workspace-absolute path arguments, so `pytest ./tests` is no longer rejected.
+- `run_command` accepts `./tests/` and `./src/` path arguments (relative or workspace-absolute) under the built-in defaults, and new scaffolds list them in `command_allowlist.yaml`, so `pytest ./tests` is no longer rejected. A configured allowlist is not widened and `refresh` does not re-add them.
 - `deny_patterns` that anchor on the start of a command (`^rm\s+-rf`, `^curl`, `^sudo`) now also apply to commands inside `bash -c "…"`.
 - The progress tracker's `write_without_read` / `rewrite_churn` signals never fired for `replace_in_file` (it tracked a tool name that does not exist).
 - `apply_patch` rejects a hunk whose old lines match several places instead of silently editing the first, rejects hunk lines with no valid prefix instead of dropping them, and honors `*** End of File`.

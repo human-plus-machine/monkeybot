@@ -325,10 +325,152 @@ async def test_inspector_denies_commands_hidden_in_shell_c(
         {"argv": ["bash", "-c", "ls && echo done"]},
         {"argv": ["bash", "-c", "echo 'rm -rf is dangerous'"]},
         {"argv": ["bash", "script.sh"]},
-        {"argv": ["bash", "-c", "echo 'unbalanced"]},
     ],
 )
 async def test_inspector_allows_benign_shell_c(tmp_path: Path, args: dict[str, object]) -> None:
     inspector = CommandTierInspector(_anchored_policy(tmp_path))
     d = await inspector.check(InspectorToolCall("1", "run_command", args), _minimal_ctx())
     assert d.kind == "allow"
+
+
+# --- Findings 1-3: commands hidden inside bash -c ---------------------------------
+
+
+def _shell_c_inspector(tmp_path: Path) -> CommandTierInspector:
+    path = tmp_path / "anchored.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "allowed_commands": ["bash", "sh", "env", "timeout", "ls", "echo", "rm"],
+                "deny_patterns": [r"^rm\s+-rf"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return CommandTierInspector(path)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "argv",
+    [
+        # 1: empty quoted token treated as an operator
+        ["bash", "-c", 'rm "" -rf build'],
+        # 2: option values and wrapper commands
+        ["bash", "-o", "pipefail", "-c", "rm -rf build"],
+        ["env", "bash", "-c", "rm -rf build"],
+        ["timeout", "5", "bash", "-c", "rm -rf build"],
+        # 3: keywords, grouping, command substitution
+        ["bash", "-c", "if true; then rm -rf build; fi"],
+        ["bash", "-c", "{ rm -rf build; }"],
+        ["bash", "-c", "echo `rm -rf build`"],
+        ["bash", "-c", 'echo "$(rm -rf build)"'],
+    ],
+)
+async def test_inspector_shell_c_bypasses_are_denied(tmp_path: Path, argv: list[str]) -> None:
+    d = await _shell_c_inspector(tmp_path).check(
+        InspectorToolCall("1", "run_command", {"argv": argv}), _minimal_ctx()
+    )
+    assert d.kind == "deny", argv
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["bash", "-c", "ls && echo done"],
+        ["bash", "-c", "echo 'rm -rf is dangerous'"],
+        ["bash", "-o", "pipefail", "-c", "ls | echo ok"],
+        ["env", "FOO=1", "ls"],
+    ],
+)
+async def test_inspector_benign_shell_c_still_allowed(tmp_path: Path, argv: list[str]) -> None:
+    d = await _shell_c_inspector(tmp_path).check(
+        InspectorToolCall("1", "run_command", {"argv": argv}), _minimal_ctx()
+    )
+    assert d.kind == "allow", argv
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["bash", "-c", 'echo "a\nb"; rm -rf build'],
+        ["bash", "-c", "eval 'rm -rf build'"],
+        ["bash", "-c", "find . -exec rm -rf {} \\;"],
+        ["find", ".", "-exec", "rm", "-rf", "x", ";"],
+    ],
+)
+async def test_inspector_denies_multiline_quote_eval_and_find_exec(
+    tmp_path: Path, argv: list[str]
+) -> None:
+    d = await _shell_c_inspector(tmp_path).check(
+        InspectorToolCall("1", "run_command", {"argv": argv}), _minimal_ctx()
+    )
+    assert d.kind == "deny", argv
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "script",
+    ["echo hi > rm-notes.txt", "ls 2>&1", "echo '$(rm -rf x)'"],
+)
+async def test_inspector_redirects_and_single_quoted_substitution_are_not_commands(
+    tmp_path: Path, script: str
+) -> None:
+    d = await _shell_c_inspector(tmp_path).check(
+        InspectorToolCall("1", "run_command", {"argv": ["bash", "-c", script]}), _minimal_ctx()
+    )
+    assert d.kind == "allow", script
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "script",
+    [
+        "cat > f <<EOF\nhello\nEOF",
+        "bash <<EOF\nrm -rf build\nEOF",
+        "echo $'it\\'s'; rm -rf build",
+        "echo 'unterminated\nrm -rf build",
+        "eval 'rm -rf build'",
+    ],
+)
+async def test_inspector_fails_closed_on_unscreenable_scripts(tmp_path: Path, script: str) -> None:
+    d = await _shell_c_inspector(tmp_path).check(
+        InspectorToolCall("1", "run_command", {"argv": ["bash", "-c", script]}), _minimal_ctx()
+    )
+    assert d.kind == "deny", script
+
+
+@pytest.mark.asyncio
+async def test_inspector_unscreenable_script_allowed_without_deny_patterns(tmp_path: Path) -> None:
+    path = tmp_path / "nodeny.yaml"
+    path.write_text(
+        yaml.safe_dump({"allowed_commands": ["bash", "cat"], "deny_patterns": []}),
+        encoding="utf-8",
+    )
+    d = await CommandTierInspector(path).check(
+        InspectorToolCall("1", "run_command", {"argv": ["bash", "-c", "cat <<EOF\nhi\nEOF"]}),
+        _minimal_ctx(),
+    )
+    assert d.kind == "allow"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["bash", "-c", "/bin/rm -rf build"], "deny"),
+        (["bash", "-c", "env /usr/bin/rm -rf build"], "deny"),
+        (["/bin/rm", "-rf", "build"], "deny"),
+        (["bash", "-c", "ls ./tools/rm-notes && echo ok"], "allow"),
+        (["bash", "-c", 'echo "\\$(rm -rf x)"'], "allow"),
+    ],
+)
+async def test_inspector_system_binary_paths_and_escaped_substitution(
+    tmp_path: Path, argv: list[str], expected: str
+) -> None:
+    d = await _shell_c_inspector(tmp_path).check(
+        InspectorToolCall("1", "run_command", {"argv": argv}), _minimal_ctx()
+    )
+    assert d.kind == expected, argv
