@@ -1264,19 +1264,25 @@ async def _consume_provider_stream_body(
                 partial_chars=len(state.assistant_text or ""),
             ),
         )
+        error_text = _provider_error_text(exc)
         await _fire_after_provider_response(
             hook_manager,
             ctx=state.ctx,
             inner_turn=state.turn_index,
             assistant_text=state.assistant_text,
             thinking_text=state.thinking_text,
-            provider_error=str(exc),
+            provider_error=error_text,
         )
-        yield Error(request_id=state.ctx.request_id, error=str(exc))
+        yield Error(request_id=state.ctx.request_id, error=error_text)
         state.needs_followup_after_tools = False
         state.provider_stream_failed = True
         state.action = "return"
         return
+
+
+def _provider_error_text(exc: Exception) -> str:
+    """Error text for a failed provider call; never blank (``httpx.ReadTimeout`` stringifies to "")."""
+    return str(exc).strip() or f"Provider request failed ({type(exc).__name__})"
 
 
 def _thinking_block(state: _TurnState) -> ContentBlock | None:

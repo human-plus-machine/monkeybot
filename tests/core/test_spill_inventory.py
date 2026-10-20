@@ -11,7 +11,10 @@ from monkeybot.core.tools.spill_inventory import (
     _build_spill_preview,
     cleanup_session_spill_files,
     session_spill_dirs,
+    collapse_run_command_streams,
+    slice_run_command_streams,
     spill_inventory_note,
+    write_run_command_output_spill,
 )
 
 
@@ -242,3 +245,52 @@ def test_session_spill_dirs_legacy_subagent_prefix(tmp_path: Path) -> None:
         legacy_name,
         f"subagent:{legacy_name}:x",
     }
+
+
+def test_shape_run_command_streams_keeps_tail_and_collapses_repeats() -> None:
+    stdout = "\n".join(["progress"] * 5000 + ["=== 2 failed, 9 passed ==="])
+    shaped = _shape(stdout, "E   boom\n", 500)
+    assert shaped["stdout_tail"].endswith("=== 2 failed, 9 passed ===")
+    assert "repeated 5000" in shaped["stdout_tail"]
+    assert shaped["stderr_tail"].strip() == "E   boom"
+    assert shaped["stdout_chars"] == len(stdout)
+    assert shaped["stderr_chars"] == len("E   boom\n")
+
+
+def test_shape_run_command_streams_bounds_single_huge_line() -> None:
+    shaped = _shape("y" * 100_000 + "TAIL", "", 100)
+    assert len(shaped["stdout_tail"]) <= 200
+    assert shaped["stdout_tail"].endswith("TAIL")
+    assert len(shaped["stdout_head"]) <= 100
+    assert shaped["stderr_tail"] == ""
+
+
+def test_write_run_command_output_spill_round_trips(tmp_path: Path) -> None:
+    rel = write_run_command_output_spill(
+        workspace_root=tmp_path,
+        thread_id="sess-1",
+        call_id="c1",
+        stdout="out-body",
+        stderr="err-body",
+        exit_code=2,
+    )
+    text = (tmp_path / rel).read_text(encoding="utf-8")
+    assert "exit_code=2" in text and "out-body" in text and "err-body" in text
+
+
+# --- Finding 9: stdout shown twice when it is small --------------------------------
+
+
+def test_small_stdout_not_duplicated() -> None:
+    shaped = _shape("short-out\n", "e\n" * 50_000, 500)
+    assert shaped["stdout_tail"].strip() == "short-out"
+    assert not shaped.get("stdout_head"), shaped["stdout_head"]
+
+
+def _shape(stdout: str, stderr: str, unit_chars: int) -> dict:
+    return slice_run_command_streams(
+        collapse_run_command_streams(stdout, stderr),
+        stdout_chars=len(stdout),
+        stderr_chars=len(stderr),
+        unit_chars=unit_chars,
+    )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import pathlib
 import os
 import sys
 import tempfile
@@ -2034,7 +2035,7 @@ async def test_run_command_blocked_path_returns_policy_envelope(
             call=ToolCall(
                 call_id="1",
                 name="run_command",
-                args={"argv": ["cat", "./forbidden/x.txt"]},
+                args={"argv": ["cat", "../forbidden/x.txt"]},
             ),
             ctx=_ctx(),
         )
@@ -2311,6 +2312,113 @@ async def test_run_command_timeout_spills_partial_output_from_real_terminal(
 
 
 @pytest.mark.asyncio
+async def test_run_command_large_output_keeps_exit_code_and_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Big streams must not hide exit_code/stderr/tail behind a raw-JSON prefix."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "mem").mkdir()
+    (tmp_path / "skills").mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+    )
+    script = (
+        "import sys\n"
+        "print('x' * 200000)\n"
+        "print('=== 1 failed, 4 passed in 0.12s ===')\n"
+        "sys.stderr.write('E   AssertionError: boom\\n')\n"
+        "sys.exit(3)\n"
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="big1", name="run_command", args={"argv": ["python3", "-c", script]}
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    payload = json.loads(out)  # must stay valid JSON, not a truncated prefix
+    assert payload["ok"] is False
+    assert payload["exit_code"] == 3
+    assert "1 failed, 4 passed" in payload["stdout_tail"]
+    assert "AssertionError: boom" in payload["stderr_tail"]
+    assert payload["stdout_chars"] > 200000
+    assert len(out) < 32_768
+    spilled = (tmp_path / payload["output_path"]).read_text(encoding="utf-8")
+    assert "exit_code=3" in spilled
+    assert "1 failed, 4 passed" in spilled
+    assert "x" * 200000 in spilled
+
+
+@pytest.mark.asyncio
+async def test_run_command_allows_workspace_relative_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``pytest ./tests`` style argv: ``./`` and workspace-absolute paths are the agent's tree."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "mem").mkdir()
+    (tmp_path / "skills").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_ops.py").write_text("x\n", encoding="utf-8")
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+    )
+
+    async def run(argv: list[str]) -> tuple[str | None, str | None]:
+        return unwrap_tool_execution_result(
+            await ex.execute(
+                call=ToolCall(call_id="p", name="run_command", args={"argv": argv}),
+                ctx=_ctx(),
+            )
+        )
+
+    for argv in (["ls", "./tests"], ["ls", str(tmp_path / "tests")]):
+        out, err = await run(argv)
+        assert err is None and out is not None, argv
+        assert "test_ops.py" in json.loads(out)["stdout"]
+
+    (tmp_path / ".env").write_text("K=v\n", encoding="utf-8")
+    for argv in (["cat", "../outside.txt"], ["cat", "./.env"], ["cat", str(tmp_path / ".env")]):
+        out, err = await run(argv)
+        assert out is None and err is not None, argv
+        assert json.loads(err)["error_kind"] == "policy"
+
+
+@pytest.mark.asyncio
+async def test_run_command_small_output_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "mem").mkdir()
+    (tmp_path / "skills").mkdir()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="small1",
+                name="run_command",
+                args={"argv": ["python3", "-c", "print('hi')"]},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    assert json.loads(out) == {"ok": True, "stdout": "hi\n", "stderr": "", "exit_code": 0}
+
+
+@pytest.mark.asyncio
 async def test_unknown_tool(tmp_path: Path) -> None:
     ex = CoreToolExecutor(
         workspace_root=tmp_path,
@@ -2490,6 +2598,76 @@ async def test_task_tool_resolves_subagent_type_agent_md(
     )
     assert err is None and out is not None
     assert seen_agent_md == [str(impl_md.resolve())]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("persona_model", "persona_location", "expected_model", "expected_location"),
+    [
+        ("claude-haiku-5-5", "europe-west4", "claude-haiku-5-5", "europe-west4"),
+        (None, None, "gemini-2.5-flash", None),
+    ],
+)
+async def test_task_tool_persona_overrides_model_and_vertex_location(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    persona_model: str | None,
+    persona_location: str | None,
+    expected_model: str,
+    expected_location: str | None,
+) -> None:
+    agents = tmp_path / "monkeybot_config" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "scout.md").write_text("# scout\n", encoding="utf-8")
+    (tmp_path / "monkeybot_config" / "AGENT.md").write_text("# parent\n", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    async def fake_run_inline(**kwargs: object) -> dict[str, object]:
+        seen["model"] = kwargs["envelope"].model  # type: ignore[attr-defined]
+        seen["location"] = kwargs["child_env"].get("VERTEX_AI_LOCATION")  # type: ignore[attr-defined]
+        return {"ok": True, "errors": []}
+
+    monkeypatch.setattr(
+        "monkeybot.core.tools.core_tool_executor._run_inline_subagent_with_progress",
+        fake_run_inline,
+    )
+    monkeypatch.delenv("VERTEX_AI_LOCATION", raising=False)
+    _stub_agent_md_for_tasks(tmp_path, monkeypatch)
+    (tmp_path / "mem").mkdir()
+    (tmp_path / "skills").mkdir()
+    worker = tmp_path / "subagent_worker.py"
+    worker.write_text("# placeholder\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
+
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        subagent_registry={
+            "scout": SubagentConfig(
+                name="scout",
+                description="d",
+                skills=[],
+                agent_md="./monkeybot_config/agents/scout.md",
+                model=persona_model,
+                vertex_location=persona_location,
+            )
+        },
+    )
+    out, err = unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(
+                call_id="c-model",
+                name="task",
+                args={"task": "look around", "subagent_type": "scout"},
+            ),
+            ctx=_ctx(),
+        )
+    )
+    assert err is None and out is not None
+    assert seen == {"model": expected_model, "location": expected_location}
 
 
 @pytest.mark.asyncio
@@ -5070,3 +5248,88 @@ async def test_egress_scan_exempts_read_only_browser_tools(
         ctx=ctx,
     )
     assert result.error is None or "credential_egress_blocked" not in (result.error or "")
+
+
+# --- Finding 4: configured path prefixes widened to the whole workspace -----------
+
+
+def _executor_with(tmp_path: Path, **kwargs: object) -> CoreToolExecutor:
+    (tmp_path / "mem").mkdir(exist_ok=True)
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    return CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=_NoMCP(),
+        **kwargs,  # type: ignore[arg-type]
+    )
+
+
+async def _run_argv(ex: CoreToolExecutor, argv: list[str]) -> tuple[str | None, str | None]:
+    return unwrap_tool_execution_result(
+        await ex.execute(
+            call=ToolCall(call_id="spike", name="run_command", args={"argv": argv}),
+            ctx=_ctx(),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_command_configured_path_prefixes_are_not_widened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "code").mkdir()
+    (tmp_path / "secret.txt").write_text("s3cret\n", encoding="utf-8")
+    ex = _executor_with(
+        tmp_path,
+        run_command_allowed_commands=["cat"],
+        run_command_allowed_path_prefixes=["./code/"],
+    )
+    out, err = await _run_argv(ex, ["cat", "./secret.txt"])
+    assert out is None and err is not None, out
+    assert json.loads(err)["error_kind"] == "policy"
+
+
+# --- Finding 5: shaped JSON can still exceed the inline hard cap ------------------
+
+
+@pytest.mark.asyncio
+async def test_run_command_control_char_output_stays_valid_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    ex = _executor_with(tmp_path)
+    script = "for i in range(3000):\n    print(str(i) + '\\x01' * 200)\nprint('SUMMARY-END')\n"
+    out, err = await _run_argv(ex, ["python3", "-c", script])
+    assert err is None and out is not None
+    payload = json.loads(out)  # a cap cut mid-JSON fails here
+    assert payload["exit_code"] == 0
+    assert "SUMMARY-END" in payload["stdout_tail"]
+    assert "note" in payload
+
+
+# --- Finding 6: a failed spill write fails a finished command ---------------------
+
+
+@pytest.mark.asyncio
+async def test_run_command_spill_write_error_keeps_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    real_write_text = pathlib.Path.write_text
+
+    def failing_write_text(self: Path, *args: object, **kwargs: object) -> int:
+        if ".monkeybot" in self.parts and "spill" in self.parts:
+            raise OSError(28, "No space left on device")
+        return real_write_text(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(pathlib.Path, "write_text", failing_write_text)
+    ex = _executor_with(tmp_path)
+    script = "print('x' * 200000)\nprint('DONE-TAIL')\n"
+    out, err = await _run_argv(ex, ["python3", "-c", script])
+    assert err is None and out is not None, err
+    payload = json.loads(out)
+    assert payload["exit_code"] == 0
+    assert "output_path" not in payload
+    assert "DONE-TAIL" in payload["stdout_tail"]

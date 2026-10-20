@@ -35,6 +35,17 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - Provider SDK clients are reused per endpoint and closed when the process shuts down.
 - PDF text extracts are sized by the read window, spills are reused, and markdown uploads are normalized.
 
+### Fixed
+
+- `run_command` output over the spill threshold no longer hides `exit_code`, `stderr` and the end of the output behind a truncated JSON prefix. The result stays valid JSON with head/tail excerpts and the full streams at `output_path`.
+- `run_command` accepts `./tests/` and `./src/` path arguments (relative or workspace-absolute) under the built-in defaults, and new scaffolds list them in `command_allowlist.yaml`, so `pytest ./tests` is no longer rejected. A configured allowlist is not widened and `refresh` does not re-add them.
+- `deny_patterns` that anchor on the start of a command (`^rm\s+-rf`, `^curl`, `^sudo`) now also apply to commands inside `bash -c "…"`.
+- The progress tracker's `write_without_read` / `rewrite_churn` signals never fired for `replace_in_file` (it tracked a tool name that does not exist).
+- `apply_patch` rejects a hunk whose old lines match several places instead of silently editing the first, rejects hunk lines with no valid prefix instead of dropping them, and honors `*** End of File`.
+- Subagent personas' `model` and `vertex_location` are used by `task` instead of the parent's model.
+- A provider call that fails with an empty message (for example an `httpx.ReadTimeout`) now reports `Provider request failed (<ExceptionType>)` instead of a blank error.
+- Over-budget tool text keeps its tail (70% head / 30% tail) instead of only its head.
+
 ## [cli v0.9.0] - 2026-10-07
 
 ### Added

@@ -494,18 +494,19 @@ def partial_output_tail(
     return f"…(+{omitted} chars omitted)\n{combined[-max_chars:]}"
 
 
-def write_run_command_timeout_spill(
+def _write_run_command_spill(
     *,
     workspace_root: Path,
     thread_id: str,
     call_id: str,
+    suffix: str,
+    title: str,
     stdout: str,
     stderr: str,
 ) -> str:
-    """Persist drained run_command streams after timeout; return workspace-relative path."""
     body = "\n".join(
         [
-            "=== run_command partial output (process killed on timeout) ===",
+            title,
             "",
             "--- stdout ---",
             stdout if stdout else "(empty)",
@@ -519,18 +520,119 @@ def write_run_command_timeout_spill(
     if rel_dir_out is None:
         return ""
     rel_dir, out_dir = rel_dir_out
-    filename = f"{_safe_spill_filename(f'{call_id}-timeout')}.txt"
+    filename = f"{_safe_spill_filename(f'{call_id}-{suffix}')}.txt"
     rel = f"{rel_dir}/{filename}"
     out_path = out_dir / filename
     if _spill_path_contained(spill_root(workspace_root), out_path) is None:
         return ""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(body, encoding="utf-8")
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(body, encoding="utf-8")
+    except OSError as exc:
+        # The command already ran; losing the spill must not lose its result.
+        logger.warning("run_command %s spill failed %s", suffix, kv(path=rel, error=str(exc)))
+        return ""
     logger.debug(
-        "run_command timeout spill %s",
+        "run_command %s spill %s",
+        suffix,
         kv(path=rel, stdout_chars=len(stdout), stderr_chars=len(stderr)),
     )
     return rel
+
+
+def write_run_command_timeout_spill(
+    *,
+    workspace_root: Path,
+    thread_id: str,
+    call_id: str,
+    stdout: str,
+    stderr: str,
+) -> str:
+    """Persist drained run_command streams after timeout; return workspace-relative path."""
+    return _write_run_command_spill(
+        workspace_root=workspace_root,
+        thread_id=thread_id,
+        call_id=call_id,
+        suffix="timeout",
+        title="=== run_command partial output (process killed on timeout) ===",
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def write_run_command_output_spill(
+    *,
+    workspace_root: Path,
+    thread_id: str,
+    call_id: str,
+    stdout: str,
+    stderr: str,
+    exit_code: int,
+) -> str:
+    """Persist full streams of a finished run_command; return workspace-relative path."""
+    return _write_run_command_spill(
+        workspace_root=workspace_root,
+        thread_id=thread_id,
+        call_id=call_id,
+        suffix="output",
+        title=f"=== run_command full output (exit_code={exit_code}) ===",
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+_RUN_COMMAND_HEAD_LINES = 20
+
+
+def _tail_chars(text: str, max_chars: int) -> str:
+    """Last ``max_chars`` of ``text``, cut at a line boundary when one is nearby."""
+    if len(text) <= max_chars:
+        return text
+    cut = text[-max_chars:]
+    newline = cut.find("\n")
+    if 0 <= newline < max_chars // 4:
+        cut = cut[newline + 1 :]
+    return cut
+
+
+def _head_chars(text: str, max_chars: int) -> str:
+    lines = text.splitlines()[:_RUN_COMMAND_HEAD_LINES]
+    head = "\n".join(lines)
+    return head[:max_chars]
+
+
+def collapse_run_command_streams(stdout: str, stderr: str) -> tuple[str, str]:
+    """Collapse repeated lines (same shaper as the log budget) in both streams."""
+    return (
+        shape_logs(stdout, max_lines=None, keep_patterns=(), collapse_repeated=True),
+        shape_logs(stderr, max_lines=None, keep_patterns=(), collapse_repeated=True),
+    )
+
+
+def slice_run_command_streams(
+    collapsed: tuple[str, str],
+    *,
+    stdout_chars: int,
+    stderr_chars: int,
+    unit_chars: int,
+) -> dict[str, Any]:
+    """Head/tail views of collapsed ``run_command`` streams that always keep the tail.
+
+    ``stdout_head`` is a handful of leading lines, left out when the tail already
+    holds all of stdout; the tails carry test summaries and tracebacks.
+    """
+    shaped_out, shaped_err = collapsed
+    tail_chars = unit_chars * 2
+    shaped: dict[str, Any] = {}
+    if len(shaped_out) > tail_chars:
+        shaped["stdout_head"] = _head_chars(shaped_out, unit_chars)
+    shaped.update(
+        stdout_tail=_tail_chars(shaped_out, tail_chars),
+        stderr_tail=_tail_chars(shaped_err, tail_chars),
+        stdout_chars=stdout_chars,
+        stderr_chars=stderr_chars,
+    )
+    return shaped
 
 
 def spill_root(workspace_root: Path) -> Path:
