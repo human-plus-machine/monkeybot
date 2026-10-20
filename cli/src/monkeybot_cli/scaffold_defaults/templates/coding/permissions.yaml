@@ -1,0 +1,42 @@
+# Soft permission ruleset for the coding template (last-match-wins).
+# Hard execution constraints remain in command_allowlist.yaml + sandbox.
+#
+# Effects: allow | ask | deny
+default: allow
+
+rules:
+  # Allow rules must stay above the ask rules. Evaluation is last-match-wins, and a
+  # line like `git commit -m msg && git push` matches both.
+  - tool: run_command
+    pattern: "git commit"
+    effect: allow
+  - tool: run_command
+    pattern: "git commit *"
+    effect: allow
+  # Direct `rm …` only. `bash -c 'rm …'` is a different resource string, so the
+  # hard block for every rm invocation (including inside a shell script) is the
+  # `^rm(\s|$)` deny_pattern in command_allowlist.yaml.
+  - tool: run_command
+    pattern: "rm *"
+    effect: deny
+    message: "Destructive rm is blocked; delete files with apply_patch instead."
+  # Substring patterns: fnmatch is applied to the whole normalized line, so
+  # `git push *` misses bare `git push`, `git commit && git push`, and
+  # `bash -c 'git push'` (bash is on the coding allowlist). An extra ask is
+  # safer than a push that skips the prompt.
+  - tool: run_command
+    pattern: "*git push*"
+    effect: ask
+    message: "Approve pushing to a remote?"
+  - tool: run_command
+    pattern: "*git reset --hard*"
+    effect: ask
+    message: "Approve discarding local changes?"
+  - tool: run_command
+    pattern: "*git clean*"
+    effect: ask
+    message: "Approve deleting untracked files?"
+  - tool: run_command
+    pattern: "*npx*"
+    effect: ask
+    message: "npx can download and run code. Approve?"

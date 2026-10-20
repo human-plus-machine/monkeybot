@@ -1,0 +1,92 @@
+# run_command: binary allowlist (enforced at execution) — coding template: adds the
+# usual test/lint/build toolchain and read-only text utilities.
+allowed_commands:
+  - cat
+  - ls
+  - grep
+  - rg
+  - echo
+  - python
+  - python3
+  - uv
+  - git
+  - gh
+  - bash
+  - mempalace
+  - pytest
+  - node
+  - npm
+  - pnpm
+  - yarn
+  - npx
+  - make
+  - cargo
+  - go
+  - ruff
+  - mypy
+  - tsc
+  - sed
+  - awk
+  - find
+  - head
+  - tail
+  - wc
+  - diff
+
+# Path prefixes permitted in run_command argv (./ and / arguments).
+allowed_path_prefixes:
+  - ./
+  - ../memory/
+  - ../memory
+  - ../memory/mempalace/
+  - ../memory/mempalace
+  - ./skills/
+  - ./skills
+  - ./global-skills/
+  - ./global-skills
+  - ./test-data/
+  - ./code/
+  - ./code
+  - ./generated-media/
+  - ./generated-media
+  - ./browser/
+  - ./browser
+
+# Optional: regexes matched against the normalized invocation (deny wins).
+# Omit this key to use built-in DEFAULT_DENY_PATTERNS (install blocking).
+deny_patterns:
+  - "pip3?\\s+install"
+  - "python3?\\s+-m\\s+pip\\s+install"
+  - "(^|\\s)uv\\s+(add|remove|sync|pip\\s+install|pip\\s+sync)"
+  - "(^|\\s)poetry\\s+(add|install)"
+  - "(^|\\s)conda\\s+install"
+  - "(^|\\s)(npm|pnpm|yarn)\\s+(install|add|i)(\\s|$)"
+  - "(^|\\s)(apt|apt-get)\\s+install"
+  - "(^|\\s)brew\\s+install"
+  - "^curl\\s+"
+  - "^wget\\s+"
+  - "^rm\\s+-rf"
+  # Any rm invocation, including inside `bash -c` (the screener checks each
+  # command, so a commit message that mentions rm is not this pattern).
+  - "^rm(\\s|$)"
+  - "^sudo\\s+"
+  - ".*>\\s*/etc/.*"
+  - "(^|\\s)find\\s.*(-delete|-exec|-execdir|-ok)\\b"
+
+# Per-tool output shaping (token optimization). Merged with built-in defaults for
+# run_command and web_search when keys are omitted here.
+tool_output:
+  run_command:
+    content_type: logs
+    max_output_lines: 400
+    collapse_repeated: true
+    keep_patterns:
+      - "(?i)\\berror\\b"
+      - "(?i)\\bfatal\\b"
+      - "(?i)traceback"
+      - "(?i)\\bexception\\b"
+  web_search:
+    content_type: json
+    max_array_items: 30
+  read_file:
+    content_type: code
