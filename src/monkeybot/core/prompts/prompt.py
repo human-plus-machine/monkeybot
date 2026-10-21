@@ -168,7 +168,6 @@ def _harness_text(ctx: TurnContext) -> str:
         subagent_personas=ctx.subagent_personas,
         emission_style=emission_style_terse_from_env(ctx.config),
         catalog_mcp_servers=ctx.catalog_mcp_servers,
-        coding_mode=ctx.config is not None and ctx.config.coding.enabled,
     )
 
 

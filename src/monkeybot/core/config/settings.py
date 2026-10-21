@@ -218,9 +218,8 @@ class VerificationGateConfig:
 
 @dataclass(frozen=True)
 class CodingConfig:
-    """YAML-only ``coding:`` section. Absent or empty → coding mode off."""
+    """YAML-only ``coding:`` section. Coding mode itself is always on; this tunes it."""
 
-    enabled: bool = False
     verification_gate: VerificationGateConfig = field(default_factory=VerificationGateConfig)
     project_instructions_files: tuple[str, ...] = DEFAULT_PROJECT_INSTRUCTIONS_FILES
 
@@ -828,7 +827,6 @@ def coding_config_from_section(section: dict[str, Any]) -> CodingConfig:
                 f"coding.verification_gate.verify_commands has an invalid regex {pattern!r}: {exc}"
             ) from exc
     return CodingConfig(
-        enabled=_verifier_bool(section.get("enabled"), "coding.enabled", defaults.enabled),
         verification_gate=VerificationGateConfig(
             enabled=_verifier_bool(
                 gate_raw.get("enabled"),

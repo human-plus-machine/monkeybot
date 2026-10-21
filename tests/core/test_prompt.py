@@ -406,38 +406,13 @@ def test_skills_section_lists_description_and_handles_edge_cases() -> None:
     assert len(skills_block[2]) < 230
 
 
-def _coding_cfg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, enabled: bool):
-    from monkeybot.core.config import reset_runtime_env_state_for_tests
-    from monkeybot.core.config.snapshot import build_runtime_config
-
-    reset_runtime_env_state_for_tests()
-    monkeypatch.chdir(tmp_path)
-    cfg_dir = tmp_path / "monkeybot_config"
-    cfg_dir.mkdir(exist_ok=True)
-    (cfg_dir / "monkeybot.yaml").write_text(
-        f"coding:\n  enabled: {str(enabled).lower()}\n", encoding="utf-8"
-    )
-    return build_runtime_config(agent_root=tmp_path)
-
-
-def test_coding_protocol_is_in_stable_prefix_only_when_coding_enabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from monkeybot.core.config import reset_runtime_env_state_for_tests
-
+def test_coding_protocol_is_always_in_stable_prefix() -> None:
     marker = "### Editing & verification protocol"
-    try:
-        off = replace(_minimal_ctx(), config=_coding_cfg(tmp_path, monkeypatch, enabled=False))
-        assert marker not in compose_system_prompt(off)
-        assert marker not in compose_system_prompt(_minimal_ctx())  # no pinned config at all
-
-        on = replace(
-            _minimal_ctx(skills=[SkillRef(name="s1", description="d1")]),
-            config=_coding_cfg(tmp_path, monkeypatch, enabled=True),
-        )
-        stable, volatile = split_system_prompt_for_cache(compose_system_prompt(on))
+    for ctx in (
+        _minimal_ctx(),  # no pinned config at all
+        _minimal_ctx(skills=[SkillRef(name="s1", description="d1")]),
+    ):
+        stable, volatile = split_system_prompt_for_cache(compose_system_prompt(ctx))
         assert marker in stable
         assert marker not in volatile
         assert stable.index(marker) < stable.index("### Tool-call protocol (strict)")
-    finally:
-        reset_runtime_env_state_for_tests()

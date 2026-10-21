@@ -87,8 +87,6 @@ class Scenario:
     # temp copy of ``workspace_fixture`` (a directory under ``evals/``).
     executor: str = "recording"
     workspace_fixture: str | None = None
-    # Coding mode for ``executor: real``: the executor gets a read-before-write ledger.
-    coding: bool = False
     # Register the turn-end VerificationGate (coding.verification_gate) on the loop's hooks.
     gate: bool = False
 
@@ -167,7 +165,6 @@ def load_scenario(path: Path) -> Scenario:
         assertions=assertions,
         executor=executor,
         workspace_fixture=str(fixture) if fixture else None,
-        coding=bool(data.get("coding", False)),
         gate=bool(data.get("gate", False)),
     )
 
@@ -268,7 +265,7 @@ def _prepare_real_workspace(scenario: Scenario, root: Path) -> tuple[Path, CoreT
         memory=_mem_sub(memory_dir),
         skills_path=skills_dir,
         mcp=_NoMCP(),
-        read_ledger=FileReadLedger() if scenario.coding else None,
+        read_ledger=FileReadLedger(),
     )
     return workspace, executor
 

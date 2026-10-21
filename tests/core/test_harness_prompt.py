@@ -185,11 +185,8 @@ def test_harness_empty_catalog_omits_enable_mcp() -> None:
     assert "Do not read or search for MCP config files" in out
 
 
-def test_coding_protocol_block_only_in_coding_mode() -> None:
-    plain = harness_fixed_context(include_task_tool=False)
-    coding = harness_fixed_context(include_task_tool=False, coding_mode=True)
-    assert "Editing & verification protocol" not in plain
-    assert coding.startswith(plain.split("### Tool-call protocol")[0].rstrip())
+def test_coding_protocol_block_is_always_present() -> None:
+    coding = harness_fixed_context(include_task_tool=False)
     for needle in (
         "### Editing & verification protocol",
         "`read_before_write`",
@@ -209,7 +206,6 @@ def test_coding_protocol_block_only_in_coding_mode() -> None:
 def test_coding_protocol_block_keeps_personas_and_emission_sections() -> None:
     out = harness_fixed_context(
         include_task_tool=True,
-        coding_mode=True,
         emission_style=True,
         subagent_personas=[("scout", "explores")],
     )

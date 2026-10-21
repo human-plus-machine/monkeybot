@@ -1,6 +1,5 @@
 description: "An edit followed by a bare 'done' is refused once; the retry verifies and reports the result"
 executor: real
-coding: true
 gate: true
 workspace_fixture: fixtures/coding/calc_repo
 user_message: "Add a power() helper to calc/ops.py."

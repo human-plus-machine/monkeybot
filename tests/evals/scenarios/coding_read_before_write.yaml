@@ -1,6 +1,5 @@
 description: "A blind edit is refused (read_before_write); after read_file the same edit lands and tests pass"
 executor: real
-coding: true
 workspace_fixture: fixtures/coding/calc_repo
 user_message: "Make divide() raise ValueError on zero."
 scripted_turns:

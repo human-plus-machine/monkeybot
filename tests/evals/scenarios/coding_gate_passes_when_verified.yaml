@@ -1,6 +1,5 @@
 description: "A verified edit is not held back: the first final answer is accepted"
 executor: real
-coding: true
 gate: true
 workspace_fixture: fixtures/coding/calc_repo
 user_message: "Fix divide() and tell me it works."

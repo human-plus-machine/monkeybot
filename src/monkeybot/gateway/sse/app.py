@@ -461,11 +461,10 @@ class GatewayRuntime:
             self.progress_tracker.register(mgr)
         if self.nudge_actuator is not None:
             self.nudge_actuator.register(mgr)
-        if cfg is not None and cfg.coding.enabled:
-            GitContextHook().register(mgr)
-            ReadLedgerCompactionHook().register(mgr)
-            if cfg.coding.verification_gate.enabled:
-                VerificationGate(cfg.coding.verification_gate).register(mgr)
+        GitContextHook().register(mgr)
+        ReadLedgerCompactionHook().register(mgr)
+        if cfg is not None and cfg.coding.verification_gate.enabled:
+            VerificationGate(cfg.coding.verification_gate).register(mgr)
         self.hook_manager = mgr
         if fastapi_app is None:
             return
@@ -1106,11 +1105,9 @@ class GatewayLoopPort:
                 todo_store = bus.todo_store
                 extra_tools.append(TodoListTool(todo_store))
 
-            read_ledger: FileReadLedger | None = None
-            if cfg is not None and cfg.coding.enabled:
-                if bus.read_ledger is None:
-                    bus.read_ledger = FileReadLedger()
-                read_ledger = bus.read_ledger
+            if bus.read_ledger is None:
+                bus.read_ledger = FileReadLedger()
+            read_ledger: FileReadLedger | None = bus.read_ledger
 
             storage_backend = getattr(serving.state, "storage", None)
             loops_available = storage_backend is not None

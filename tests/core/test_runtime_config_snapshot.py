@@ -447,7 +447,7 @@ def test_verifier_included_in_snapshot_and_diff(
     assert get_verifier_config(config=reloaded).tracker.suspicion_threshold == 9
 
 
-def test_coding_defaults_off_and_included_in_snapshot_and_diff(
+def test_coding_defaults_and_included_in_snapshot_and_diff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from monkeybot.core.config.settings import get_coding_config
@@ -456,7 +456,6 @@ def test_coding_defaults_off_and_included_in_snapshot_and_diff(
     yaml_path = _write_yaml(tmp_path, "model:\n  provider: fake\n")
     apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
     off = get_config_store().current()
-    assert off.coding.enabled is False
     assert off.coding.verification_gate.enabled is False
     assert off.coding.project_instructions_files == (
         "AGENTS.md",
@@ -466,7 +465,7 @@ def test_coding_defaults_off_and_included_in_snapshot_and_diff(
 
     yaml_path.write_text(
         "model:\n  provider: fake\n"
-        "coding:\n  enabled: true\n"
+        "coding:\n"
         "  verification_gate:\n    enabled: true\n    max_rejections: 2\n"
         "    verify_commands: ['\\bmake verify\\b']\n"
         "  project_instructions_files: [AGENTS.md]\n",
@@ -476,25 +475,24 @@ def test_coding_defaults_off_and_included_in_snapshot_and_diff(
     assert not diff.noop
     assert "coding.*" in diff.changed_env_keys
     assert ConfigTier.REBUILD in diff.tiers
-    assert reloaded.coding.enabled is True
+    assert reloaded.coding.verification_gate.enabled is True
     assert reloaded.coding.verification_gate.max_rejections == 2
     assert reloaded.coding.verification_gate.verify_commands == ("\\bmake verify\\b",)
     assert reloaded.coding.project_instructions_files == ("AGENTS.md",)
-    assert get_coding_config(config=off).enabled is False
-    assert get_coding_config(config=reloaded).enabled is True
+    assert get_coding_config(config=off).verification_gate.enabled is False
+    assert get_coding_config(config=reloaded).verification_gate.enabled is True
 
 
 @pytest.mark.parametrize(
     "section",
     [
         "coding: yes\n",
-        "coding:\n  enabled: 1\n",
         "coding:\n  verification_gate:\n    max_rejections: -1\n",
         "coding:\n  verification_gate:\n    verify_commands: ['(']\n",
         "coding:\n  project_instructions_files: []\n",
     ],
 )
-def test_invalid_coding_section_falls_back_to_off(
+def test_invalid_coding_section_falls_back_to_defaults(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -505,10 +503,20 @@ def test_invalid_coding_section_falls_back_to_off(
     monkeypatch.chdir(tmp_path)
     yaml_path = _write_yaml(tmp_path, "model:\n  provider: fake\n" + section)
     apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
-    assert get_config_store().current().coding.enabled is False
+    assert get_config_store().current().coding.verification_gate.enabled is False
     assert "Ignoring invalid coding section" in caplog.text
     with pytest.raises(ConfigError):
         get_coding_config()
+
+
+def test_retired_coding_enabled_warns_and_is_ignored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(tmp_path, "model:\n  provider: fake\ncoding:\n  enabled: false\n")
+    apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+    assert "coding.enabled is retired" in caplog.text
+    assert get_config_store().current().coding.verification_gate.enabled is False
 
 
 def test_verifier_model_inherits_agent_model_when_omitted(

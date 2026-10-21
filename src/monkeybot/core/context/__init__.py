@@ -1150,7 +1150,7 @@ async def build_context(
         tools.append(ct.tool_def)
     project_instructions = ""
     overview = ""
-    if config is not None and config.coding.enabled and workspace_root is not None:
+    if config is not None and workspace_root is not None:
         project_instructions, overview = await asyncio.to_thread(
             _coding_project_context, workspace_root, config.coding.project_instructions_files
         )
