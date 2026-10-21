@@ -53,7 +53,9 @@ trap restore_locks EXIT
 uv sync --extra claude --extra vertex-claude --extra bedrock --extra firestore --extra evals
 uv run ruff format --check .
 uv run mypy src/monkeybot
-uv run pytest tests/ -q
+# Each worker is its own process. Tests keep state in tmp_path, so the
+# suite is safe to fan out across the machine.
+uv run pytest tests/ -q -n auto
 
 (
   cd cli
