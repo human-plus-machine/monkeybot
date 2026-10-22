@@ -46,6 +46,7 @@ from monkeybot.core.types.content_blocks import (
     ToolResponse,
 )
 from monkeybot.core.types.types_tools import ToolDef
+from monkeybot.providers._stream_marks import mark_content, mark_tool_args
 from monkeybot.providers._utils import safe_parse_tool_args, suppress_thinking_for_auxiliary_call
 from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.rejected_sampling import (
@@ -64,6 +65,13 @@ if TYPE_CHECKING:
     from monkeybot.core.tools.spill_inventory import SpillBudgets
 
 _log = logging.getLogger(__name__)
+
+# Match ``openai.DEFAULT_CONNECTION_LIMITS`` (1000 / 100). httpx leaves
+# ``keepalive_expiry`` at 5s, which drops a startup socket before the first turn.
+_MAX_CONNECTIONS = 1000
+_MAX_KEEPALIVE_CONNECTIONS = 100
+_KEEPALIVE_EXPIRY_S = 120.0
+_WARM_TIMEOUT_S = 5.0
 
 
 def _delta_reasoning_text(delta: Any) -> str:
@@ -863,6 +871,7 @@ async def iter_openai_compat_stream(
             if delta is None:
                 continue
             if delta.content:
+                mark_content("text")
                 if scanner is not None:
                     for text in scanner.feed(delta.content):
                         yield TextDelta(text=text)
@@ -870,6 +879,7 @@ async def iter_openai_compat_stream(
                     yield TextDelta(text=delta.content)
             reasoning = _delta_reasoning_text(delta)
             if reasoning:
+                mark_content("thinking")
                 yield ThinkingDelta(text=reasoning)
             if delta.tool_calls:
                 for tc in delta.tool_calls:
@@ -915,8 +925,10 @@ async def iter_openai_compat_stream(
                     if tc.function:
                         if tc.function.name:
                             slot["name"] = tc.function.name
+                            mark_content("tool_name")
                         if tc.function.arguments:
                             slot["args"] += tc.function.arguments
+                            mark_tool_args(len(tc.function.arguments))
 
         if scanner is not None:
             leftover = scanner.flush_incomplete()
@@ -1308,6 +1320,127 @@ async def iter_openai_compat_stream_with_sampling_retry(
             )
 
 
+def openai_connection_limits() -> Any:
+    """Pool caps from the OpenAI SDK, with a longer idle socket.
+
+    One warm connection per endpoint. After the server closes it, the next
+    request connects again.
+    """
+    import httpx  # noqa: PLC0415
+
+    return httpx.Limits(
+        max_connections=_MAX_CONNECTIONS,
+        max_keepalive_connections=_MAX_KEEPALIVE_CONNECTIONS,
+        keepalive_expiry=_KEEPALIVE_EXPIRY_S,
+    )
+
+
+def _keepalive_http_client(*, base_url: str | None) -> Any | None:
+    """SDK httpx client with :func:`openai_connection_limits`, or None in fakes."""
+    import openai  # noqa: PLC0415
+
+    ctor = getattr(openai, "DefaultAsyncHttpxClient", None)
+    if ctor is None:
+        return None
+    kwargs: dict[str, Any] = {"limits": openai_connection_limits()}
+    if base_url is not None:
+        kwargs["base_url"] = base_url
+    return ctor(**kwargs)
+
+
+def cached_async_openai(
+    key: tuple[Any, ...],
+    *,
+    fingerprint: tuple[Any, ...],
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> Any:
+    """Cached ``AsyncOpenAI`` for ``key`` on this loop.
+
+    Warm-up and ``stream`` must use the same key and fingerprint so they share
+    one connection pool.
+    """
+    from monkeybot.providers._sdk_client import cached_sdk_client  # noqa: PLC0415
+
+    def factory() -> Any:
+        from openai import AsyncOpenAI  # noqa: PLC0415
+
+        kwargs: dict[str, Any] = {}
+        if base_url is not None:
+            kwargs["base_url"] = base_url
+        if api_key is not None:
+            kwargs["api_key"] = api_key
+        http_client = _keepalive_http_client(base_url=base_url)
+        if http_client is not None:
+            kwargs["http_client"] = http_client
+        return AsyncOpenAI(**kwargs)
+
+    return cached_sdk_client(key, factory, fingerprint=fingerprint)
+
+
+def _log_warm_failure(provider: str, exc: BaseException) -> None:
+    _log.warning(
+        "provider connection warm-up failed %s",
+        kv(provider=provider, error=type(exc).__name__, detail=str(exc)[:200]),
+    )
+
+
+async def _probe_models(client: Any, *, provider: str) -> None:
+    """GET ``/models`` on ``client``. Not a chat completion."""
+    await asyncio.wait_for(
+        client.models.list(timeout=_WARM_TIMEOUT_S),
+        timeout=_WARM_TIMEOUT_S,
+    )
+    _log.debug("provider connection warmed %s", kv(provider=provider))
+
+
+async def warm_openai_compat_connection(*, base_url: str, api_key: str, provider: str) -> None:
+    """Open the compat client's connection. Failures are logged, not raised."""
+    from monkeybot.providers._sdk_client import sdk_env  # noqa: PLC0415
+
+    try:
+        client = cached_async_openai(
+            ("openai-compat", base_url),
+            base_url=base_url,
+            api_key=api_key,
+            # AsyncOpenAI still reads OPENAI_ORG_ID and the other OPENAI_* vars.
+            fingerprint=(api_key, sdk_env("OPENAI_")),
+        )
+        await _probe_models(client, provider=provider)
+    except Exception as exc:
+        _log_warm_failure(provider, exc)
+
+
+async def warm_openai_connection() -> None:
+    """Open the official OpenAI client's connection. Failures are logged, not raised."""
+    from monkeybot.providers._sdk_client import sdk_env  # noqa: PLC0415
+
+    try:
+        # The model id is a request field. AsyncOpenAI reads OPENAI_* env vars
+        # in its constructor, so those identify the client.
+        client = cached_async_openai(("openai",), fingerprint=sdk_env("OPENAI_"))
+        await _probe_models(client, provider="openai")
+    except Exception as exc:
+        _log_warm_failure("openai", exc)
+
+
+async def warm_provider_connection(provider: Any) -> None:
+    """Warm ``provider`` when it implements ``warm_connection``. Never raises.
+
+    Looks up the method on the class so a ``MagicMock`` provider does not grow
+    a child mock and get awaited.
+    """
+    if provider is None:
+        return
+    method = getattr(type(provider), "warm_connection", None)
+    if not callable(method):
+        return
+    try:
+        await provider.warm_connection()
+    except Exception as exc:
+        _log_warm_failure(type(provider).__name__, exc)
+
+
 async def stream_chat_completions_with_tool_fallback(
     *,
     base_url: str,
@@ -1338,9 +1471,7 @@ async def stream_chat_completions_with_tool_fallback(
     ``max_request_bytes`` is a hard JSON-body cap. When set, oldest historical
     ``image_url`` data URLs are stubbed before the request is sent.
     """
-    from openai import AsyncOpenAI  # noqa: PLC0415
-
-    from monkeybot.providers._sdk_client import cached_sdk_client, sdk_env  # noqa: PLC0415
+    from monkeybot.providers._sdk_client import sdk_env  # noqa: PLC0415
 
     msgs = list(messages)
     if max_request_bytes is not None and max_request_bytes > 0:
@@ -1355,9 +1486,10 @@ async def stream_chat_completions_with_tool_fallback(
     if system:
         oai_messages = [{"role": "system", "content": system}, *oai_messages]
 
-    client = cached_sdk_client(
+    client = cached_async_openai(
         ("openai-compat", base_url),
-        lambda: AsyncOpenAI(base_url=base_url, api_key=api_key),
+        base_url=base_url,
+        api_key=api_key,
         # AsyncOpenAI still reads OPENAI_ORG_ID and the other OPENAI_* vars.
         fingerprint=(api_key, sdk_env("OPENAI_")),
     )
@@ -1530,5 +1662,10 @@ __all__ = [
     "openai_messages_token_count",
     "openai_tools",
     "openai_tools_token_count",
+    "cached_async_openai",
+    "openai_connection_limits",
     "stream_chat_completions_with_tool_fallback",
+    "warm_openai_compat_connection",
+    "warm_openai_connection",
+    "warm_provider_connection",
 ]

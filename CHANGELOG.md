@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The gateway opens the model provider's HTTP connection at startup with a models-list request and keeps that socket for 120 seconds, so the first turn does not wait on a cold connection.
+
 ## [cli v0.11.0] - 2026-10-22
 
 ### Added
