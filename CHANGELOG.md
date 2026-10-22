@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- OpenAI-compatible token counting loads the tiktoken `cl100k_base` encoding when the provider module is imported, so the first turn in a process pays the warm count instead of the cold load.
+
 ## [cli v0.11.0] - 2026-10-22
 
 ### Added
