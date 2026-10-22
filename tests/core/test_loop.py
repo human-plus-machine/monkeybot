@@ -3725,6 +3725,23 @@ async def test_compaction_fires_history_compacted_and_resets_the_ledger(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_compaction_resets_the_ledger_without_a_hook_manager(tmp_path: Path) -> None:
+    """Subagents compact in this loop and do not register ReadLedgerCompactionHook."""
+    from monkeybot.core.tools.read_ledger import FileReadLedger
+
+    ledger = FileReadLedger()
+    ledger.record_read("calc/ops.py", (5, 50))
+    ledger.record_write("calc/ops.py", (6, 60))
+    ledger.record_command("pytest -q", 0)
+    await _compact_with_ledger(tmp_path, ledger)
+
+    assert ledger.check_write("calc/ops.py", (6, 60)) == "read_before_write"
+    assert ledger.written == {"calc/ops.py"}
+    assert ledger.recent_commands[0].command == "pytest -q"
+    assert ledger.recent_commands[0].exit_code == 0
+
+
+@pytest.mark.asyncio
 async def test_no_compaction_means_no_history_compacted_event(tmp_path: Path) -> None:
     from monkeybot.core.hooks import HookEvent, HookManager
 

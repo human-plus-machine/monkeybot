@@ -170,8 +170,9 @@ class TurnContext:
     repo_overview: str = ""
     """Coding mode: deterministic toolchain + layout summary for the stable prompt prefix."""
     read_ledger: FileReadLedger | None = None
-    """Session read/write ledger (coding mode only); mutable store held by frozen context.
-    Shared with ``CoreToolExecutor``; history compaction reads and clears it."""
+    """Session read/write ledger; mutable store held by the frozen context.
+    Shared with ``CoreToolExecutor``. History compaction reads and clears it.
+    ``None`` only for tests and embedded executors that skip the check."""
     invoked_skill: SkillRef | None = None
     """Installed skill the user explicitly invoked with a leading `/slug` this turn."""
     session: str | None = None

@@ -101,9 +101,19 @@ def _workspace_trailer_from_ctx(ctx: TurnContext) -> str | None:
 async def _fire_history_compacted(
     hook_manager: HookManager | None, ctx: TurnContext, *, turns_summarized: int
 ) -> None:
-    """Tell hooks that older history was replaced by a summary (awaited, bounded, never raises)."""
+    """Tell hooks that older history was replaced by a summary (awaited, bounded, never raises).
+
+    Reads are cleared here, before hooks run. The summary trailer has already been
+    taken from the ledger's write and command records, which survive ``clear``.
+    Subagents compact through this loop and have no hook manager, so forgetting
+    reads cannot depend on ``ReadLedgerCompactionHook`` being registered. That
+    hook still clears too; a second ``clear`` is a no-op.
+    """
     if turns_summarized <= 0:
         return
+    ledger = ctx.read_ledger
+    if ledger is not None:
+        ledger.clear()
     await _fire_hook(
         hook_manager,
         event=HookEvent.HISTORY_COMPACTED,

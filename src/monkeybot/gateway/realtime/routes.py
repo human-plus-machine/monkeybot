@@ -58,6 +58,7 @@ from monkeybot.core.runtime.realtime_loop import run_realtime_turn
 from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
 from monkeybot.core.tools.background_jobs import jobs_killed_at_turn_end_error
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
+from monkeybot.core.tools.read_ledger import FileReadLedger
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.todo_list import TodoListStore, TodoListTool
 
@@ -170,6 +171,7 @@ async def _build_realtime_context(
     thread_id: str | None = None,
     todo_store: TodoListStore | None = None,
     cancelled: asyncio.Event | None = None,
+    read_ledger: FileReadLedger | None = None,
 ) -> TurnContext:
     if deps.mcp is None:
         raise RuntimeError("MCP client is not initialized")
@@ -210,6 +212,7 @@ async def _build_realtime_context(
             cancelled=cancelled,
             config=cfg,
             verdict_mailbox=live.verdict_mailbox,
+            read_ledger=read_ledger,
         )
     finally:
         end_in_flight_turn()
@@ -221,6 +224,7 @@ def _create_tool_executor(
     *,
     todo_store: TodoListStore | None = None,
     config: Any | None = None,
+    read_ledger: FileReadLedger | None = None,
 ) -> CoreToolExecutor:
     """Build the tool executor for one assistant boundary.
 
@@ -250,6 +254,7 @@ def _create_tool_executor(
         loops_registry=deps.loops_registry,
         config=config if config is not None else get_config_store().current_or_none(),
         grants_path=AgentLayout.from_environment().grants_path,
+        read_ledger=read_ledger,
     )
 
 
@@ -386,7 +391,11 @@ async def _handle_assistant_boundary(
     async with get_reload_lock():
         live = _live_slices(deps)
         tool_executor = _create_tool_executor(
-            deps, attachment_store, todo_store=state.todo_store, config=ctx.config
+            deps,
+            attachment_store,
+            todo_store=state.todo_store,
+            config=ctx.config,
+            read_ledger=ctx.read_ledger,
         )
         begin_in_flight_turn()
     try:
@@ -869,6 +878,10 @@ def create_realtime_router(
             thread_id = await resolve_active_thread_id(storage, session_id)
             workspace_root, _skills_path = _resolved_workspace_paths()
             todo_store = await _maybe_todo_store(manager, session_id, workspace_root)
+            # One ledger for the Live connection. Voice does not share the SSE
+            # session bus, and it does not compact, so reads stay valid until
+            # the socket closes. Chat compaction must not forget them.
+            read_ledger = FileReadLedger()
             cancelled = asyncio.Event()
             ctx = await _build_realtime_context(
                 session_id,
@@ -877,6 +890,7 @@ def create_realtime_router(
                 thread_id=thread_id,
                 todo_store=todo_store,
                 cancelled=cancelled,
+                read_ledger=read_ledger,
             )
             if ctx.verdict_mailbox is not None:
                 ctx.verdict_mailbox.open_request(ctx.thread_id, request_id)

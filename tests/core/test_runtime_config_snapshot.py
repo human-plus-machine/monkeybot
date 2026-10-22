@@ -513,10 +513,16 @@ def test_retired_coding_enabled_warns_and_is_ignored(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    yaml_path = _write_yaml(tmp_path, "model:\n  provider: fake\ncoding:\n  enabled: false\n")
+    yaml_path = _write_yaml(
+        tmp_path,
+        "model:\n  provider: fake\n"
+        "coding:\n  enabled: false\n"
+        "  verification_gate:\n    enabled: true\n",
+    )
     apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
     assert "coding.enabled is retired" in caplog.text
-    assert get_config_store().current().coding.verification_gate.enabled is False
+    # The retired flag must not turn the rest of the section off.
+    assert get_config_store().current().coding.verification_gate.enabled is True
 
 
 def test_verifier_model_inherits_agent_model_when_omitted(
