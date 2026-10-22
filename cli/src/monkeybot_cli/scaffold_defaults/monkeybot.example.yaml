@@ -254,13 +254,12 @@ scheduler:
 #   escalation:
 #     max_severity: nudge
 
-# Coding mode (YAML-only). Off by default; `monkeybot new --template coding` turns it on.
-# When enabled the agent gets an editing & verification protocol in its prompt, edits are
-# refused unless the file was read first (and unchanged since), AGENTS.md / CLAUDE.md and a
-# short repo overview join the cached prompt prefix, and git state appears in runtime notes.
+# Coding mode is always on: the agent gets an editing & verification protocol in its prompt,
+# edits are refused unless the file was read first (and unchanged since), AGENTS.md / CLAUDE.md
+# and a short repo overview join the cached prompt prefix, and git state appears in runtime
+# notes. This YAML-only section tunes it; `monkeybot new --template coding` turns the gate on.
 # coding:
-#   enabled: true
-#   # Reject a final answer that follows unverified edits (once per message by default):
+#   # Reject a final answer that follows unverified edits (off by default; once per message):
 #   verification_gate:
 #     enabled: true
 #     max_rejections: 1

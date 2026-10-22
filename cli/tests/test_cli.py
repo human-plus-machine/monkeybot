@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 CLI_ROOT = Path(__file__).resolve().parents[1]
 
@@ -329,7 +330,9 @@ def test_new_coding_template_via_cli(tmp_path: Path) -> None:
     result = _run_cli("new", "--dest", str(tmp_path), "--yes", "--template", "coding")
     assert result.returncode == 0, result.stderr
     text = (tmp_path / "monkeybot_config" / "monkeybot.yaml").read_text()
-    assert "coding:" in text and "enabled: true" in text
+    doc = yaml.safe_load(text)
+    assert "enabled" not in doc["coding"]
+    assert doc["coding"]["verification_gate"]["enabled"] is True
     assert "Explore before editing" in (tmp_path / "monkeybot_config" / "AGENT.md").read_text()
     assert "paths.workspace_root" in result.stdout
 

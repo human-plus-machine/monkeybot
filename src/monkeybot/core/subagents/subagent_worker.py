@@ -404,7 +404,7 @@ async def _async_main() -> None:
         cfg = get_config_store().current_or_none()
         window_tokens = context_window_tokens(cfg)
         # A subagent starts with a fresh ledger: it has read nothing the parent read.
-        read_ledger = FileReadLedger() if cfg is not None and cfg.coding.enabled else None
+        read_ledger = FileReadLedger()
 
         try:
             _ws_backend = _build_web_search_backend()

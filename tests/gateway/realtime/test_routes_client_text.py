@@ -263,3 +263,48 @@ async def test_assistant_boundary_writes_talk_transcript(
     assert "UserMessage" in types
     assert "AssistantTextEnded" in types
     assert "TurnComplete" in types
+
+
+@pytest.mark.asyncio
+async def test_assistant_boundary_uses_the_connection_read_ledger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from monkeybot.core.tools.read_ledger import FileReadLedger
+
+    state = _state()
+    state.buffer.add_user_text("edit the file")
+    state.buffer.mark_user_turn_boundary()
+    state.buffer.add_assistant_text("done")
+    state.buffer.mark_assistant_turn_boundary()
+
+    ledger = FileReadLedger()
+    history = MagicMock()
+    history.append = AsyncMock()
+    history.load = AsyncMock(return_value=[])
+    ctx = MagicMock()
+    ctx.memory = None
+    ctx.thread_id = "s1"
+    ctx.request_id = "r1"
+    ctx.model = "fake"
+    ctx.config = None
+    ctx.read_ledger = ledger
+    deps = MagicMock()
+    deps.inspectors = []
+    deps.hook_manager = None
+
+    seen: dict[str, object] = {}
+    executor = MagicMock()
+    executor.aclose = AsyncMock(return_value=[])
+
+    def _capture(*_args: object, **kwargs: object) -> MagicMock:
+        seen.update(kwargs)
+        return executor
+
+    monkeypatch.setattr(
+        "monkeybot.gateway.realtime.routes._create_tool_executor",
+        _capture,
+    )
+
+    await _handle_assistant_boundary(MagicMock(), state, ctx, history, deps, None, None)
+
+    assert seen["read_ledger"] is ledger

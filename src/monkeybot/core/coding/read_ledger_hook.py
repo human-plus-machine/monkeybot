@@ -12,6 +12,10 @@ class ReadLedgerCompactionHook:
     edit made "from memory" would be blind. Clearing the reads turns that into a
     ``read_before_write`` refusal and a fresh ``read_file``. The ledger's ``written``
     record and command log survive, so the workspace trailer stays accurate.
+
+    The loop also clears in ``_fire_history_compacted`` before this hook runs, so a
+    subagent (no hook manager) cannot keep stale reads. This hook remains for the
+    same invariant when a caller fires the event without that helper.
     """
 
     def register(self, manager: HookManager) -> None:

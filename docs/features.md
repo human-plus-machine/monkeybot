@@ -177,7 +177,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Section order (cache-friendly):**
 
-1. **Stable prefix (epoch baseline):** `AGENT.md` + harness + (coding mode: `## Project instructions`, `## Repo overview`; see [§22](#22-coding-mode)) + session attachments
+1. **Stable prefix (epoch baseline):** `AGENT.md` + harness + (`## Project instructions`, `## Repo overview`; see [§22](#22-coding-mode)) + session attachments
 2. **Volatile tail:** current date (`YYYY-MM-DD`) + memory index + skills + "Current request" anchor
 3. **Mid-conversation updates (within epoch):** chronological user message with `## System context update` when volatile sources change; leading baseline stays byte-identical for prompt cache
 
@@ -541,7 +541,7 @@ its `.env` before YAML values fill still-unset environment variables.
 
 | Command | Purpose |
 |---------|---------|
-| `monkeybot new` | Scaffold `monkeybot_config/`, workspace, `.env.example`. `--template {default,coding}` (prompted when interactive); `coding` swaps in a coding `AGENT.md`, a toolchain `command_allowlist.yaml` (pytest, npm/pnpm/yarn/node/npx, cargo, go, make, ruff, mypy, tsc, sed, awk, find, head, tail, wc, diff; install denies kept, plus `find -delete/-exec` and any `rm`), a `permissions.yaml` that asks before `git push`, `git reset --hard`, `git clean`, and `npx` even when those commands are chained or wrapped in `bash -c`, and deep-merges `monkeybot.overrides.yaml` (`coding.enabled`, verification gate, verifier ledger+tracker, transcripts, 200k context window, 100 turns) over the example config |
+| `monkeybot new` | Scaffold `monkeybot_config/`, workspace, `.env.example`. `--template {default,coding}` (prompted when interactive); `coding` swaps in a coding `AGENT.md`, a toolchain `command_allowlist.yaml` (pytest, npm/pnpm/yarn/node/npx, cargo, go, make, ruff, mypy, tsc, sed, awk, find, head, tail, wc, diff; install denies kept, plus `find -delete/-exec` and any `rm`), a `permissions.yaml` that asks before `git push`, `git reset --hard`, `git clean`, and `npx` even when those commands are chained or wrapped in `bash -c`, and deep-merges `monkeybot.overrides.yaml` (verification gate, verifier ledger+tracker, transcripts, 200k context window, 100 turns) over the example config |
 | `monkeybot validate` | YAML, paths, MCP, provider env |
 | `monkeybot doctor` | Python, harness, extras, credentials, port |
 | `monkeybot run` | Foreground gateway (fail-closed harness probe) |
@@ -680,22 +680,22 @@ Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.
 
 ### 22. Coding mode
 
-**Purpose:** Make a monkeybot agent reliable on a real repository — navigate it, edit it precisely, prove the edit, and survive long tasks. Off by default; `monkeybot new --template coding` turns it on. Config is the YAML-only `coding:` section (`core/config/settings.py::CodingConfig`): `enabled`, `verification_gate.{enabled, verify_commands, max_rejections}`, `project_instructions_files`. Non-coding agents are untouched.
+**Purpose:** Make a monkeybot agent reliable on a real repository — navigate it, edit it precisely, prove the edit, and survive long tasks. Always on for every agent; `monkeybot new --template coding` additionally scaffolds a coding `AGENT.md`, toolchain allowlist and the verification gate. Config is the YAML-only `coding:` section (`core/config/settings.py::CodingConfig`): `verification_gate.{enabled, verify_commands, max_rejections}`, `project_instructions_files`. The former `coding.enabled` flag is retired and ignored (with a warning).
 
 **Key files:** `core/prompts/harness_prompt.py` (protocol block), `core/context/project_context.py`, `core/tools/read_ledger.py`, `core/tools/gitignore.py`, `core/coding/{git_context_hook,verification_gate,read_ledger_hook}.py`, `core/runtime/history_compaction.py`, `cli/.../scaffold_defaults/templates/coding/`.
 
 **Ownership rule:** mechanics (which tool, in what order, what counts as evidence) live in `harness_prompt.py`; judgment (how much to plan, when to ask, style) lives in the template `AGENT.md`.
 
-**What it adds when `coding.enabled`:**
+**What it adds:**
 - **Protocol block.** `### Editing & verification protocol` in the stable harness prefix: locate with `glob`/`grep`/`list_dir`, `read_file` before editing, smallest edit, verify by running, final answer states what ran or `not verified: <why>`.
-- **Read-before-write ledger.** `FileReadLedger` (one per session, held on the session bus like `todo_store`) records `(mtime_ns, size)` per file at `read_file`. `replace_in_file`, `apply_patch` (Update/Delete) and `write_file` on an *existing* file return `error_kind=policy` with `details.code` `read_before_write` (never read) or `stale_read` (changed since). New files are free; the agent's own successful writes keep a file "seen". Subagents start with a fresh ledger. Without a ledger (non-coding) edits are not gated.
+- **Read-before-write ledger.** `FileReadLedger` (one per chat session, held on the session bus like `todo_store`; the realtime voice loop keeps a separate one for that connection, because it does not share the bus and does not compact) records `(mtime_ns, size)` per file at `read_file`. `replace_in_file`, `apply_patch` (Update/Delete) and `write_file` on an *existing* file return `error_kind=policy` with `details.code` `read_before_write` (never read) or `stale_read` (changed since). New files are free; the agent's own successful writes keep a file "seen". Subagents start with a fresh ledger. Edits are gated for every agent; only tools built without a ledger (tests, embedded executors such as `run_pattern_bc_turn`) skip the check.
 - **Project instructions and repo overview** in the stable prefix (`## Project instructions`, `## Repo overview`; deliberately *not* volatile headings, so they cache). The first existing file of `project_instructions_files` is injected, capped at 12k chars, symlinks escaping the workspace skipped, and `## Skills`-style headings inside it demoted so they cannot be mistaken for the volatile tail. The overview is byte-stable for an unchanged workspace (toolchain guess + sorted top-level dirs, plus well-known root files and package subdirectories — not arbitrary files, so ordinary edits never rewrite the prefix). Editing `AGENTS.md` mid-session changes the stable fingerprint and opens a new context epoch.
 - **Git state** via a `PRE_TURN` hook (`git status --porcelain -b`, 1 s timeout) into `## Runtime notes` — volatile, never in the cached prefix.
 - **Verification gate** (`coding.verification_gate.enabled`). `VerificationGate` tracks successful writes and passing verify commands. A `run_command` counts only when one of its shell segments matches `verify_commands`, the result is an explicit foreground `ok: true` (a background start does not count), and the exit is the check's own (`pytest || true` does not count). Commands that only read or list files never count. While edits are unverified (or this message touched files/`todo_list` and todo items are open) it sets `hold_assistant_text` on `BEFORE_PROVIDER_REQUEST`, and on `PRE_FINAL_ANSWER` refuses the answer up to `max_rejections` times with `[Harness] You changed N files (…) since the last passing verification command. Run the project's test/lint command now, or state in your answer that you could not verify and why.` Pure Q&A turns are never gated; subagents have no hook manager and are not gated.
-- **Long-task resilience.** Compaction appends a harness-generated `## Workspace state (harness-generated)` trailer (files written this session, last verification command and exit code, "re-read before editing") from the ledger — not LLM-written, so it cannot be misremembered. `HISTORY_COMPACTED` clears the ledger's reads so the agent must re-read before editing a file whose content was summarized away. Oversized tool text is trimmed 70% head / 30% tail. A tool failing on the same `path` three times in a row with *different* other arguments triggers the same doom-loop recovery as three identical calls.
+- **Long-task resilience.** Compaction appends a harness-generated `## Workspace state (harness-generated)` trailer (files written this session, last verification command and exit code, "re-read before editing") from the ledger — not LLM-written, so it cannot be misremembered. The loop then clears the ledger's reads, including when no hook manager is registered (subagents). `ReadLedgerCompactionHook` clears them again; the second clear is a no-op. The agent must re-read before editing a file whose content was summarized away. Oversized tool text is trimmed 70% head / 30% tail. A tool failing on the same `path` three times in a row with *different* other arguments triggers the same doom-loop recovery as three identical calls.
 
 **Invariants:**
-- Core never imports gateway; the gateway wires the ledger (`bus.read_ledger`), hooks (`rebuild_hooks`) and `TurnContext.read_ledger`.
+- Core never imports gateway; the gateway wires the ledger (`bus.read_ledger` for chat, a connection-scoped ledger for realtime), hooks (`rebuild_hooks`) and `TurnContext.read_ledger`. The context and the executor share that one object.
 - Stable prefix stays byte-identical within an epoch; coding blocks only change when `AGENTS.md`, the toolchain markers, or top-level directories change.
 - The gate is policy in a hook; the loop only offers the generic hold/refuse seam (§16) and is bounded (hook errors and timeouts are pass-through, refusals are capped, never raises, still ends in `TurnComplete`).
 - Realtime loop does not implement `PRE_FINAL_ANSWER`/`HISTORY_COMPACTED` yet.
@@ -795,7 +795,7 @@ Use this when reviewing PRs or designing new features.
 | Hook settlement timeout | 2s | `MONKEYBOT_HOOK_SETTLEMENT_TIMEOUT_S` |
 | Parallel-safe tool concurrency | 10 | `MONKEYBOT_PARALLEL_TOOL_CONCURRENCY` |
 | Parallel `task` concurrency | 10 | code constant (`_MAX_CONCURRENT_SUBAGENTS`) |
-| Coding mode | off | `coding.enabled` (YAML only) |
+| Coding mode | always on | — (`coding.enabled` retired) |
 | Verification gate | off; 1 refusal per message (loop cap 3) | `coding.verification_gate.{enabled,max_rejections,verify_commands}` |
 | Project instructions | 12000 chars, first of `AGENTS.md`, `CLAUDE.md`, `.monkeybot/AGENTS.md` | `coding.project_instructions_files` |
 | Repo overview | ≤ 80 entries | code constant |

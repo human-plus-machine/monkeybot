@@ -259,20 +259,17 @@ def test_newline_directory_name_cannot_split_the_cached_prefix(tmp_path: Path) -
     assert "pkg/" in stable
 
 
-def _coding_config(tmp_path: Path, *, enabled: bool):
+def _coding_config(tmp_path: Path):
     reset_runtime_env_state_for_tests()
     cfg_dir = tmp_path / "monkeybot_config"
     cfg_dir.mkdir(exist_ok=True)
-    (cfg_dir / "monkeybot.yaml").write_text(
-        f"coding:\n  enabled: {str(enabled).lower()}\n", encoding="utf-8"
-    )
+    (cfg_dir / "monkeybot.yaml").write_text("model:\n  provider: fake\n", encoding="utf-8")
     return build_runtime_config(agent_root=tmp_path)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("enabled", [True, False])
-async def test_build_context_fills_coding_context_only_when_enabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled: bool
+async def test_build_context_always_fills_coding_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
     ws = tmp_path / "ws"
@@ -292,15 +289,12 @@ async def test_build_context_fills_coding_context_only_when_enabled(
             skills_path=skills,
             mcp_client=FakeMCPClient([]),
             workspace_root=ws,
-            config=_coding_config(tmp_path, enabled=enabled),
+            config=_coding_config(tmp_path),
         )
     finally:
         reset_runtime_env_state_for_tests()
-    if enabled:
-        assert "run make check" in ctx.project_instructions
-        assert "python" in ctx.repo_overview
-    else:
-        assert ctx.project_instructions == "" and ctx.repo_overview == ""
+    assert "run make check" in ctx.project_instructions
+    assert "python" in ctx.repo_overview
 
 
 def test_project_context_lives_in_the_cacheable_prefix_in_order() -> None:

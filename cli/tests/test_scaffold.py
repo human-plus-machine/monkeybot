@@ -333,7 +333,7 @@ def test_coding_template_merges_overrides_into_active_config(tmp_path: Path) -> 
     doc = yaml.safe_load(
         (tmp_path / "monkeybot_config" / "monkeybot.yaml").read_text(encoding="utf-8")
     )
-    assert doc["coding"] == {"enabled": True, "verification_gate": {"enabled": True}}
+    assert doc["coding"] == {"verification_gate": {"enabled": True}}
     assert doc["verifier"]["enabled"] is True
     assert doc["verifier"]["ledger"]["enabled"] is True
     assert doc["verifier"]["tracker"]["enabled"] is True
@@ -354,7 +354,7 @@ def test_coding_template_config_is_accepted_by_the_core_loader(tmp_path: Path) -
     run_new(dest=tmp_path, force=False, template="coding", provider="anthropic")
     cfg_path = str(tmp_path / "monkeybot_config" / "monkeybot.yaml")
     coding = get_coding_config(cfg_path)
-    assert coding.enabled and coding.verification_gate.enabled
+    assert coding.verification_gate.enabled
     verifier = get_verifier_config(cfg_path)
     assert verifier.enabled and verifier.tracker.enabled and not verifier.judge.enabled
 
@@ -392,7 +392,7 @@ def test_coding_template_does_not_retemplate_an_existing_config(tmp_path: Path) 
     assert doc["model"]["name"] == "claude-x"
     run_new(dest=tmp_path, force=True, template="coding")
     doc = yaml.safe_load((cfg / "monkeybot.yaml").read_text(encoding="utf-8"))
-    assert doc["coding"]["enabled"] is True
+    assert doc["coding"]["verification_gate"]["enabled"] is True
 
 
 def test_unknown_template_is_rejected_before_writing(tmp_path: Path) -> None:
@@ -418,4 +418,4 @@ def test_refresh_keeps_coding_toolchain_entries(tmp_path: Path) -> None:
     doc = yaml.safe_load(
         (tmp_path / "monkeybot_config" / "monkeybot.yaml").read_text(encoding="utf-8")
     )
-    assert doc["coding"]["enabled"] is True
+    assert doc["coding"]["verification_gate"]["enabled"] is True

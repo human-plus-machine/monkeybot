@@ -41,7 +41,6 @@ sandbox:
   enabled: false
 
 coding:
-  enabled: true
   verification_gate:
     enabled: true
 

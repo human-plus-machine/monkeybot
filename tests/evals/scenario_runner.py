@@ -87,8 +87,6 @@ class Scenario:
     # temp copy of ``workspace_fixture`` (a directory under ``evals/``).
     executor: str = "recording"
     workspace_fixture: str | None = None
-    # Coding mode for ``executor: real``: the executor gets a read-before-write ledger.
-    coding: bool = False
     # Register the turn-end VerificationGate (coding.verification_gate) on the loop's hooks.
     gate: bool = False
 
@@ -167,7 +165,6 @@ def load_scenario(path: Path) -> Scenario:
         assertions=assertions,
         executor=executor,
         workspace_fixture=str(fixture) if fixture else None,
-        coding=bool(data.get("coding", False)),
         gate=bool(data.get("gate", False)),
     )
 
@@ -253,7 +250,9 @@ def _result_text(result: ToolExecutionResult) -> str:
     return "\n".join(getattr(block, "text", "") for block in result.blocks)
 
 
-def _prepare_real_workspace(scenario: Scenario, root: Path) -> tuple[Path, CoreToolExecutor]:
+def _prepare_real_workspace(
+    scenario: Scenario, root: Path
+) -> tuple[Path, CoreToolExecutor, FileReadLedger]:
     workspace = root / "workspace"
     if scenario.workspace_fixture:
         shutil.copytree(FIXTURES_ROOT / scenario.workspace_fixture, workspace)
@@ -263,17 +262,25 @@ def _prepare_real_workspace(scenario: Scenario, root: Path) -> tuple[Path, CoreT
     skills_dir = root / "skills"
     memory_dir.mkdir()
     skills_dir.mkdir()
+    # Same object on the executor and the turn context. Compaction clears
+    # ``ctx.read_ledger``; a second ledger would keep allowing stale edits.
+    read_ledger = FileReadLedger()
     executor = CoreToolExecutor(
         workspace_root=workspace,
         memory=_mem_sub(memory_dir),
         skills_path=skills_dir,
         mcp=_NoMCP(),
-        read_ledger=FileReadLedger() if scenario.coding else None,
+        read_ledger=read_ledger,
     )
-    return workspace, executor
+    return workspace, executor, read_ledger
 
 
-def _make_turn_context(scenario: Scenario, workspace: Path | None = None) -> TurnContext:
+def _make_turn_context(
+    scenario: Scenario,
+    workspace: Path | None = None,
+    *,
+    read_ledger: FileReadLedger | None = None,
+) -> TurnContext:
     tools = _core_tool_defs(include_task_tool=True)
     return TurnContext(
         workspace_root=workspace,
@@ -286,6 +293,7 @@ def _make_turn_context(scenario: Scenario, workspace: Path | None = None) -> Tur
         user_id=None,
         parent_run_id=None,
         model="gemini-2.5-flash",
+        read_ledger=read_ledger,
     )
 
 
@@ -312,18 +320,19 @@ async def run_scenario(scenario: Scenario, workspace_root: Path | None = None) -
 
     provider = FakeProvider(scenario.scripted_turns)
     workspace: Path | None = None
+    read_ledger: FileReadLedger | None = None
     executor: RecordingExecutor | _ObservingExecutor
     if scenario.executor == "real":
         if workspace_root is None:
             msg = "executor: real scenarios need a workspace_root"
             raise ValueError(msg)
-        workspace, real = _prepare_real_workspace(scenario, workspace_root)
+        workspace, real, read_ledger = _prepare_real_workspace(scenario, workspace_root)
         executor = _ObservingExecutor(real, record)
         record.workspace = workspace
     else:
         executor = RecordingExecutor()
     history = FakeHistory()
-    ctx = _make_turn_context(scenario, workspace)
+    ctx = _make_turn_context(scenario, workspace, read_ledger=read_ledger)
     events: list[object] = []
     async for evt in run(
         scenario.user_message,

@@ -1,6 +1,5 @@
 description: "Scripted read -> edit -> verify -> report run against a real executor and the calc_repo fixture"
 executor: real
-coding: true
 workspace_fixture: fixtures/coding/calc_repo
 user_message: "The divide-by-zero test fails. Fix calc/ops.py without touching the tests."
 scripted_turns:

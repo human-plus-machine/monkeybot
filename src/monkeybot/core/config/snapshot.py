@@ -1008,7 +1008,7 @@ def _parse_verifier(doc: Mapping[str, Any]) -> VerifierConfig:
 
 
 def _parse_coding(doc: Mapping[str, Any]) -> CodingConfig:
-    """Parse ``coding:`` for the snapshot (invalid shapes fall back to coding mode off)."""
+    """Parse ``coding:`` for the snapshot (invalid shapes fall back to defaults)."""
     try:
         return _coding_config_from_section(_coding_section(dict(doc)))
     except ConfigError as exc:

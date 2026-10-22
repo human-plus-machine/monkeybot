@@ -294,6 +294,13 @@ def warn_retired_tools_keys(doc: Mapping[str, Any]) -> list[str]:
             "runtime.transcript_include_live is retired and ignored — "
             "transcript capture is runtime.transcript_enabled only"
         )
+    coding = doc.get("coding")
+    if isinstance(coding, dict) and "enabled" in coding:
+        found.append("coding.enabled")
+        logger.warning(
+            "coding.enabled is retired and ignored — coding mode is always on; "
+            "coding.verification_gate.enabled is the remaining opt-in"
+        )
     return found
 
 

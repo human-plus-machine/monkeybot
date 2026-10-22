@@ -81,8 +81,8 @@ def _memory_paths_line(*, memory_on: bool, memory_storage_uri: str) -> str:
 
 
 # Coding-agent mechanics (which tool, in what order, what counts as evidence). Judgment —
-# how much to plan, when to ask, style — belongs in the operator's AGENT.md. Gated by
-# ``coding_mode`` (``coding.enabled``); lives in the stable prefix so it caches.
+# how much to plan, when to ask, style — belongs in the operator's AGENT.md. Always
+# included; lives in the stable prefix so it caches.
 _CODING_PROTOCOL_BLOCK = """
 
 ### Editing & verification protocol
@@ -169,7 +169,6 @@ def harness_fixed_context(
     emission_style: bool = False,
     memory_on: bool = True,
     catalog_mcp_servers: Sequence[str] | None = None,
-    coding_mode: bool = False,
 ) -> str:
     """Runtime-owned protocol, paths, MCP naming, and strict tool-call rules.
 
@@ -188,7 +187,7 @@ def harness_fixed_context(
     not mention ``enable_mcp`` (the tool is also omitted from the JSON tool list).
     The model must use this list (and the ``enable_mcp`` tool schema); it must not
     read control-plane config files.
-    ``coding_mode`` (``coding.enabled``) appends the editing & verification protocol.
+    The editing & verification protocol is always appended (coding mode is always on).
     """
     exec_note = (
         _RUN_COMMAND_EXEC_NOTE_SANDBOX if run_command_opensandbox else _RUN_COMMAND_EXEC_NOTE_HOST
@@ -217,7 +216,7 @@ def harness_fixed_context(
         ),
         workspace_root=workspace_root,
     )
-    coding_block = _CODING_PROTOCOL_BLOCK.rstrip("\n") + "\n" if coding_mode else ""
+    coding_block = _CODING_PROTOCOL_BLOCK.rstrip("\n") + "\n"
     personas_block = _subagent_personas_block(subagent_personas or ())
     emission_block = _emission_section(
         emission_style=emission_style,

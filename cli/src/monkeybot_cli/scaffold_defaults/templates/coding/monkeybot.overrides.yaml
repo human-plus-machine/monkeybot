@@ -7,7 +7,6 @@
 # directory requires updating those prefixes.
 
 coding:
-  enabled: true
   # Reject a final answer that follows unverified edits, once per message.
   verification_gate:
     enabled: true
