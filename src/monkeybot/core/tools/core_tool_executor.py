@@ -112,11 +112,15 @@ from monkeybot.core.tools.fs_isolation import (
     toolchain_cache_env,
 )
 from monkeybot.core.tools.grant_store import PATH_GRANT_TOOLS, GrantStoreCache
-from monkeybot.core.tools.inspector import parse_run_command
+from monkeybot.core.tools.inspector import norm_run_command_line, parse_run_command
+from monkeybot.core.tools.read_ledger import FileReadLedger, WriteProblem, stamp_of
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.spill_inventory import (
     partial_output_tail,
+    collapse_run_command_streams,
+    slice_run_command_streams,
     spill_budgets_from_window,
+    write_run_command_output_spill,
     write_run_command_timeout_spill,
     write_spill_with_inventory,
 )
@@ -146,6 +150,8 @@ _PARENT_CANCEL_TASK_ERR = "task: cancelled (parent)"
 
 _SPILL_DIR = ".monkeybot/spill"
 
+_LIST_DIR_MAX_ENTRIES = 300
+
 _CORE_TOOL_NAMES = frozenset(
     {
         "load_file",
@@ -154,6 +160,7 @@ _CORE_TOOL_NAMES = frozenset(
         "replace_in_file",
         "glob",
         "grep",
+        "list_dir",
         "apply_patch",
         "list_skills",
         "task",
@@ -179,7 +186,8 @@ _CORE_TOOL_NAMES = frozenset(
     }
 )
 
-_SPILL_SKIP_TOOLS = frozenset({"read_file", "load_file"})
+# run_command self-spills in ``_tool_run_command`` so exit_code and the tail survive.
+_SPILL_SKIP_TOOLS = frozenset({"read_file", "load_file", "run_command"})
 
 
 def _mcp_call_meta(ctx: TurnContext) -> dict[str, object]:
@@ -710,6 +718,25 @@ def _built_in_tool_error(
     return _j(payload)
 
 
+def _bool_arg(raw: object, *, default: bool) -> bool:
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _read_ledger_error(problem: WriteProblem, key: str) -> str:
+    """Policy envelope for an edit refused by the read-before-write ledger."""
+    if problem == "read_before_write":
+        message = f"{key} has not been read in this context; refusing to edit it blind."
+        hint = f"Call read_file on {key}, then repeat the edit against what you read."
+    else:
+        message = f"{key} changed on disk since you last read it (a command, another process, or a compaction)."
+        hint = f"Call read_file on {key} again, then redo the edit against its current content."
+    return _built_in_tool_error("policy", message, hint, {"code": problem, "path": key})
+
+
 # Credential broker phase 5.3: tool calls that can route a secret out of the
 # process without ever touching the LLM provider (a shell command, a file
 # write, a browser navigation/input, or an outbound web request) get their
@@ -956,6 +983,7 @@ class CoreToolExecutor(ToolExecutorPort):
         loops_registry: LoopsToolRegistry | None = None,
         config: RuntimeConfig | None = None,
         grants_path: Path | None = None,
+        read_ledger: FileReadLedger | None = None,
     ) -> None:
         ws_settings = workspace_settings_from_config()
         self._skills_path = Path(skills_path).resolve()
@@ -970,6 +998,8 @@ class CoreToolExecutor(ToolExecutorPort):
         )
         self._memory = memory
         self._mcp = mcp
+        # Coding mode only: with a ledger, edits require a prior read of the same bytes.
+        self._read_ledger = read_ledger
         self._attachment_store = attachment_store
         self._run_store = run_store
         self._scheduled_loop_store = scheduled_loop_store
@@ -1011,7 +1041,15 @@ class CoreToolExecutor(ToolExecutorPort):
             # Allow absolute argv paths under the resolved skills root (list_skills
             # returns this path; scripts live outside the workspace cwd).
             skills = str(self._skills_path)
-            paths = tuple(dict.fromkeys((*paths, skills, f"{skills}/")))
+            extra = [skills, f"{skills}/"]
+            if run_command_allowed_path_prefixes is None:
+                # Built-in defaults only: the agent's own ``tests``/``src`` trees (relative
+                # or absolute). ``_validate_paths`` still resolves them, so ``../memory``
+                # and symlink escapes stay outside, and ``.env``/config stay unreachable.
+                # A configured allowlist is the operator's call and is not widened.
+                root = str(self._workspace.repo_root)
+                extra += ["./tests/", "./src/", f"{root}/tests/", f"{root}/src/"]
+            paths = tuple(dict.fromkeys((*paths, *extra)))
         self._run_cmd_allowed_commands = cmds
         self._run_cmd_allowed_paths = paths
         _job_cfg = SandboxConfig.from_env(self._config)
@@ -1189,6 +1227,8 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = self._tool_glob(args)
             elif name == "grep":
                 result_text, err_text = self._tool_grep(args)
+            elif name == "list_dir":
+                result_text, err_text = self._tool_list_dir(args)
             elif name == "apply_patch":
                 result_text, err_text = self._tool_apply_patch(args)
             elif name == "list_skills":
@@ -1491,6 +1531,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 max_chars=max_chars,
                 apply_default_limit=not spill_path,
             )
+            self._note_read(path)
             return (_j(payload), None)
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
@@ -1512,8 +1553,12 @@ class CoreToolExecutor(ToolExecutorPort):
             content = args.get("body", "")
         if not isinstance(content, str):
             content = str(content)
+        guard = self._edit_guard(path)
+        if guard is not None:
+            return (None, guard)
         try:
             payload = self._workspace.write_file(path, content)
+            self._note_write(path)
             return (_j(payload), None)
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
@@ -1550,13 +1595,76 @@ class CoreToolExecutor(ToolExecutorPort):
         replace_all = args.get("replace_all", False)
         if not isinstance(replace_all, bool):
             replace_all = str(replace_all).strip().lower() in ("1", "true", "yes", "on")
+        guard = self._edit_guard(path)
+        if guard is not None:
+            return (None, guard)
         try:
             payload = self._workspace.replace_in_file(
                 path, old_string, new_string, replace_all=replace_all
             )
+            self._note_write(path)
             return (_j(payload), None)
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
+
+    def _ledger_key(self, path: str) -> tuple[str, Path] | None:
+        """Ledger key and physical path for a writable workspace path, or ``None`` if invalid."""
+        try:
+            fp = self._workspace.require_writable_path(path)
+            return self._workspace.repo_rel(fp), fp
+        except WorkspaceError:
+            return None
+
+    def _note_read(self, path: str) -> None:
+        ledger = self._read_ledger
+        if ledger is None:
+            return
+        try:
+            fp = self._workspace.resolve_read_path(path)
+            key = self._workspace.repo_rel(fp)
+        except WorkspaceError:
+            return
+        ledger.record_read(key, stamp_of(fp))
+
+    def _note_write(self, path: str) -> None:
+        ledger = self._read_ledger
+        keyed = self._ledger_key(path) if ledger is not None else None
+        if ledger is not None and keyed is not None:
+            ledger.record_write(keyed[0], stamp_of(keyed[1]))
+
+    def _note_forgotten(self, path: str) -> None:
+        keyed = self._ledger_key(path) if self._read_ledger is not None else None
+        if self._read_ledger is not None and keyed is not None:
+            self._read_ledger.forget(keyed[0])
+
+    def _edit_guard(self, path: str) -> str | None:
+        """Error envelope when an edit to existing ``path`` breaks the read-before-write rule."""
+        ledger = self._read_ledger
+        if ledger is None:
+            return None
+        keyed = self._ledger_key(path)
+        if keyed is None or not keyed[1].is_file():
+            return None  # invalid path or a new file: the tool reports / allows it itself
+        key, fp = keyed
+        problem = ledger.check_write(key, stamp_of(fp))
+        return None if problem is None else _read_ledger_error(problem, key)
+
+    def _tool_list_dir(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+        path = _str_arg(args, "path", "root", "dir") or "."
+        try:
+            entries = self._workspace.list_directory(path)
+        except WorkspaceError as exc:
+            return (None, _workspace_error_envelope(exc))
+        shown = entries[:_LIST_DIR_MAX_ENTRIES]
+        payload: dict[str, Any] = {
+            "ok": True,
+            "path": path,
+            "dirs": [e["name"] for e in shown if e["kind"] == "dir"],
+            "files": [e["name"] for e in shown if e["kind"] == "file"],
+            "count": len(entries),
+            "truncated": len(entries) > len(shown),
+        }
+        return (_j(payload), None)
 
     def _tool_glob(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         pattern = _str_arg(args, "pattern", "glob")
@@ -1571,8 +1679,9 @@ class CoreToolExecutor(ToolExecutorPort):
                 ),
             )
         root = _str_arg(args, "root")
+        files_only = _bool_arg(args.get("files_only"), default=True)
         try:
-            payload = self._workspace.glob_paths(pattern, root=root)
+            payload = self._workspace.glob_paths(pattern, root=root, files_only=files_only)
             return (_j(payload), None)
         except WorkspaceError as exc:
             if getattr(exc, "code", None) == "incomplete_scan":
@@ -1622,6 +1731,9 @@ class CoreToolExecutor(ToolExecutorPort):
             file_glob = None
         max_matches = _coerce_int(args.get("max_matches"), None)
         offset = _coerce_int(args.get("offset"), None)
+        context = _coerce_int(args.get("context"), 0) or 0
+        files_only = _bool_arg(args.get("files_only"), default=False)
+        respect_gitignore = _bool_arg(args.get("respect_gitignore"), default=True)
         try:
             payload = self._workspace.grep(
                 pattern,
@@ -1630,6 +1742,9 @@ class CoreToolExecutor(ToolExecutorPort):
                 file_glob=file_glob,
                 max_matches=max_matches,
                 offset=offset,
+                context=context,
+                files_only=files_only,
+                respect_gitignore=respect_gitignore,
             )
             return (_j(payload), None)
         except WorkspaceError as exc:
@@ -1651,7 +1766,13 @@ class CoreToolExecutor(ToolExecutorPort):
             return (None, _workspace_error_envelope(exc))
 
     def _tool_apply_patch(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
-        from monkeybot.core.tools.patch import PatchError, parse_patch, plan_and_apply_patch
+        from monkeybot.core.tools.patch import (
+            DeleteHunk,
+            PatchError,
+            UpdateHunk,
+            parse_patch,
+            plan_and_apply_patch,
+        )
 
         patch_text = args.get("patch_text")
         if patch_text is None:
@@ -1670,7 +1791,13 @@ class CoreToolExecutor(ToolExecutorPort):
             )
         try:
             hunks = parse_patch(patch_text)
+            for hunk in hunks:
+                if isinstance(hunk, (UpdateHunk, DeleteHunk)):
+                    guard = self._edit_guard(hunk.path)
+                    if guard is not None:
+                        return (None, guard)
             payload = plan_and_apply_patch(self._workspace, hunks)
+            self._note_patch_applied(payload)
             return (_j(payload), None)
         except PatchError as exc:
             code = getattr(exc, "code", "patch_error")
@@ -1701,6 +1828,21 @@ class CoreToolExecutor(ToolExecutorPort):
             )
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
+
+    def _note_patch_applied(self, payload: dict[str, object]) -> None:
+        if self._read_ledger is None:
+            return
+        files = payload.get("files")
+        for entry in files if isinstance(files, list) else []:
+            if not isinstance(entry, dict):
+                continue
+            action, path = entry.get("action"), str(entry.get("path", ""))
+            if action in ("add", "update", "move"):
+                self._note_write(path)
+            if action == "delete":
+                self._note_forgotten(path)
+            if action == "move" and entry.get("from"):
+                self._note_forgotten(str(entry["from"]))
 
     def _tool_list_skills(self, ctx: TurnContext) -> tuple[str | None, str | None]:
         rows = [{"name": s.name, "description": s.description} for s in ctx.skills]
@@ -1799,6 +1941,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 ),
             )
 
+        persona = self._subagent_registry.get(subagent_type) if subagent_type else None
         parent_label = f"{ctx.request_id}:{call.call_id}"
         traceparent = _inject_subagent_traceparent()
         run_id = make_run_id()
@@ -1808,7 +1951,7 @@ class CoreToolExecutor(ToolExecutorPort):
             context=context_val,
             memory_storage_uri=memory_uri,
             parent_run_id=parent_label,
-            model=ctx.model,
+            model=(persona.model if persona is not None else None) or ctx.model,
             traceparent=traceparent,
             agent_md=str(agent_md_path),
             subagent_type=subagent_type,
@@ -1871,6 +2014,8 @@ class CoreToolExecutor(ToolExecutorPort):
             artifacts_path=self._artifacts_path,
             config=self._config,
         )
+        if persona is not None and persona.vertex_location:
+            child_env["VERTEX_AI_LOCATION"] = persona.vertex_location
         payload = await _run_inline_subagent_with_progress(
             script=script,
             envelope=envelope,
@@ -2112,17 +2257,66 @@ class CoreToolExecutor(ToolExecutorPort):
                     {"tool": "run_command", "command": cmd, "argv": list(argv)},
                 ),
             )
-        return (
-            _j(
-                {
-                    "ok": result.exit_code == 0,
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
-                    "exit_code": result.exit_code,
-                }
-            ),
-            None,
+        if self._read_ledger is not None:
+            self._read_ledger.record_command(norm_run_command_line(args) or cmd, result.exit_code)
+        ok = result.exit_code == 0
+        payload = _j(
+            {
+                "ok": ok,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "exit_code": result.exit_code,
+            }
         )
+        budgets = spill_budgets_from_window(ctx.context_window_tokens)
+        if len(payload) < budgets.spill_threshold:
+            return payload, None
+        spill_path = await asyncio.to_thread(
+            write_run_command_output_spill,
+            workspace_root=self._workspace.repo_root,
+            thread_id=ctx.session_id,
+            call_id=call.call_id,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            exit_code=result.exit_code,
+        )
+        note = "Output was large; stdout/stderr are shown as head/tail only. " + (
+            f"read_file {spill_path} (offset/limit) for the full streams."
+            if spill_path
+            else "The full streams could not be saved."
+        )
+        # Excerpts are sized in raw chars, but JSON escapes (``\u001b``, ``\n``) can
+        # grow them past the hard cap, which would cut the JSON; halve until it fits.
+        unit_chars = max(1, budgets.inline_hard_cap // 12)
+        collapsed = collapse_run_command_streams(result.stdout, result.stderr)
+        base: dict[str, Any] = {"ok": ok, "exit_code": result.exit_code}
+        if spill_path:
+            base["output_path"] = spill_path
+        while True:
+            shaped = {
+                **base,
+                **slice_run_command_streams(
+                    collapsed,
+                    stdout_chars=len(result.stdout),
+                    stderr_chars=len(result.stderr),
+                    unit_chars=unit_chars,
+                ),
+                "note": note,
+            }
+            text = _j(shaped)
+            if len(text) <= budgets.inline_hard_cap:
+                return text, None
+            if unit_chars == 1:
+                break
+            unit_chars = max(1, unit_chars // 2)
+        # Even minimal excerpts exceed the cap: drop them rather than let the JSON be cut.
+        bare = {
+            **base,
+            "stdout_chars": len(result.stdout),
+            "stderr_chars": len(result.stderr),
+            "note": note,
+        }
+        return _j(bare), None
 
     async def _start_background_command(
         self,

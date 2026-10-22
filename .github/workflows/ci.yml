@@ -29,7 +29,7 @@ jobs:
         run: uv run mypy src/monkeybot
 
       - name: Pytest
-        run: uv run pytest tests/ -q
+        run: uv run pytest tests/ -q -n auto
 
       - name: CLI pytest
         working-directory: cli
@@ -49,3 +49,4 @@ jobs:
           uv run python evals/test_assertions.py
           uv run python evals/test_report.py
           uv run python evals/test_runner_sse.py
+          uv run python evals/test_coding_hard_oracle.py

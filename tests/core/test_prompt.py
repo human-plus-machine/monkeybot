@@ -64,7 +64,7 @@ def test_compose_uses_memory_index_lines() -> None:
     mem_section = out.split("## Memory wake-up", 1)[1].split("## Skills", 1)[0]
     assert "a" in mem_section
     assert "b" in mem_section
-    assert "\n\n## Skills\n- s1\n- s2" in out
+    assert "\n\n## Skills\n- s1 — d1\n- s2 — d2" in out
 
 
 def test_compose_retired_context_curation_does_not_truncate_wake_up(
@@ -386,3 +386,33 @@ def test_harness_precedes_volatile_sections() -> None:
     skills_idx = volatile.index(heading_marker(SKILLS_HEADING))
     current_idx = volatile.index(heading_marker(CURRENT_REQUEST_HEADING))
     assert date_idx < mem_idx < skills_idx < current_idx
+
+
+def test_skills_section_lists_description_and_handles_edge_cases() -> None:
+    long_desc = "word " * 100
+    ctx = _minimal_ctx(
+        skills=[
+            SkillRef(name="plain", description="Does a thing\nacross lines"),
+            SkillRef(name="bare", description=""),
+            SkillRef(name="wordy", description=long_desc),
+        ],
+    )
+    out = compose_system_prompt(ctx)
+    skills_block = out.split("\n\n## Skills\n", 1)[1].split("\n\n", 1)[0].splitlines()
+    assert skills_block[0] == "- plain — Does a thing across lines"
+    assert skills_block[1] == "- bare"
+    assert skills_block[2].startswith("- wordy — word word")
+    assert skills_block[2].endswith("…")
+    assert len(skills_block[2]) < 230
+
+
+def test_coding_protocol_is_always_in_stable_prefix() -> None:
+    marker = "### Editing & verification protocol"
+    for ctx in (
+        _minimal_ctx(),  # no pinned config at all
+        _minimal_ctx(skills=[SkillRef(name="s1", description="d1")]),
+    ):
+        stable, volatile = split_system_prompt_for_cache(compose_system_prompt(ctx))
+        assert marker in stable
+        assert marker not in volatile
+        assert stable.index(marker) < stable.index("### Tool-call protocol (strict)")

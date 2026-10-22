@@ -183,3 +183,31 @@ def test_harness_empty_catalog_omits_enable_mcp() -> None:
     assert "Configured MCP servers:" not in out
     assert "`enable_mcp`" not in out
     assert "Do not read or search for MCP config files" in out
+
+
+def test_coding_protocol_block_is_always_present() -> None:
+    coding = harness_fixed_context(include_task_tool=False)
+    for needle in (
+        "### Editing & verification protocol",
+        "`read_before_write`",
+        "`stale_read`",
+        "`snippet`",
+        "`exit_code`",
+        "`not verified: <why>`",
+        "`todo_list`",
+        "operator content",
+    ):
+        assert needle in coding, needle
+    assert coding.index("Editing & verification protocol") < coding.index(
+        "### Tool-call protocol (strict)"
+    )
+
+
+def test_coding_protocol_block_keeps_personas_and_emission_sections() -> None:
+    out = harness_fixed_context(
+        include_task_tool=True,
+        emission_style=True,
+        subagent_personas=[("scout", "explores")],
+    )
+    assert out.index("Editing & verification protocol") < out.index("Subagent personas")
+    assert out.index("Subagent personas") < out.index("### Emission style (terse)")

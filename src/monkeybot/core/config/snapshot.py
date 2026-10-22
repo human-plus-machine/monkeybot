@@ -26,7 +26,7 @@ import os
 import threading
 import time
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -34,6 +34,7 @@ from typing import Any
 from monkeybot.core.config.realtime_config import RealtimeConfig, realtime_config_from_doc
 from monkeybot.core.config.runtime_env import (
     _GCP_PROJECT_ENV_KEYS,
+    CODING_DIFF_KEY,
     CONTENT_DIGEST_TIERS,
     ENV_FIELD_PATHS,
     ENV_MAP,
@@ -51,14 +52,19 @@ from monkeybot.core.config.runtime_env import (
     warn_retired_tools_keys,
 )
 from monkeybot.core.config.settings import (
+    CodingConfig,
     ConfigError,
     SubagentConfig,
     SubagentSettings,
     VerifierConfig,
+    _coding_section,
     _parse_subagent_entries,
     _persona_registry,
     _subagents_section,
     _verifier_section,
+)
+from monkeybot.core.config.settings import (
+    coding_config_from_section as _coding_config_from_section,
 )
 from monkeybot.core.config.settings import (
     subagent_settings_from_section as _subagent_settings_from_section,
@@ -230,6 +236,7 @@ class RuntimeConfig:
     subagent_settings: SubagentSettings
     verifier: VerifierConfig
     env_values: Mapping[str, str]
+    coding: CodingConfig = field(default_factory=CodingConfig)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "env_values", MappingProxyType(dict(self.env_values)))
@@ -599,6 +606,7 @@ def build_runtime_config(
     digest = _compute_digest(merged=merged, pinned=pinned, content=content)
     subagents, subagent_settings = _parse_subagents(merged)
     verifier = _parse_verifier(merged)
+    coding = _parse_coding(merged)
     return RuntimeConfig(
         revision=revision,
         digest=digest,
@@ -614,6 +622,7 @@ def build_runtime_config(
         subagent_settings=subagent_settings,
         verifier=verifier,
         env_values=env_values,
+        coding=coding,
     )
 
 
@@ -642,10 +651,15 @@ def diff_runtime_configs(old: RuntimeConfig, new: RuntimeConfig) -> ConfigDiff:
     if old.verifier != new.verifier:
         changed_content.add("verifier")
         changed_env.add(VERIFIER_DIFF_KEY)
+    if old.coding != new.coding:
+        changed_content.add("coding")
+        changed_env.add(CODING_DIFF_KEY)
     tiers = {ENV_TIERS[k] for k in changed_env if k in ENV_TIERS}
     if SUBAGENTS_DIFF_KEY in changed_env:
         tiers.add(ConfigTier.REBUILD)
     if VERIFIER_DIFF_KEY in changed_env:
+        tiers.add(ConfigTier.REBUILD)
+    if CODING_DIFF_KEY in changed_env:
         tiers.add(ConfigTier.REBUILD)
     return ConfigDiff(
         noop=False,
@@ -991,6 +1005,15 @@ def _parse_verifier(doc: Mapping[str, Any]) -> VerifierConfig:
     except ConfigError as exc:
         logger.error("Ignoring invalid verifier section during snapshot load: %s", exc)
         return VerifierConfig()
+
+
+def _parse_coding(doc: Mapping[str, Any]) -> CodingConfig:
+    """Parse ``coding:`` for the snapshot (invalid shapes fall back to defaults)."""
+    try:
+        return _coding_config_from_section(_coding_section(dict(doc)))
+    except ConfigError as exc:
+        logger.error("Ignoring invalid coding section during snapshot load: %s", exc)
+        return CodingConfig()
 
 
 __all__ = [

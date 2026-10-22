@@ -53,7 +53,9 @@ trap restore_locks EXIT
 uv sync --extra claude --extra vertex-claude --extra bedrock --extra firestore --extra evals
 uv run ruff format --check .
 uv run mypy src/monkeybot
-uv run pytest tests/ -q
+# Each worker is its own process. Tests keep state in tmp_path, so the
+# suite is safe to fan out across the machine.
+uv run pytest tests/ -q -n auto
 
 (
   cd cli
@@ -70,6 +72,7 @@ uv run pytest tests/ -q
 uv run python evals/test_assertions.py
 uv run python evals/test_report.py
 uv run python evals/test_runner_sse.py
+uv run python evals/test_coding_hard_oracle.py
 
 if [[ -z "$(git status --porcelain)" ]]; then
   printf '%s\n' "$head_sha" >"$stamp_file"

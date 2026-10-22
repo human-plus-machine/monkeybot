@@ -397,3 +397,122 @@ def test_move_rollback_lists_successful_half(
     assert not (tmp_path / "dest.txt").exists()
     # Source was never deleted (apply failed on delete), and restore rewrite also failed.
     assert (tmp_path / "src.txt").read_text(encoding="utf-8") == "from\n"
+
+
+def test_derive_rejects_ambiguous_block_without_context() -> None:
+    original = "def a():\n    return 1\ndef b():\n    return 1\n"
+    chunks = (UpdateChunk(old_lines=("    return 1",), new_lines=("    return 2",)),)
+    with pytest.raises(PatchError) as ei:
+        derive_new_contents("f.py", chunks, original)
+    assert ei.value.code == "ambiguous_context"
+    assert ei.value.details["match_lines"] == [2, 4]
+
+
+def test_derive_context_header_disambiguates() -> None:
+    original = "def a():\n    return 1\ndef b():\n    return 1\n"
+    chunks = (
+        UpdateChunk(
+            old_lines=("    return 1",),
+            new_lines=("    return 2",),
+            change_context="def b():",
+        ),
+    )
+    assert (
+        derive_new_contents("f.py", chunks, original)
+        == "def a():\n    return 1\ndef b():\n    return 2\n"
+    )
+
+
+def test_derive_longer_block_disambiguates() -> None:
+    original = "x = 1\nprint(x)\ny = 2\nprint(x)\n"
+    chunks = (UpdateChunk(old_lines=("y = 2", "print(x)"), new_lines=("y = 2", "print(y)")),)
+    assert derive_new_contents("f.py", chunks, original) == "x = 1\nprint(x)\ny = 2\nprint(y)\n"
+
+
+def test_parse_rejects_malformed_hunk_line() -> None:
+    text = "*** Begin Patch\n*** Update File: a.py\n@@ def f():\n-old\nnew without prefix\n*** End Patch\n"
+    with pytest.raises(PatchError) as ei:
+        parse_patch(text)
+    assert ei.value.code == "invalid_hunk_line"
+    assert "new without prefix" in str(ei.value)
+
+
+def test_parse_rejects_prose_before_first_hunk() -> None:
+    text = (
+        "*** Begin Patch\n*** Update File: a.py\nHere is the change:\n@@\n-a\n+b\n*** End Patch\n"
+    )
+    with pytest.raises(PatchError) as ei:
+        parse_patch(text)
+    assert ei.value.code == "invalid_hunk_line"
+
+
+def test_parse_first_chunk_may_omit_header() -> None:
+    text = "*** Begin Patch\n*** Update File: a.py\n-a\n+b\n*** End Patch\n"
+    hunk = parse_patch(text)[0]
+    assert isinstance(hunk, UpdateHunk)
+    assert hunk.chunks[0].old_lines == ("a",)
+    assert hunk.chunks[0].new_lines == ("b",)
+
+
+def test_parse_blank_line_is_blank_context_but_trailing_blanks_dropped() -> None:
+    text = "*** Begin Patch\n*** Update File: a.py\n@@\n a\n\n-b\n+B\n\n*** End Patch\n"
+    chunk = parse_patch(text)[0].chunks[0]  # type: ignore[union-attr]
+    assert chunk.old_lines == ("a", "", "b")
+    assert chunk.new_lines == ("a", "", "B")
+
+
+def test_parse_end_of_file_marker_sets_flag() -> None:
+    text = (
+        "*** Begin Patch\n*** Update File: a.py\n@@\n-tail\n+TAIL\n*** End of File\n*** End Patch\n"
+    )
+    chunk = parse_patch(text)[0].chunks[0]  # type: ignore[union-attr]
+    assert chunk.is_end_of_file is True
+
+
+def test_parse_empty_update_hunk_rejected() -> None:
+    text = "*** Begin Patch\n*** Update File: a.py\n*** End Patch\n"
+    with pytest.raises(PatchError) as ei:
+        parse_patch(text)
+    assert ei.value.code == "empty_hunk"
+
+
+# --- Finding 7: an ambiguous @@ header silently picks the first match --------------
+
+_TWO_INITS = (
+    "class A:\n    def __init__(self):\n        pass\n"
+    "class B:\n    def __init__(self):\n        pass\n"
+)
+
+
+def test_patch_ambiguous_context_header_rejected() -> None:
+    chunks = (
+        UpdateChunk(
+            old_lines=("        pass",),
+            new_lines=("        self.x = 1",),
+            change_context="def __init__(self):",
+        ),
+    )
+    with pytest.raises(PatchError) as ei:
+        derive_new_contents("f.py", chunks, _TWO_INITS)
+    assert ei.value.code == "ambiguous_context"
+
+
+def test_patch_header_ambiguous_but_body_unique_still_applies() -> None:
+    original = "def f():\n    a = 1\ndef f():\n    b = 2\n"
+    chunks = (
+        UpdateChunk(old_lines=("    b = 2",), new_lines=("    b = 3",), change_context="def f():"),
+    )
+    assert (
+        derive_new_contents("f.py", chunks, original)
+        == "def f():\n    a = 1\ndef f():\n    b = 3\n"
+    )
+
+
+# --- Finding 8: trailing blanks dropped before *** End of File ---------------------
+
+
+def test_patch_end_of_file_chunk_keeps_trailing_blank() -> None:
+    text = "*** Begin Patch\n*** Update File: a.txt\n@@\n-x\n+y\n\n*** End of File\n*** End Patch\n"
+    chunk = parse_patch(text)[0].chunks[0]  # type: ignore[union-attr]
+    out = derive_new_contents("a.txt", (chunk,), "x\nmid\nx\n\n")
+    assert out.startswith("x\nmid\ny"), out

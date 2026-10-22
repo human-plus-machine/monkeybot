@@ -186,6 +186,76 @@ def test_suite_aggregate_p95_and_means() -> None:
     assert agg.mean_quality_by_metric["m"] == 0.75
 
 
+def test_materialize_workspace_copies_fixture_and_substitutes_subdir() -> None:
+    from models import Scenario
+    from scenario_loader import materialize_workspace, parse_scenario_yaml
+
+    scenario = parse_scenario_yaml(
+        "workspace_fixture: fixtures/coding/calc_repo\n"
+        "messages:\n  - 'look in {workspace_subdir}/calc'\n",
+        sid="coding/demo",
+    )
+    assert scenario.workspace_fixture == "fixtures/coding/calc_repo"
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        resolved, dest = materialize_workspace(scenario, root)
+        assert dest == root / "eval-coding-demo"
+        assert (dest / "calc" / "ops.py").is_file()
+        assert (dest / "AGENTS.md").is_file()
+        assert resolved.messages == ["look in eval-coding-demo/calc"]
+        assert scenario.messages == ["look in {workspace_subdir}/calc"]  # input untouched
+
+        (dest / "calc" / "ops.py").write_text("# scribbled\n")
+        _, again = materialize_workspace(scenario, root)
+        assert "scribbled" not in (again / "calc" / "ops.py").read_text()  # fresh copy per run
+
+    plain, none_dir = materialize_workspace(Scenario(id="p", messages=["hi"]))
+    assert none_dir is None and plain.messages == ["hi"]
+
+
+def test_overlays_are_copied_over_the_fixture_and_define_the_pristine_files() -> None:
+    from scenario_loader import fixture_file, materialize_workspace, parse_scenario_yaml
+
+    scenario = parse_scenario_yaml(
+        "workspace_fixture: fixtures/coding/shop_repo\n"
+        "workspace_overlays: [fixtures/coding/overlays/bug_discount]\n"
+        "messages: ['fix {workspace_subdir}']\n",
+        sid="coding/ov",
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        _, dest = materialize_workspace(scenario, Path(tmp))
+        pricing = (dest / "shop" / "pricing.py").read_text()
+        assert "return int(amount_cents" in pricing  # overlay wins over the green fixture
+        assert (dest / "shop" / "taxes.py").is_file()  # untouched fixture files remain
+    assert "return int(amount_cents" in fixture_file(scenario, "shop/pricing.py").read_text()
+    assert fixture_file(scenario, "shop/taxes.py").is_file()
+    assert fixture_file(scenario, "nope.py") is None
+
+
+def test_workspace_fixture_must_be_relative() -> None:
+    from scenario_loader import parse_scenario_yaml
+
+    for bad in ("/etc", "../outside"):
+        try:
+            parse_scenario_yaml(f"workspace_fixture: {bad}\nmessages: [hi]\n", sid="x")
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad!r}")
+
+
+def test_coding_suite_scenarios_all_resolve() -> None:
+    from scenario_loader import EVAL_ROOT, fixture_source, load_scenarios_by_id, load_suite
+
+    suite_id, ids = load_suite(EVAL_ROOT / "suites" / "coding.yaml")
+    assert suite_id == "coding"
+    scenarios = load_scenarios_by_id(ids)
+    assert len(scenarios) == 3
+    for scenario in scenarios:
+        source = fixture_source(scenario)
+        assert source is not None and source.is_dir(), scenario.id
+        assert "{workspace_subdir}" in scenario.messages[0], scenario.id
+
+
 if __name__ == "__main__":
     fns = [v for k, v in list(globals().items()) if k.startswith("test_")]
     for fn in fns:

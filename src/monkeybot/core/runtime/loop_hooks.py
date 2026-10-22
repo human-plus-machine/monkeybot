@@ -69,6 +69,7 @@ async def _fire_hook(
     tool_requests: list[dict[str, Any]] | None = None,
     usage: dict[str, int] | None = None,
     provider_error: str | None = None,
+    turns_summarized: int | None = None,
 ) -> HookPayload | None:
     """Construct + fire a payload when ``hook_manager`` is configured; else return ``None``."""
     if hook_manager is None:
@@ -92,6 +93,7 @@ async def _fire_hook(
         tool_requests=tool_requests,
         usage=usage,
         provider_error=provider_error,
+        turns_summarized=turns_summarized,
     )
     return await hook_manager.fire(payload, timeout_s=timeout_s)
 

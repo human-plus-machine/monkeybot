@@ -6,6 +6,40 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### CLI
+
+### Added
+
+- `monkeybot new --template coding` scaffolds an agent with a coding `AGENT.md`, a toolchain command allowlist (including yarn, with `rm` denied inside `bash -c`), ask-before-push permissions that also match chained commands and `bash -c`, and `coding.verification_gate` turned on.
+- `monkeybot mcp-login` signs in to one remote MCP server in the browser and writes the token file core reuses.
+- New scaffolds list `./tests/` and `./src/` in `command_allowlist.yaml`. `refresh` does not re-add them to an allowlist you already configured.
+
+## [core v3.10.0] - 2026-10-22
+
+### Added
+
+- Coding mode for agents that work in a repository. It adds an editing & verification protocol to the prompt, puts `AGENTS.md` / `CLAUDE.md` and a short repo overview in the cached prompt prefix, reports git branch and dirty files each turn, refuses edits to files the model has not read (`read_before_write`) or that changed since (`stale_read`), and — with `coding.verification_gate` — refuses a final answer that follows edits no test or lint run has passed since. See `docs/features.md` §22.
+- Hooks: `PRE_FINAL_ANSWER` (a hook may refuse a final answer once the tools are done; `BEFORE_PROVIDER_REQUEST` may hold the text until then) and `HISTORY_COMPACTED` (awaited after history is summarized). A tool failing on the same file repeatedly trips doom-loop recovery even when its other arguments, or the path's spelling, change.
+- New `list_dir` tool. `grep` gains `context`, `files_only` and `respect_gitignore`; `glob` takes `files_only` and no longer walks `node_modules`, `.git`, `build` and similar. `replace_in_file` and `apply_patch` return the edited `line` and a numbered `snippet`. Skills appear in the prompt as `name — description`.
+- Live eval suites `coding` and `coding_hard` (`evals/suites/`) over fixture repos, with workspace-checked assertions (`workspace_command_passes`, `workspace_file_contains`, `workspace_unchanged`, `final_text_regex`, `verified_before_final`), seeded-bug overlays, and `python -m evals.trials` to run a suite repeatedly and compare configurations. The eval runner answers `ask_user` prompts so a run cannot hang waiting for a human.
+- Remote MCP servers can sign in with browser OAuth. Tokens are stored per server and reused on later connects; a failed refresh is reported as an auth error.
+
+### Changed
+
+- Coding mode is always on for every agent. `coding.enabled` is retired: a leftover `coding: {enabled: ...}` is ignored with a warning. Every agent now gets the editing & verification protocol, the read-before-write ledger (`read_before_write` / `stale_read` refusals), project instructions and repo overview in the cached prompt prefix, and git state in runtime notes. `coding.verification_gate.enabled` stays opt-in.
+- `glob` returns files only by default; pass `files_only: false` to also list directories. `bash -c` scripts are screened command by command against `deny_patterns`.
+
+### Fixed
+
+- `run_command` output over the spill threshold no longer hides `exit_code`, `stderr` and the end of the output behind a truncated JSON prefix. The result stays valid JSON with head/tail excerpts and the full streams at `output_path`.
+- `run_command` accepts `./tests/` and `./src/` path arguments (relative or workspace-absolute) under the built-in defaults, so `pytest ./tests` is no longer rejected. A configured allowlist is not widened.
+- `deny_patterns` that anchor on the start of a command (`^rm\s+-rf`, `^curl`, `^sudo`) now also apply to commands inside `bash -c "…"`. A `bash -c` script that cannot be screened is rejected instead of run.
+- The progress tracker's `write_without_read` / `rewrite_churn` signals never fired for `replace_in_file` (it tracked a tool name that does not exist).
+- `apply_patch` rejects a hunk whose old lines match several places instead of silently editing the first, rejects hunk lines with no valid prefix instead of dropping them, and honors `*** End of File`.
+- Subagent personas' `model` and `vertex_location` are used by `task` instead of the parent's model.
+- A provider call that fails with an empty message (for example an `httpx.ReadTimeout`) now reports `Provider request failed (<ExceptionType>)` instead of a blank error.
+- Over-budget tool text keeps its tail (70% head / 30% tail) instead of only its head.
+
 ## [cli v0.10.0] - 2026-10-18
 
 ### Added

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 
@@ -17,6 +18,12 @@ class EvalRecord:
     completed: bool = False
     trace_id: str | None = None
     errors: list[str] = field(default_factory=list)
+    # (tool name, result text or error envelope), filled for ``executor: real`` scenarios.
+    tool_results: list[tuple[str, str]] = field(default_factory=list)
+    # HarnessIntervention names, in order (e.g. ``final_answer_gate``).
+    interventions: list[str] = field(default_factory=list)
+    provider_calls: int = 0
+    workspace: Path | None = None
 
 
 class EvalHook:

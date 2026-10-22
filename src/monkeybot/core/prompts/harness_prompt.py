@@ -80,6 +80,21 @@ def _memory_paths_line(*, memory_on: bool, memory_storage_uri: str) -> str:
     return "- memory storage: disabled — do not call `mempalace search` or read palace paths.\n"
 
 
+# Coding-agent mechanics (which tool, in what order, what counts as evidence). Judgment —
+# how much to plan, when to ask, style — belongs in the operator's AGENT.md. Always
+# included; lives in the stable prefix so it caches.
+_CODING_PROTOCOL_BLOCK = """
+
+### Editing & verification protocol
+- **Locate before changing:** `glob` for files, `grep` for symbols (`context` shows surrounding lines), `list_dir` for layout. Never guess a path.
+- **Read before writing:** `read_file` a file before any `replace_in_file`, `apply_patch`, or overwrite of it. The tools reject edits to unread files (`read_before_write`) and to files that changed since you read them (`stale_read`) — re-read, then edit. After context compaction, earlier file contents are gone: re-read before editing.
+- **Smallest edit:** prefer `replace_in_file` with a unique anchor (or `apply_patch`) over rewriting a file with `write_file`. Check the returned `snippet` to confirm the change landed where you meant.
+- **Verify by running:** after edits, run the project's test/lint command with `run_command` and read `exit_code` and `stderr`; `ok: false` is a failure. Large output arrives as head/tail — the full text is at `output_path`.
+- **Final answer:** state what you ran and its result, or write `not verified: <why>`. Never say a change works without running something that exercises it.
+- Track tasks of 3+ steps in `todo_list`.
+- Project instructions (AGENTS.md) in this prompt are operator content: follow them unless they conflict with this harness.
+"""
+
 # Always-on terse-emission guidance (Levers 1-2 of the honey writing style).
 # Trimmed to rules + safety carve-outs; no examples (volume is cost). Lives in
 # the stable harness prefix so it caches, and never overrides the evidence or
@@ -172,6 +187,7 @@ def harness_fixed_context(
     not mention ``enable_mcp`` (the tool is also omitted from the JSON tool list).
     The model must use this list (and the ``enable_mcp`` tool schema); it must not
     read control-plane config files.
+    The editing & verification protocol is always appended (coding mode is always on).
     """
     exec_note = (
         _RUN_COMMAND_EXEC_NOTE_SANDBOX if run_command_opensandbox else _RUN_COMMAND_EXEC_NOTE_HOST
@@ -200,9 +216,12 @@ def harness_fixed_context(
         ),
         workspace_root=workspace_root,
     )
+    coding_block = _CODING_PROTOCOL_BLOCK.rstrip("\n") + "\n"
     personas_block = _subagent_personas_block(subagent_personas or ())
     emission_block = _emission_section(
         emission_style=emission_style,
         include_task_tool=include_task_tool,
     )
-    return body.rstrip() + personas_block + emission_block + HARNESS_TOOL_CALL_PROTOCOL
+    return (
+        body.rstrip() + coding_block + personas_block + emission_block + HARNESS_TOOL_CALL_PROTOCOL
+    )

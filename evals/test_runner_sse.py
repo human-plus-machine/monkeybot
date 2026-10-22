@@ -108,6 +108,150 @@ def test_single_session_telemetry() -> None:
     assert t.verdicts[0].triggering_signals == ["budget_burn"]
 
 
+def _run_with_events(events_for: "callable") -> list:
+    import runner as runner_mod
+
+    orig_client_cls = httpx.AsyncClient
+    request_ids: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/sessions" and request.method == "POST":
+            return httpx.Response(200, json={"session_id": "sess-1"})
+        if path.endswith("/reply"):
+            request_ids.append(json.loads(request.content)["request_id"])
+            return httpx.Response(200, json={"ok": True})
+        if path.endswith("/events"):
+            events = events_for(request_ids[-1] if request_ids else "")
+            return httpx.Response(
+                200,
+                content=b"".join(_sse_block(e) for e in events),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(path)
+
+    def patched_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return orig_client_cls(*args, **kwargs)
+
+    runner_mod.httpx.AsyncClient = patched_client  # type: ignore[attr-defined]
+    try:
+        return asyncio.run(run_scenario_live(Scenario(id="t", messages=["go"]), "http://fake"))
+    finally:
+        runner_mod.httpx.AsyncClient = orig_client_cls  # type: ignore[attr-defined]
+
+
+def test_tool_call_ok_parsed_from_result_payload() -> None:
+    def events(rid: str) -> list[dict]:
+        def started(call_id: str, tool: str, args: dict) -> dict:
+            return {
+                "type": "ToolCallStarted",
+                "request_id": rid,
+                "tool": tool,
+                "call_id": call_id,
+                "args": args,
+            }
+
+        def result(call_id: str, tool: str, payload: object, error: str | None = None) -> dict:
+            return {
+                "type": "ToolCallResult",
+                "request_id": rid,
+                "tool": tool,
+                "call_id": call_id,
+                "result": payload if isinstance(payload, str) else json.dumps(payload),
+                "error": error,
+            }
+
+        return [
+            started("c1", "run_command", {"argv": ["pytest"]}),
+            result("c1", "run_command", {"ok": False, "exit_code": 1, "stdout": "1 failed"}),
+            started("c2", "run_command", {"argv": ["pytest"]}),
+            result("c2", "run_command", {"ok": True, "exit_code": 0, "stdout": "5 passed"}),
+            started("c3", "read_file", {"path": "a.py"}),
+            result("c3", "read_file", "plain text, not json"),
+            started("c4", "replace_in_file", {"path": "a.py"}),
+            result("c4", "replace_in_file", "", error="boom"),
+            {"type": "TurnComplete", "request_id": rid, "usage": {}},
+        ]
+
+    calls = _run_with_events(events)[0].tool_calls
+    assert [(c.tool, c.ok) for c in calls] == [
+        ("run_command", False),
+        ("run_command", True),
+        ("read_file", True),
+        ("replace_in_file", False),
+    ]
+    assert calls[0].error is None  # ok:false is a result, not a tool error
+    assert calls[3].error == "boom"
+    assert calls[1].call_id == "c2"
+
+
+def test_tool_result_without_call_id_pairs_with_open_call() -> None:
+    def events(rid: str) -> list[dict]:
+        return [
+            {"type": "ToolCallStarted", "request_id": rid, "tool": "run_command", "args": {}},
+            {
+                "type": "ToolCallResult",
+                "request_id": rid,
+                "tool": "run_command",
+                "result": '{"ok": false}',
+            },
+            {"type": "ToolCallStarted", "request_id": rid, "tool": "run_command", "args": {}},
+            {
+                "type": "ToolCallResult",
+                "request_id": rid,
+                "tool": "run_command",
+                "result": '{"ok": true}',
+            },
+            {"type": "TurnComplete", "request_id": rid, "usage": {}},
+        ]
+
+    calls = _run_with_events(events)[0].tool_calls
+    assert [c.ok for c in calls] == [False, True]
+
+
+def test_ask_user_prompts_are_answered_so_the_turn_cannot_hang() -> None:
+    import runner as runner_mod
+
+    answers: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/sessions" and request.method == "POST":
+            return httpx.Response(200, json={"session_id": "s1"})
+        if path.endswith("/reply"):
+            return httpx.Response(200, json={"ok": True})
+        if "/ask-user/" in path:
+            answers.append((path, json.loads(request.content)))
+            return httpx.Response(202, json={"ok": True})
+        if path.endswith("/events"):
+            events = [
+                {"type": "AskUserRequest", "tool_call_id": "call-9", "question": "mock it?"},
+                {"type": "AssistantDelta", "delta": "ok"},
+                {"type": "TurnComplete", "usage": {}},
+            ]
+            return httpx.Response(
+                200,
+                content=b"".join(_sse_block(e) for e in events),
+                headers={"content-type": "text/event-stream"},
+            )
+        raise AssertionError(path)
+
+    orig = httpx.AsyncClient
+
+    def patched(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return orig(*args, **kwargs)
+
+    runner_mod.httpx.AsyncClient = patched  # type: ignore[attr-defined]
+    try:
+        turns = asyncio.run(run_scenario_live(Scenario(id="a", messages=["go"]), "http://fake"))
+    finally:
+        runner_mod.httpx.AsyncClient = orig  # type: ignore[attr-defined]
+    assert turns[0].output == "ok"
+    assert answers == [("/sessions/s1/ask-user/call-9", {"answer": runner_mod.NO_HUMAN_ANSWER})]
+
+
 def test_cross_session_opens_two_sessions() -> None:
     import runner as runner_mod
 

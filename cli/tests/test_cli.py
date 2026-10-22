@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 CLI_ROOT = Path(__file__).resolve().parents[1]
 
@@ -323,3 +324,46 @@ def test_doctor_reports_layout_browser_sandbox_and_legacy_migration(tmp_path: Pa
     assert checks["sandbox.status"]["status"] == "pass"
     assert checks["env.harness.compatible"]["status"] == "pass"
     assert "MemPalace" not in checks["env.harness.compatible"]["message"]
+
+
+def test_new_coding_template_via_cli(tmp_path: Path) -> None:
+    result = _run_cli("new", "--dest", str(tmp_path), "--yes", "--template", "coding")
+    assert result.returncode == 0, result.stderr
+    text = (tmp_path / "monkeybot_config" / "monkeybot.yaml").read_text()
+    doc = yaml.safe_load(text)
+    assert "enabled" not in doc["coding"]
+    assert doc["coding"]["verification_gate"]["enabled"] is True
+    assert "Explore before editing" in (tmp_path / "monkeybot_config" / "AGENT.md").read_text()
+    assert "paths.workspace_root" in result.stdout
+
+
+def test_new_rejects_unknown_template(tmp_path: Path) -> None:
+    result = _run_cli("new", "--dest", str(tmp_path), "--yes", "--template", "bogus")
+    assert result.returncode == 2
+    assert "bogus" in result.stderr
+    assert not (tmp_path / "monkeybot_config").exists()
+
+
+def test_new_prompts_for_template_interactively(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "monkeybot_cli.main",
+            "new",
+            "--dest",
+            str(tmp_path),
+            "--provider",
+            "gemini",
+            "--model",
+            "m",
+        ],
+        cwd=CLI_ROOT,
+        input="2\n\n\n",
+        capture_output=True,
+        text=True,
+        env={**__import__("os").environ, "PYTHONPATH": str(CLI_ROOT / "src")},
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Choose template" in result.stdout
+    assert "coding" in (tmp_path / "monkeybot_config" / "monkeybot.yaml").read_text()

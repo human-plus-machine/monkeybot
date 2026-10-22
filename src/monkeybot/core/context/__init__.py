@@ -15,9 +15,11 @@ import yaml
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.tools import load_file_tool_def
 from monkeybot.core.config.settings import SubagentConfig
+from monkeybot.core.context.project_context import load_project_instructions, repo_overview
 from monkeybot.core.mcp.ports_mcp import MCPClientPort, normalize_catalog_mcp_names
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import AgentEvent
+from monkeybot.core.tools.read_ledger import FileReadLedger
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.tools.workspace_service import AGENT_READ_DEFAULT_LINES
 from monkeybot.core.types.types_tools import ToolDef
@@ -163,6 +165,14 @@ class TurnContext:
     """Optional goal ledger (Phase 1). None when verifier.ledger is off."""
     verdict_mailbox: VerdictMailbox | None = None
     """Optional verdict mailbox (Phase 2). None when verifier.tracker is off."""
+    project_instructions: str = ""
+    """Coding mode: ``AGENTS.md`` (or equivalent) text for the stable prompt prefix; ``""`` if none."""
+    repo_overview: str = ""
+    """Coding mode: deterministic toolchain + layout summary for the stable prompt prefix."""
+    read_ledger: FileReadLedger | None = None
+    """Session read/write ledger; mutable store held by the frozen context.
+    Shared with ``CoreToolExecutor``. History compaction reads and clears it.
+    ``None`` only for tests and embedded executors that skip the check."""
     invoked_skill: SkillRef | None = None
     """Installed skill the user explicitly invoked with a leading `/slug` this turn."""
     session: str | None = None
@@ -545,6 +555,10 @@ def _core_tool_defs(
                 "type": "string",
                 "description": "Optional repo-relative directory to search under.",
             },
+            "files_only": {
+                "type": "boolean",
+                "description": "Return files only (default true); false also returns directories.",
+            },
         },
         "required": ["pattern"],
     }
@@ -595,8 +609,40 @@ def _core_tool_defs(
                     "(default 0). Continue from a prior response's next_offset."
                 ),
             },
+            "context": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 3,
+                "description": (
+                    "Lines of surrounding context to return with each match, as "
+                    "`before` / `after` (default 0, max 3)."
+                ),
+            },
+            "files_only": {
+                "type": "boolean",
+                "description": (
+                    "Return only the paths of files that match, in `files` (default false). "
+                    "match_count / total_match_count then count files."
+                ),
+            },
+            "respect_gitignore": {
+                "type": "boolean",
+                "description": (
+                    "Skip paths ignored by .gitignore files in the workspace "
+                    "(default true; noise directories like node_modules are always skipped)."
+                ),
+            },
         },
         "required": ["pattern"],
+    }
+    list_dir_schema: dict[str, object] = {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Repo-relative directory to list (default: the workspace root).",
+            },
+        },
     }
     apply_patch_schema: dict[str, object] = {
         "type": "object",
@@ -812,13 +858,15 @@ def _core_tool_defs(
         ToolDef(
             "replace_in_file",
             "Replace old_string with new_string in an existing file. Requires a unique match "
-            "unless replace_all is true. Uses exact match first, then light fuzzy fallbacks.",
+            "unless replace_all is true. Uses exact match first, then light fuzzy fallbacks. "
+            "Returns `line` and a numbered `snippet` of the edited region.",
             replace_schema,
         ),
         ToolDef(
             "glob",
-            "List workspace file paths matching a glob pattern. Prefer over run_command+ls for "
-            "discovery. For content questions ('how does X work?'), use `grep`, then `read_file`. "
+            "List workspace file paths matching a glob pattern; noise directories "
+            "(node_modules, .git, build, ...) are skipped unless the pattern names them. "
+            "Prefer over run_command+ls for discovery. For content questions ('how does X work?'), use `grep`, then `read_file`. "
             "A path list is evidence of absence only when the call succeeds with ok:true "
             "(incomplete scans return ok:false / incomplete_scan — narrow root or pattern).",
             glob_schema,
@@ -832,8 +880,18 @@ def _core_tool_defs(
             "distinctive terms, then `read_file` the matching paths. "
             "An empty match list is evidence of absence only when the payload has "
             "scan_complete=true (incomplete scans return ok:false / incomplete_scan — narrow "
-            "root or pass file_glob). Capped pages still report total_match_count and next_offset.",
+            "root or pass file_glob). Capped pages still report total_match_count and next_offset. "
+            "Use `context` to see lines around a match and `files_only` to just list files.",
             grep_schema,
+            parallel_safe=True,
+            read_only=True,
+        ),
+        ToolDef(
+            "list_dir",
+            "List the immediate children of a workspace directory (directory and file names). "
+            "Use it to see a project's layout; use `glob` to find files by pattern and `grep` "
+            "to find content.",
+            list_dir_schema,
             parallel_safe=True,
             read_only=True,
         ),
@@ -987,6 +1045,10 @@ def _load_agent_md(agent_md_path: Path) -> str:
     return content
 
 
+def _coding_project_context(workspace_root: Path, names: Sequence[str]) -> tuple[str, str]:
+    return load_project_instructions(workspace_root, names), repo_overview(workspace_root)
+
+
 async def build_context(
     thread_id: str,
     request_id: str,
@@ -1016,6 +1078,7 @@ async def build_context(
     goal_ledger: GoalLedger | None = None,
     verdict_mailbox: VerdictMailbox | None = None,
     session_id: str | None = None,
+    read_ledger: FileReadLedger | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -1053,6 +1116,7 @@ async def build_context(
         config: Optional pinned ``RuntimeConfig`` for this turn. When omitted the
             turn is not snapshot-aware (tests / callers that only need env).
         goal_ledger: Optional goal ledger for intent capture and compaction facts.
+        read_ledger: Optional coding-mode file read/write ledger shared with the executor.
         session_id: Chat session when it differs from ``thread_id``; see
             ``TurnContext.session_id``.
 
@@ -1085,6 +1149,12 @@ async def build_context(
         tools.extend(SCHEDULED_LOOP_TOOL_DEFS)
     for ct in extra_tools or []:
         tools.append(ct.tool_def)
+    project_instructions = ""
+    overview = ""
+    if config is not None and workspace_root is not None:
+        project_instructions, overview = await asyncio.to_thread(
+            _coding_project_context, workspace_root, config.coding.project_instructions_files
+        )
     return TurnContext(
         thread_id=thread_id,
         request_id=request_id,
@@ -1111,6 +1181,9 @@ async def build_context(
         config=config,
         goal_ledger=goal_ledger,
         verdict_mailbox=verdict_mailbox,
+        project_instructions=project_instructions,
+        repo_overview=overview,
+        read_ledger=read_ledger,
         session=session_id,
     )
 

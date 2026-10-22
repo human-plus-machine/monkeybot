@@ -279,6 +279,37 @@ async def test_pre_turn_inject_text_lands_in_system_prompt() -> None:
 
 
 @pytest.mark.asyncio
+async def test_git_context_hook_note_lands_in_runtime_notes_not_the_stable_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.coding.git_context_hook import GitContextHook
+    from monkeybot.providers._utils import split_system_prompt_for_cache
+
+    async def fake_note(root: Path, **_: object) -> str:
+        return "git: branch feat/x, 2 modified (a.py, b.py)"
+
+    monkeypatch.setattr("monkeybot.core.coding.git_context_hook.git_status_note", fake_note)
+    mgr = HookManager()
+    GitContextHook().register(mgr)
+    prov = CapturingProvider([[TextDelta(text="ok"), Done()]])
+    async for _ in run(
+        "hi",
+        dataclasses.replace(_ctx(), workspace_root=tmp_path),
+        provider=prov,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(),
+        max_turns=2,
+        hook_manager=mgr,
+    ):
+        pass
+    stable, volatile = split_system_prompt_for_cache(prov.system_texts[0])
+    assert "git: branch feat/x, 2 modified (a.py, b.py)" in prov.system_texts[0]
+    assert "git: branch" not in stable
+    assert "## Runtime notes" in prov.system_texts[0]
+
+
+@pytest.mark.asyncio
 async def test_pre_turn_inject_memory_lines_appear_in_context() -> None:
     mgr = HookManager()
     seen_indexes: list[list[str]] = []
@@ -765,3 +796,260 @@ async def test_credential_egress_blocked_ends_routine_without_second_provider_ca
     )
     # The second provider call (which would have sent the secret) never happens.
     assert len(prov.message_snapshots) == 1
+
+
+# --- PRE_FINAL_ANSWER seam ---
+
+
+async def _run_collect(
+    prov: CapturingProvider,
+    mgr: HookManager | None,
+    *,
+    max_turns: int = 6,
+    hist: FakeHistory | None = None,
+) -> list[Any]:
+    return [
+        e
+        async for e in run(
+            "go",
+            _ctx(),
+            provider=prov,
+            history=hist if hist is not None else FakeHistory(),
+            inspectors=[AllowInspector()],
+            tool_executor=RecordingExecutor(),
+            max_turns=max_turns,
+            hook_manager=mgr,
+        )
+    ]
+
+
+def _deltas(events: list[Any]) -> str:
+    return "".join(e.delta for e in events if getattr(e, "kind", None) == "AssistantDelta")
+
+
+def _gate_events(events: list[Any]) -> list[Any]:
+    return [
+        e
+        for e in events
+        if getattr(e, "kind", None) == "HarnessIntervention"
+        and e.intervention == "final_answer_gate"
+    ]
+
+
+def _answer_script(*answers: str) -> list[list[ProviderEvent]]:
+    return [[TextDelta(text=a), Done()] for a in answers]
+
+
+@pytest.mark.asyncio
+async def test_pre_final_answer_rejection_discards_held_text_and_asks_again() -> None:
+    mgr = HookManager()
+    seen_candidates: list[str | None] = []
+
+    async def hold(p: HookPayload) -> None:
+        p.hold_assistant_text = True
+
+    async def gate(p: HookPayload) -> None:
+        seen_candidates.append(p.assistant_text)
+        if len(seen_candidates) == 1:
+            p.reject_final_answer = "[Harness] Run the tests first."
+
+    mgr.register(HookEvent.BEFORE_PROVIDER_REQUEST, hold)
+    mgr.register(HookEvent.PRE_FINAL_ANSWER, gate)
+    hist = FakeHistory()
+    prov = CapturingProvider(_answer_script("All done!", "Ran pytest: 5 passed."))
+    events = await _run_collect(prov, mgr, hist=hist)
+
+    assert prov._idx == 2
+    assert seen_candidates == ["All done!", "Ran pytest: 5 passed."]
+    assert _deltas(events) == "Ran pytest: 5 passed."  # the refused answer was never streamed
+    (gate_event,) = _gate_events(events)
+    assert gate_event.detail == "[Harness] Run the tests first."
+    assert "[Harness] Run the tests first." in prov.system_texts[1]
+    assert "## Runtime notes" in prov.system_texts[1]
+    assert "Run the tests first" not in prov.system_texts[0]
+    assistants = [m for m in hist.rows if m.role == "assistant"]
+    assert [b.text for m in assistants for b in m.content if isinstance(b, Text)] == [
+        "Ran pytest: 5 passed."
+    ]
+    assert events[-1].kind == "TurnComplete"
+
+
+@pytest.mark.asyncio
+async def test_without_hold_the_refused_answer_has_already_streamed() -> None:
+    mgr = HookManager()
+
+    async def gate(p: HookPayload) -> None:
+        if p.assistant_text == "All done!":
+            p.reject_final_answer = "[Harness] nope"
+
+    mgr.register(HookEvent.PRE_FINAL_ANSWER, gate)
+    events = await _run_collect(CapturingProvider(_answer_script("All done!", "fixed")), mgr)
+    assert _deltas(events) == "All done!fixed"  # hold is the hook's responsibility
+    assert len(_gate_events(events)) == 1
+
+
+@pytest.mark.asyncio
+async def test_pre_final_answer_rejections_are_capped_per_message() -> None:
+    from monkeybot.core.runtime.turn_loop import _FINAL_ANSWER_REJECTIONS
+
+    mgr = HookManager()
+    calls = 0
+
+    async def always_reject(p: HookPayload) -> None:
+        nonlocal calls
+        calls += 1
+        p.reject_final_answer = "[Harness] again"
+
+    async def hold(p: HookPayload) -> None:
+        p.hold_assistant_text = True
+
+    mgr.register(HookEvent.BEFORE_PROVIDER_REQUEST, hold)
+    mgr.register(HookEvent.PRE_FINAL_ANSWER, always_reject)
+    answers = [f"answer {i}" for i in range(_FINAL_ANSWER_REJECTIONS + 3)]
+    prov = CapturingProvider(_answer_script(*answers))
+    events = await _run_collect(prov, mgr, max_turns=20)
+
+    assert len(_gate_events(events)) == _FINAL_ANSWER_REJECTIONS
+    assert calls == _FINAL_ANSWER_REJECTIONS  # the hook is not even asked past the cap
+    assert _deltas(events) == f"answer {_FINAL_ANSWER_REJECTIONS}"  # first answer past the cap
+    assert prov._idx == _FINAL_ANSWER_REJECTIONS + 1
+    assert events[-1].kind == "TurnComplete"
+
+
+@pytest.mark.asyncio
+async def test_pre_final_answer_is_not_asked_when_the_turn_budget_is_spent() -> None:
+    mgr = HookManager()
+    fired = 0
+
+    async def reject(p: HookPayload) -> None:
+        nonlocal fired
+        fired += 1
+        p.reject_final_answer = "[Harness] again"
+
+    mgr.register(HookEvent.PRE_FINAL_ANSWER, reject)
+    events = await _run_collect(CapturingProvider(_answer_script("only answer")), mgr, max_turns=1)
+    assert fired == 0 and _deltas(events) == "only answer" and not _gate_events(events)
+
+
+@pytest.mark.asyncio
+async def test_pre_final_answer_hook_failure_is_a_pass_through() -> None:
+    mgr = HookManager()
+
+    async def boom(p: HookPayload) -> None:
+        raise RuntimeError("gate bug")
+
+    async def slow(p: HookPayload) -> None:
+        await asyncio.sleep(30)
+
+    mgr.register(HookEvent.PRE_FINAL_ANSWER, boom)
+    mgr.register(HookEvent.PRE_FINAL_ANSWER, slow)
+    import monkeybot.core.runtime.turn_loop as turn_loop
+
+    original = turn_loop._HOOK_READ_TIMEOUT_S
+    turn_loop._HOOK_READ_TIMEOUT_S = 0.05
+    try:
+        events = await _run_collect(CapturingProvider(_answer_script("fine")), mgr)
+    finally:
+        turn_loop._HOOK_READ_TIMEOUT_S = original
+    assert _deltas(events) == "fine" and not _gate_events(events)
+    assert events[-1].kind == "TurnComplete"
+
+
+@pytest.mark.asyncio
+async def test_pre_final_answer_is_skipped_for_tool_turns_and_empty_text() -> None:
+    mgr = HookManager()
+    candidates: list[str | None] = []
+
+    async def record(p: HookPayload) -> None:
+        candidates.append(p.assistant_text)
+
+    mgr.register(HookEvent.PRE_FINAL_ANSWER, record)
+    script: list[list[ProviderEvent]] = [
+        [TextDelta(text="looking"), ToolCall(call_id="c1", name="run_command", args={}), Done()],
+        [TextDelta(text="final"), Done()],
+    ]
+    await _run_collect(CapturingProvider(script), mgr)
+    assert candidates == ["final"]  # tool-calling turns never reach the gate
+
+
+@pytest.mark.asyncio
+async def test_rejected_final_answer_is_not_persisted_when_the_next_attempt_aborts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused answer is not history, even if the follow-up dies before streaming.
+
+    Abort persistence used to write whatever ``assistant_text`` still held. The
+    gate drops that text, and the next provider attempt starts blank, so a
+    credential block (which returns before the model speaks) cannot resurrect it.
+    """
+    from monkeybot.core.runtime import loop_hooks
+
+    monkeypatch.setattr(loop_hooks, "get_scanner", lambda: _MarkerScanner())
+    monkeypatch.setenv("MONKEYBOT_RUN_KIND", "routine")
+
+    mgr = HookManager()
+
+    async def before(p: HookPayload) -> None:
+        p.hold_assistant_text = True
+        if p.inner_turn == 2 and p.provider_messages is not None:
+            p.provider_messages = [
+                *p.provider_messages,
+                Message(role="assistant", content=[Text(text=_MarkerScanner.MARKER)]),
+            ]
+
+    async def gate(p: HookPayload) -> None:
+        if p.assistant_text == "leaked answer":
+            p.reject_final_answer = "[Harness] nope"
+
+    mgr.register(HookEvent.BEFORE_PROVIDER_REQUEST, before)
+    mgr.register(HookEvent.PRE_FINAL_ANSWER, gate)
+    hist = FakeHistory()
+    prov = CapturingProvider(_answer_script("leaked answer", "should not run"))
+    events = await _run_collect(prov, mgr, hist=hist)
+
+    assert prov._idx == 1
+    assert _deltas(events) == ""
+    assert any(getattr(e, "kind", None) == "CredentialEgressBlocked" for e in events)
+    texts = [
+        b.text for m in hist.rows if m.role == "assistant" for b in m.content if isinstance(b, Text)
+    ]
+    assert texts == []
+
+
+@pytest.mark.asyncio
+async def test_prior_tool_preamble_is_not_rewritten_when_the_next_attempt_aborts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Abort persistence writes this attempt only, not the previous tool turn's prose."""
+    from monkeybot.core.runtime import loop_hooks
+
+    monkeypatch.setattr(loop_hooks, "get_scanner", lambda: _MarkerScanner())
+    monkeypatch.setenv("MONKEYBOT_RUN_KIND", "routine")
+
+    mgr = HookManager()
+
+    async def before(p: HookPayload) -> None:
+        if p.inner_turn == 2 and p.provider_messages is not None:
+            p.provider_messages = [
+                *p.provider_messages,
+                Message(role="assistant", content=[Text(text=_MarkerScanner.MARKER)]),
+            ]
+
+    mgr.register(HookEvent.BEFORE_PROVIDER_REQUEST, before)
+    hist = FakeHistory()
+    script: list[list[ProviderEvent]] = [
+        [
+            TextDelta(text="preamble"),
+            ToolCall(call_id="c1", name="run_command", args={}),
+            Done(),
+        ],
+        [TextDelta(text="should not run"), Done()],
+    ]
+    prov = CapturingProvider(script)
+    await _run_collect(prov, mgr, hist=hist)
+
+    assert prov._idx == 1
+    texts = [
+        b.text for m in hist.rows if m.role == "assistant" for b in m.content if isinstance(b, Text)
+    ]
+    assert texts.count("preamble") == 1

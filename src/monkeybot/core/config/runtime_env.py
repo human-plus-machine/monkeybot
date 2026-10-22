@@ -248,6 +248,8 @@ CONTENT_DIGEST_TIERS: dict[str, str] = {
 SUBAGENTS_DIFF_KEY = "subagents.*"
 # Synthetic diff key for ``verifier:`` (not in ENV_MAP). Always REBUILD.
 VERIFIER_DIFF_KEY = "verifier.*"
+# Synthetic diff key for ``coding:`` (not in ENV_MAP). Always REBUILD.
+CODING_DIFF_KEY = "coding.*"
 
 # YAML keys that used to map to env but are retired. Still accepted in the file
 # (no unknown-key rejection), but warn so configs are not silently ignored.
@@ -291,6 +293,13 @@ def warn_retired_tools_keys(doc: Mapping[str, Any]) -> list[str]:
         logger.warning(
             "runtime.transcript_include_live is retired and ignored — "
             "transcript capture is runtime.transcript_enabled only"
+        )
+    coding = doc.get("coding")
+    if isinstance(coding, dict) and "enabled" in coding:
+        found.append("coding.enabled")
+        logger.warning(
+            "coding.enabled is retired and ignored — coding mode is always on; "
+            "coding.verification_gate.enabled is the remaining opt-in"
         )
     return found
 

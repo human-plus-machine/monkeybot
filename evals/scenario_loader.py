@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import shutil
 import uuid
 from pathlib import Path
 
@@ -51,7 +53,39 @@ def parse_scenario_yaml(text: str, *, sid: str | None) -> Scenario:
         sessions=sessions,
         session_pause_sec=float(data.get("session_pause_sec", 5.0)),
         assertions=dict(assertions),
+        workspace_fixture=_opt_fixture(data),
+        workspace_overlays=_opt_overlays(data),
     )
+
+
+def _relative_under_evals(raw: object, key: str) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError(f"{key} entries must be non-empty strings")
+    rel = Path(raw.strip())
+    if rel.is_absolute() or ".." in rel.parts:
+        raise ValueError(f"{key} must be a relative path under evals/")
+    return rel.as_posix()
+
+
+def _opt_overlays(data: dict) -> list[str]:
+    raw = data.get("workspace_overlays")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("workspace_overlays must be a list")
+    return [_relative_under_evals(item, "workspace_overlays") for item in raw]
+
+
+def _opt_fixture(data: dict) -> str | None:
+    raw = data.get("workspace_fixture")
+    if raw is None:
+        return None
+    if not isinstance(raw, str) or not raw.strip():
+        raise ValueError("workspace_fixture must be a non-empty string")
+    rel = Path(raw.strip())
+    if rel.is_absolute() or ".." in rel.parts:
+        raise ValueError("workspace_fixture must be a relative path under evals/")
+    return rel.as_posix()
 
 
 def load_disk_scenarios(root: Path = EVAL_ROOT / "scenarios") -> list[Scenario]:
@@ -91,3 +125,71 @@ def load_suite(path: Path) -> tuple[str, list[str]]:
     if not isinstance(scenarios, list) or not all(isinstance(s, str) for s in scenarios):
         raise ValueError(f"Suite manifest 'scenarios' must be a list of strings: {path}")
     return suite_id, list(scenarios)
+
+
+def agent_workspace_root() -> Path:
+    """Workspace root of the running eval agent (``MONKEYBOT_AGENT_WORKSPACE`` or the smoke agent's)."""
+    raw = os.environ.get("MONKEYBOT_AGENT_WORKSPACE", "").strip()
+    return Path(raw).expanduser() if raw else EVAL_ROOT / "smoke_agent" / "workspace"
+
+
+def fixture_source(scenario: Scenario) -> Path | None:
+    return EVAL_ROOT / scenario.workspace_fixture if scenario.workspace_fixture else None
+
+
+def fixture_file(scenario: Scenario, rel: str) -> Path | None:
+    """Pristine copy of ``rel`` as the agent first saw it: the last overlay that has it, else the fixture."""
+    for overlay in reversed(scenario.workspace_overlays):
+        candidate = EVAL_ROOT / overlay / rel
+        if candidate.is_file():
+            return candidate
+    source = fixture_source(scenario)
+    if source is not None and (source / rel).is_file():
+        return source / rel
+    return None
+
+
+def workspace_subdir_name(scenario: Scenario) -> str:
+    """Per-scenario directory name inside the agent workspace (``eval-<id>``, slashes flattened)."""
+    return "eval-" + scenario.id.replace("/", "-")
+
+
+def materialize_workspace(
+    scenario: Scenario, workspace_root: Path | None = None
+) -> tuple[Scenario, Path | None]:
+    """Copy the scenario's fixture into the agent workspace; return the scenario with
+    ``{workspace_subdir}`` substituted into its messages, plus the copied directory.
+
+    Scenarios without a ``workspace_fixture`` are returned unchanged with ``None``.
+    The copy is recreated on every run so a previous run's edits never leak in.
+    """
+    source = fixture_source(scenario)
+    if source is None:
+        return scenario, None
+    if not source.is_dir():
+        raise FileNotFoundError(f"workspace_fixture not found: {source}")
+    subdir = workspace_subdir_name(scenario)
+    dest = (workspace_root or agent_workspace_root()) / subdir
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(source, dest)
+    for overlay in scenario.workspace_overlays:
+        overlay_dir = EVAL_ROOT / overlay
+        if not overlay_dir.is_dir():
+            raise FileNotFoundError(f"workspace_overlay not found: {overlay_dir}")
+        shutil.copytree(overlay_dir, dest, dirs_exist_ok=True)
+
+    def sub(text: str) -> str:
+        return text.replace("{workspace_subdir}", subdir)
+
+    resolved = scenario.model_copy(
+        update={
+            "messages": [sub(m) for m in scenario.messages],
+            "sessions": (
+                [[sub(m) for m in group] for group in scenario.sessions]
+                if scenario.sessions
+                else scenario.sessions
+            ),
+        }
+    )
+    return resolved, dest

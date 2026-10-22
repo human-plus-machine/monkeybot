@@ -177,7 +177,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Section order (cache-friendly):**
 
-1. **Stable prefix (epoch baseline):** `AGENT.md` + harness + session attachments
+1. **Stable prefix (epoch baseline):** `AGENT.md` + harness + (`## Project instructions`, `## Repo overview`; see [§22](#22-coding-mode)) + session attachments
 2. **Volatile tail:** current date (`YYYY-MM-DD`) + memory index + skills + "Current request" anchor
 3. **Mid-conversation updates (within epoch):** chronological user message with `## System context update` when volatile sources change; leading baseline stays byte-identical for prompt cache
 
@@ -187,6 +187,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Harness lines for `task`, `web_search`, subagent personas, and `run_command` execution mode are conditional on active tool list.
 - Emission-style block (Levers 1–2: minimum code, terse prose) is injected into the stable prefix when `MONKEYBOT_EMISSION_STYLE=terse`; its dense agent-to-agent sub-block (Lever 3) is additionally gated on the `task` tool being active. Default off. See [§21](#21-emission-style-terse-output-guidance).
 - `HARNESS_TOOL_CALL_PROTOCOL` enforces native tool-call channel, evidence rule, no-repeat rule.
+- Skills are listed as `- name — description` (description collapsed to one line, 200 chars max) in the volatile tail.
 - "Current date" injects the host-local calendar day as machine-stable `YYYY-MM-DD` in the volatile tail (not the stable cache prefix), so a midnight rollover mid-session emits a mid-conversation update without busting prompt cache.
 - "Current request" block restates last user text when transcript continued with assistant/tool messages (skipped when user row is already last).
 - Memory selection (`MemoryPromptSelection`) replaces full `ctx.memory_index` when truncated; skill names always come from `ctx.skills` (use `list_skills`/`read_file` for the skills root path and full `SKILL.md` procedure).
@@ -268,9 +269,10 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 | Tool | Role |
 |------|------|
 | `read_file` / `write_file` | `skills/...` read-only or workspace-relative paths; `read_file`/`load_file` also accept an absolute path outside the workspace once the user grants that folder (see §5) — read in place, never copied in |
-| `replace_in_file` | Unique (or `replace_all`) substring edit; exact then light fuzzy match |
-| `glob` / `grep` | Path discovery / content regex search (prefer over shell); `root` accepts a granted external folder the same way `read_file` does |
-| `apply_patch` | Multi-file Codex-style Add/Update/Delete/Move; fail-closed before any write |
+| `replace_in_file` | Unique (or `replace_all`) substring edit; exact then light fuzzy match. Returns `line` and a numbered `snippet` (±3 lines) of the edited region |
+| `glob` / `grep` | Path discovery / content regex search (prefer over shell); `root` accepts a granted external folder the same way `read_file` does. `glob` returns files only by default (`files_only: false` adds directories) and never descends `node_modules`, `.git`, `build`, … unless the pattern names them. `grep` takes `context` (0–3 surrounding lines as `before`/`after`), `files_only` (just the matching paths in `files`) and `respect_gitignore` (default true: `.gitignore` files inside the tree, on top of the built-in noise dirs) |
+| `list_dir` | Immediate children of a workspace directory (`dirs` / `files` names, capped at 300) |
+| `apply_patch` | Multi-file Codex-style Add/Update/Delete/Move; fail-closed before any write. Update/move entries carry `line` + `snippet`. A context-free hunk that matches several places is refused (`ambiguous_context`), and a hunk line that does not start with ` `, `-`, `+` or `@@` is a parse error (`invalid_hunk_line`) |
 | `search_memory` | Keyword search in memory tree |
 | `list_skills` | Skill discovery |
 | `run_command` | Allowlisted **and OS-confined** shell (host or OpenSandbox) — see the workspace jail below |
@@ -293,6 +295,8 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Writes, edits, and patches reject `skills/...`; real-path checks reject symlink escapes from either root.
 - `apply_patch` validates all hunks before writing; a mid-apply failure rolls back completed ops in reverse order.
 - Soft spill: large tool results always write the full payload to `.monkeybot/spill/{session_id}/` (and `.monkeybot/spill/subagent:{session_id}:*/` for task subagents) and keep a window-derived inline body in history when headroom allows; cleaned concurrently on session end. Budgets derive from `model.context_window` (no spill YAML/env knobs). Reported `read_file` line metadata is always truthful (`next_offset` when truncated).
+- `run_command` output over the spill threshold is never inlined as a raw-JSON prefix: the result stays valid JSON with `ok`, `exit_code`, `stdout_head`, `stdout_tail`, `stderr_tail`, `stdout_chars`/`stderr_chars` and `output_path` (full streams under `.monkeybot/spill/`). It is in `_SPILL_SKIP_TOOLS` because it self-spills.
+- `run_command` accepts `./…` and workspace-absolute path arguments (the agent's own tree); `../memory` and symlink escapes stay outside. `bash|sh|zsh -c "…"` scripts are split on shell operators and each command is checked against `deny_patterns` (anchored patterns like `^rm\s+-rf` used to miss them).
 - `task` omitted in subagent workers (`include_task_tool=False`).
 - Nested `task` disabled inside subagents.
 - Custom tools must not collide with core or MCP names.
@@ -537,7 +541,7 @@ its `.env` before YAML values fill still-unset environment variables.
 
 | Command | Purpose |
 |---------|---------|
-| `monkeybot new` | Scaffold `monkeybot_config/`, workspace, `.env.example` |
+| `monkeybot new` | Scaffold `monkeybot_config/`, workspace, `.env.example`. `--template {default,coding}` (prompted when interactive); `coding` swaps in a coding `AGENT.md`, a toolchain `command_allowlist.yaml` (pytest, npm/pnpm/yarn/node/npx, cargo, go, make, ruff, mypy, tsc, sed, awk, find, head, tail, wc, diff; install denies kept, plus `find -delete/-exec` and any `rm`), a `permissions.yaml` that asks before `git push`, `git reset --hard`, `git clean`, and `npx` even when those commands are chained or wrapped in `bash -c`, and deep-merges `monkeybot.overrides.yaml` (verification gate, verifier ledger+tracker, transcripts, 200k context window, 100 turns) over the example config |
 | `monkeybot validate` | YAML, paths, MCP, provider env |
 | `monkeybot doctor` | Python, harness, extras, credentials, port |
 | `monkeybot run` | Foreground gateway (fail-closed harness probe) |
@@ -582,8 +586,10 @@ Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.
 | `TOOL_DEFINITION` (`tool.definition`) | Before each provider call; may filter/replace `payload.tools` |
 | `BEFORE_PROVIDER_REQUEST` | After messages are finalized; may rewrite `provider_messages` / `tools` |
 | `AFTER_PROVIDER_RESPONSE` | After stream success or failure (fire-and-forget); observational |
+| `PRE_FINAL_ANSWER` | The model ended the turn with text and no tool calls, before that text is persisted; a hook may set `payload.reject_final_answer` (read-side, awaited) |
+| `HISTORY_COMPACTED` | After a summary replaced older history (awaited, bounded); `payload.turns_summarized` set |
 
-**Extension API:** `HookManager.register(HookEvent, fn)` with `HookPayload.inject_text` / `inject_memory_lines`. Provider hooks also use `tools`, `provider_messages`, `assistant_text`, `usage`, `provider_error`.
+**Extension API:** `HookManager.register(HookEvent, fn)` with `HookPayload.inject_text` / `inject_memory_lines`. Provider hooks also use `tools`, `provider_messages`, `assistant_text`, `usage`, `provider_error`. `BEFORE_PROVIDER_REQUEST` hooks may set `hold_assistant_text` to buffer that call's text so `PRE_FINAL_ANSWER` can refuse it unseen; the loop caps refusals per message (`_FINAL_ANSWER_REJECTIONS`, 3) and never refuses once the turn budget is spent. A refused answer is discarded (never streamed once held, never persisted), the hook's note becomes the next runtime note, and a `final_answer_gate` `HarnessIntervention` is recorded.
 
 **Invariants:**
 - Bounded timeout; errors never propagate; no re-entrancy.
@@ -669,6 +675,32 @@ Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.
 - `resource_for_call` gained `url`/`app` argument lookups (lowest priority, after `path`) so `computer_open_url`/`computer_open_app` get readable permission resource strings; no existing tool's resource string changes.
 - A resource stored in `approvals.json` is `glob.escape`d before becoming an `fnmatch` pattern, so a literal `*`/`?`/`[` in a filename can't over-match.
 - `ComputerAwarePermissionInspector` is used **instead of** (not alongside) the plain `PermissionInspector` when computer tools are enabled; every other deployment's inspector chain is unchanged.
+
+---
+
+### 22. Coding mode
+
+**Purpose:** Make a monkeybot agent reliable on a real repository — navigate it, edit it precisely, prove the edit, and survive long tasks. Always on for every agent; `monkeybot new --template coding` additionally scaffolds a coding `AGENT.md`, toolchain allowlist and the verification gate. Config is the YAML-only `coding:` section (`core/config/settings.py::CodingConfig`): `verification_gate.{enabled, verify_commands, max_rejections}`, `project_instructions_files`. The former `coding.enabled` flag is retired and ignored (with a warning).
+
+**Key files:** `core/prompts/harness_prompt.py` (protocol block), `core/context/project_context.py`, `core/tools/read_ledger.py`, `core/tools/gitignore.py`, `core/coding/{git_context_hook,verification_gate,read_ledger_hook}.py`, `core/runtime/history_compaction.py`, `cli/.../scaffold_defaults/templates/coding/`.
+
+**Ownership rule:** mechanics (which tool, in what order, what counts as evidence) live in `harness_prompt.py`; judgment (how much to plan, when to ask, style) lives in the template `AGENT.md`.
+
+**What it adds:**
+- **Protocol block.** `### Editing & verification protocol` in the stable harness prefix: locate with `glob`/`grep`/`list_dir`, `read_file` before editing, smallest edit, verify by running, final answer states what ran or `not verified: <why>`.
+- **Read-before-write ledger.** `FileReadLedger` (one per chat session, held on the session bus like `todo_store`; the realtime voice loop keeps a separate one for that connection, because it does not share the bus and does not compact) records `(mtime_ns, size)` per file at `read_file`. `replace_in_file`, `apply_patch` (Update/Delete) and `write_file` on an *existing* file return `error_kind=policy` with `details.code` `read_before_write` (never read) or `stale_read` (changed since). New files are free; the agent's own successful writes keep a file "seen". Subagents start with a fresh ledger. Edits are gated for every agent; only tools built without a ledger (tests, embedded executors such as `run_pattern_bc_turn`) skip the check.
+- **Project instructions and repo overview** in the stable prefix (`## Project instructions`, `## Repo overview`; deliberately *not* volatile headings, so they cache). The first existing file of `project_instructions_files` is injected, capped at 12k chars, symlinks escaping the workspace skipped, and `## Skills`-style headings inside it demoted so they cannot be mistaken for the volatile tail. The overview is byte-stable for an unchanged workspace (toolchain guess + sorted top-level dirs, plus well-known root files and package subdirectories — not arbitrary files, so ordinary edits never rewrite the prefix). Editing `AGENTS.md` mid-session changes the stable fingerprint and opens a new context epoch.
+- **Git state** via a `PRE_TURN` hook (`git status --porcelain -b`, 1 s timeout) into `## Runtime notes` — volatile, never in the cached prefix.
+- **Verification gate** (`coding.verification_gate.enabled`). `VerificationGate` tracks successful writes and passing verify commands. A `run_command` counts only when one of its shell segments matches `verify_commands`, the result is an explicit foreground `ok: true` (a background start does not count), and the exit is the check's own (`pytest || true` does not count). Commands that only read or list files never count. While edits are unverified (or this message touched files/`todo_list` and todo items are open) it sets `hold_assistant_text` on `BEFORE_PROVIDER_REQUEST`, and on `PRE_FINAL_ANSWER` refuses the answer up to `max_rejections` times with `[Harness] You changed N files (…) since the last passing verification command. Run the project's test/lint command now, or state in your answer that you could not verify and why.` Pure Q&A turns are never gated; subagents have no hook manager and are not gated.
+- **Long-task resilience.** Compaction appends a harness-generated `## Workspace state (harness-generated)` trailer (files written this session, last verification command and exit code, "re-read before editing") from the ledger — not LLM-written, so it cannot be misremembered. The loop then clears the ledger's reads, including when no hook manager is registered (subagents). `ReadLedgerCompactionHook` clears them again; the second clear is a no-op. The agent must re-read before editing a file whose content was summarized away. Oversized tool text is trimmed 70% head / 30% tail. A tool failing on the same `path` three times in a row with *different* other arguments triggers the same doom-loop recovery as three identical calls.
+
+**Invariants:**
+- Core never imports gateway; the gateway wires the ledger (`bus.read_ledger` for chat, a connection-scoped ledger for realtime), hooks (`rebuild_hooks`) and `TurnContext.read_ledger`. The context and the executor share that one object.
+- Stable prefix stays byte-identical within an epoch; coding blocks only change when `AGENTS.md`, the toolchain markers, or top-level directories change.
+- The gate is policy in a hook; the loop only offers the generic hold/refuse seam (§16) and is bounded (hook errors and timeouts are pass-through, refusals are capped, never raises, still ends in `TurnComplete`).
+- Realtime loop does not implement `PRE_FINAL_ANSWER`/`HISTORY_COMPACTED` yet.
+
+**Evals:** `evals/suites/coding.yaml` (live; workspace-checked assertions — see [live-evals.md](live-evals.md#coding-suite-workspace-checked)) and `tests/evals/scenarios/coding_*.yaml` (deterministic, `executor: real`).
 
 ---
 
@@ -763,6 +795,13 @@ Use this when reviewing PRs or designing new features.
 | Hook settlement timeout | 2s | `MONKEYBOT_HOOK_SETTLEMENT_TIMEOUT_S` |
 | Parallel-safe tool concurrency | 10 | `MONKEYBOT_PARALLEL_TOOL_CONCURRENCY` |
 | Parallel `task` concurrency | 10 | code constant (`_MAX_CONCURRENT_SUBAGENTS`) |
+| Coding mode | always on | — (`coding.enabled` retired) |
+| Verification gate | off; 1 refusal per message (loop cap 3) | `coding.verification_gate.{enabled,max_rejections,verify_commands}` |
+| Project instructions | 12000 chars, first of `AGENTS.md`, `CLAUDE.md`, `.monkeybot/AGENTS.md` | `coding.project_instructions_files` |
+| Repo overview | ≤ 80 entries | code constant |
+| `list_dir` entries | 300 | code constant |
+| Edit `snippet` | ±3 lines, ≤ 40 lines | code constant |
+| `grep` `context` | 0–3 | tool argument |
 
 ---
 

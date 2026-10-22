@@ -25,7 +25,11 @@ from typing import TYPE_CHECKING, Literal
 
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.tools.text_normalize import normalize_unicode_punctuation
-from monkeybot.core.tools.workspace_service import WorkspaceError
+from monkeybot.core.tools.workspace_service import (
+    WorkspaceError,
+    changed_line_range,
+    snippet_around,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -124,24 +128,57 @@ def _parse_add_content(lines: list[str], start_idx: int) -> tuple[str, int]:
     return "\n".join(parts), i
 
 
-def _parse_update_chunks(lines: list[str], start_idx: int) -> tuple[list[UpdateChunk], int]:
+_EOF_MARKER = "*** End of File"
+
+
+def _bad_hunk_line(path: str, line: str) -> PatchError:
+    shown = line if len(line) <= 80 else line[:77] + "..."
+    return PatchError(
+        f"Invalid hunk line in {path}: {shown!r}. Hunk lines must start with ' ' (context), "
+        "'-' (remove), '+' (add) or '@@'.",
+        code="invalid_hunk_line",
+        details={"path": path, "line": shown},
+    )
+
+
+def _parse_update_chunks(
+    lines: list[str], start_idx: int, path: str = ""
+) -> tuple[list[UpdateChunk], int]:
     chunks: list[UpdateChunk] = []
     i = start_idx
     while i < len(lines) and not lines[i].startswith("***"):
-        if not lines[i].startswith("@@"):
+        header = lines[i]
+        if header.startswith("@@"):
+            context_line = header[2:].strip()
+            i += 1
+        elif not header.strip():
             i += 1
             continue
-        context_line = lines[i][2:].strip()
-        i += 1
+        elif header[0] in " -+":
+            # Codex lets the first chunk omit its ``@@`` header.
+            context_line = ""
+        else:
+            raise _bad_hunk_line(path, header)
         old_lines: list[str] = []
         new_lines: list[str] = []
         is_eof = False
-        while i < len(lines) and not lines[i].startswith("@@") and not lines[i].startswith("***"):
+        trailing_blank = 0
+        while i < len(lines) and not lines[i].startswith("@@"):
             change = lines[i]
-            if change == "*** End of File":
+            if change == _EOF_MARKER:
                 is_eof = True
                 i += 1
                 break
+            if change.startswith("***"):
+                break
+            if change == "":
+                # Models often drop the leading space of a blank context line.
+                old_lines.append("")
+                new_lines.append("")
+                trailing_blank += 1
+                i += 1
+                continue
+            trailing_blank = 0
             if change.startswith(" "):
                 content = change[1:]
                 old_lines.append(content)
@@ -150,7 +187,14 @@ def _parse_update_chunks(lines: list[str], start_idx: int) -> tuple[list[UpdateC
                 old_lines.append(change[1:])
             elif change.startswith("+"):
                 new_lines.append(change[1:])
+            else:
+                raise _bad_hunk_line(path, change)
             i += 1
+        if trailing_blank and not is_eof:
+            # Blank lines closing a chunk are separators, not content; before
+            # ``*** End of File`` they are the file's own trailing blank lines.
+            del old_lines[-trailing_blank:]
+            del new_lines[-trailing_blank:]
         chunks.append(
             UpdateChunk(
                 old_lines=tuple(old_lines),
@@ -195,7 +239,13 @@ def parse_patch(patch_text: str) -> list[Hunk]:
             hunks.append(DeleteHunk(path=path))
             i = next_idx
         else:
-            chunks, i = _parse_update_chunks(lines, next_idx)
+            chunks, i = _parse_update_chunks(lines, next_idx, path)
+            if not chunks and move_path is None:
+                raise PatchError(
+                    f"Update hunk for {path} has no changes",
+                    code="empty_hunk",
+                    details={"path": path},
+                )
             hunks.append(UpdateHunk(path=path, move_path=move_path, chunks=tuple(chunks)))
 
     if not hunks:
@@ -222,6 +272,18 @@ def _try_match(
     return -1
 
 
+_COMPARATORS: tuple[Callable[[str, str], bool], ...] = (
+    (lambda a, b: a == b),
+    (lambda a, b: a.rstrip() == b.rstrip()),
+    (lambda a, b: a.strip() == b.strip()),
+    (
+        lambda a, b: (
+            normalize_unicode_punctuation(a.strip()) == normalize_unicode_punctuation(b.strip())
+        )
+    ),
+)
+
+
 def seek_sequence(
     lines: list[str],
     pattern: list[str],
@@ -232,20 +294,50 @@ def seek_sequence(
     """Find ``pattern`` in ``lines`` with exact → rstrip → trim → unicode-normalize passes."""
     if not pattern:
         return -1
-    for compare in (
-        (lambda a, b: a == b),
-        (lambda a, b: a.rstrip() == b.rstrip()),
-        (lambda a, b: a.strip() == b.strip()),
-        (
-            lambda a, b: (
-                normalize_unicode_punctuation(a.strip()) == normalize_unicode_punctuation(b.strip())
-            )
-        ),
-    ):
+    for compare in _COMPARATORS:
         found = _try_match(lines, pattern, start_index, compare, eof)
         if found != -1:
             return found
     return -1
+
+
+def _match_starts(lines: list[str], pattern: list[str], start_index: int) -> list[int]:
+    """Every start index of ``pattern`` at the strictest comparison level that matches."""
+    for compare in _COMPARATORS:
+        starts = [
+            i
+            for i in range(start_index, len(lines) - len(pattern) + 1)
+            if all(compare(lines[i + j], pattern[j]) for j in range(len(pattern)))
+        ]
+        if starts:
+            return starts
+    return []
+
+
+def _ambiguous_hunk(file_path: str, starts: list[int]) -> PatchError:
+    shown = [n + 1 for n in starts[:5]]
+    return PatchError(
+        f"Ambiguous hunk in {file_path}: the lines to change match {len(starts)} places "
+        f"(first at lines {shown}). Add an '@@ <unique line above the change>' header or "
+        "more surrounding context lines so exactly one place matches.",
+        code="ambiguous_context",
+        details={"path": file_path, "match_lines": shown, "match_count": len(starts)},
+    )
+
+
+def _context_targets(lines: list[str], chunk: UpdateChunk, header_starts: list[int]) -> set[int]:
+    """Where ``chunk`` would land under each matching ``@@`` header line."""
+    if not chunk.old_lines:
+        return {start + 1 for start in header_starts}
+    pattern = list(chunk.old_lines)
+    targets: set[int] = set()
+    for start in header_starts:
+        found = seek_sequence(lines, pattern, start + 1, eof=chunk.is_end_of_file)
+        if found == -1 and pattern[-1] == "":
+            found = seek_sequence(lines, pattern[:-1], start + 1, eof=chunk.is_end_of_file)
+        if found != -1:
+            targets.add(found)
+    return targets
 
 
 def derive_new_contents(
@@ -269,6 +361,12 @@ def derive_new_contents(
                     f"Failed to find context '{chunk.change_context}' in {file_path}",
                     code="context_not_found",
                 )
+            header_starts = _match_starts(original_lines, [chunk.change_context], line_index)
+            if (
+                len(header_starts) > 1
+                and len(_context_targets(original_lines, chunk, header_starts)) > 1
+            ):
+                raise _ambiguous_hunk(file_path, header_starts)
             line_index = ctx_idx + 1
             context_matched = True
 
@@ -294,6 +392,10 @@ def derive_new_contents(
             if new_slice and new_slice[-1] == "":
                 new_slice = new_slice[:-1]
             found = seek_sequence(original_lines, pattern, line_index, eof=chunk.is_end_of_file)
+        if found != -1 and not context_matched and not chunk.is_end_of_file:
+            starts = _match_starts(original_lines, pattern, line_index)
+            if len(starts) > 1:
+                raise _ambiguous_hunk(file_path, starts)
         if found == -1:
             raise PatchError(
                 f"Failed to find expected lines in {file_path}:\n" + "\n".join(chunk.old_lines),
@@ -471,6 +573,16 @@ def _rollback_ops(
     return reverted, dirty
 
 
+def _with_snippet(entry: dict[str, object], op: _PlannedOp) -> dict[str, object]:
+    """Add ``line`` + numbered ``snippet`` of the first changed region to an update/move entry."""
+    if op.content is None or op.old_content is None:
+        return entry
+    first, last = changed_line_range(op.old_content, op.content)
+    entry["line"] = first
+    entry["snippet"] = snippet_around(op.content, first, last)
+    return entry
+
+
 def _apply_ops(
     workspace: WorkspaceFileService, planned: list[_PlannedOp]
 ) -> list[dict[str, object]]:
@@ -487,7 +599,7 @@ def _apply_ops(
                 if op.content is None:
                     raise PatchError("update op missing content", code="internal")
                 workspace.write_file(op.path, op.content)
-                files.append({"path": op.path, "action": "update"})
+                files.append(_with_snippet({"path": op.path, "action": "update"}, op))
             elif op.action == "move":
                 if op.content is None or op.move_path is None:
                     raise PatchError("move op missing content or move_path", code="internal")
@@ -495,7 +607,9 @@ def _apply_ops(
                 workspace.write_file(op.move_path, op.content)
                 done.append(op)
                 workspace.delete_file(op.path)
-                files.append({"path": op.move_path, "action": "move", "from": op.path})
+                files.append(
+                    _with_snippet({"path": op.move_path, "action": "move", "from": op.path}, op)
+                )
                 continue
             elif op.action == "delete":
                 workspace.delete_file(op.path)

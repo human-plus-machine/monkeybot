@@ -59,6 +59,7 @@ from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
 from monkeybot.core.tools.path_grant_inspector import PathGrantInspector
 from monkeybot.core.tools.permission import try_load_permission_inspector
+from monkeybot.core.tools.read_ledger import FileReadLedger
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
 
@@ -402,6 +403,8 @@ async def _async_main() -> None:
 
         cfg = get_config_store().current_or_none()
         window_tokens = context_window_tokens(cfg)
+        # A subagent starts with a fresh ledger: it has read nothing the parent read.
+        read_ledger = FileReadLedger()
 
         try:
             _ws_backend = _build_web_search_backend()
@@ -439,6 +442,7 @@ async def _async_main() -> None:
             context_window_tokens=window_tokens,
             extra_tools=extra_tools,
             config=cfg,
+            read_ledger=read_ledger,
         )
 
         executor = CoreToolExecutor(
@@ -452,6 +456,7 @@ async def _async_main() -> None:
             run_command_allowed_path_prefixes=run_allow_paths,
             config=cfg,
             grants_path=grants_path,
+            read_ledger=read_ledger,
         )
         history = backend.history()
 
