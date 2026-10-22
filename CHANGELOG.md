@@ -6,13 +6,17 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### CLI
+## [cli v0.11.0] - 2026-10-22
 
 ### Added
 
 - `monkeybot new --template coding` scaffolds an agent with a coding `AGENT.md`, a toolchain command allowlist (including yarn, with `rm` denied inside `bash -c`), ask-before-push permissions that also match chained commands and `bash -c`, and `coding.verification_gate` turned on.
 - `monkeybot mcp-login` signs in to one remote MCP server in the browser and writes the token file core reuses.
 - New scaffolds list `./tests/` and `./src/` in `command_allowlist.yaml`. `refresh` does not re-add them to an allowlist you already configured.
+
+### Changed
+
+- Requires `monkeybot[cli]>=3.10.0,<4`. `monkeybot mcp-login` imports the OAuth flow added in core 3.10.0.
 
 ## [core v3.10.0] - 2026-10-22
 
