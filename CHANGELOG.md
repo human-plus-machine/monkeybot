@@ -14,6 +14,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - `monkeybot mcp-login` signs in to one remote MCP server in the browser and writes the token file core reuses.
 - New scaffolds list `./tests/` and `./src/` in `command_allowlist.yaml`. `refresh` does not re-add them to an allowlist you already configured.
 
+### Changed
+
+- Requires `monkeybot[cli]>=3.10.0,<4`. `monkeybot mcp-login` imports the OAuth flow added in core 3.10.0.
+
 ## [core v3.10.0] - 2026-10-22
 
 ### Added
