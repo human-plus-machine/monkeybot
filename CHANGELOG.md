@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- A thread past about 70% of its context window summarizes in the background. The turn that crosses the summary bar applies that summary instead of waiting on the summarizer, and falls back to summarizing inline when the summary is missing or the covered history changed.
+
 ## [cli v0.11.0] - 2026-10-22
 
 ### Added
