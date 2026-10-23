@@ -8,6 +8,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The gateway opens the model provider's HTTP connection at startup with a models-list request and keeps that socket for 120 seconds, so the first turn does not wait on a cold connection.
 - The harness prompt tells the model to issue independent `read_file` calls in one response instead of one file per turn. `grep` says to read the matching paths together once they are known.
 - OpenAI-compatible token counting loads the tiktoken `cl100k_base` encoding when the provider module is imported, so a turn that counts with that encoding pays the warm count instead of the cold load.
 
