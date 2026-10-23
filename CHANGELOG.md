@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- The harness prompt tells the model to issue independent `read_file` calls in one response instead of one file per turn. `grep` says to read the matching paths together once they are known.
+
 ## [cli v0.11.0] - 2026-10-22
 
 ### Added
