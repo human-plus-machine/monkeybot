@@ -18,6 +18,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 - OpenAI-compatible providers still import when that tiktoken encoding file cannot be read at startup. Token counting raises the same error on the turn that needs the encoder, and a later successful read is cached as usual.
 - Cancelling gateway, harness, or subagent startup while an `autoConnect` server is still connecting closes that server instead of leaving its process behind.
+- The managed memory runtime installs `monkeybot-browser-mcp` next to `monkeybot[memory]`. A cached runtime that cannot import `browser_mcp` is rebuilt, so a local CLI gateway can start the browser server with its own interpreter.
 
 ## [cli v0.11.0] - 2026-10-22
 

@@ -18,6 +18,7 @@ from monkeybot_cli.runtime_python import (
     MEMORY_PROBE,
     RuntimePython,
     RuntimeUpgradeError,
+    _browser_mcp_requirement,
     _managed_memory_requirement,
     _monkeybot_checkout_root,
     gateway_argv,
@@ -531,6 +532,7 @@ def _isolate_managed_cache(
     monkeypatch: pytest.MonkeyPatch,
     *,
     extras: tuple[str, ...] = (),
+    browser_requirement: str | None = None,
 ) -> Path:
     """Point the managed-runtime cache at ``tmp_path`` and pretend uv is installed."""
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
@@ -546,7 +548,13 @@ def _isolate_managed_cache(
         "monkeybot_cli.runtime_python._monkeybot_checkout_root",
         lambda: None,
     )
-    return managed_memory_runtime_dir(package_version("monkeybot"), extras)
+    monkeypatch.setattr(
+        "monkeybot_cli.runtime_python._browser_mcp_requirement",
+        lambda checkout: browser_requirement,
+    )
+    from monkeybot_cli.runtime_python import _managed_runtime_cache_dir
+
+    return _managed_runtime_cache_dir(package_version("monkeybot"), extras, None)
 
 
 def _fake_uv(calls: list[list[str]], *, install_returncode: int = 0, stderr: str = ""):
@@ -684,6 +692,148 @@ def test_managed_runtime_installs_from_local_checkout_when_present(
     assert requirement.url == checkout.resolve().as_uri()
     assert str(requirement.specifier) == ""
     assert f"provisioning {install[-1]}" in capsys.readouterr().out
+
+
+def test_managed_runtime_installs_browser_mcp_from_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gateway interpreter must be able to run ``python -m browser_mcp.server``."""
+    checkout = tmp_path / "monkeybot-src"
+    browser = checkout / "integrations" / "browser-mcp"
+    browser.mkdir(parents=True)
+    (checkout / "pyproject.toml").write_text('[project]\nname = "monkeybot"\n', encoding="utf-8")
+    (browser / "pyproject.toml").write_text(
+        '[project]\nname = "monkeybot-browser-mcp"\n', encoding="utf-8"
+    )
+    _isolate_managed_cache(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "monkeybot_cli.runtime_python._monkeybot_checkout_root",
+        lambda: checkout,
+    )
+    monkeypatch.setattr(
+        "monkeybot_cli.runtime_python._browser_mcp_requirement",
+        _browser_mcp_requirement,
+    )
+    calls: list[list[str]] = []
+    monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", _fake_uv(calls))
+    monkeypatch.setattr(
+        "monkeybot_cli.runtime_python.run_probe",
+        lambda runtime, code, **kwargs: runtime.source == MANAGED_RUNTIME_SOURCE,
+    )
+
+    provision_managed_memory_runtime(tmp_path)
+
+    install = next(cmd for cmd in calls if cmd[:3] == ["uv", "pip", "install"])
+    browser_spec = next(part for part in install if part.startswith("monkeybot-browser-mcp"))
+    requirement = Requirement(browser_spec)
+    assert requirement.name == "monkeybot-browser-mcp"
+    assert requirement.url == browser.resolve().as_uri()
+
+
+def test_browser_mcp_requirement_pins_the_cli_package(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "monkeybot_cli.runtime_python._package_version",
+        lambda name: "0.8.1" if name == "monkeybot-browser-mcp" else "3.10.0",
+    )
+
+    assert _browser_mcp_requirement(None) == "monkeybot-browser-mcp==0.8.1"
+
+
+def test_managed_runtime_reinstalls_when_cached_browser_mcp_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A memory cache from before the browser package was mirrored is rebuilt."""
+    runtime_dir = _isolate_managed_cache(
+        tmp_path,
+        monkeypatch,
+        browser_requirement="monkeybot-browser-mcp==0.8.1",
+    )
+    old_interpreter = runtime_dir / "bin" / "python"
+    old_interpreter.parent.mkdir(parents=True)
+    old_interpreter.write_text("#!/bin/sh\n# stale\n", encoding="utf-8")
+    old_interpreter.chmod(0o755)
+    calls: list[list[str]] = []
+    monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", _fake_uv(calls))
+
+    def fake_probe(runtime: RuntimePython, code: str, **kwargs: object) -> bool:
+        del kwargs
+        if "import browser_mcp" in code:
+            return "stale" not in Path(runtime.argv[0]).read_text(encoding="utf-8")
+        return True
+
+    monkeypatch.setattr("monkeybot_cli.runtime_python.run_probe", fake_probe)
+
+    runtime = provision_managed_memory_runtime(tmp_path)
+
+    install = next(cmd for cmd in calls if cmd[:3] == ["uv", "pip", "install"])
+    assert "monkeybot-browser-mcp==0.8.1" in install
+    assert runtime.argv == [str(runtime_dir / "bin" / "python")]
+    assert "stale" not in Path(runtime.argv[0]).read_text(encoding="utf-8")
+
+
+def test_prepare_reprovisions_when_managed_runtime_lacks_browser_mcp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent_root = tmp_path / "agent"
+    agent_root.mkdir()
+    (agent_root / "monkeybot_config").mkdir()
+    (agent_root / "monkeybot_config" / "monkeybot.yaml").write_text(
+        "memory:\n  enabled: true\n",
+        encoding="utf-8",
+    )
+    runtime_dir = _isolate_managed_cache(
+        tmp_path,
+        monkeypatch,
+        browser_requirement="monkeybot-browser-mcp==0.8.1",
+    )
+    old_interpreter = runtime_dir / "bin" / "python"
+    old_interpreter.parent.mkdir(parents=True)
+    old_interpreter.write_text("#!/bin/sh\n# stale\n", encoding="utf-8")
+    old_interpreter.chmod(0o755)
+    calls: list[list[str]] = []
+    monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", _fake_uv(calls))
+
+    def fake_probe(runtime: RuntimePython, code: str, **kwargs: object) -> tuple[bool, str]:
+        del kwargs
+        if runtime.source != MANAGED_RUNTIME_SOURCE:
+            return False, "cli has no mempalace"
+        if "import browser_mcp" in code and "stale" in Path(runtime.argv[0]).read_text(
+            encoding="utf-8"
+        ):
+            return False, "missing browser_mcp"
+        if "import mempalace" in code or "import browser_mcp" in code:
+            return True, ""
+        return False, code
+
+    monkeypatch.setattr("monkeybot_cli.runtime_python._probe", fake_probe)
+
+    runtime = prepare_runtime_python(agent_root)
+
+    assert any("monkeybot-browser-mcp==0.8.1" in cmd for cmd in calls)
+    assert runtime.source == MANAGED_RUNTIME_SOURCE
+    assert "stale" not in Path(runtime.argv[0]).read_text(encoding="utf-8")
+
+
+def test_managed_runtime_dir_invalidates_on_browser_mcp_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    checkout = tmp_path / "monkeybot-src"
+    browser = checkout / "integrations" / "browser-mcp"
+    browser.mkdir(parents=True)
+    (checkout / "pyproject.toml").write_text('[project]\nname = "monkeybot"\n', encoding="utf-8")
+    module = browser / "server.py"
+    module.write_text("x = 1\n", encoding="utf-8")
+
+    before = managed_memory_runtime_dir("3.1.2", checkout=checkout)
+    module.write_text("x = 2\n", encoding="utf-8")
+    st = module.stat()
+    os.utime(module, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+    after = managed_memory_runtime_dir("3.1.2", checkout=checkout)
+
+    assert before != after
 
 
 def test_managed_memory_requirement_uses_checkout_env(
