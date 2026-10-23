@@ -9,7 +9,11 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - The harness prompt tells the model to issue independent `read_file` calls in one response instead of one file per turn. `grep` says to read the matching paths together once they are known.
-- OpenAI-compatible token counting loads the tiktoken `cl100k_base` encoding when the provider module is imported, so the first turn in a process pays the warm count instead of the cold load.
+- OpenAI-compatible token counting loads the tiktoken `cl100k_base` encoding when the provider module is imported, so a turn that counts with that encoding pays the warm count instead of the cold load.
+
+### Fixed
+
+- OpenAI-compatible providers still import when that tiktoken encoding file cannot be read at startup. Token counting raises the same error on the turn that needs the encoder, and a later successful read is cached as usual.
 
 ## [cli v0.11.0] - 2026-10-22
 

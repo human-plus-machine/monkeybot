@@ -1017,28 +1017,56 @@ def tiktoken_encoding_for_model(model: str) -> Any:
     try:
         enc: Any = tiktoken.encoding_for_model(model)
     except KeyError:
-        enc = _tiktoken_encodings.get(_TIKTOKEN_FALLBACK_ENCODING)
-        if enc is None:
-            enc = tiktoken.get_encoding(_TIKTOKEN_FALLBACK_ENCODING)
-            _tiktoken_encodings[_TIKTOKEN_FALLBACK_ENCODING] = enc
+        enc = _cached_fallback_tiktoken_encoding()
     _tiktoken_encodings[model] = enc
     return enc
+
+
+def _publish_fallback_tiktoken_encoding(enc: Any) -> Any:
+    """Cache ``cl100k_base`` only after its special-token regex exists.
+
+    Publishing before ``encode`` would let the next turn pay that compile.
+    A failure leaves the cache empty so the caller can try again.
+    """
+    # The first encode builds the special-token regex. Do it here so a turn does not.
+    enc.encode(" ")
+    _tiktoken_encodings[_TIKTOKEN_FALLBACK_ENCODING] = enc
+    return enc
+
+
+def _cached_fallback_tiktoken_encoding() -> Any:
+    cached = _tiktoken_encodings.get(_TIKTOKEN_FALLBACK_ENCODING)
+    if cached is not None:
+        return cached
+    import tiktoken  # noqa: PLC0415
+
+    enc = tiktoken.get_encoding(_TIKTOKEN_FALLBACK_ENCODING)
+    return _publish_fallback_tiktoken_encoding(enc)
 
 
 def _load_fallback_tiktoken_encoding() -> None:
     """Load ``cl100k_base`` at import.
 
-    tiktoken is an optional extra. Importing this module still succeeds
-    without it; the count path raises ``ImportError`` when it needs the encoder.
+    tiktoken is an optional extra. Importing this module still succeeds when
+    tiktoken is missing or its encoding file cannot be read. The count path
+    raises when it needs the encoder, and does not keep a failed load.
     """
     try:
-        import tiktoken  # noqa: PLC0415
+        _cached_fallback_tiktoken_encoding()
     except ImportError:
         return
-    enc = tiktoken.get_encoding(_TIKTOKEN_FALLBACK_ENCODING)
-    # The first encode builds the special-token regex. Do it here so a turn does not.
-    enc.encode(" ")
-    _tiktoken_encodings[_TIKTOKEN_FALLBACK_ENCODING] = enc
+    except MemoryError:
+        raise
+    except Exception:
+        # A cold cache downloads cl100k_base.tiktoken. That failure used to abort
+        # import of every provider, because settings imports this module. Leave
+        # the cache empty so the count path can try again.
+        _log.warning(
+            "tiktoken %s was not loaded at import; token counting will try again",
+            _TIKTOKEN_FALLBACK_ENCODING,
+            exc_info=True,
+        )
+        return
 
 
 _load_fallback_tiktoken_encoding()
