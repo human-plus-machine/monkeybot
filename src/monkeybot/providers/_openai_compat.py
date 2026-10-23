@@ -1003,6 +1003,82 @@ async def iter_openai_compat_stream(
     yield Done(truncated=finish_reason == "length")
 
 
+# Unknown model ids (the common case on OpenAI-compatible endpoints) all share
+# this encoding. It is loaded once, at import, so the first token count does
+# not pay the BPE load.
+_TIKTOKEN_FALLBACK_ENCODING = "cl100k_base"
+_tiktoken_encodings: dict[str, Any] = {}
+
+
+def tiktoken_encoding_for_model(model: str) -> Any:
+    """Return a process-cached tiktoken encoding for ``model``.
+
+    A model id tiktoken does not know shares the preloaded ``cl100k_base``
+    encoding. A known id is resolved once and then reused.
+    """
+    cached = _tiktoken_encodings.get(model)
+    if cached is not None:
+        return cached
+    import tiktoken  # noqa: PLC0415
+
+    try:
+        enc: Any = tiktoken.encoding_for_model(model)
+    except KeyError:
+        enc = _cached_fallback_tiktoken_encoding()
+    _tiktoken_encodings[model] = enc
+    return enc
+
+
+def _publish_fallback_tiktoken_encoding(enc: Any) -> Any:
+    """Cache ``cl100k_base`` only after its special-token regex exists.
+
+    Publishing before ``encode`` would let the next turn pay that compile.
+    A failure leaves the cache empty so the caller can try again.
+    """
+    # The first encode builds the special-token regex. Do it here so a turn does not.
+    enc.encode(" ")
+    _tiktoken_encodings[_TIKTOKEN_FALLBACK_ENCODING] = enc
+    return enc
+
+
+def _cached_fallback_tiktoken_encoding() -> Any:
+    cached = _tiktoken_encodings.get(_TIKTOKEN_FALLBACK_ENCODING)
+    if cached is not None:
+        return cached
+    import tiktoken  # noqa: PLC0415
+
+    enc = tiktoken.get_encoding(_TIKTOKEN_FALLBACK_ENCODING)
+    return _publish_fallback_tiktoken_encoding(enc)
+
+
+def _load_fallback_tiktoken_encoding() -> None:
+    """Load ``cl100k_base`` at import.
+
+    tiktoken is an optional extra. Importing this module still succeeds when
+    tiktoken is missing or its encoding file cannot be read. The count path
+    raises when it needs the encoder, and does not keep a failed load.
+    """
+    try:
+        _cached_fallback_tiktoken_encoding()
+    except ImportError:
+        return
+    except MemoryError:
+        raise
+    except Exception:
+        # A cold cache downloads cl100k_base.tiktoken. That failure used to abort
+        # import of every provider, because settings imports this module. Leave
+        # the cache empty so the count path can try again.
+        _log.warning(
+            "tiktoken %s was not loaded at import; token counting will try again",
+            _TIKTOKEN_FALLBACK_ENCODING,
+            exc_info=True,
+        )
+        return
+
+
+_load_fallback_tiktoken_encoding()
+
+
 async def count_input_tokens_tiktoken(
     messages: Sequence[Message],
     tools: Sequence[ToolDef],
@@ -1017,6 +1093,7 @@ async def count_input_tokens_tiktoken(
 
     Falls back to ``cl100k_base`` when ``model`` isn't a tiktoken-known model id
     (true for most non-OpenAI models served through an OpenAI-compat endpoint).
+    That encoding is resolved once at import; see ``tiktoken_encoding_for_model``.
 
     Media is stubbed against ``max_request_bytes`` so the count reflects what
     ``stream`` will actually send, but never raises when text alone stays over
@@ -1026,8 +1103,6 @@ async def count_input_tokens_tiktoken(
     none of these providers' token counts vary with reasoning configuration.
     """
     del thinking_budget
-    import tiktoken  # noqa: PLC0415
-
     msgs = trim_message_media_for_byte_budget(
         messages,
         tools,
@@ -1036,10 +1111,7 @@ async def count_input_tokens_tiktoken(
         raise_if_oversized=False,
         trim_files=False,
     )
-    try:
-        enc = tiktoken.encoding_for_model(model)
-    except KeyError:
-        enc = tiktoken.get_encoding("cl100k_base")
+    enc = tiktoken_encoding_for_model(model)
     return await count_openai_compat_input_tokens(enc, msgs, tools, hints=hints)
 
 
@@ -1646,6 +1718,7 @@ __all__ = [
     "ProviderRateLimitError",
     "ProviderServerError",
     "count_input_tokens_tiktoken",
+    "tiktoken_encoding_for_model",
     "drop_rejected_sampling",
     "iter_openai_compat_stream_with_sampling_retry",
     "count_openai_compat_input_tokens",

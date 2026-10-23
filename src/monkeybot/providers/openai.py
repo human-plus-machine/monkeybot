@@ -21,6 +21,7 @@ from monkeybot.providers._openai_compat import (
     openai_messages_token_count,
     openai_tools,
     openai_tools_token_count,
+    tiktoken_encoding_for_model,
     warm_openai_connection,
 )
 from monkeybot.providers._sdk_client import (
@@ -91,8 +92,6 @@ class OpenAIProvider:
         hints: ProviderCallHints | None = None,
     ) -> int:
         del thinking_budget
-        import tiktoken  # noqa: PLC0415
-
         msgs = trim_message_media_for_byte_budget(
             messages,
             tools,
@@ -100,10 +99,7 @@ class OpenAIProvider:
             raise_if_oversized=False,
             trim_files=False,
         )
-        try:
-            enc = tiktoken.encoding_for_model(model)
-        except KeyError:
-            enc = tiktoken.get_encoding("cl100k_base")
+        enc = tiktoken_encoding_for_model(model)
         return await count_openai_compat_input_tokens(enc, msgs, tools, hints=hints)
 
     async def warm_connection(self) -> None:
