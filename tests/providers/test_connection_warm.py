@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -130,6 +131,20 @@ async def test_warm_swallows_probe_errors(monkeypatch: pytest.MonkeyPatch) -> No
 
     seen = _install_openai(monkeypatch, list_models=_list)
     await _provider().warm_connection()
+    assert seen["completions"] == []
+
+
+@pytest.mark.asyncio
+async def test_hung_models_list_does_not_block_warm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A models list that never returns must not stall startup past the warm cap."""
+    monkeypatch.setattr("monkeybot.providers._openai_compat._WARM_TIMEOUT_S", 0.05)
+
+    async def _list(**_kwargs: Any) -> list[object]:
+        await asyncio.Event().wait()
+        return []
+
+    seen = _install_openai(monkeypatch, list_models=_list)
+    await asyncio.wait_for(_provider().warm_connection(), timeout=1)
     assert seen["completions"] == []
 
 

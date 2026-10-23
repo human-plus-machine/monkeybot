@@ -46,7 +46,6 @@ from monkeybot.core.types.content_blocks import (
     ToolResponse,
 )
 from monkeybot.core.types.types_tools import ToolDef
-from monkeybot.providers._stream_marks import mark_content, mark_tool_args
 from monkeybot.providers._utils import safe_parse_tool_args, suppress_thinking_for_auxiliary_call
 from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.rejected_sampling import (
@@ -871,7 +870,6 @@ async def iter_openai_compat_stream(
             if delta is None:
                 continue
             if delta.content:
-                mark_content("text")
                 if scanner is not None:
                     for text in scanner.feed(delta.content):
                         yield TextDelta(text=text)
@@ -879,7 +877,6 @@ async def iter_openai_compat_stream(
                     yield TextDelta(text=delta.content)
             reasoning = _delta_reasoning_text(delta)
             if reasoning:
-                mark_content("thinking")
                 yield ThinkingDelta(text=reasoning)
             if delta.tool_calls:
                 for tc in delta.tool_calls:
@@ -925,10 +922,8 @@ async def iter_openai_compat_stream(
                     if tc.function:
                         if tc.function.name:
                             slot["name"] = tc.function.name
-                            mark_content("tool_name")
                         if tc.function.arguments:
                             slot["args"] += tc.function.arguments
-                            mark_tool_args(len(tc.function.arguments))
 
         if scanner is not None:
             leftover = scanner.flush_incomplete()
