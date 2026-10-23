@@ -89,6 +89,9 @@ class _NoMCP:
     async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         del path, raise_on_error
 
+    async def wait_until_ready(self) -> None:
+        return None
+
 
 class _MCPWithBlob:
     """MCP stub returning a large JSON payload with an embedded base64 field."""
@@ -156,6 +159,9 @@ class _MCPWithBlob:
 
     async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         del path, raise_on_error
+
+    async def wait_until_ready(self) -> None:
+        return None
 
 
 class _RecordingMCP(_NoMCP):

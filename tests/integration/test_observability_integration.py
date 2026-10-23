@@ -279,7 +279,7 @@ async def test_integrated_run_task_subagent_shares_parent_trace_id(
 
         mcp = MagicMock()
         mcp.load_from_config = AsyncMock()
-        mcp.disconnect = AsyncMock()
+        mcp.disconnect_all = AsyncMock()
         mcp._servers = {}
         monkeypatch.setattr(subagent_worker, "MCPClient", lambda: mcp)
 

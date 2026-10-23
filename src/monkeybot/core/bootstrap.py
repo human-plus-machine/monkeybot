@@ -180,7 +180,7 @@ async def create_harness_deps(
         mcp = MCPClient()
         if open_mcp and mcp_config_path is not None:
             strict = os.environ.get("MCP_STRICT_LOAD", "").strip().lower() in ("1", "true", "yes")
-            await mcp.load_from_config(mcp_config_path, raise_on_error=strict)
+            await mcp.load_from_config(mcp_config_path, raise_on_error=strict, wait=strict)
 
         return HarnessDeps(
             storage=backend,

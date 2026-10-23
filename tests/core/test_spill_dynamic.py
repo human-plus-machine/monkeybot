@@ -69,6 +69,9 @@ class _NoMCP:
         del name
         return []
 
+    async def wait_until_ready(self) -> None:
+        return None
+
     async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         del path, raise_on_error
 

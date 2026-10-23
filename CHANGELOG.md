@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- MCP servers marked `autoConnect` connect in parallel. Boot returns after reading `mcp.json` and finishes those connects in the background; the first turn waits only for the time still left and still sees the tools. `MCP_STRICT_LOAD` still waits for them and fails startup on a connect error.
+
 ## [cli v0.11.0] - 2026-10-22
 
 ### Added

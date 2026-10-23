@@ -70,6 +70,9 @@ class _NoMCP:
     async def load_from_config(self, *_a: object, **_kw: object) -> None:
         return None
 
+    async def wait_until_ready(self) -> None:
+        return None
+
 
 def _ctx() -> TurnContext:
     return TurnContext(
@@ -434,7 +437,7 @@ def _install_worker_mocks(
 
     mcp = MagicMock()
     mcp.load_from_config = AsyncMock()
-    mcp.disconnect = AsyncMock()
+    mcp.disconnect_all = AsyncMock()
     mcp._servers = {}
     monkeypatch.setattr(subagent_worker, "MCPClient", lambda: mcp)
 
@@ -613,7 +616,7 @@ async def test_worker_completes_without_memory_uri(
 
     mcp = MagicMock()
     mcp.load_from_config = AsyncMock()
-    mcp.disconnect = AsyncMock()
+    mcp.disconnect_all = AsyncMock()
     mcp._servers = {}
     monkeypatch.setattr(subagent_worker, "MCPClient", lambda: mcp)
 

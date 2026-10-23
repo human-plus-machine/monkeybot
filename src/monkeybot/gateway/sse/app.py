@@ -1317,7 +1317,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
         mcp.set_env_overlay(cfg.env_values)
     strict = os.environ.get("MCP_STRICT_LOAD", "").strip().lower() in ("1", "true", "yes")
     try:
-        await mcp.load_from_config(mcp_config, raise_on_error=strict)
+        await mcp.load_from_config(mcp_config, raise_on_error=strict, wait=strict)
     except OSError as exc:
         logger.info("MCP config skipped (%s): %s", mcp_config, exc)
 
@@ -1461,8 +1461,7 @@ async def _teardown_runtime(fastapi_app: FastAPI) -> None:
 
     mcp = gateway_runtime.mcp
     if mcp is not None:
-        for name in list(getattr(mcp, "_servers", {}).keys()):
-            await mcp.disconnect(name)
+        await mcp.disconnect_all()
 
     try:
         gateway_runtime.close_verifier()

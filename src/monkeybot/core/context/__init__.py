@@ -1089,6 +1089,8 @@ async def build_context(
         memory: Optional memory subsystem; when set, L0+L1 wake-up is loaded.
         skills_path: Root directory for skill folders (each with ``SKILL.md``).
         mcp_client: Client exposing ``all_tools()`` for MCP-registered tools.
+            ``wait_until_ready`` runs before the catalog and tool list are read, so a
+            background autoConnect still in flight is included in this turn.
         user_id: Optional authenticated user.
         parent_run_id: Optional parent run for subagent linkage.
         model: Model id for this turn.
@@ -1132,6 +1134,7 @@ async def build_context(
     registry = subagent_registry or {}
     type_names = sorted(registry)
     personas = tuple((name, registry[name].description) for name in type_names)
+    await mcp_client.wait_until_ready()
     catalog_names = normalize_catalog_mcp_names(mcp_client.catalog_names())
     tools = list(
         _core_tool_defs(
