@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 from pathlib import Path
 
@@ -106,3 +108,51 @@ async def test_asgi_lifespan_loads_agent_dotenv_before_observability(
         os.environ.clear()
         os.environ.update(before)
         runtime_env.reset_runtime_env_state_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_tears_down_background_mcp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A startup error after autoConnect begins still runs gateway teardown."""
+    from monkeybot.core.config.settings import ConfigError
+    from monkeybot.core.mcp.mcp_client import MCPClient
+    from monkeybot.gateway.sse.app import GatewayRuntime
+
+    pending: list[asyncio.Task[None]] = []
+    disconnected = asyncio.Event()
+
+    async def _load(self: MCPClient, _path: object, *_a: object, **_kw: object) -> None:
+        task: asyncio.Task[None] = asyncio.create_task(asyncio.Event().wait())
+        pending.append(task)
+        self._pending = task
+
+    async def _disconnect_all(self: MCPClient) -> None:
+        task = self._pending
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            self._pending = None
+        disconnected.set()
+
+    def _boom(self: GatewayRuntime, _cfg: object) -> None:
+        raise ConfigError("bad subagents")
+
+    monkeypatch.setattr(MCPClient, "load_from_config", _load)
+    monkeypatch.setattr(MCPClient, "disconnect_all", _disconnect_all)
+    monkeypatch.setattr(GatewayRuntime, "build_subagents", _boom)
+    monkeypatch.setenv("MONKEYBOT_OTEL_ENABLED", "false")
+    monkeypatch.setenv("DB_URL", "sqlite:///:memory:")
+    monkeypatch.setenv("MCP_CONFIG", "/nonexistent/mcp.json")
+    try:
+        with pytest.raises(ConfigError, match="bad subagents"):
+            async with LifespanManager(app):
+                pass
+        assert disconnected.is_set()
+        assert pending
+        assert pending[0].done()
+    finally:
+        for task in pending:
+            if not task.done():
+                task.cancel()

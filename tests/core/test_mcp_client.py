@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
+import subprocess
+import sys
+import time
+import warnings
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import MethodType, SimpleNamespace
@@ -19,6 +25,7 @@ from monkeybot.core.mcp.mcp_client import (
     _mcp_auth_handler_cls,
     interpolate_env_vars,
     mcp_file_env_refs,
+    run_cleanup,
 )
 
 
@@ -1315,3 +1322,284 @@ async def test_apply_catalog_diff_empty_servers_object_disconnects(tmp_path: Pat
     result = await client.apply_catalog_diff(cfg)
     assert result.removed == ("keep",)
     assert client._servers == {}
+
+
+def _slow_session(*, delay: float = 0.1) -> SimpleNamespace:
+    """Session whose handshake waits, so parallel connects are visible."""
+
+    async def _initialize() -> None:
+        await asyncio.sleep(delay)
+
+    sess = SimpleNamespace()
+    sess.initialize = _initialize
+    sess.list_tools = AsyncMock(
+        return_value=SimpleNamespace(
+            tools=[SimpleNamespace(name="ping", description="Ping", inputSchema={})]
+        )
+    )
+    return sess
+
+
+def _autoconnect_config(path: Path, names: list[str], *, command: str = "python") -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    name: {"command": command, "args": [f"{name}.py"], "autoConnect": True}
+                    for name in names
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _child_pids(parent: int) -> set[int]:
+    out = subprocess.run(
+        ["pgrep", "-P", str(parent)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if out.returncode != 0:
+        return set()
+    return {int(line) for line in out.stdout.split() if line.strip().isdigit()}
+
+
+def _cmdline(pid: int) -> str:
+    out = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.strip()
+
+
+@pytest.mark.asyncio
+async def test_autoconnect_servers_connect_in_parallel(tmp_path: Path) -> None:
+    """Three handshakes of 0.1s overlap; the batch finishes under twice that."""
+    cfg = tmp_path / "mcp.json"
+    _autoconnect_config(cfg, ["a", "b", "c"])
+    client = MCPClient(hooks=_stub_hooks(_slow_session(delay=0.1)))
+    started = time.perf_counter()
+    await client.load_from_config(cfg, raise_on_error=True)
+    elapsed = time.perf_counter() - started
+    try:
+        assert elapsed < 0.2
+        assert sorted(client._servers) == ["a", "b", "c"]
+        assert {tool.name for tool in client.all_tools()} == {"a__ping", "b__ping", "c__ping"}
+    finally:
+        await client.disconnect_all()
+
+
+@pytest.mark.asyncio
+async def test_load_from_config_wait_false_returns_before_connect(tmp_path: Path) -> None:
+    """Background autoConnect stays ``connecting`` until ``wait_until_ready``."""
+    cfg = tmp_path / "mcp.json"
+    _autoconnect_config(cfg, ["fixture"])
+    release = asyncio.Event()
+
+    async def _initialize() -> None:
+        await release.wait()
+
+    sess = _slow_session(delay=0)
+    sess.initialize = _initialize
+    client = MCPClient(hooks=_stub_hooks(sess))
+    started = time.perf_counter()
+    await client.load_from_config(cfg, wait=False)
+    assert time.perf_counter() - started < 0.1
+    assert client.status("fixture")["status"] == mc.MCP_STATUS_CONNECTING  # type: ignore[index]
+    assert client.all_tools() == []
+    release.set()
+    await client.wait_until_ready()
+    try:
+        assert client.status("fixture")["status"] == mc.MCP_STATUS_CONNECTED  # type: ignore[index]
+        assert [tool.name for tool in client.all_tools()] == ["fixture__ping"]
+    finally:
+        await client.disconnect_all()
+
+
+@pytest.mark.asyncio
+async def test_autoconnect_failure_rolls_back_siblings(tmp_path: Path) -> None:
+    """``raise_on_error`` waits for the batch, then leaves no server connected."""
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "a": {"command": "ok", "args": ["a.py"], "autoConnect": True},
+                    "b": {"command": "fail", "args": ["b.py"], "autoConnect": True},
+                    "c": {"command": "ok", "args": ["c.py"], "autoConnect": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    class _Hooks:
+        def stdio_server_parameters(
+            self,
+            command: str,
+            args: list[str],
+            env: dict[str, str] | None,
+        ) -> SimpleNamespace:
+            return SimpleNamespace(command=command, args=args, env=env)
+
+        def stdio_client(self, params: object):  # noqa: ANN202
+            @asynccontextmanager
+            async def _transport():  # noqa: ANN202
+                if getattr(params, "command", "") == "fail":
+                    raise RuntimeError("boom")
+                await asyncio.sleep(0.05)
+                yield ("fake-read", "fake-write")
+
+            return _transport()
+
+        def client_session(self, read_stream: object, write_stream: object) -> _SessionACM:
+            del read_stream, write_stream
+            return _SessionACM(_slow_session(delay=0))
+
+    client = MCPClient(hooks=_Hooks())
+    with pytest.raises(MCPConnectionError, match="boom"):
+        await client.load_from_config(cfg, raise_on_error=True)
+    assert client._servers == {}
+    assert client.status("b")["status"] == mc.MCP_STATUS_FAILED  # type: ignore[index]
+
+
+@pytest.mark.asyncio
+async def test_background_connect_failure_is_status_not_an_exception(tmp_path: Path) -> None:
+    cfg = tmp_path / "mcp.json"
+    _autoconnect_config(cfg, ["fixture"])
+    release = asyncio.Event()
+
+    async def _initialize() -> None:
+        await release.wait()
+        raise RuntimeError("boom")
+
+    sess = _slow_session(delay=0)
+    sess.initialize = _initialize
+    client = MCPClient(hooks=_stub_hooks(sess))
+    await client.load_from_config(cfg, raise_on_error=False, wait=False)
+    assert client.status("fixture")["status"] == mc.MCP_STATUS_CONNECTING  # type: ignore[index]
+    release.set()
+    await client.wait_until_ready()
+    assert client.status("fixture")["status"] == mc.MCP_STATUS_FAILED  # type: ignore[index]
+    assert "fixture" not in client._servers
+
+
+@pytest.mark.asyncio
+async def test_disconnect_all_cancels_pending_connect(tmp_path: Path) -> None:
+    cfg = tmp_path / "mcp.json"
+    _autoconnect_config(cfg, ["fixture"])
+    client = MCPClient(hooks=_stub_hooks(_slow_session(delay=30)))
+    await client.load_from_config(cfg, wait=False)
+    assert client.status("fixture")["status"] == mc.MCP_STATUS_CONNECTING  # type: ignore[index]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        await client.disconnect_all()
+    assert client._servers == {}
+    assert client._pending is None
+    leaked = [task for task in asyncio.all_tasks() if task.get_name().startswith("mcp-session-")]
+    assert leaked == []
+
+
+@pytest.mark.asyncio
+async def test_disconnect_from_another_task_reaps_stdio_child(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The session stack closes in its owner task, so a different task can disconnect it."""
+    fixture = (
+        Path(__file__).resolve().parents[2] / "evals" / "smoke_agent" / "fixture_mcp_server.py"
+    )
+    client = MCPClient()
+    before = _child_pids(os.getpid())
+    await client.connect("fixture", sys.executable, [str(fixture)], {})
+    spawned = [
+        pid for pid in _child_pids(os.getpid()) - before if "fixture_mcp_server" in _cmdline(pid)
+    ]
+    assert spawned, "stdio connect did not spawn the fixture server"
+    try:
+        with caplog.at_level(logging.DEBUG, logger="monkeybot.core.mcp.mcp_client"):
+
+            async def _bye() -> None:
+                await client.disconnect("fixture")
+
+            await asyncio.create_task(_bye())
+        assert not client.is_connected("fixture")
+        noisy = [
+            record
+            for record in caplog.records
+            if "cancel scope" in record.message or "different task" in record.message
+        ]
+        assert noisy == []
+    finally:
+        await client.disconnect_all()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if all(pid not in _child_pids(os.getpid()) for pid in spawned):
+            return
+        await asyncio.sleep(0.02)
+    pytest.fail(f"fixture server still running: {spawned}")
+
+
+@pytest.mark.asyncio
+async def test_run_cleanup_finishes_when_the_task_is_cancelled() -> None:
+    """A cancelled owner still runs the coroutine it passed to ``run_cleanup``."""
+    finished = asyncio.Event()
+
+    async def _work() -> None:
+        await asyncio.sleep(0)
+        finished.set()
+
+    async def _main() -> None:
+        try:
+            await asyncio.sleep(30)
+        finally:
+            await run_cleanup(_work())
+
+    task = asyncio.create_task(_main())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_connect_reaps_stdio_child(tmp_path: Path) -> None:
+    """Cancelling a handshake still closes the transport in its owner task.
+
+    The stdio child is started in its own session, so it keeps running if the
+    owner's stack unwind is itself cancelled before the transport kills it.
+    """
+    script = tmp_path / "slow_mcp.py"
+    script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+    client = MCPClient()
+    task = asyncio.create_task(
+        client.connect("slow", sys.executable, [str(script)], {}),
+        name="cancel-connect",
+    )
+    spawned: list[int] = []
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        spawned = [pid for pid in _child_pids(os.getpid()) if "slow_mcp.py" in _cmdline(pid)]
+        if spawned:
+            break
+        await asyncio.sleep(0.02)
+    assert spawned, "stdio connect did not spawn the slow server"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if all(pid not in _child_pids(os.getpid()) for pid in spawned):
+            leaked = [
+                running
+                for running in asyncio.all_tasks()
+                if running.get_name().startswith("mcp-session-") and not running.done()
+            ]
+            assert leaked == []
+            return
+        await asyncio.sleep(0.02)
+    pytest.fail(f"slow server still running after cancelled connect: {spawned}")

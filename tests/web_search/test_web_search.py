@@ -61,6 +61,9 @@ class _FakeMCP:
     async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         pass
 
+    async def wait_until_ready(self) -> None:
+        return None
+
 
 def _mem_sub(root: Path) -> MemorySubsystem:
     return make_memory_subsystem(root)

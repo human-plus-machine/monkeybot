@@ -117,6 +117,9 @@ class FakeMCPClient:
     async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         del path, raise_on_error
 
+    async def wait_until_ready(self) -> None:
+        return None
+
     def set_env_overlay(self, env: Mapping[str, str] | None) -> dict[str, str] | None:
         del env
         return None
@@ -757,3 +760,40 @@ async def test_refresh_memory_index_silent_fail_on_os_error(
     assert out is ctx
     assert ctx.memory_index == original
     assert any("[MEMORY]" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_build_context_waits_for_background_mcp_tools(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tools that appear during ``wait_until_ready`` are on the turn."""
+    import asyncio
+    import time
+
+    monkeypatch.setenv("ATTACHMENTS_ENABLED", "false")
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("You are a helpful assistant.\n", encoding="utf-8")
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+
+    class _SlowMCP(FakeMCPClient):
+        def __init__(self) -> None:
+            super().__init__([])
+
+        async def wait_until_ready(self) -> None:
+            await asyncio.sleep(0.05)
+            self._tools = [ToolDef("fixture__echo", "Echo", {"type": "object"})]
+
+    started = time.perf_counter()
+    ctx = await build_context(
+        "thread-1",
+        "req-1",
+        agent_md_path=agent_path,
+        memory=_memory_subsystem(mem),
+        skills_path=skills,
+        mcp_client=_SlowMCP(),
+    )
+    assert time.perf_counter() - started >= 0.05
+    assert any(tool.name == "fixture__echo" for tool in ctx.tools)

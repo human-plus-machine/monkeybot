@@ -57,6 +57,9 @@ class _FakeMCP:
     async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
         pass
 
+    async def wait_until_ready(self) -> None:
+        return None
+
 
 def test_todo_list_enabled_defaults_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("MONKEYBOT_TODO_LIST_ENABLED", raising=False)

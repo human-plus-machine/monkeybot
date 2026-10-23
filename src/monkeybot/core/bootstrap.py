@@ -20,7 +20,7 @@ from monkeybot.core.context import build_context
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.llm.provider import Provider
 from monkeybot.core.llm.usage import usage_from_totals
-from monkeybot.core.mcp.mcp_client import MCPClient
+from monkeybot.core.mcp.mcp_client import MCPClient, run_cleanup
 from monkeybot.core.memory.subsystem import MemoryConfigurationError, MemorySubsystem
 from monkeybot.core.persistence.backends import StorageBackend, create_storage_backend
 from monkeybot.core.runtime.events import AssistantDelta, Error, TurnComplete
@@ -142,6 +142,8 @@ async def create_harness_deps(
     )
     backend = create_storage_backend(db_url, agent_scope=resolved_agent_scope)
     await backend.open(run_schema=auto_schema_enabled_from_config())
+    memory: MemorySubsystem | None = None
+    mcp: MCPClient | None = None
     try:
         if override is not None:
             prov = override
@@ -152,7 +154,6 @@ async def create_harness_deps(
             prov = pc.provider
             model_str = pc.model
 
-        memory: MemorySubsystem | None = None
         uri = (memory_storage_uri or "").strip()
         if uri:
             from monkeybot.core.layout import AgentLayout
@@ -180,7 +181,7 @@ async def create_harness_deps(
         mcp = MCPClient()
         if open_mcp and mcp_config_path is not None:
             strict = os.environ.get("MCP_STRICT_LOAD", "").strip().lower() in ("1", "true", "yes")
-            await mcp.load_from_config(mcp_config_path, raise_on_error=strict)
+            await mcp.load_from_config(mcp_config_path, raise_on_error=strict, wait=strict)
 
         from monkeybot.providers._openai_compat import warm_provider_connection  # noqa: PLC0415
 
@@ -194,7 +195,24 @@ async def create_harness_deps(
             model=model_str,
         )
     except BaseException:
-        await backend.close()
+        # ``mcp`` is assigned above. A cancel while the provider warms happens
+        # after background autoConnect has already spawned children, and this
+        # function never returns the deps that would otherwise close them.
+        opened = mcp
+
+        async def _close_partial() -> None:
+            try:
+                if memory is not None:
+                    await memory.close()
+            except Exception:
+                logger.warning("memory close during harness setup failed", exc_info=True)
+            try:
+                await backend.close()
+            finally:
+                if opened is not None:
+                    await opened.disconnect_all()
+
+        await run_cleanup(_close_partial())
         raise
 
 

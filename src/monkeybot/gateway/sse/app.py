@@ -24,6 +24,9 @@ from monkeybot.computer import build_computer_tools, should_enable_computer_tool
 from monkeybot.computer.permissions import build_computer_permission_inspector, build_persist_hook
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
+from monkeybot.core.coding.git_context_hook import GitContextHook
+from monkeybot.core.coding.read_ledger_hook import ReadLedgerCompactionHook
+from monkeybot.core.coding.verification_gate import VerificationGate
 from monkeybot.core.config.runtime_env import (
     CODING_DIFF_KEY,
     SUBAGENTS_DIFF_KEY,
@@ -52,9 +55,6 @@ from monkeybot.core.config.snapshot import (
 )
 from monkeybot.core.context import LoopsToolRegistry, TurnContext, build_context
 from monkeybot.core.context.common import text_from_blocks
-from monkeybot.core.coding.git_context_hook import GitContextHook
-from monkeybot.core.coding.read_ledger_hook import ReadLedgerCompactionHook
-from monkeybot.core.coding.verification_gate import VerificationGate
 from monkeybot.core.context.slash_skills import apply_invoked_skill
 from monkeybot.core.hooks import HookEvent, HookManager
 from monkeybot.core.hooks.evidence_guard import EvidencePathGuard
@@ -71,7 +71,7 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.llm.usage import Usage as UsageRecord
 from monkeybot.core.llm.usage import UsageGranularity
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.mcp.mcp_client import MCPClient, mcp_file_env_refs
+from monkeybot.core.mcp.mcp_client import MCPClient, mcp_file_env_refs, run_cleanup
 from monkeybot.core.mcp.ports_mcp import MCPCatalogApplyResult
 from monkeybot.core.memory.config import memory_enabled_from_config
 from monkeybot.core.memory.ingest import persist_message
@@ -1329,7 +1329,7 @@ async def _startup(fastapi_app: FastAPI) -> None:
         mcp.set_env_overlay(cfg.env_values)
     strict = os.environ.get("MCP_STRICT_LOAD", "").strip().lower() in ("1", "true", "yes")
     try:
-        await mcp.load_from_config(mcp_config, raise_on_error=strict)
+        await mcp.load_from_config(mcp_config, raise_on_error=strict, wait=strict)
     except OSError as exc:
         logger.info("MCP config skipped (%s): %s", mcp_config, exc)
 
@@ -1476,8 +1476,7 @@ async def _teardown_runtime(fastapi_app: FastAPI) -> None:
 
     mcp = gateway_runtime.mcp
     if mcp is not None:
-        for name in list(getattr(mcp, "_servers", {}).keys()):
-            await mcp.disconnect(name)
+        await mcp.disconnect_all()
 
     try:
         gateway_runtime.close_verifier()
@@ -1521,11 +1520,13 @@ async def _teardown_runtime(fastapi_app: FastAPI) -> None:
 
 @contextlib.asynccontextmanager
 async def _gateway_lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
-    await _startup(fastapi_app)
     try:
+        await _startup(fastapi_app)
         yield
     finally:
-        await _shutdown(fastapi_app)
+        # Startup returns while autoConnect is still in flight. If it raises
+        # or the process is cancelled before yield, this is the only teardown.
+        await run_cleanup(_shutdown(fastapi_app))
 
 
 _registry = SessionRegistry(workspace_root=_resolved_workspace_paths()[0])

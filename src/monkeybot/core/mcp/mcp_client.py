@@ -16,7 +16,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -404,12 +404,39 @@ class MCPServer:
 
 @dataclass
 class _ServerRecord:
-    """Runtime connection state per logical server."""
+    """Runtime connection state per logical server.
+
+    ``task`` owns ``stack``. AnyIO cancel scopes inside the MCP transport must
+    be exited in the task that entered them, so ``disconnect`` only sets
+    ``stop`` and waits for that task to close the stack.
+    """
 
     stack: AsyncExitStack
     session: Any
     tools: list[ToolDef]
     capabilities: dict[str, bool] | None = None
+    task: asyncio.Task[None] | None = None
+    stop: asyncio.Event | None = None
+
+
+async def run_cleanup(work: Awaitable[None]) -> None:
+    """Finish ``work`` when this task is already cancelled.
+
+    Startup and shutdown own MCP transports. A pending cancellation is
+    delivered at the next await, which would skip ``disconnect_all`` and leave
+    a stdio child running in its own session.
+    """
+    task = asyncio.current_task()
+    deferred = 0
+    if task is not None:
+        while task.cancelling():
+            task.uncancel()
+            deferred += 1
+    try:
+        await work
+    finally:
+        if task is not None and deferred:
+            task.cancel()
 
 
 # Status machine values (OpenCode-inspired; progressive-disclosure aware).
@@ -419,6 +446,13 @@ MCP_STATUS_DISCONNECTED = "disconnected"
 MCP_STATUS_DISABLED = "disabled"
 MCP_STATUS_FAILED = "failed"
 MCP_STATUS_NEEDS_AUTH = "needs_auth"
+MCP_STATUS_CONNECTING = "connecting"
+
+# Opens one session on a stack the caller owns. Returns session, tool defs, capabilities.
+_SessionOpener = Callable[
+    [AsyncExitStack],
+    Awaitable[tuple[Any, list[ToolDef], dict[str, bool]]],
+]
 
 
 def _server_capabilities_snapshot(session: Any) -> dict[str, bool]:
@@ -578,6 +612,27 @@ def _tool_input_schema(tool: object) -> dict[str, object]:
     return {}
 
 
+def _tool_defs_from_listing(server_name: str, listing: Any) -> list[ToolDef]:
+    """Build prefixed ``ToolDef`` rows from an MCP ``list_tools`` result."""
+    tools_raw = getattr(listing, "tools", None) or []
+    defs: list[ToolDef] = []
+    sorted_tools = sorted(tools_raw, key=lambda t: getattr(t, "name", "") or "")
+    for tool in sorted_tools:
+        tn = getattr(tool, "name", None)
+        if not isinstance(tn, str) or not tn:
+            continue
+        desc_val = getattr(tool, "description", None) or ""
+        desc = desc_val if isinstance(desc_val, str) else str(desc_val)
+        defs.append(
+            ToolDef(
+                name=f"{server_name}__{tn}",
+                description=desc,
+                input_schema=_tool_input_schema(tool),
+            )
+        )
+    return defs
+
+
 def _normalize_call_tool_result(result: Any) -> str:
     """Turn ``call_tool`` structured content into a single string."""
     if result is None:
@@ -618,6 +673,8 @@ class MCPClient:
         self._statuses: dict[str, dict[str, Any]] = {}
         # Snapshot env overlay for ``${VAR}`` interpolation (YAML-backed keys).
         self._env_overlay: dict[str, str] | None = None
+        # In-flight ``load_from_config(wait=False)`` batch. None when idle.
+        self._pending: asyncio.Task[None] | None = None
 
     @property
     def env_overlay(self) -> dict[str, str] | None:
@@ -694,6 +751,116 @@ class MCPClient:
                 return sname, prefixed_name[len(p) :]
         return None
 
+    def _install_connected(self, name: str, record: _ServerRecord) -> list[ToolDef]:
+        """Publish a session whose owner task is already waiting to tear it down."""
+        self._servers[name] = record
+        self._seen_servers.add(name)
+        register_mcp_tool_names(tool.name for tool in record.tools)
+        self._set_status(
+            name,
+            MCP_STATUS_CONNECTED,
+            tool_count=len(record.tools),
+            capabilities=record.capabilities,
+        )
+        return list(record.tools)
+
+    async def _hold_session(
+        self,
+        name: str,
+        stop: asyncio.Event,
+        ready: asyncio.Future[_ServerRecord],
+        opener: _SessionOpener,
+    ) -> None:
+        """Enter ``opener``'s stack, publish the session, and close the stack on ``stop``.
+
+        The stack is always closed in this task. A failed handshake resolves
+        ``ready`` with the opener's exception and does not publish a record.
+        """
+        stack = AsyncExitStack()
+        published = False
+        try:
+            try:
+                session, defs, capabilities = await opener(stack)
+            except Exception as exc:
+                if not ready.done():
+                    ready.set_exception(exc)
+                return
+            current = asyncio.current_task()
+            if current is None:
+                raise RuntimeError(f"MCP session {name!r} holder is not running in a task")
+            record = _ServerRecord(
+                stack=stack,
+                session=session,
+                tools=list(defs),
+                capabilities=capabilities,
+                task=current,
+                stop=stop,
+            )
+            if ready.done():
+                return
+            ready.set_result(record)
+            published = True
+            await stop.wait()
+        finally:
+            try:
+                await stack.aclose()
+            except BaseException as exc:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                if published:
+                    raise
+                logger.debug(
+                    "mcp session %s: suppressed teardown during failed connect (%s)",
+                    name,
+                    exc.__class__.__name__,
+                    exc_info=True,
+                )
+
+    async def _release_held_session(self, stop: asyncio.Event, task: asyncio.Task[None]) -> None:
+        """Close a session owner after this task was cancelled, then wait until it exits."""
+        stop.set()
+        task.cancel()
+        current = asyncio.current_task()
+        if current is None:
+            return
+        # This task is already cancelled. Drop that request long enough to await the owner.
+        if current.uncancel() > 0:
+            while current.cancelling():
+                current.uncancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            logger.debug("mcp session owner ended during cancellation", exc_info=True)
+        finally:
+            current.cancel()
+
+    async def _spawn_held_session(self, name: str, opener: _SessionOpener) -> _ServerRecord:
+        """Run ``opener`` in its own task and return once the session is published."""
+        loop = asyncio.get_running_loop()
+        ready: asyncio.Future[_ServerRecord] = loop.create_future()
+        stop = asyncio.Event()
+        task = asyncio.create_task(
+            self._hold_session(name, stop, ready, opener),
+            name=f"mcp-session-{name}",
+        )
+        try:
+            return await ready
+        except asyncio.CancelledError:
+            if ready.done() and not ready.cancelled():
+                ready.exception()
+            await self._release_held_session(stop, task)
+            raise
+        except Exception:
+            try:
+                await task
+            except Exception:
+                logger.debug(
+                    "mcp session %s: holder ended after a failed connect",
+                    name,
+                    exc_info=True,
+                )
+            raise
+
     async def connect(
         self,
         name: str,
@@ -704,8 +871,8 @@ class MCPClient:
         """Bring up ``name`` via stdio, discover tools, and register ``server__tool`` names."""
         if name in self._servers:
             await self.disconnect(name)
-        stack = AsyncExitStack()
-        try:
+
+        async def opener(stack: AsyncExitStack) -> tuple[Any, list[ToolDef], dict[str, bool]]:
             env_arg: dict[str, str] | None = env if env else None
             params = self._hooks.stdio_server_parameters(command, args, env_arg)
             transport_cm = self._hooks.stdio_client(params)
@@ -717,47 +884,19 @@ class MCPClient:
             session = await stack.enter_async_context(session_cm)
             await session.initialize()
             listing = await session.list_tools()
-            tools_raw = getattr(listing, "tools", None) or []
+            defs = _tool_defs_from_listing(name, listing)
+            return session, defs, _server_capabilities_snapshot(session)
 
-            defs: list[ToolDef] = []
-            sorted_tools = sorted(
-                tools_raw,
-                key=lambda t: getattr(t, "name", "") or "",
-            )
-            for tool in sorted_tools:
-                tn = getattr(tool, "name", None)
-                if not isinstance(tn, str) or not tn:
-                    continue
-                prefixed = f"{name}__{tn}"
-                desc_val = getattr(tool, "description", None) or ""
-                desc = desc_val if isinstance(desc_val, str) else str(desc_val)
-                schema = _tool_input_schema(tool)
-                defs.append(ToolDef(name=prefixed, description=desc, input_schema=schema))
-
-            self._servers[name] = _ServerRecord(
-                stack=stack,
-                session=session,
-                tools=list(defs),
-                capabilities=_server_capabilities_snapshot(session),
-            )
-            self._seen_servers.add(name)
-            register_mcp_tool_names(t.name for t in defs)
-            self._set_status(
-                name,
-                MCP_STATUS_CONNECTED,
-                tool_count=len(defs),
-                capabilities=self._servers[name].capabilities,
-            )
-            return list(defs)
+        try:
+            record = await self._spawn_held_session(name, opener)
         except MCPConnectionError as exc:
-            await stack.aclose()
             self._record_connect_failure(name, exc)
             raise
         except Exception as exc:
-            await stack.aclose()
             wrapped = MCPConnectionError(name, str(exc))
             self._record_connect_failure(name, wrapped)
             raise wrapped from exc
+        return self._install_connected(name, record)
 
     async def connect_streamable_http(
         self,
@@ -770,12 +909,12 @@ class MCPClient:
         """Connect ``name`` to a remote MCP endpoint (Streamable HTTP); register ``server__tool`` names."""
         if name in self._servers:
             await self.disconnect(name)
-        stack = AsyncExitStack()
-        try:
-            import httpx
-            from mcp import ClientSession
-            from mcp.client.streamable_http import streamable_http_client
 
+        import httpx
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamable_http_client
+
+        async def opener(stack: AsyncExitStack) -> tuple[Any, list[ToolDef], dict[str, bool]]:
             hdr = dict(headers) if headers else {}
             if auth is not None:
                 hdr.pop("Authorization", None)
@@ -795,51 +934,21 @@ class MCPClient:
             session = await stack.enter_async_context(session_cm)
             await session.initialize()
             listing = await session.list_tools()
-            tools_raw = getattr(listing, "tools", None) or []
+            defs = _tool_defs_from_listing(name, listing)
+            return session, defs, _server_capabilities_snapshot(session)
 
-            defs: list[ToolDef] = []
-            sorted_tools = sorted(
-                tools_raw,
-                key=lambda t: getattr(t, "name", "") or "",
-            )
-            for tool in sorted_tools:
-                tn = getattr(tool, "name", None)
-                if not isinstance(tn, str) or not tn:
-                    continue
-                prefixed = f"{name}__{tn}"
-                desc_val = getattr(tool, "description", None) or ""
-                desc = desc_val if isinstance(desc_val, str) else str(desc_val)
-                schema = _tool_input_schema(tool)
-                defs.append(ToolDef(name=prefixed, description=desc, input_schema=schema))
-
-            self._servers[name] = _ServerRecord(
-                stack=stack,
-                session=session,
-                tools=list(defs),
-                capabilities=_server_capabilities_snapshot(session),
-            )
-            self._seen_servers.add(name)
-            register_mcp_tool_names(t.name for t in defs)
-            self._set_status(
-                name,
-                MCP_STATUS_CONNECTED,
-                tool_count=len(defs),
-                capabilities=self._servers[name].capabilities,
-            )
-            return list(defs)
+        try:
+            record = await self._spawn_held_session(name, opener)
         except MCPConnectionError as exc:
-            await stack.aclose()
             self._record_connect_failure(name, exc)
             raise
         except MCPAuthError as exc:
-            await stack.aclose()
             auth_exc = _auth_error_for(name, exc)
             self._record_connect_failure(name, auth_exc)
             if auth_exc is exc:
                 raise
             raise auth_exc from exc
         except Exception as exc:
-            await stack.aclose()
             from monkeybot.core.mcp.oauth_flow import find_auth_error
 
             found = find_auth_error(exc)
@@ -850,6 +959,7 @@ class MCPClient:
             wrapped = MCPConnectionError(name, str(exc))
             self._record_connect_failure(name, wrapped)
             raise wrapped from exc
+        return self._install_connected(name, record)
 
     async def _stop_remote_session_before_teardown(self, name: str, rec: _ServerRecord) -> None:
         """Best-effort ``browser_stop`` call so cloud-browser billing ends on disconnect.
@@ -886,20 +996,30 @@ class MCPClient:
         unregister_mcp_server_tools(name)
         try:
             await self._stop_remote_session_before_teardown(name, rec)
-            try:
+            if rec.stop is not None:
+                rec.stop.set()
+            if rec.task is not None:
+                try:
+                    await rec.task
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise
+                    logger.debug("mcp disconnect %s: owner task cancelled", name)
+                except BaseException as exc:
+                    if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                        raise
+                    if _mcp_disconnect_teardown_noise(exc):
+                        logger.debug(
+                            "mcp disconnect %s: suppressed SDK teardown noise (%s)",
+                            name,
+                            exc.__class__.__name__,
+                            exc_info=True,
+                        )
+                    else:
+                        raise
+            else:
                 await rec.stack.aclose()
-            except BaseException as exc:
-                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                    raise
-                if _mcp_disconnect_teardown_noise(exc):
-                    logger.debug(
-                        "mcp disconnect %s: suppressed SDK teardown noise (%s)",
-                        name,
-                        exc.__class__.__name__,
-                        exc_info=True,
-                    )
-                else:
-                    raise
         finally:
             if record_status:
                 if name in self._catalog:
@@ -907,10 +1027,53 @@ class MCPClient:
                 else:
                     self._set_status(name, MCP_STATUS_DISCONNECTED)
 
+    async def _cancel_pending_connect(self) -> None:
+        """Cancel an in-flight background autoConnect batch and wait for it to finish."""
+        pending = self._pending
+        self._pending = None
+        if pending is None:
+            return
+        if not pending.done():
+            pending.cancel()
+            try:
+                await pending
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.debug("mcp autoconnect ended after cancel", exc_info=True)
+            return
+        if not pending.cancelled():
+            pending.exception()
+
     async def disconnect_all(self) -> None:
-        """Disconnect every connected MCP server."""
+        """Cancel a background autoConnect batch, then disconnect every server."""
+        await self._cancel_pending_connect()
         for name in list(self._servers.keys()):
             await self.disconnect(name)
+
+    async def wait_until_ready(self) -> None:
+        """Wait until a background autoConnect batch has finished.
+
+        Returns immediately when nothing is in flight. Connect failures are
+        already recorded on each server's status and are not re-raised.
+        """
+        pending = self._pending
+        if pending is None:
+            return
+        if not pending.done():
+            try:
+                await asyncio.shield(pending)
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+                logger.debug("mcp autoconnect cancelled before this turn", exc_info=True)
+            except Exception:
+                logger.debug("mcp autoconnect failed", exc_info=True)
+        if self._pending is pending and pending.done():
+            self._pending = None
+            if not pending.cancelled():
+                pending.exception()
 
     async def call_tool(
         self,
@@ -921,6 +1084,7 @@ class MCPClient:
         meta: Mapping[str, object] | None = None,
     ) -> str:
         """Invoke *unprefixed* ``tool_name`` on ``server_name``; return flattened text."""
+        await self.wait_until_ready()
         rec = self._servers.get(server_name)
         if rec is None:
             raise MCPServerNotConnectedError(server_name)
@@ -974,6 +1138,7 @@ class MCPClient:
 
     async def list_resources(self, server_name: str | None = None) -> list[dict[str, Any]]:
         """List MCP resources from one or all connected servers."""
+        await self.wait_until_ready()
         return await self._list_capability_items(
             server_name=server_name,
             capability="resources",
@@ -984,6 +1149,7 @@ class MCPClient:
 
     async def read_resource(self, server_name: str, uri: str) -> dict[str, Any]:
         """Read one MCP resource by ``server_name`` + ``uri``."""
+        await self.wait_until_ready()
         rec = self._require_connected(server_name)
         caps = rec.capabilities or {}
         if caps and not caps.get("resources", False):
@@ -1005,6 +1171,7 @@ class MCPClient:
 
     async def list_prompts(self, server_name: str | None = None) -> list[dict[str, Any]]:
         """List MCP prompts from one or all connected servers."""
+        await self.wait_until_ready()
         return await self._list_capability_items(
             server_name=server_name,
             capability="prompts",
@@ -1020,6 +1187,7 @@ class MCPClient:
         arguments: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Fetch a named MCP prompt template (with optional string arguments)."""
+        await self.wait_until_ready()
         rec = self._require_connected(server_name)
         caps = rec.capabilities or {}
         if caps and not caps.get("prompts", False):
@@ -1049,6 +1217,7 @@ class MCPClient:
         catalog spec changed; otherwise this is a no-op that returns current tools.
         Raises :class:`MCPDiagnosticError` when ``name`` is not in the catalog.
         """
+        await self.wait_until_ready()
         previous = dict(self._catalog[name]) if name in self._catalog else None
         if self._config_path is not None:
             # Refresh catalog from disk without dropping other connected servers.
@@ -1220,11 +1389,79 @@ class MCPClient:
         )
         return defs
 
+    async def _connect_named_specs(
+        self,
+        specs: Sequence[tuple[str, Mapping[str, Any]]],
+        *,
+        mcp_json_path: Path | None,
+        raise_on_error: bool,
+    ) -> None:
+        """Connect every spec concurrently.
+
+        Waits for the whole batch before raising, so a failure does not cancel
+        a sibling mid-handshake. When ``raise_on_error`` is set, servers that
+        did connect are disconnected and the first failure in sorted name order
+        is re-raised.
+        """
+        if not specs:
+            return
+        ordered = sorted(specs, key=lambda item: item[0])
+        results = await asyncio.gather(
+            *(
+                self._connect_from_spec(
+                    name,
+                    spec,
+                    mcp_json_path=mcp_json_path,
+                    raise_on_error=raise_on_error,
+                )
+                for name, spec in ordered
+            ),
+            return_exceptions=True,
+        )
+        failures = [
+            (name, result)
+            for (name, _spec), result in zip(ordered, results, strict=True)
+            if isinstance(result, BaseException)
+        ]
+        if not failures:
+            return
+        # KeyboardInterrupt, SystemExit, and CancelledError must not be swallowed
+        # as a logged connect failure. Connection errors are Exception subclasses.
+        fatal = next(
+            (result for _name, result in failures if not isinstance(result, Exception)),
+            None,
+        )
+        if fatal is None and not raise_on_error:
+            return
+        for name, _spec in ordered:
+            if name in self._servers:
+                await self.disconnect(name)
+        raise fatal if fatal is not None else failures[0][1]
+
+    async def _run_autoconnect_batch(
+        self,
+        specs: Sequence[tuple[str, Mapping[str, Any]]],
+        *,
+        mcp_json_path: Path | None,
+    ) -> None:
+        """Background autoConnect. Failures stay on server status; this task does not raise them."""
+        try:
+            await self._connect_named_specs(
+                specs,
+                mcp_json_path=mcp_json_path,
+                raise_on_error=False,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("mcp autoconnect batch failed")
+
     async def load_from_config(
         self,
         mcp_json_path: Path,
         *,
         raise_on_error: bool = False,
+        wait: bool = True,
     ) -> None:
         """Load Claude/Cursor ``mcpServers`` JSON; tolerate missing paths and noisy failures.
 
@@ -1240,13 +1477,19 @@ class MCPClient:
         :meth:`connect_from_catalog` / ``enable_mcp`` unless ``"enabled": false``.
         Catalogued servers are **not** connected at startup by default (progressive
         disclosure — the model opts in via ``enable_mcp``). Set ``"autoConnect": true``
-        to restore eager startup connect for that server. Remove an entry from the
-        file to drop it from the catalog.
+        to restore eager startup connect for that server. Those connects run
+        concurrently. Remove an entry from the file to drop it from the catalog.
 
         Args:
             mcp_json_path: Path to ``mcp.json``.
             raise_on_error: When True, invalid JSON or structure raises
                 :class:`MCPDiagnosticError` instead of logging and returning.
+                A failed autoConnect also raises, after the rest of the batch
+                has finished. Ignored for the connect batch when ``wait`` is False:
+                those failures are logged and recorded as status.
+            wait: When False, return after the catalog is parsed and finish
+                ``autoConnect`` servers in the background. :meth:`wait_until_ready`
+                waits for that batch. Invalid config still raises before returning.
         """
         if not mcp_json_path.is_file():
             return
@@ -1256,6 +1499,7 @@ class MCPClient:
             return
 
         self._config_path = mcp_json_path
+        await self._cancel_pending_connect()
         self._catalog.clear()
         new_catalog, disabled = self._parse_catalog_entries(
             servers_any, mcp_json_path, raise_on_error=raise_on_error
@@ -1263,6 +1507,7 @@ class MCPClient:
         for server_name in sorted(disabled):
             logger.info("mcp server skipped (enabled: false) %s", kv(server=server_name))
             self._set_status(server_name, MCP_STATUS_DISABLED)
+        pending: list[tuple[str, dict[str, Any]]] = []
         for server_name, spec in new_catalog.items():
             self._catalog[server_name] = spec
             self._seen_servers.add(server_name)
@@ -1271,18 +1516,27 @@ class MCPClient:
                     "mcp autoConnect server=%s (connecting at startup)",
                     server_name,
                 )
-                await self._connect_from_spec(
-                    server_name,
-                    spec,
-                    mcp_json_path=mcp_json_path,
-                    raise_on_error=raise_on_error,
-                )
+                self._set_status(server_name, MCP_STATUS_CONNECTING)
+                pending.append((server_name, spec))
             else:
                 self._set_status(server_name, MCP_STATUS_CATALOGUED)
                 logger.info(
                     "mcp catalog registered server=%s (connect via enable_mcp)",
                     server_name,
                 )
+        if not pending:
+            return
+        if wait:
+            await self._connect_named_specs(
+                pending,
+                mcp_json_path=mcp_json_path,
+                raise_on_error=raise_on_error,
+            )
+            return
+        self._pending = asyncio.create_task(
+            self._run_autoconnect_batch(pending, mcp_json_path=mcp_json_path),
+            name="mcp-autoconnect",
+        )
 
     def _read_mcp_servers_file(
         self,
@@ -1397,6 +1651,7 @@ class MCPClient:
         ``added`` servers are not listed there. Failed reconnects land in
         ``failed`` with status ``failed`` (or ``needs_auth``).
         """
+        await self.wait_until_ready()
         parsed = self._read_mcp_servers_file(mcp_json_path, raise_on_error=raise_on_error)
         if parsed is None:
             return MCPCatalogApplyResult(kept=tuple(sorted(self._servers)))
@@ -1437,13 +1692,12 @@ class MCPClient:
 
         failed: list[str] = []
         reconnected: list[str] = []
+        await self._connect_named_specs(
+            [(name, new_catalog[name]) for name in sorted(pending_connect)],
+            mcp_json_path=mcp_json_path,
+            raise_on_error=raise_on_error,
+        )
         for name in sorted(pending_connect):
-            await self._connect_from_spec(
-                name,
-                new_catalog[name],
-                mcp_json_path=mcp_json_path,
-                raise_on_error=raise_on_error,
-            )
             if name in self._servers:
                 if name in changed:
                     reconnected.append(name)

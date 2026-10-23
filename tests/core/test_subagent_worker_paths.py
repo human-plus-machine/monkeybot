@@ -97,7 +97,7 @@ async def test_worker_resolves_relative_agent_md_from_project_root(
 
     mcp = MagicMock()
     mcp.load_from_config = AsyncMock()
-    mcp.disconnect = AsyncMock()
+    mcp.disconnect_all = AsyncMock()
     mcp._servers = {}
     monkeypatch.setattr(subagent_worker, "MCPClient", lambda: mcp)
     monkeypatch.setattr(subagent_worker, "build_context", _fake_build_context)
@@ -202,7 +202,7 @@ async def _run_worker_capturing_vertex_google_search(
 
     mcp = MagicMock()
     mcp.load_from_config = AsyncMock()
-    mcp.disconnect = AsyncMock()
+    mcp.disconnect_all = AsyncMock()
     mcp._servers = {}
     monkeypatch.setattr(subagent_worker, "MCPClient", lambda: mcp)
     monkeypatch.setattr(subagent_worker, "build_context", _fake_build_context)
@@ -349,7 +349,7 @@ async def _run_worker_capture_thread_id(
 
     mcp = MagicMock()
     mcp.load_from_config = AsyncMock()
-    mcp.disconnect = AsyncMock()
+    mcp.disconnect_all = AsyncMock()
     mcp._servers = {}
     monkeypatch.setattr(subagent_worker, "MCPClient", lambda: mcp)
     monkeypatch.setattr(subagent_worker, "build_context", _fake_build_context)
