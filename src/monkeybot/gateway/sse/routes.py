@@ -657,6 +657,11 @@ def create_app(
                     f"Model provider '{body.model_provider}' unavailable: {exc}",
                     uuid.uuid4().hex,
                 ) from exc
+            from monkeybot.providers._openai_compat import (  # noqa: PLC0415
+                warm_provider_connection,
+            )
+
+            await warm_provider_connection(session_provider)
         try:
             reg_dep.create(
                 sid,

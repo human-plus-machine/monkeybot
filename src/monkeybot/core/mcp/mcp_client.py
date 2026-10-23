@@ -419,6 +419,26 @@ class _ServerRecord:
     stop: asyncio.Event | None = None
 
 
+async def run_cleanup(work: Awaitable[None]) -> None:
+    """Finish ``work`` when this task is already cancelled.
+
+    Startup and shutdown own MCP transports. A pending cancellation is
+    delivered at the next await, which would skip ``disconnect_all`` and leave
+    a stdio child running in its own session.
+    """
+    task = asyncio.current_task()
+    deferred = 0
+    if task is not None:
+        while task.cancelling():
+            task.uncancel()
+            deferred += 1
+    try:
+        await work
+    finally:
+        if task is not None and deferred:
+            task.cancel()
+
+
 # Status machine values (OpenCode-inspired; progressive-disclosure aware).
 MCP_STATUS_CONNECTED = "connected"
 MCP_STATUS_CATALOGUED = "catalogued"

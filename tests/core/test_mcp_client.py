@@ -25,6 +25,7 @@ from monkeybot.core.mcp.mcp_client import (
     _mcp_auth_handler_cls,
     interpolate_env_vars,
     mcp_file_env_refs,
+    run_cleanup,
 )
 
 
@@ -1540,3 +1541,65 @@ async def test_disconnect_from_another_task_reaps_stdio_child(
             return
         await asyncio.sleep(0.02)
     pytest.fail(f"fixture server still running: {spawned}")
+
+
+@pytest.mark.asyncio
+async def test_run_cleanup_finishes_when_the_task_is_cancelled() -> None:
+    """A cancelled owner still runs the coroutine it passed to ``run_cleanup``."""
+    finished = asyncio.Event()
+
+    async def _work() -> None:
+        await asyncio.sleep(0)
+        finished.set()
+
+    async def _main() -> None:
+        try:
+            await asyncio.sleep(30)
+        finally:
+            await run_cleanup(_work())
+
+    task = asyncio.create_task(_main())
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_connect_reaps_stdio_child(tmp_path: Path) -> None:
+    """Cancelling a handshake still closes the transport in its owner task.
+
+    The stdio child is started in its own session, so it keeps running if the
+    owner's stack unwind is itself cancelled before the transport kills it.
+    """
+    script = tmp_path / "slow_mcp.py"
+    script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+    client = MCPClient()
+    task = asyncio.create_task(
+        client.connect("slow", sys.executable, [str(script)], {}),
+        name="cancel-connect",
+    )
+    spawned: list[int] = []
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        spawned = [pid for pid in _child_pids(os.getpid()) if "slow_mcp.py" in _cmdline(pid)]
+        if spawned:
+            break
+        await asyncio.sleep(0.02)
+    assert spawned, "stdio connect did not spawn the slow server"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if all(pid not in _child_pids(os.getpid()) for pid in spawned):
+            leaked = [
+                running
+                for running in asyncio.all_tasks()
+                if running.get_name().startswith("mcp-session-") and not running.done()
+            ]
+            assert leaked == []
+            return
+        await asyncio.sleep(0.02)
+    pytest.fail(f"slow server still running after cancelled connect: {spawned}")

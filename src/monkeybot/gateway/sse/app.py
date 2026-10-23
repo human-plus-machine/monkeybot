@@ -24,6 +24,9 @@ from monkeybot.computer import build_computer_tools, should_enable_computer_tool
 from monkeybot.computer.permissions import build_computer_permission_inspector, build_persist_hook
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
+from monkeybot.core.coding.git_context_hook import GitContextHook
+from monkeybot.core.coding.read_ledger_hook import ReadLedgerCompactionHook
+from monkeybot.core.coding.verification_gate import VerificationGate
 from monkeybot.core.config.runtime_env import (
     CODING_DIFF_KEY,
     SUBAGENTS_DIFF_KEY,
@@ -52,9 +55,6 @@ from monkeybot.core.config.snapshot import (
 )
 from monkeybot.core.context import LoopsToolRegistry, TurnContext, build_context
 from monkeybot.core.context.common import text_from_blocks
-from monkeybot.core.coding.git_context_hook import GitContextHook
-from monkeybot.core.coding.read_ledger_hook import ReadLedgerCompactionHook
-from monkeybot.core.coding.verification_gate import VerificationGate
 from monkeybot.core.context.slash_skills import apply_invoked_skill
 from monkeybot.core.hooks import HookEvent, HookManager
 from monkeybot.core.hooks.evidence_guard import EvidencePathGuard
@@ -71,7 +71,7 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.llm.usage import Usage as UsageRecord
 from monkeybot.core.llm.usage import UsageGranularity
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.mcp.mcp_client import MCPClient, mcp_file_env_refs
+from monkeybot.core.mcp.mcp_client import MCPClient, mcp_file_env_refs, run_cleanup
 from monkeybot.core.mcp.ports_mcp import MCPCatalogApplyResult
 from monkeybot.core.memory.config import memory_enabled_from_config
 from monkeybot.core.memory.ingest import persist_message
@@ -195,6 +195,23 @@ def _resolved_cfg_path(
     """Resolve a snapshot path against ``agent_root``; keep ``fallback`` when unset."""
     raw = env_value(cfg, key, "").strip()
     return resolve_agent_path(raw, agent_root) if raw else fallback
+
+
+# Env keys that rebuild the chat provider. A new host or key needs a warm socket.
+_PROVIDER_REBUILD_KEYS = frozenset(
+    {
+        "MODEL_PROVIDER",
+        "MODEL_TEMPERATURE",
+        "MODEL_MAX_TOKENS",
+        "MODEL_THINKING_BUDGET",
+        "MODEL_REASONING_EFFORT",
+        "VERTEX_AI_PROJECT_ID",
+        "VERTEX_AI_LOCATION",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "ANTHROPIC_VERTEX_REGION",
+        "MONKEYBOT_FAKE_PROVIDER_EVENTS",
+    }
+)
 
 
 @dataclass
@@ -498,18 +515,7 @@ class GatewayRuntime:
     ) -> tuple[list[str], str | None]:
         applied: list[str] = []
         error: str | None = None
-        provider_keys = {
-            "MODEL_PROVIDER",
-            "MODEL_TEMPERATURE",
-            "MODEL_MAX_TOKENS",
-            "MODEL_THINKING_BUDGET",
-            "MODEL_REASONING_EFFORT",
-            "VERTEX_AI_PROJECT_ID",
-            "VERTEX_AI_LOCATION",
-            "ANTHROPIC_VERTEX_PROJECT_ID",
-            "ANTHROPIC_VERTEX_REGION",
-            "MONKEYBOT_FAKE_PROVIDER_EVENTS",
-        }
+        provider_keys = _PROVIDER_REBUILD_KEYS
         inspector_keys = {
             "COMMAND_ALLOWLIST_CONFIG",
             "PERMISSION_CONFIG",
@@ -696,6 +702,12 @@ class GatewayRuntime:
                 return self._abort_staged(staging, fastapi_app, memory_prev, mcp_result, error)
         self._install_live_slices(staging)
         self._close_replaced_after_commit(prev_ledger, prev_judge)
+        if _PROVIDER_REBUILD_KEYS.intersection(applied):
+            from monkeybot.providers._openai_compat import (  # noqa: PLC0415
+                warm_provider_connection,
+            )
+
+            await warm_provider_connection(self.provider)
         return RuntimeApplyResult(applied=applied, mcp=mcp_result)
 
     def _abort_staged(
@@ -1323,6 +1335,9 @@ async def _startup(fastapi_app: FastAPI) -> None:
 
     gateway_runtime.build_inspectors(layout, cfg)
     gateway_runtime.build_provider(cfg)
+    from monkeybot.providers._openai_compat import warm_provider_connection  # noqa: PLC0415
+
+    await warm_provider_connection(gateway_runtime.provider)
     gateway_runtime.build_web_search(cfg)
 
     vertex_gs = vertex_google_search_enabled_from_config()
@@ -1505,11 +1520,13 @@ async def _teardown_runtime(fastapi_app: FastAPI) -> None:
 
 @contextlib.asynccontextmanager
 async def _gateway_lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
-    await _startup(fastapi_app)
     try:
+        await _startup(fastapi_app)
         yield
     finally:
-        await _shutdown(fastapi_app)
+        # Startup returns while autoConnect is still in flight. If it raises
+        # or the process is cancelled before yield, this is the only teardown.
+        await run_cleanup(_shutdown(fastapi_app))
 
 
 _registry = SessionRegistry(workspace_root=_resolved_workspace_paths()[0])

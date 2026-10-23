@@ -33,6 +33,7 @@ from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._openai_compat import (
     count_input_tokens_tiktoken,
     stream_chat_completions_with_tool_fallback,
+    warm_openai_compat_connection,
 )
 from monkeybot.providers.request_budget import configured_request_byte_budget
 from monkeybot.providers.sampling import resolve_model_sampling
@@ -95,6 +96,14 @@ class NvidiaProvider:
             max_request_bytes=configured_request_byte_budget(provider=self.name),
             thinking_budget=thinking_budget,
             hints=hints,
+        )
+
+    async def warm_connection(self) -> None:
+        """Open the cached client's socket with a models list, not a completion."""
+        await warm_openai_compat_connection(
+            base_url=self._base_url,
+            api_key=self._api_key,
+            provider=self.name,
         )
 
     async def stream(

@@ -26,8 +26,10 @@ _DIFF_GIT_RE = re.compile(r"^diff --git a/.+ b/(.+)$", re.MULTILINE)
 PRESSURE_LIGHT_RATIO = 0.50
 PRESSURE_MODERATE_RATIO = 0.70
 PRESSURE_AGGRESSIVE_RATIO = 0.85
-# Sync history summarization fires at the same bar as aggressive tool-result
+# Inline history summarization fires at the same bar as aggressive tool-result
 # shaping — row count is otherwise unbounded until this token bar is hit.
+# A background summary starts at the moderate bar so the turn that crosses this
+# one can apply it instead of waiting on the summarizer.
 SUMMARY_TRIGGER_RATIO = PRESSURE_AGGRESSIVE_RATIO
 RESULT_BUDGET_FRACTION = 0.8
 RESULT_BUDGET_FLOOR_TOKENS = 2000

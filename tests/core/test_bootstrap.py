@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
+import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -240,6 +247,102 @@ async def test_close_closes_storage() -> None:
     await deps.close()
     with pytest.raises(RuntimeError, match="open\\(\\) has not been called"):
         deps.storage.history()
+
+
+def _child_pids(parent: int) -> set[int]:
+    out = subprocess.run(
+        ["pgrep", "-P", str(parent)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if out.returncode != 0:
+        return set()
+    return {int(line) for line in out.stdout.split() if line.strip().isdigit()}
+
+
+def _cmdline(pid: int) -> str:
+    out = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return out.stdout.strip()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_harness_startup_reaps_background_mcp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelling setup after autoConnect starts must not leave the stdio child up.
+
+    Boot returns before those connects finish, then warms the provider. A cancel
+    in that window never hands back ``HarnessDeps``, so setup itself has to
+    disconnect.
+    """
+    script = tmp_path / "slow_mcp.py"
+    script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+    cfg = tmp_path / "mcp.json"
+    cfg.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "slow": {
+                        "command": sys.executable,
+                        "args": [str(script)],
+                        "autoConnect": True,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MCP_STRICT_LOAD", raising=False)
+
+    async def _warm(_provider: object) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        "monkeybot.providers._openai_compat.warm_provider_connection",
+        _warm,
+    )
+    task = asyncio.create_task(
+        create_harness_deps(
+            "sqlite:///:memory:",
+            None,
+            mcp_config_path=cfg,
+            open_mcp=True,
+            _provider_override=_fake(),
+        )
+    )
+    spawned: list[int] = []
+    try:
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            spawned = [pid for pid in _child_pids(os.getpid()) if "slow_mcp.py" in _cmdline(pid)]
+            if spawned:
+                break
+            await asyncio.sleep(0.02)
+        assert spawned, "background autoConnect did not spawn the stdio server"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # stdio gives the child 2s to exit after stdin closes, then signals it.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if all(pid not in _child_pids(os.getpid()) for pid in spawned):
+                return
+            await asyncio.sleep(0.02)
+        pytest.fail(f"stdio server still running after cancelled setup: {spawned}")
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        for pid in spawned:
+            if pid in _child_pids(os.getpid()):
+                subprocess.run(["kill", "-9", str(pid)], check=False)
 
 
 @pytest.mark.asyncio

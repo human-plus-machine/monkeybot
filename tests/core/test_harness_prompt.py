@@ -43,7 +43,8 @@ def test_harness_is_protocol_not_tool_catalog() -> None:
     assert '{"tool_calls":' not in out
     assert "Path rule" in out
     # Compact: protocol + paths, not the old ~15k tool manual.
-    assert len(out) < 6000
+    # The batch-reads sentence is one protocol rule, not a tool catalog.
+    assert len(out) < 6500
 
 
 def test_harness_omits_memory_uri_when_disabled() -> None:
@@ -191,6 +192,8 @@ def test_coding_protocol_block_is_always_present() -> None:
         "### Editing & verification protocol",
         "`read_before_write`",
         "`stale_read`",
+        "Batch independent reads",
+        "same response",
         "`snippet`",
         "`exit_code`",
         "`not verified: <why>`",
