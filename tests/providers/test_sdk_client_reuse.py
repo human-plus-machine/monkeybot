@@ -57,8 +57,12 @@ def _install_openai(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         constructed.append(client)
         return client
 
+    def _http_client(**_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace()
+
     fake = ModuleType("openai")
     fake.AsyncOpenAI = _factory  # type: ignore[attr-defined]
+    fake.DefaultAsyncHttpxClient = _http_client  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "openai", fake)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     return {"constructed": constructed, "captured": captured}

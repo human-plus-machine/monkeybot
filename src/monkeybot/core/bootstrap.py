@@ -182,6 +182,10 @@ async def create_harness_deps(
             strict = os.environ.get("MCP_STRICT_LOAD", "").strip().lower() in ("1", "true", "yes")
             await mcp.load_from_config(mcp_config_path, raise_on_error=strict)
 
+        from monkeybot.providers._openai_compat import warm_provider_connection  # noqa: PLC0415
+
+        await warm_provider_connection(prov)
+
         return HarnessDeps(
             storage=backend,
             memory=memory,

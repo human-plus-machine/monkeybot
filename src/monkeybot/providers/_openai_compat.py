@@ -66,6 +66,13 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 
+# Match ``openai.DEFAULT_CONNECTION_LIMITS`` (1000 / 100). httpx leaves
+# ``keepalive_expiry`` at 5s, which drops a startup socket before the first turn.
+_MAX_CONNECTIONS = 1000
+_MAX_KEEPALIVE_CONNECTIONS = 100
+_KEEPALIVE_EXPIRY_S = 120.0
+_WARM_TIMEOUT_S = 5.0
+
 
 def _delta_reasoning_text(delta: Any) -> str:
     """Extract thinking/reasoning text from an OpenAI-compat stream delta.
@@ -1001,6 +1008,82 @@ async def iter_openai_compat_stream(
     yield Done(truncated=finish_reason == "length")
 
 
+# Unknown model ids (the common case on OpenAI-compatible endpoints) all share
+# this encoding. It is loaded once, at import, so the first token count does
+# not pay the BPE load.
+_TIKTOKEN_FALLBACK_ENCODING = "cl100k_base"
+_tiktoken_encodings: dict[str, Any] = {}
+
+
+def tiktoken_encoding_for_model(model: str) -> Any:
+    """Return a process-cached tiktoken encoding for ``model``.
+
+    A model id tiktoken does not know shares the preloaded ``cl100k_base``
+    encoding. A known id is resolved once and then reused.
+    """
+    cached = _tiktoken_encodings.get(model)
+    if cached is not None:
+        return cached
+    import tiktoken  # noqa: PLC0415
+
+    try:
+        enc: Any = tiktoken.encoding_for_model(model)
+    except KeyError:
+        enc = _cached_fallback_tiktoken_encoding()
+    _tiktoken_encodings[model] = enc
+    return enc
+
+
+def _publish_fallback_tiktoken_encoding(enc: Any) -> Any:
+    """Cache ``cl100k_base`` only after its special-token regex exists.
+
+    Publishing before ``encode`` would let the next turn pay that compile.
+    A failure leaves the cache empty so the caller can try again.
+    """
+    # The first encode builds the special-token regex. Do it here so a turn does not.
+    enc.encode(" ")
+    _tiktoken_encodings[_TIKTOKEN_FALLBACK_ENCODING] = enc
+    return enc
+
+
+def _cached_fallback_tiktoken_encoding() -> Any:
+    cached = _tiktoken_encodings.get(_TIKTOKEN_FALLBACK_ENCODING)
+    if cached is not None:
+        return cached
+    import tiktoken  # noqa: PLC0415
+
+    enc = tiktoken.get_encoding(_TIKTOKEN_FALLBACK_ENCODING)
+    return _publish_fallback_tiktoken_encoding(enc)
+
+
+def _load_fallback_tiktoken_encoding() -> None:
+    """Load ``cl100k_base`` at import.
+
+    tiktoken is an optional extra. Importing this module still succeeds when
+    tiktoken is missing or its encoding file cannot be read. The count path
+    raises when it needs the encoder, and does not keep a failed load.
+    """
+    try:
+        _cached_fallback_tiktoken_encoding()
+    except ImportError:
+        return
+    except MemoryError:
+        raise
+    except Exception:
+        # A cold cache downloads cl100k_base.tiktoken. That failure used to abort
+        # import of every provider, because settings imports this module. Leave
+        # the cache empty so the count path can try again.
+        _log.warning(
+            "tiktoken %s was not loaded at import; token counting will try again",
+            _TIKTOKEN_FALLBACK_ENCODING,
+            exc_info=True,
+        )
+        return
+
+
+_load_fallback_tiktoken_encoding()
+
+
 async def count_input_tokens_tiktoken(
     messages: Sequence[Message],
     tools: Sequence[ToolDef],
@@ -1015,6 +1098,7 @@ async def count_input_tokens_tiktoken(
 
     Falls back to ``cl100k_base`` when ``model`` isn't a tiktoken-known model id
     (true for most non-OpenAI models served through an OpenAI-compat endpoint).
+    That encoding is resolved once at import; see ``tiktoken_encoding_for_model``.
 
     Media is stubbed against ``max_request_bytes`` so the count reflects what
     ``stream`` will actually send, but never raises when text alone stays over
@@ -1024,8 +1108,6 @@ async def count_input_tokens_tiktoken(
     none of these providers' token counts vary with reasoning configuration.
     """
     del thinking_budget
-    import tiktoken  # noqa: PLC0415
-
     msgs = trim_message_media_for_byte_budget(
         messages,
         tools,
@@ -1034,10 +1116,7 @@ async def count_input_tokens_tiktoken(
         raise_if_oversized=False,
         trim_files=False,
     )
-    try:
-        enc = tiktoken.encoding_for_model(model)
-    except KeyError:
-        enc = tiktoken.get_encoding("cl100k_base")
+    enc = tiktoken_encoding_for_model(model)
     return await count_openai_compat_input_tokens(enc, msgs, tools, hints=hints)
 
 
@@ -1313,6 +1392,127 @@ async def iter_openai_compat_stream_with_sampling_retry(
             )
 
 
+def openai_connection_limits() -> Any:
+    """Pool caps from the OpenAI SDK, with a longer idle socket.
+
+    One warm connection per endpoint. After the server closes it, the next
+    request connects again.
+    """
+    import httpx  # noqa: PLC0415
+
+    return httpx.Limits(
+        max_connections=_MAX_CONNECTIONS,
+        max_keepalive_connections=_MAX_KEEPALIVE_CONNECTIONS,
+        keepalive_expiry=_KEEPALIVE_EXPIRY_S,
+    )
+
+
+def _keepalive_http_client(*, base_url: str | None) -> Any | None:
+    """SDK httpx client with :func:`openai_connection_limits`, or None in fakes."""
+    import openai  # noqa: PLC0415
+
+    ctor = getattr(openai, "DefaultAsyncHttpxClient", None)
+    if ctor is None:
+        return None
+    kwargs: dict[str, Any] = {"limits": openai_connection_limits()}
+    if base_url is not None:
+        kwargs["base_url"] = base_url
+    return ctor(**kwargs)
+
+
+def cached_async_openai(
+    key: tuple[Any, ...],
+    *,
+    fingerprint: tuple[Any, ...],
+    base_url: str | None = None,
+    api_key: str | None = None,
+) -> Any:
+    """Cached ``AsyncOpenAI`` for ``key`` on this loop.
+
+    Warm-up and ``stream`` must use the same key and fingerprint so they share
+    one connection pool.
+    """
+    from monkeybot.providers._sdk_client import cached_sdk_client  # noqa: PLC0415
+
+    def factory() -> Any:
+        from openai import AsyncOpenAI  # noqa: PLC0415
+
+        kwargs: dict[str, Any] = {}
+        if base_url is not None:
+            kwargs["base_url"] = base_url
+        if api_key is not None:
+            kwargs["api_key"] = api_key
+        http_client = _keepalive_http_client(base_url=base_url)
+        if http_client is not None:
+            kwargs["http_client"] = http_client
+        return AsyncOpenAI(**kwargs)
+
+    return cached_sdk_client(key, factory, fingerprint=fingerprint)
+
+
+def _log_warm_failure(provider: str, exc: BaseException) -> None:
+    _log.warning(
+        "provider connection warm-up failed %s",
+        kv(provider=provider, error=type(exc).__name__, detail=str(exc)[:200]),
+    )
+
+
+async def _probe_models(client: Any, *, provider: str) -> None:
+    """GET ``/models`` on ``client``. Not a chat completion."""
+    await asyncio.wait_for(
+        client.models.list(timeout=_WARM_TIMEOUT_S),
+        timeout=_WARM_TIMEOUT_S,
+    )
+    _log.debug("provider connection warmed %s", kv(provider=provider))
+
+
+async def warm_openai_compat_connection(*, base_url: str, api_key: str, provider: str) -> None:
+    """Open the compat client's connection. Failures are logged, not raised."""
+    from monkeybot.providers._sdk_client import sdk_env  # noqa: PLC0415
+
+    try:
+        client = cached_async_openai(
+            ("openai-compat", base_url),
+            base_url=base_url,
+            api_key=api_key,
+            # AsyncOpenAI still reads OPENAI_ORG_ID and the other OPENAI_* vars.
+            fingerprint=(api_key, sdk_env("OPENAI_")),
+        )
+        await _probe_models(client, provider=provider)
+    except Exception as exc:
+        _log_warm_failure(provider, exc)
+
+
+async def warm_openai_connection() -> None:
+    """Open the official OpenAI client's connection. Failures are logged, not raised."""
+    from monkeybot.providers._sdk_client import sdk_env  # noqa: PLC0415
+
+    try:
+        # The model id is a request field. AsyncOpenAI reads OPENAI_* env vars
+        # in its constructor, so those identify the client.
+        client = cached_async_openai(("openai",), fingerprint=sdk_env("OPENAI_"))
+        await _probe_models(client, provider="openai")
+    except Exception as exc:
+        _log_warm_failure("openai", exc)
+
+
+async def warm_provider_connection(provider: Any) -> None:
+    """Warm ``provider`` when it implements ``warm_connection``. Never raises.
+
+    Looks up the method on the class so a ``MagicMock`` provider does not grow
+    a child mock and get awaited.
+    """
+    if provider is None:
+        return
+    method = getattr(type(provider), "warm_connection", None)
+    if not callable(method):
+        return
+    try:
+        await provider.warm_connection()
+    except Exception as exc:
+        _log_warm_failure(type(provider).__name__, exc)
+
+
 async def stream_chat_completions_with_tool_fallback(
     *,
     base_url: str,
@@ -1343,9 +1543,7 @@ async def stream_chat_completions_with_tool_fallback(
     ``max_request_bytes`` is a hard JSON-body cap. When set, oldest historical
     ``image_url`` data URLs are stubbed before the request is sent.
     """
-    from openai import AsyncOpenAI  # noqa: PLC0415
-
-    from monkeybot.providers._sdk_client import cached_sdk_client, sdk_env  # noqa: PLC0415
+    from monkeybot.providers._sdk_client import sdk_env  # noqa: PLC0415
 
     msgs = list(messages)
     if max_request_bytes is not None and max_request_bytes > 0:
@@ -1360,9 +1558,10 @@ async def stream_chat_completions_with_tool_fallback(
     if system:
         oai_messages = [{"role": "system", "content": system}, *oai_messages]
 
-    client = cached_sdk_client(
+    client = cached_async_openai(
         ("openai-compat", base_url),
-        lambda: AsyncOpenAI(base_url=base_url, api_key=api_key),
+        base_url=base_url,
+        api_key=api_key,
         # AsyncOpenAI still reads OPENAI_ORG_ID and the other OPENAI_* vars.
         fingerprint=(api_key, sdk_env("OPENAI_")),
     )
@@ -1524,6 +1723,7 @@ __all__ = [
     "ProviderRateLimitError",
     "ProviderServerError",
     "count_input_tokens_tiktoken",
+    "tiktoken_encoding_for_model",
     "drop_rejected_sampling",
     "iter_openai_compat_stream_with_sampling_retry",
     "count_openai_compat_input_tokens",
@@ -1535,5 +1735,10 @@ __all__ = [
     "openai_messages_token_count",
     "openai_tools",
     "openai_tools_token_count",
+    "cached_async_openai",
+    "openai_connection_limits",
     "stream_chat_completions_with_tool_fallback",
+    "warm_openai_compat_connection",
+    "warm_openai_connection",
+    "warm_provider_connection",
 ]

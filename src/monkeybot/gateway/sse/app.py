@@ -197,6 +197,23 @@ def _resolved_cfg_path(
     return resolve_agent_path(raw, agent_root) if raw else fallback
 
 
+# Env keys that rebuild the chat provider. A new host or key needs a warm socket.
+_PROVIDER_REBUILD_KEYS = frozenset(
+    {
+        "MODEL_PROVIDER",
+        "MODEL_TEMPERATURE",
+        "MODEL_MAX_TOKENS",
+        "MODEL_THINKING_BUDGET",
+        "MODEL_REASONING_EFFORT",
+        "VERTEX_AI_PROJECT_ID",
+        "VERTEX_AI_LOCATION",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "ANTHROPIC_VERTEX_REGION",
+        "MONKEYBOT_FAKE_PROVIDER_EVENTS",
+    }
+)
+
+
 @dataclass
 class GatewayRuntime:
     """Process-level deps populated on startup; ``apply()`` rebuilds hot slices.
@@ -498,18 +515,7 @@ class GatewayRuntime:
     ) -> tuple[list[str], str | None]:
         applied: list[str] = []
         error: str | None = None
-        provider_keys = {
-            "MODEL_PROVIDER",
-            "MODEL_TEMPERATURE",
-            "MODEL_MAX_TOKENS",
-            "MODEL_THINKING_BUDGET",
-            "MODEL_REASONING_EFFORT",
-            "VERTEX_AI_PROJECT_ID",
-            "VERTEX_AI_LOCATION",
-            "ANTHROPIC_VERTEX_PROJECT_ID",
-            "ANTHROPIC_VERTEX_REGION",
-            "MONKEYBOT_FAKE_PROVIDER_EVENTS",
-        }
+        provider_keys = _PROVIDER_REBUILD_KEYS
         inspector_keys = {
             "COMMAND_ALLOWLIST_CONFIG",
             "PERMISSION_CONFIG",
@@ -696,6 +702,12 @@ class GatewayRuntime:
                 return self._abort_staged(staging, fastapi_app, memory_prev, mcp_result, error)
         self._install_live_slices(staging)
         self._close_replaced_after_commit(prev_ledger, prev_judge)
+        if _PROVIDER_REBUILD_KEYS.intersection(applied):
+            from monkeybot.providers._openai_compat import (  # noqa: PLC0415
+                warm_provider_connection,
+            )
+
+            await warm_provider_connection(self.provider)
         return RuntimeApplyResult(applied=applied, mcp=mcp_result)
 
     def _abort_staged(
@@ -1323,6 +1335,9 @@ async def _startup(fastapi_app: FastAPI) -> None:
 
     gateway_runtime.build_inspectors(layout, cfg)
     gateway_runtime.build_provider(cfg)
+    from monkeybot.providers._openai_compat import warm_provider_connection  # noqa: PLC0415
+
+    await warm_provider_connection(gateway_runtime.provider)
     gateway_runtime.build_web_search(cfg)
 
     vertex_gs = vertex_google_search_enabled_from_config()
