@@ -51,6 +51,12 @@ class PendingSummary:
     middle: list[Message]
     model: str
     window_tokens: int
+    # ``len(raw)`` when the job started. A shorter history deleted the tail this
+    # cut was built for (rewind, truncate); that job must not be applied.
+    base_len: int
+    # Tokens after ``cut`` when the job was started. A later suffix may grow up
+    # to the tail budget, but not past the size this job already accepted.
+    suffix_tokens: int
     task: asyncio.Task[str | None]
 
 
@@ -82,12 +88,30 @@ def _prefix_matches(pending: PendingSummary, raw: Sequence[Message]) -> bool:
     return list(raw[: pending.cut]) == list(pending.covered)
 
 
+def _suffix_within_limit(pending: PendingSummary, raw: Sequence[Message]) -> bool:
+    """True when rows after the cut have not outgrown the tail this job can keep.
+
+    The split keeps at least two recent rows even when they already exceed the
+    token budget. That tail is fresh until new rows push it further: restarting
+    on every in-band turn would cancel the same summary before it finishes.
+    A tail that fit the budget may still grow up to the budget. A shorter
+    history has lost rows, so this cut is no longer the one a new split would use.
+    """
+    if len(raw) < pending.base_len or pending.cut > len(raw):
+        return False
+    limit = max(pending.suffix_tokens, _tail_budget(pending.window_tokens))
+    return _tail_tokens(raw[pending.cut :]) <= limit
+
+
 def _is_fresh(pending: PendingSummary, raw: Sequence[Message], *, model: str, window: int) -> bool:
-    """True when this job still covers the thread and its tail fits the keep budget.
+    """True when this job still covers the prefix it summarized and its tail still fits.
 
     A finished job that produced no text is not fresh, so the next in-band turn
-    can try again. A changed model, window, or covered prefix is not fresh either:
-    applying it would summarize the wrong rows.
+    can try again. A changed model, window, or covered prefix is not fresh either.
+    Rows after the cut may grow up to the tail budget (or up to the tail this job
+    already accepted, when that was larger). Past that limit, or once rows have
+    been deleted, the cut is stale: applying it would keep rows that now have to
+    be summarized, or summarize rows a rewind meant to keep.
     """
     task = pending.task
     if task.done():
@@ -102,7 +126,7 @@ def _is_fresh(pending: PendingSummary, raw: Sequence[Message], *, model: str, wi
         return False
     if not _prefix_matches(pending, raw):
         return False
-    return _tail_tokens(raw[pending.cut :]) <= _tail_budget(window)
+    return _suffix_within_limit(pending, raw)
 
 
 def _retrieve(task: asyncio.Task[str | None]) -> None:
@@ -128,6 +152,17 @@ def _drop(thread_id: str) -> None:
         _cancel(pending.task)
 
 
+def _drop_if_same(thread_id: str, pending: PendingSummary) -> None:
+    """Remove ``pending`` only when it is still this thread's job."""
+    if _pending.get(thread_id) is pending:
+        _drop(thread_id)
+
+
+def _waiter_cancelled() -> bool:
+    current = asyncio.current_task()
+    return current is not None and current.cancelling() > 0
+
+
 def _evict_until_room(thread_id: str) -> None:
     if thread_id in _pending:
         return
@@ -146,14 +181,19 @@ async def _run_job(
     intent_facts: str | None,
     thread_id: str,
 ) -> str | None:
+    # Lazy import: loading providers pulls every SDK adapter, and this module
+    # is imported on the turn path. The suppress call is the only use.
+    from monkeybot.providers._stream_marks import suppress_stream_marks
+
     try:
-        return await _generate_summary_text(
-            provider,
-            model,
-            middle,
-            window_tokens=window_tokens,
-            intent_facts=intent_facts,
-        )
+        with suppress_stream_marks():
+            return await _generate_summary_text(
+                provider,
+                model,
+                middle,
+                window_tokens=window_tokens,
+                intent_facts=intent_facts,
+            )
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -174,8 +214,8 @@ async def maybe_start(
     """Start a summary when the thread is past 70% of the window and under the bar.
 
     Returns once the model call is scheduled. The call itself is not awaited.
-    A job that is still fresh is left alone. A job whose rows after the cut exceed
-    the tail budget is replaced, so the summary still covers the thread.
+    A job that is still fresh is left alone. A job whose rows after the cut have
+    outgrown the tail it can keep is replaced, so the summary still covers the thread.
     """
     window = ctx.context_window_tokens
     if window <= 0:
@@ -216,6 +256,8 @@ async def maybe_start(
         middle=list(middle),
         model=model,
         window_tokens=window,
+        base_len=len(raw),
+        suffix_tokens=_tail_tokens(raw[cut:]),
         task=task,
     )
     logger.debug(
@@ -231,30 +273,18 @@ async def take(
     model: str,
     window_tokens: int,
 ) -> tuple[PendingSummary, str] | None:
-    """Pop this thread's job and return it when the covered prefix is unchanged.
+    """Return this thread's job when it still covers ``raw``.
 
-    A running job is awaited. ``None`` means the caller should summarize inline.
+    The job stays registered. The caller pops it only after a second check,
+    immediately before writing history, so a cancelled turn does not lose a
+    summary that is still running. A stale job is removed here and is not
+    awaited: waiting would make the pressured turn slower than summarizing inline.
+    ``None`` means the caller should summarize inline.
     """
-    pending = _pending.pop(thread_id, None)
+    pending = _pending.get(thread_id)
     if pending is None:
         return None
-    try:
-        text = await pending.task
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        logger.warning(
-            "background summary failed %s",
-            kv(thread_id=thread_id),
-            exc_info=True,
-        )
-        return None
-    if (
-        not text
-        or pending.model != model
-        or pending.window_tokens != window_tokens
-        or not _prefix_matches(pending, raw)
-    ):
+    if not _is_fresh(pending, raw, model=model, window=window_tokens):
         logger.debug(
             "background summary discarded %s",
             kv(
@@ -262,8 +292,36 @@ async def take(
                 model_match=pending.model == model,
                 window_match=pending.window_tokens == window_tokens,
                 prefix_match=_prefix_matches(pending, raw),
+                suffix_ok=_suffix_within_limit(pending, raw),
             ),
         )
+        _drop_if_same(thread_id, pending)
+        return None
+    try:
+        text = await pending.task
+    except asyncio.CancelledError:
+        if _waiter_cancelled():
+            raise
+        logger.debug(
+            "background summary cancelled %s",
+            kv(thread_id=thread_id),
+        )
+        _drop_if_same(thread_id, pending)
+        return None
+    except Exception:
+        logger.warning(
+            "background summary failed %s",
+            kv(thread_id=thread_id),
+            exc_info=True,
+        )
+        _drop_if_same(thread_id, pending)
+        return None
+    if not text or _pending.get(thread_id) is not pending:
+        logger.debug(
+            "background summary discarded %s",
+            kv(thread_id=thread_id, empty=not text),
+        )
+        _drop_if_same(thread_id, pending)
         return None
     return pending, text
 
@@ -279,7 +337,9 @@ async def apply_pending_summary(
     """Write a ready summary. ``None`` when there is nothing to apply.
 
     The trailer is read at apply time. Rows appended after the job's cut are kept,
-    in order, after the compacted prefix.
+    in order, after the compacted prefix, when they still fit the tail this job
+    can keep. History is loaded again after the summary text is ready so a row
+    that arrived while it was streaming is kept or forces an inline summary.
     """
     if thread_id not in _pending:
         return None
@@ -289,16 +349,28 @@ async def apply_pending_summary(
         return None
     pending, text = got
     if not pending.middle:
+        _drop_if_same(thread_id, pending)
         return None
+    current = await history.load(thread_id)
+    if _pending.get(thread_id) is not pending or not _is_fresh(
+        pending, current, model=model, window=window_tokens
+    ):
+        # A replacement job belongs to whoever stored it. A stale one must not
+        # be written over rows that have since outgrown its cut.
+        if _pending.get(thread_id) is pending:
+            _drop(thread_id)
+        return None
+    _pending.pop(thread_id, None)
     summary = _finalize_summary_row(text, workspace_trailer)
     # Rebuild from the snapshotted objects: head matching is by identity, and a
-    # fresh load() returns equal rows that are not those objects.
+    # fresh load() returns equal rows that are not those objects. The suffix is
+    # the post-await load, which includes rows appended while the job streamed.
     merged = rebuild_compacted_history(
         pending.covered,
         head=pending.head,
         summary=summary,
         tail=[],
-    ) + list(raw[pending.cut :])
+    ) + list(current[pending.cut :])
     await history.reset(thread_id, merged)
     logger.debug(
         "background summary applied %s",
@@ -324,9 +396,11 @@ async def wait_idle(thread_id: str) -> None:
     try:
         await asyncio.shield(task)
     except asyncio.CancelledError:
-        if task.cancelled() or task.done():
-            return
-        raise
+        # The job finishing is not the waiter finishing. A cancelled waiter must
+        # stay cancelled even when the job happens to end on the same tick.
+        if _waiter_cancelled():
+            raise
+        return
     except Exception:
         return
 

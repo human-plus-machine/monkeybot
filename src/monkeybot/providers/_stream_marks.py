@@ -10,6 +10,8 @@ arrived. With nothing bound, the mark calls are a no-op.
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 
@@ -35,6 +37,20 @@ def bind_stream_marks(marks: StreamMarks) -> Token[StreamMarks | None]:
 
 def reset_stream_marks(token: Token[StreamMarks | None]) -> None:
     _current.reset(token)
+
+
+@contextmanager
+def suppress_stream_marks() -> Iterator[None]:
+    """Hide marks bound on this task.
+
+    ``asyncio.create_task`` copies the current context, so a summary started
+    during a profiled turn would otherwise write the user stream's marks.
+    """
+    token = _current.set(None)
+    try:
+        yield
+    finally:
+        _current.reset(token)
 
 
 def mark_content(kind: str) -> None:

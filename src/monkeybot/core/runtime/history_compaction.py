@@ -472,7 +472,8 @@ async def _compact_history_if_needed(
     """Summarize middle history when the thread has exhausted headroom.
 
     A summary prepared earlier in the background is applied first. A miss, a changed
-    prefix, or a failed job falls through to the inline summarizer.
+    prefix, a tail that has grown past the rows that summary can keep, or a failed
+    job falls through to the inline summarizer.
     """
     # Lazy import: background_summary imports this module's split and prompt helpers.
     from .background_summary import apply_pending_summary

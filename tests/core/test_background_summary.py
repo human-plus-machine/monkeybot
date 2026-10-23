@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import AsyncIterator, Sequence
 
 import pytest
@@ -24,6 +25,12 @@ from monkeybot.core.runtime.history_compaction import (
 )
 from monkeybot.core.runtime.loop import run
 from monkeybot.core.types.content_blocks import SystemNotification, Text
+from monkeybot.providers._stream_marks import (
+    StreamMarks,
+    bind_stream_marks,
+    mark_content,
+    reset_stream_marks,
+)
 from tests.core.test_loop import FakeHistory, FakeProvider, RecordingExecutor
 from tests.core.test_loop import _ctx as _loop_ctx
 
@@ -227,6 +234,202 @@ async def test_failed_background_job_falls_back_to_inline_summary() -> None:
     assert turns > 0
     assert provider.calls == 2
     assert "inline-summary" in _summary_text(history.rows)
+
+
+class _BlockingFirst:
+    """First stream waits. Later streams yield ``later`` immediately."""
+
+    def __init__(self, later: str = "inline-summary") -> None:
+        self.calls = 0
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self._later = later
+
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[object],
+        *,
+        model: str,
+        thinking_budget: int | None = None,
+    ) -> AsyncIterator[TextDelta | Done]:
+        del messages, tools, model, thinking_budget
+        self.calls += 1
+        if self.calls == 1:
+            self.entered.set()
+            await self.release.wait()
+            yield TextDelta(text="bg-summary")
+        else:
+            yield TextDelta(text=self._later)
+        yield Done()
+
+
+async def _run_until_blocked(task: asyncio.Task[object]) -> None:
+    """Let ``task`` reach its first real wait. Fails if it finishes instead."""
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert not task.done()
+
+
+async def test_overgrown_tail_falls_back_without_waiting() -> None:
+    """A large append makes the prepared cut stale. Compact must inline immediately.
+
+    Waiting for that summary would hold the pressured turn, then write a summary
+    that leaves the new rows verbatim. The gate is never released: if compact
+    awaits the stale job, this test times out.
+    """
+    history = MemoryHistory()
+    provider = _BlockingFirst()
+    ctx = _ctx()
+    await maybe_start(ctx, history, provider, _IN_BAND)  # type: ignore[arg-type]
+    await provider.entered.wait()
+    await history.append(ctx.thread_id, Message(role="user", content=[Text(text="y" * 12_000)]))
+    turns = await asyncio.wait_for(_compact(history, provider, ctx), timeout=2)
+    assert turns > 0
+    assert provider.calls == 2
+    summary = _summary_text(history.rows)
+    assert "inline-summary" in summary
+    assert "bg-summary" not in summary
+    assert any(
+        isinstance(block, Text) and block.text.startswith("y" * 100)
+        for row in history.rows
+        for block in row.content
+    )
+
+
+async def test_row_appended_while_streaming_is_kept_when_the_tail_still_fits() -> None:
+    history = MemoryHistory()
+    provider = _BlockingFirst()
+    ctx = _ctx()
+    await maybe_start(ctx, history, provider, _IN_BAND)  # type: ignore[arg-type]
+    await provider.entered.wait()
+
+    async def _apply() -> int:
+        return await _compact(history, provider, ctx)
+
+    applying = asyncio.create_task(_apply())
+    await _run_until_blocked(applying)
+    await history.append(ctx.thread_id, Message(role="user", content=[Text(text="kept-during")]))
+    provider.release.set()
+    turns = await asyncio.wait_for(applying, timeout=2)
+    assert turns > 0
+    assert provider.calls == 1
+    assert history.rows[-1].content == [Text(text="kept-during")]
+    assert "bg-summary" in _summary_text(history.rows)
+
+
+async def test_minimum_tail_over_budget_is_not_restarted() -> None:
+    """The split's minimum tail can already exceed the budget. That job is the
+    summary for those rows; the next in-band turn must not cancel it and start
+    the same one again.
+    """
+    history = MemoryHistory()
+    ctx = _ctx()
+    huge = "h" * 20_000
+    await history.append(ctx.thread_id, Message(role="user", content=[Text(text=huge)]))
+    await history.append(ctx.thread_id, Message(role="assistant", content=[Text(text=huge)]))
+    provider = _BlockingFirst()
+    await maybe_start(ctx, history, provider, _IN_BAND)  # type: ignore[arg-type]
+    await provider.entered.wait()
+    first_pending = bg._pending[ctx.thread_id]
+    assert first_pending.suffix_tokens > bg._tail_budget(ctx.context_window_tokens)
+    first = first_pending.task
+    await maybe_start(ctx, history, provider, _IN_BAND)  # type: ignore[arg-type]
+    await asyncio.sleep(0)
+    assert provider.calls == 1
+    assert bg._pending[ctx.thread_id].task is first
+    assert not first.cancelled()
+    provider.release.set()
+    await wait_idle(ctx.thread_id)
+    turns = await _compact(history, provider, ctx)
+    assert turns > 0
+    assert provider.calls == 1
+    assert "bg-summary" in _summary_text(history.rows)
+
+
+async def test_deleted_tail_falls_back_to_inline_summary() -> None:
+    """Rewind drops the newest rows. The prepared cut still matches the prefix,
+    but those rows are now the tail an inline split would keep.
+    """
+    history = MemoryHistory()
+    provider = Scripted(["bg-summary", "inline-summary"])
+    ctx = _ctx()
+    await maybe_start(ctx, history, provider, _IN_BAND)  # type: ignore[arg-type]
+    await wait_idle(ctx.thread_id)
+    history.rows = history.rows[:-3]
+    turns = await _compact(history, provider, ctx)
+    assert turns > 0
+    assert provider.calls == 2
+    summary = _summary_text(history.rows)
+    assert "inline-summary" in summary
+    assert "bg-summary" not in summary
+
+
+async def test_cancelled_background_job_falls_back_to_inline() -> None:
+    history = MemoryHistory()
+    provider = _BlockingFirst()
+    ctx = _ctx()
+    await maybe_start(ctx, history, provider, _IN_BAND)  # type: ignore[arg-type]
+    await provider.entered.wait()
+    bg._pending[ctx.thread_id].task.cancel()
+    turns = await asyncio.wait_for(_compact(history, provider, ctx), timeout=2)
+    assert turns > 0
+    assert "inline-summary" in _summary_text(history.rows)
+    assert "bg-summary" not in _summary_text(history.rows)
+
+
+async def test_wait_idle_propagates_waiter_cancellation() -> None:
+    history = MemoryHistory()
+    provider = _BlockingFirst()
+    ctx = _ctx()
+    await maybe_start(ctx, history, provider, _IN_BAND)  # type: ignore[arg-type]
+    await provider.entered.wait()
+    waiter = asyncio.create_task(wait_idle(ctx.thread_id))
+    await _run_until_blocked(waiter)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    pending = bg._pending[ctx.thread_id]
+    assert not pending.task.cancelled()
+    provider.release.set()
+    await wait_idle(ctx.thread_id)
+    assert pending.task.done()
+    assert not pending.task.cancelled()
+
+
+async def test_background_job_does_not_write_the_user_stream_marks() -> None:
+    class Marking(Scripted):
+        async def stream(
+            self,
+            messages: Sequence[Message],
+            tools: Sequence[object],
+            *,
+            model: str,
+            thinking_budget: int | None = None,
+        ) -> AsyncIterator[TextDelta | Done]:
+            mark_content("text")
+            mark_content("thinking")
+            async for event in super().stream(
+                messages,
+                tools,
+                model=model,
+                thinking_budget=thinking_budget,
+            ):
+                yield event
+
+    history = MemoryHistory()
+    provider = Marking(["bg-summary"])
+    ctx = _ctx()
+    marks = StreamMarks(started=time.perf_counter())
+    token = bind_stream_marks(marks)
+    try:
+        await maybe_start(ctx, history, provider, _IN_BAND)  # type: ignore[arg-type]
+        await wait_idle(ctx.thread_id)
+    finally:
+        reset_stream_marks(token)
+    assert provider.calls == 1
+    assert marks.first_at is None
+    assert marks.first_kind is None
 
 
 async def test_stale_job_is_replaced_when_the_tail_exceeds_its_budget() -> None:
