@@ -66,6 +66,7 @@ from monkeybot.core.verifier.severity import cap_severity
 from monkeybot.providers._utils import note_anthropic_token_estimate_observation
 from monkeybot.providers.pricing import estimate_cost
 
+from .background_summary import maybe_start
 from .doom_loop import (
     _doom_loop_exempt_names,
     _DoomLoopTracker,
@@ -93,9 +94,9 @@ from .history_compaction import (
     _compact_history_if_needed,
     _fire_history_compacted,
     _intent_facts_from_ctx,
-    _workspace_trailer_from_ctx,
     _summarization_model_id,
     _summarization_viable,
+    _workspace_trailer_from_ctx,
     protect_recent_count,
     truncate_history_preserving_pins,
 )
@@ -979,6 +980,9 @@ async def _maybe_compact_and_shape(
         inner_turn=state.turn_index,
     )
     cap = max(1, int(state.ctx.context_window_tokens * SUMMARY_TRIGGER_RATIO))
+    # Schedule only. The model call runs beside this turn; the turn that crosses
+    # the bar applies it inside _compact_history_if_needed.
+    await maybe_start(state.ctx, history, provider, preflight)
     async for evt in _maybe_summarize_on_token_pressure(
         state,
         history=history,

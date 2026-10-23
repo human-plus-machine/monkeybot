@@ -469,7 +469,24 @@ async def _compact_history_if_needed(
     intent_facts: str | None = None,
     workspace_trailer: str | None = None,
 ) -> int:
-    """Summarize middle history when tool results exhausted headroom."""
+    """Summarize middle history when the thread has exhausted headroom.
+
+    A summary prepared earlier in the background is applied first. A miss, a changed
+    prefix, a tail that has grown past the rows that summary can keep, or a failed
+    job falls through to the inline summarizer.
+    """
+    # Lazy import: background_summary imports this module's split and prompt helpers.
+    from .background_summary import apply_pending_summary
+
+    applied = await apply_pending_summary(
+        thread_id=thread_id,
+        history=history,
+        model=model,
+        window_tokens=window_tokens,
+        workspace_trailer=workspace_trailer,
+    )
+    if applied is not None:
+        return applied
     return await _summarize_history(
         thread_id,
         history,
@@ -551,39 +568,22 @@ async def _append_budgeted_tool_responses(
     )
 
 
-async def _summarize_history(
-    thread_id: str,
-    history: HistoryStore,
+async def _generate_summary_text(
     provider: Provider,
     model: str,
+    middle: Sequence[Message],
     *,
     window_tokens: int,
     intent_facts: str | None = None,
-    workspace_trailer: str | None = None,
-) -> int:
-    """Compress middle history into one assistant summary row. Returns middle row count.
+) -> str | None:
+    """Stream a summary of ``middle``. ``None`` when those rows have nothing to compact.
 
-    Loads raw stored rows itself: ``history.reset`` persists whatever it is given, so
-    callers must never hand it a ``transform_context`` view (that would permanently
-    drop verdicts, descriptors, thinking and merged ``row_id``s, and persist
-    synthetic tool repairs).
+    The workspace trailer is not applied here. It is taken from the ledger when the
+    summary is written, so files touched after this call still appear.
     """
-    messages = await history.load(thread_id)
-    head, middle, tail = split_messages_for_compaction(messages, window_tokens=window_tokens)
     lines = _middle_summary_lines(middle, window_tokens=window_tokens)
     if not lines:
-        return 0
-    logger.debug(
-        "history compaction split %s",
-        kv(
-            thread_id=thread_id,
-            window_tokens=window_tokens,
-            head=len(head),
-            middle=len(middle),
-            tail=len(tail),
-            tail_budget=max(1, int(max(1, window_tokens) * SUMMARY_KEEP_TAIL_RATIO)),
-        ),
-    )
+        return None
     blob = "\n\n---\n\n".join(lines)
     user_text = "Create a structured summary from the conversation segment below.\n\n" + blob
     if intent_facts:
@@ -605,7 +605,12 @@ async def _summarize_history(
                 summary_text += ev.text
             elif isinstance(ev, Done):
                 break
-    summary_text = summary_text.strip() or "(empty summary)"
+    return summary_text.strip() or "(empty summary)"
+
+
+def _finalize_summary_row(text: str, workspace_trailer: str | None) -> Message:
+    """Build the stored summary row, including the apply-time workspace trailer."""
+    summary_text = text.strip() or "(empty summary)"
     if workspace_trailer:
         # A prior compaction's trailer may have been echoed into the new summary; ours replaces it.
         summary_text = summary_text.split(_WORKSPACE_STATE_HEADING)[0].rstrip() or "(empty summary)"
@@ -614,10 +619,54 @@ async def _summarize_history(
         summary_body = f"{CONTEXT_SUMMARY_PREFIX}\n{summary_text}"
     else:
         summary_body = f"{CONTEXT_SUMMARY_PREFIX}\n{summary_text}\n\n{_POST_COMPACTION_STANDING}"
-    summary_row = Message(
+    return Message(
         role="assistant",
         content=[Text(text=summary_body)],
     )
+
+
+async def _summarize_history(
+    thread_id: str,
+    history: HistoryStore,
+    provider: Provider,
+    model: str,
+    *,
+    window_tokens: int,
+    intent_facts: str | None = None,
+    workspace_trailer: str | None = None,
+) -> int:
+    """Compress middle history into one assistant summary row. Returns middle row count.
+
+    Loads raw stored rows itself: ``history.reset`` persists whatever it is given, so
+    callers must never hand it a ``transform_context`` view (that would permanently
+    drop verdicts, descriptors, thinking and merged ``row_id``s, and persist
+    synthetic tool repairs).
+    """
+    messages = await history.load(thread_id)
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=window_tokens)
+    if not _middle_summary_lines(middle, window_tokens=window_tokens):
+        return 0
+    logger.debug(
+        "history compaction split %s",
+        kv(
+            thread_id=thread_id,
+            window_tokens=window_tokens,
+            head=len(head),
+            middle=len(middle),
+            tail=len(tail),
+            tail_budget=max(1, int(max(1, window_tokens) * SUMMARY_KEEP_TAIL_RATIO)),
+        ),
+    )
+    summary_text = await _generate_summary_text(
+        provider,
+        model,
+        middle,
+        window_tokens=window_tokens,
+        intent_facts=intent_facts,
+    )
+    if not summary_text:
+        return 0
+    summary_row = _finalize_summary_row(summary_text, workspace_trailer)
     merged = rebuild_compacted_history(messages, head=head, summary=summary_row, tail=tail)
     await history.reset(thread_id, merged)
     logger.debug(
