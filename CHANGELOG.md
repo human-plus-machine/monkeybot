@@ -27,6 +27,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - Cancelling gateway, harness, or subagent startup while an `autoConnect` server is still connecting closes that server instead of leaving its process behind.
 - The managed memory runtime installs `monkeybot-browser-mcp` next to `monkeybot[memory]`. A cached runtime that cannot import `browser_mcp` is rebuilt, so a local CLI gateway can start the browser server with its own interpreter.
 - The managed memory runtime also installs the `web-search` extra. DuckDuckGo is the default search backend, and a cached runtime that cannot import `ddgs` is rebuilt.
+- `mempalace search` from `run_command` no longer fails with `Operation not permitted (os error 1)` on a palace using the `minilm` embedder. The command jail now lets `mempalace`, and only `mempalace`, read Chroma's installed MiniLM model under `~/.cache/chroma/onnx_models`.
 
 ## [cli v0.11.0] - 2026-10-22
 

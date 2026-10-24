@@ -17,6 +17,7 @@ from monkeybot.core.tools.fs_isolation import (
     ISOLATION_FAILURE_EXIT_CODE,
     IsolationSupport,
     JailRoots,
+    chroma_onnx_model_dirs,
     isolated_argv,
     isolation_failed,
     isolation_support,
@@ -351,6 +352,27 @@ class TestLocalWhisperModelDirs:
         assert local_whisper_model_dirs(home=empty_home, env=env, deny=(home,)) == (
             nested.parent.resolve(),
         )
+
+
+class TestChromaOnnxModelDirs:
+    def test_grants_the_model_directory_only_when_the_model_exists(self, tmp_path: Path):
+        model_dir = tmp_path / ".cache" / "chroma" / "onnx_models" / "all-MiniLM-L6-v2"
+        (model_dir / "onnx").mkdir(parents=True)
+        assert chroma_onnx_model_dirs(home=tmp_path) == ()
+
+        model = model_dir / "onnx" / "model.onnx"
+        model.write_bytes(b"")
+        assert chroma_onnx_model_dirs(home=tmp_path) == ()
+
+        model.write_bytes(b"weights")
+        assert chroma_onnx_model_dirs(home=tmp_path) == (model_dir.resolve(),)
+
+    def test_skips_paths_that_would_break_the_seatbelt_profile(self, tmp_path: Path):
+        home = tmp_path / 'home"(allow default)'
+        model = home / ".cache" / "chroma" / "onnx_models" / "all-MiniLM-L6-v2" / "onnx"
+        model.mkdir(parents=True)
+        (model / "model.onnx").write_bytes(b"weights")
+        assert chroma_onnx_model_dirs(home=home) == ()
 
 
 class TestJailedArgv:
