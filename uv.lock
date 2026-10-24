@@ -2231,7 +2231,7 @@ wheels = [
 
 [[package]]
 name = "mempalace"
-version = "3.7.0"
+version = "3.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "chromadb" },
@@ -2241,9 +2241,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "tokenizers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9e/88/a7ded317b52c4accb21f5ea86ff7a1db6567c694fcabb5a697d06683a106/mempalace-3.7.0.tar.gz", hash = "sha256:9485f6fa5b43c5614c2b60c8f20d9f0afd0112f3b7ba32a994673128f8558461", size = 25655659, upload-time = "2026-08-11T14:07:12.808Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b2/c5/c54c9950efe2b1e797ac05e352fafb660aa8fd4d8dfac08e889c084ec6ab/mempalace-3.11.0.tar.gz", hash = "sha256:5e5ff52671d5d751113d9067555d69d0ef77b672df1fbdc64dbc16f360639214", size = 26662966, upload-time = "2026-10-14T05:37:09.794Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/60/fa/a6ad2f6166eb438430cc17f88ac2813b6895a0086f18b8c214c78b42248b/mempalace-3.7.0-py3-none-any.whl", hash = "sha256:6ef6f1ae916de7bba1295b4c42e89ec9ae8a4aabb1e1309ff8488cca583bf673", size = 713898, upload-time = "2026-08-11T14:07:10.083Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/fb/24cde4c9f29472483a7f33441d6e154bf56f45c6840fcffdb69f94853859/mempalace-3.11.0-py3-none-any.whl", hash = "sha256:43e4c690e339b66e86a3177fe4eea15da3d9541ecbd58e671431c1e13dc1bf0c", size = 1073747, upload-time = "2026-10-14T05:37:06.886Z" },
 ]
 
 [[package]]
@@ -2516,7 +2516,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "langfuse", marker = "extra == 'evals'", specifier = ">=3.0.0" },
     { name = "mcp", specifier = ">=1.27.1,<2" },
-    { name = "mempalace", marker = "extra == 'memory'", specifier = ">=3.7.0,<4" },
+    { name = "mempalace", marker = "extra == 'memory'", specifier = ">=3.11,<3.12" },
     { name = "monkeybot", extras = ["cli"], marker = "extra == 'cli-realtime'" },
     { name = "monkeybot", extras = ["realtime"], marker = "extra == 'cli'" },
     { name = "monkeybot", extras = ["realtime"], marker = "extra == 'realtime-gemini'" },

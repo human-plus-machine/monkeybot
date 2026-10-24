@@ -19,7 +19,7 @@ from monkeybot.core.memory.uri import object_store_memory_scheme
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_EMBEDDING_MODEL = "embeddinggemma-300m"
+DEFAULT_EMBEDDING_MODEL = "minilm"
 DEFAULT_BACKEND = "chroma"
 CONVERSATION_ROOM = "conversation"
 EMBEDDER_IDENTITY_FILE = ".embedder_identity"
@@ -245,13 +245,14 @@ class MemPalaceAdapter:
 
     @contextmanager
     def acquire_write_lock(self) -> Iterator[None]:
-        from mempalace.palace import mine_palace_lock
+        # MemPalace 3.11 exec()s these into mempalace.palace at import, so mypy cannot see them.
+        from mempalace.palace import mine_palace_lock  # type: ignore[attr-defined]
 
         with palace_volume_lock(self.palace_path), mine_palace_lock(str(self.palace_path)):
             yield
 
     def _collection(self, *, create: bool = True) -> Any:
-        from mempalace.palace import get_collection
+        from mempalace.palace import get_collection  # type: ignore[attr-defined]
 
         return get_collection(str(self.palace_path), create=create)
 

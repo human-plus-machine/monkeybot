@@ -13,6 +13,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The `memory` extra requires MemPalace 3.11. Installs take 3.11 bug-fix releases but no longer resolve 3.12 or later.
+- Memory uses MemPalace's default `minilm` embedder. `embeddinggemma-300m` was not a MemPalace model name; older builds filed those palaces with MiniLM. Startup rewrites that name to `minilm` and leaves the existing index in place.
 - An unpriced model logs `unknown model for pricing lookup` once per process instead of on every usage event.
 
 - MCP servers marked `autoConnect` connect in parallel. Boot returns after reading `mcp.json` and finishes those connects in the background; the first turn waits only for the time still left and still sees the tools. `MCP_STRICT_LOAD` still waits for them and fails startup on a connect error.
