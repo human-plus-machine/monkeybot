@@ -487,6 +487,10 @@ class _TurnState:
     assistant_write_task: asyncio.Task[None] | None = None
     pre_turn_extra: str | None = None
     pre_tool_extra_next: str | None = None
+    # Runtime notes already folded into this inner turn's system prompt.
+    # History compaction rebuilds that prompt; it must reapply these notes or
+    # a one-shot PRE_TOOL reminder is dropped before the model sees it.
+    turn_runtime_notes: str | None = None
     empty_completion_retries_left: int = _EMPTY_COMPLETION_RETRIES
     post_tool_empty_retries_left: int = _POST_TOOL_EMPTY_RETRIES
     background_job_nudges_left: int = _BACKGROUND_JOB_NUDGES
@@ -576,6 +580,7 @@ async def _prepare_turn_context(
         )
     force_no_tools, doom_loop_note = state.doom_tracker.consume_recovery()
     combined_extra = _combine_extras(combined_extra, doom_loop_note)
+    state.turn_runtime_notes = combined_extra
     state.system = _append_extra_system_text(system, combined_extra)
     state.pre_tool_extra_next = None
     state.turn_tools = () if force_no_tools else state.ctx.tools
@@ -640,7 +645,7 @@ async def _refresh_prompt_after_history_change(
         yield epoch_evt
     state.system = _append_extra_system_text(
         _system_message_from_text(state.admit.leading_system_text),
-        state.pre_turn_extra,
+        state.turn_runtime_notes if state.turn_runtime_notes is not None else state.pre_turn_extra,
     )
     state.resolved_messages = convert_to_provider(
         state.chat_messages,

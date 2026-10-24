@@ -10,11 +10,13 @@ under the session artifact directory for debugging unless
 from __future__ import annotations
 
 from monkeybot.core.config.snapshot import current_env_flag
+from monkeybot.todo_list.hook import TodoListReminder
 from monkeybot.todo_list.store import TodoItem, TodoListStore
 from monkeybot.todo_list.tool import TodoListTool
 
 __all__ = [
     "TodoItem",
+    "TodoListReminder",
     "TodoListStore",
     "TodoListTool",
     "todo_list_enabled_from_env",

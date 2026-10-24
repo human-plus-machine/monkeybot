@@ -13,6 +13,7 @@ mirroring with ``todo_list.mirror_to_disk: false``.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import re
@@ -25,12 +26,49 @@ from monkeybot.core.persistence.transcript import now_iso, resolve_session_artif
 
 logger = logging.getLogger(__name__)
 
-TodoStatus = Literal["pending", "done"]
+TodoStatus = Literal["pending", "in_progress", "done"]
 
 _MAX_ITEMS = 50
 _MAX_TEXT_CHARS = 500
 _TODOS_FILENAME = "todos.json"
 _ITEM_ID_RE = re.compile(r"^t(\d+)$")
+_STORE_IDS = itertools.count(1)
+
+
+def _single_in_progress(items: list[TodoItem]) -> list[TodoItem]:
+    """Keep the earliest in-progress row. Later ones return to pending.
+
+    ``start`` maintains this while the process is up. Disk can still hold
+    more than one (a hand edit, or a mirror that raced a switch), and the
+    prompt would then show two current tasks.
+    """
+    seen = False
+    changed = False
+    out: list[TodoItem] = []
+    for item in items:
+        if item.status != "in_progress":
+            out.append(item)
+            continue
+        if not seen:
+            seen = True
+            out.append(item)
+            continue
+        changed = True
+        out.append(TodoItem(id=item.id, text=item.text, status="pending"))
+    return out if changed else items
+
+
+def _next_n_from_disk(raw: dict[str, object], max_item_n: int) -> int:
+    """High-water id counter. Never below one past the highest restored id.
+
+    Older mirrors omit ``next_n``. A counter that sits behind a restored id
+    would reissue that id, so the items win.
+    """
+    stored = raw.get("next_n")
+    parsed = 0
+    if isinstance(stored, int) and not isinstance(stored, bool) and stored >= 1:
+        parsed = stored
+    return max(parsed, max_item_n + 1)
 
 
 @dataclass(frozen=True)
@@ -58,6 +96,9 @@ class TodoListStore:
         from monkeybot.todo_list import todo_list_mirror_to_disk_from_env
 
         self.session_id = session_id
+        # Not ``id(self)``: CPython reuses that after the previous store is freed,
+        # and the reminder timer is keyed by this value.
+        self.instance_id = next(_STORE_IDS)
         self._workspace_root = workspace_root.resolve()
         self._mirror_to_disk_enabled = (
             todo_list_mirror_to_disk_from_env() if mirror_to_disk is None else mirror_to_disk
@@ -95,12 +136,14 @@ class TodoListStore:
         return [asdict(item) for item in self._items]
 
     def format_lines(self) -> str:
-        """Numbered status lines for the volatile prompt, or ``\"\"`` when empty."""
+        """Id-tagged status lines for the volatile prompt, or ``\"\"`` when empty.
+
+        Ids (``t1``) are what ``start``, ``complete``, and ``remove`` require.
+        Numbering from 1 drifted from those ids after a removal.
+        """
         if not self._items:
             return ""
-        return "\n".join(
-            f"{i}. [{item.status}] {item.text}" for i, item in enumerate(self._items, start=1)
-        )
+        return "\n".join(f"- {item.id} [{item.status}] {item.text}" for item in self._items)
 
     async def add(self, text: str) -> TodoItem | str:
         """Append a pending item. Returns the item or an error message string."""
@@ -142,6 +185,38 @@ class TodoListStore:
         self._log_mutate("add", ids)
         await self._mirror_to_disk()
         return added
+
+    async def start(self, item_id: str) -> TodoItem | str:
+        """Mark one item in progress. Any other in-progress item returns to pending.
+
+        At most one item is ``in_progress``. Starting an item that is already the
+        sole in-progress item is a no-op. Returns the item or an error string.
+        """
+        idx = self._index_of(item_id)
+        if idx is None:
+            return f"todo_list item id not found: {item_id!r}."
+        changed = False
+        for i, item in enumerate(self._items):
+            if i != idx and item.status == "in_progress":
+                self._items[i] = TodoItem(id=item.id, text=item.text, status="pending")
+                changed = True
+        current = self._items[idx]
+        if current.status != "in_progress":
+            self._items[idx] = TodoItem(id=current.id, text=current.text, status="in_progress")
+            changed = True
+        started = self._items[idx]
+        if changed:
+            self._log_mutate("start", started.id)
+            await self._mirror_to_disk()
+        return started
+
+    async def clear(self) -> None:
+        """Drop every item. Ids already issued are not reused, including after reconnect."""
+        if not self._items:
+            return
+        self._items.clear()
+        self._log_mutate("clear", "")
+        await self._mirror_to_disk()
 
     async def complete(self, item_id: str) -> TodoItem | str:
         """Mark an item done. Returns the item or an error message string."""
@@ -206,14 +281,14 @@ class TodoListStore:
                 item_id = str(entry.get("id") or "").strip()
                 text = str(entry.get("text") or "")
                 status = entry.get("status")
-                if not item_id or status not in ("pending", "done"):
+                if not item_id or status not in ("pending", "in_progress", "done"):
                     continue
                 restored.append(TodoItem(id=item_id, text=text, status=status))
                 match = _ITEM_ID_RE.match(item_id)
                 if match:
                     max_n = max(max_n, int(match.group(1)))
-            self._items = restored
-            self._next_n = max_n + 1
+            self._items = _single_in_progress(restored)
+            self._next_n = _next_n_from_disk(raw, max_n)
             self._session_dir = session_dir
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             logger.warning(
@@ -222,16 +297,24 @@ class TodoListStore:
                 exc_info=True,
             )
 
-    def _write_mirror_sync(self) -> None:
+    def _mirror_payload(self) -> dict[str, object]:
+        """Consistent snapshot taken on the event loop, before the write thread runs.
+
+        ``next_n`` is the id high-water mark. Without it, a reconnect after
+        ``clear`` or ``remove`` reissues ids the model already used.
+        """
+        return {
+            "session_id": self.session_id,
+            "updated_at": now_iso(),
+            "next_n": self._next_n,
+            "items": self.snapshot(),
+        }
+
+    def _write_mirror_sync(self, payload: dict[str, object]) -> None:
         """Synchronous mirror write — always run via ``asyncio.to_thread``."""
         if self._session_dir is None:
             self._session_dir = resolve_session_artifact_dir(self._workspace_root, self.session_id)
         path = self._session_dir / _TODOS_FILENAME
-        payload = {
-            "session_id": self.session_id,
-            "updated_at": now_iso(),
-            "items": self.snapshot(),
-        }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
@@ -247,8 +330,9 @@ class TodoListStore:
         """
         if not self._mirror_to_disk_enabled:
             return
+        payload = self._mirror_payload()
         try:
-            await asyncio.to_thread(self._write_mirror_sync)
+            await asyncio.to_thread(self._write_mirror_sync, payload)
             self._mirror_error = None
         except OSError as exc:
             self._mirror_error = str(exc)

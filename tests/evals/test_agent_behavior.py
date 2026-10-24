@@ -25,6 +25,7 @@ SCENARIO_FILES = [
     "tool_load_file.yaml",
     "tool_web_search.yaml",
     "tool_todo_list.yaml",
+    "tool_todo_list_steps.yaml",
     "coding_fix_failing_test.yaml",
     "coding_read_before_write.yaml",
     "coding_gate_rejects_unverified.yaml",

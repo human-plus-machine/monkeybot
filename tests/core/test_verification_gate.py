@@ -234,6 +234,19 @@ async def test_open_todos_reject_but_stale_todos_do_not(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_in_progress_todos_count_as_open(tmp_path: Path) -> None:
+    store = TodoListStore("s", workspace_root=tmp_path, mirror_to_disk=False)
+    await store.add("write the parser")
+    await store.start("t1")
+    ctx = dataclasses.replace(_ctx(), todo_store=store)
+    gate, _ = _gate()
+    await _tool(gate, "todo_list", {"action": "start"}, '{"ok": true}')
+    final = await _final(gate, ctx)
+    assert final.reject_final_answer is not None
+    assert "Open todo items: write the parser." in final.reject_final_answer
+
+
+@pytest.mark.asyncio
 async def test_new_user_message_resets_everything() -> None:
     gate, _ = _gate()
     await _tool(gate, "write_file", {"path": "a.py"}, '{"ok": true}')
