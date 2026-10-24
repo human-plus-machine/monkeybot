@@ -32,7 +32,12 @@ from monkeybot.core.llm.provider import (
     TextDelta,
     ToolCall,
 )
+from monkeybot.core.runtime.doom_loop import _DoomLoopTracker
 from monkeybot.core.runtime.loop import run
+from monkeybot.core.runtime.turn_loop import (
+    _refresh_prompt_after_history_change,
+    _TurnState,
+)
 from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
 from monkeybot.core.tools.inspector import Decision
 from monkeybot.core.tools.types import ToolExecutionResult
@@ -474,6 +479,36 @@ async def test_pre_tool_extra_clears_after_one_use() -> None:
     assert "FIRST-TOOL-MEMORY" not in prov.system_texts[0]
     assert "FIRST-TOOL-MEMORY" in prov.system_texts[1]
     assert "FIRST-TOOL-MEMORY" not in prov.system_texts[2], "transient extra must clear"
+
+
+@pytest.mark.asyncio
+async def test_history_refresh_keeps_this_turn_runtime_notes() -> None:
+    """Compaction rebuilds the system prompt after PRE_TOOL notes were already
+    folded in. Those notes are for this provider call and must survive the rebuild.
+    """
+    state = _TurnState(
+        ctx=_ctx(),
+        user_text="hi",
+        effective_max=4,
+        doom_tracker=_DoomLoopTracker(threshold=3),
+    )
+    state.pre_turn_extra = "from the start of the message"
+    state.turn_runtime_notes = (
+        "from the start of the message\n\n"
+        "Todo list unchanged for 8 tool calls: mark finished items done and `start` the next."
+    )
+    async for _evt in _refresh_prompt_after_history_change(
+        state,
+        history=FakeHistory(),
+        attachment_store=None,
+        attachment_catalog=None,
+        begin_epoch=True,
+    ):
+        pass
+    assert state.system is not None
+    text = "".join(block.text for block in state.system.content if isinstance(block, Text))
+    assert "from the start of the message" in text
+    assert "Todo list unchanged for 8 tool calls" in text
 
 
 @pytest.mark.asyncio

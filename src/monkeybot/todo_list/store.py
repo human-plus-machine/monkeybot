@@ -13,6 +13,7 @@ mirroring with ``todo_list.mirror_to_disk: false``.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import re
@@ -31,6 +32,43 @@ _MAX_ITEMS = 50
 _MAX_TEXT_CHARS = 500
 _TODOS_FILENAME = "todos.json"
 _ITEM_ID_RE = re.compile(r"^t(\d+)$")
+_STORE_IDS = itertools.count(1)
+
+
+def _single_in_progress(items: list[TodoItem]) -> list[TodoItem]:
+    """Keep the earliest in-progress row. Later ones return to pending.
+
+    ``start`` maintains this while the process is up. Disk can still hold
+    more than one (a hand edit, or a mirror that raced a switch), and the
+    prompt would then show two current tasks.
+    """
+    seen = False
+    changed = False
+    out: list[TodoItem] = []
+    for item in items:
+        if item.status != "in_progress":
+            out.append(item)
+            continue
+        if not seen:
+            seen = True
+            out.append(item)
+            continue
+        changed = True
+        out.append(TodoItem(id=item.id, text=item.text, status="pending"))
+    return out if changed else items
+
+
+def _next_n_from_disk(raw: dict[str, object], max_item_n: int) -> int:
+    """High-water id counter. Never below one past the highest restored id.
+
+    Older mirrors omit ``next_n``. A counter that sits behind a restored id
+    would reissue that id, so the items win.
+    """
+    stored = raw.get("next_n")
+    parsed = 0
+    if isinstance(stored, int) and not isinstance(stored, bool) and stored >= 1:
+        parsed = stored
+    return max(parsed, max_item_n + 1)
 
 
 @dataclass(frozen=True)
@@ -58,6 +96,9 @@ class TodoListStore:
         from monkeybot.todo_list import todo_list_mirror_to_disk_from_env
 
         self.session_id = session_id
+        # Not ``id(self)``: CPython reuses that after the previous store is freed,
+        # and the reminder timer is keyed by this value.
+        self.instance_id = next(_STORE_IDS)
         self._workspace_root = workspace_root.resolve()
         self._mirror_to_disk_enabled = (
             todo_list_mirror_to_disk_from_env() if mirror_to_disk is None else mirror_to_disk
@@ -170,7 +211,7 @@ class TodoListStore:
         return started
 
     async def clear(self) -> None:
-        """Drop every item. Ids already issued are not reused."""
+        """Drop every item. Ids already issued are not reused, including after reconnect."""
         if not self._items:
             return
         self._items.clear()
@@ -246,8 +287,8 @@ class TodoListStore:
                 match = _ITEM_ID_RE.match(item_id)
                 if match:
                     max_n = max(max_n, int(match.group(1)))
-            self._items = restored
-            self._next_n = max_n + 1
+            self._items = _single_in_progress(restored)
+            self._next_n = _next_n_from_disk(raw, max_n)
             self._session_dir = session_dir
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             logger.warning(
@@ -256,16 +297,24 @@ class TodoListStore:
                 exc_info=True,
             )
 
-    def _write_mirror_sync(self) -> None:
+    def _mirror_payload(self) -> dict[str, object]:
+        """Consistent snapshot taken on the event loop, before the write thread runs.
+
+        ``next_n`` is the id high-water mark. Without it, a reconnect after
+        ``clear`` or ``remove`` reissues ids the model already used.
+        """
+        return {
+            "session_id": self.session_id,
+            "updated_at": now_iso(),
+            "next_n": self._next_n,
+            "items": self.snapshot(),
+        }
+
+    def _write_mirror_sync(self, payload: dict[str, object]) -> None:
         """Synchronous mirror write — always run via ``asyncio.to_thread``."""
         if self._session_dir is None:
             self._session_dir = resolve_session_artifact_dir(self._workspace_root, self.session_id)
         path = self._session_dir / _TODOS_FILENAME
-        payload = {
-            "session_id": self.session_id,
-            "updated_at": now_iso(),
-            "items": self.snapshot(),
-        }
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
@@ -281,8 +330,9 @@ class TodoListStore:
         """
         if not self._mirror_to_disk_enabled:
             return
+        payload = self._mirror_payload()
         try:
-            await asyncio.to_thread(self._write_mirror_sync)
+            await asyncio.to_thread(self._write_mirror_sync, payload)
             self._mirror_error = None
         except OSError as exc:
             self._mirror_error = str(exc)

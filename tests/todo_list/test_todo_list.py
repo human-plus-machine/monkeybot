@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 from pathlib import Path
@@ -381,6 +382,57 @@ async def test_todo_list_hydrates_in_progress(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_ids_survive_clear_remove_and_reconnect(tmp_path: Path) -> None:
+    """The id counter is list state. A new store hydrated from disk must not
+    reissue an id that clear or remove already retired.
+    """
+    cleared = TodoListStore("sess-clear", workspace_root=tmp_path)
+    await cleared.add("A")
+    await cleared.add("B")
+    await cleared.clear()
+    reconnected = TodoListStore("sess-clear", workspace_root=tmp_path)
+    await reconnected.hydrate_from_disk()
+    assert reconnected.items == ()
+    nxt = await reconnected.add("C")
+    assert not isinstance(nxt, str)
+    assert nxt.id == "t3"
+
+    removed = TodoListStore("sess-remove", workspace_root=tmp_path)
+    await removed.add("A")
+    await removed.add("B")
+    await removed.remove("t2")
+    reconnected_remove = TodoListStore("sess-remove", workspace_root=tmp_path)
+    await reconnected_remove.hydrate_from_disk()
+    assert [item.id for item in reconnected_remove.items] == ["t1"]
+    nxt_remove = await reconnected_remove.add("C")
+    assert not isinstance(nxt_remove, str)
+    assert nxt_remove.id == "t3"
+
+
+@pytest.mark.asyncio
+async def test_hydrate_collapses_extra_in_progress_and_keeps_next_id(tmp_path: Path) -> None:
+    store = TodoListStore("sess-two", workspace_root=tmp_path)
+    await store.add("A")
+    await store.add("B")
+    path = next((tmp_path / ".monkeybot" / "transcripts").rglob("todos.json"))
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["items"][0]["status"] = "in_progress"
+    raw["items"][1]["status"] = "in_progress"
+    raw["next_n"] = 9
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    fresh = TodoListStore("sess-two", workspace_root=tmp_path)
+    await fresh.hydrate_from_disk()
+    assert [(item.id, item.status) for item in fresh.items] == [
+        ("t1", "in_progress"),
+        ("t2", "pending"),
+    ]
+    nxt = await fresh.add("C")
+    assert not isinstance(nxt, str)
+    assert nxt.id == "t9"
+
+
+@pytest.mark.asyncio
 async def test_todo_reminder_nags_once_until_the_list_is_updated(tmp_path: Path) -> None:
     store = TodoListStore("s", workspace_root=tmp_path, mirror_to_disk=False)
     await store.add("Draft notes")
@@ -475,3 +527,66 @@ async def test_todo_reminder_ignores_missing_store() -> None:
         )
     )
     assert none_store.inject_text is None
+
+
+@pytest.mark.asyncio
+async def test_todo_reminder_is_scoped_to_the_store_not_only_the_thread(tmp_path: Path) -> None:
+    """Chat and voice keep separate lists on one thread. Touching the empty
+    list must not restart the open list's stale count.
+    """
+    open_store = TodoListStore("chat", workspace_root=tmp_path, mirror_to_disk=False)
+    other_store = TodoListStore("voice", workspace_root=tmp_path, mirror_to_disk=False)
+    await open_store.add("Draft notes")
+    reminder = TodoListReminder(stale_after=2)
+    mgr = HookManager()
+    reminder.register(mgr)
+
+    async def fire(store: TodoListStore, tool: str) -> HookPayload:
+        return await mgr.fire(
+            HookPayload(
+                event=HookEvent.PRE_TOOL,
+                thread_id="same-thread",
+                request_id="r",
+                ctx=_ctx(store),
+                tool_name=tool,
+                tool_args={},
+            )
+        )
+
+    assert (await fire(open_store, "read_file")).inject_text is None
+    assert (await fire(other_store, "todo_list")).inject_text is None
+    nag = await fire(open_store, "grep")
+    assert nag.inject_text is not None
+    assert "unchanged for 2 tool calls" in nag.inject_text
+
+
+@pytest.mark.asyncio
+async def test_todo_reminder_starts_over_when_the_store_is_replaced(tmp_path: Path) -> None:
+    """A reconnect builds a new store. Its timer must not keep the old count,
+    including when the freed store's memory address is reused.
+    """
+    reminder = TodoListReminder(stale_after=1)
+    mgr = HookManager()
+    reminder.register(mgr)
+
+    async def fire(store: TodoListStore) -> HookPayload:
+        return await mgr.fire(
+            HookPayload(
+                event=HookEvent.PRE_TOOL,
+                thread_id="same-thread",
+                request_id="r",
+                ctx=_ctx(store),
+                tool_name="read_file",
+                tool_args={},
+            )
+        )
+
+    first = TodoListStore("s", workspace_root=tmp_path, mirror_to_disk=False)
+    await first.add("Draft notes")
+    assert (await fire(first)).inject_text is not None
+    del first
+    gc.collect()
+
+    second = TodoListStore("s", workspace_root=tmp_path, mirror_to_disk=False)
+    await second.add("Next request")
+    assert (await fire(second)).inject_text is not None
