@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 from monkeybot.providers.model_capabilities import BEDROCK_GEO_PREFIXES
@@ -17,7 +19,7 @@ Rates: TypeAlias = tuple[float, float, float, float]
 # Bedrock/Vertex ids are normalized onto these bare keys (see _normalize).
 # Gemini-on-Vertex uses the same gemini-* keys when the model id matches.
 # Anthropic cache_write is the 5-minute (1.25× input) rate; estimate_cost
-# upgrades writes to 2× input when cache_retention is ``long`` (1h TTL).
+# upgrades Claude-family writes to 2× input when cache_retention is ``long``.
 # Built-in defaults only: deployments add models via ``pricing:`` in
 # monkeybot.yaml or :func:`register_model_pricing`.
 MODEL_PRICING: dict[str, Rates] = {
@@ -41,10 +43,13 @@ _ANTHROPIC_LONG_CACHE_WRITE_MULTIPLIER = 2.0
 _RATE_FIELDS = ("input", "output", "cache_write", "cache_read")
 _REQUIRED_RATE_FIELDS = ("input", "output")
 
+_FileStamp: TypeAlias = tuple[str | None, int | None, int | None]
+_IncludeStamp: TypeAlias = tuple[str, int | None, int | None]
+
 _registered_pricing: dict[str, Rates] = {}
-_config_pricing_cache: tuple[tuple[str | None, int | None, int | None], dict[str, Rates]] | None = (
-    None
-)
+_config_pricing_cache: tuple[_FileStamp, tuple[_IncludeStamp, ...], dict[str, Rates]] | None = None
+_resolved_key: tuple[str, str, str] | None = None
+_resolved_path: Path | None = None
 _warned_unknown_models: set[str] = set()
 
 __all__ = [
@@ -63,14 +68,15 @@ def _entry_rates(model: str, entry: Mapping[str, Any]) -> Rates:
     unknown = sorted(set(entry) - set(_RATE_FIELDS) - {"aliases"})
     if unknown:
         raise ValueError(f"pricing.{model}: unknown field(s) {', '.join(unknown)}")
-    missing = [f for f in _REQUIRED_RATE_FIELDS if entry.get(f) is None]
+    missing = [f for f in _REQUIRED_RATE_FIELDS if f not in entry or entry[f] is None]
     if missing:
         raise ValueError(f"pricing.{model}: missing {', '.join(missing)}")
     values: list[float] = []
     for field in _RATE_FIELDS:
-        raw = entry.get(field, 0.0)
-        if raw is None:
-            raw = 0.0
+        if field not in entry:
+            values.append(0.0)
+            continue
+        raw = entry[field]
         if isinstance(raw, bool) or not isinstance(raw, (int, float)):
             raise ValueError(f"pricing.{model}.{field} must be a number, got {raw!r}")
         value = float(raw)
@@ -83,7 +89,7 @@ def _entry_rates(model: str, entry: Mapping[str, Any]) -> Rates:
 def _entry_aliases(model: str, raw: object) -> list[str]:
     if raw is None:
         return []
-    if isinstance(raw, str) or not isinstance(raw, Iterable):
+    if isinstance(raw, (str, bytes, Mapping)) or not isinstance(raw, Iterable):
         raise ValueError(f"pricing.{model}.aliases must be a list of model ids")
     aliases: list[str] = []
     for alias in raw:
@@ -112,7 +118,13 @@ def parse_pricing_section(section: object) -> dict[str, Rates]:
         if not isinstance(entry, Mapping):
             raise ValueError(f"pricing.{model} must be a mapping of rates")
         rates = _entry_rates(model, entry)
+        keys: list[str] = []
         for key in (model, *_entry_aliases(model, entry.get("aliases"))):
+            if key not in keys:
+                keys.append(key)
+        for key in keys:
+            if key in parsed:
+                raise ValueError(f"pricing.{key} is listed more than once")
             parsed[key] = rates
     return parsed
 
@@ -139,7 +151,7 @@ def register_model_pricing(
         name,
         {"input": input, "output": output, "cache_write": cache_write, "cache_read": cache_read},
     )
-    for key in (name, *_entry_aliases(name, list(aliases))):
+    for key in (name, *_entry_aliases(name, aliases)):
         _registered_pricing[key] = rates
         _warned_unknown_models.discard(key)
 
@@ -149,12 +161,75 @@ def unregister_model_pricing(model: str) -> None:
     _registered_pricing.pop(model.strip(), None)
 
 
-def _config_stamp() -> tuple[str | None, int | None, int | None]:
-    from monkeybot.core.config.yaml_loader import resolve_monkeybot_config_path  # noqa: PLC0415
+def _resolution_key() -> tuple[str, str, str]:
+    """Env that selects the config file.
 
-    path = resolve_monkeybot_config_path()
-    if path is None:
-        return (None, None, None)
+    The working directory is part of the key only when a path is relative or
+    nothing is pinned. Absolute pins stay valid after a worker chdirs.
+    """
+    explicit = os.environ.get("MONKEYBOT_CONFIG", "").strip()
+    agent = os.environ.get("MONKEYBOT_AGENT_ROOT", "").strip()
+    explicit_abs = bool(explicit) and Path(explicit).expanduser().is_absolute()
+    agent_abs = bool(agent) and Path(agent).expanduser().is_absolute()
+    # Cwd changes which file we read when nothing is pinned, the agent root is
+    # relative, or a relative config path has no agent root to join to.
+    needs_cwd = (
+        (not explicit and not agent)
+        or (bool(agent) and not agent_abs)
+        or (bool(explicit) and not explicit_abs and not agent)
+    )
+    cwd = os.path.abspath(os.getcwd()) if needs_cwd else ""
+    return (explicit, agent, cwd)
+
+
+def _pinned_config_appeared(key: tuple[str, str, str]) -> bool:
+    """True when a pinned config file showed up after a cached miss.
+
+    One stat, no directory walk, and no repeat of the missing-path warning.
+    Cwd discovery stays cached until the working directory changes.
+    """
+    explicit, agent, _cwd = key
+    # An explicit path wins and does not fall through to the agent-root file.
+    if explicit:
+        path = Path(explicit).expanduser()
+        if not path.is_absolute() and agent:
+            path = Path(agent).expanduser() / path
+        return path.is_file()
+    if agent:
+        default = Path(agent).expanduser() / "monkeybot_config" / "monkeybot.yaml"
+        return default.is_file()
+    return False
+
+
+def _pricing_config_path() -> Path | None:
+    """The monkeybot.yaml this process should price from.
+
+    A pinned agent root or ``MONKEYBOT_CONFIG`` wins over the working directory.
+    Subagent workers chdir into the workspace after bootstrap, and that
+    workspace may contain a different ``monkeybot_config``.
+    """
+    global _resolved_key, _resolved_path
+    key = _resolution_key()
+    if _resolved_key == key and _resolved_path is not None:
+        return _resolved_path
+    if _resolved_key == key and not _pinned_config_appeared(key):
+        return None
+    if key[1]:
+        from monkeybot.core.layout import resolve_config_path  # noqa: PLC0415
+
+        path = resolve_config_path(agent_root=Path(key[1]).expanduser().resolve())
+    else:
+        from monkeybot.core.config.yaml_loader import (  # noqa: PLC0415
+            resolve_monkeybot_config_path,
+        )
+
+        path = resolve_monkeybot_config_path()
+    _resolved_key = key
+    _resolved_path = path
+    return path
+
+
+def _file_stamp(path: Path) -> _IncludeStamp:
     try:
         st = path.stat()
         return (str(path), st.st_mtime_ns, st.st_size)
@@ -162,27 +237,63 @@ def _config_stamp() -> tuple[str | None, int | None, int | None]:
         return (str(path), None, None)
 
 
+def _include_paths(primary: Path, root: Mapping[str, Any]) -> list[Path]:
+    raw = root.get("includes")
+    if not isinstance(raw, list):
+        return []
+    parent = primary.parent
+    paths: list[Path] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            paths.append((parent / item.strip()).resolve())
+    return paths
+
+
 def _config_pricing() -> dict[str, Rates]:
-    """``pricing:`` from monkeybot.yaml, re-read when the file changes. Never raises."""
+    """``pricing:`` from monkeybot.yaml, re-read when the file or an include changes.
+
+    Never raises. A bad ``pricing:`` block is ignored until the file changes.
+    """
     global _config_pricing_cache
     try:
-        stamp = _config_stamp()
+        path = _pricing_config_path()
     except Exception:
         _log.debug("monkeybot.yaml pricing lookup failed", exc_info=True)
         return {}
-    if _config_pricing_cache is not None and _config_pricing_cache[0] == stamp:
-        return _config_pricing_cache[1]
-    parsed: dict[str, Rates] = {}
-    if stamp[0] is not None:
-        try:
-            from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict  # noqa: PLC0415
+    if path is None:
+        stamp: _FileStamp = (None, None, None)
+        if (
+            _config_pricing_cache is not None
+            and _config_pricing_cache[0] == stamp
+            and _config_pricing_cache[1] == ()
+        ):
+            return _config_pricing_cache[2]
+        _config_pricing_cache = (stamp, (), {})
+        return {}
 
-            _, doc = load_monkeybot_yaml_dict(stamp[0])
-            parsed = parse_pricing_section(doc.get("pricing"))
-        except Exception as exc:
-            _log.warning("ignoring pricing in %s: %s", stamp[0], exc)
-            parsed = {}
-    _config_pricing_cache = (stamp, parsed)
+    primary = _file_stamp(path)
+    cached = _config_pricing_cache
+    if cached is not None and cached[0] == primary:
+        fresh_includes = tuple(_file_stamp(Path(item[0])) for item in cached[1])
+        if fresh_includes == cached[1]:
+            return cached[2]
+
+    parsed: dict[str, Rates] = {}
+    include_stamps: tuple[_IncludeStamp, ...] = ()
+    try:
+        from monkeybot.core.config.runtime_env import (  # noqa: PLC0415
+            _load_yaml_file,
+            _merge_with_includes,
+        )
+
+        root = _load_yaml_file(path)
+        include_stamps = tuple(_file_stamp(inc) for inc in _include_paths(path, root))
+        merged = _merge_with_includes(path, root)
+        parsed = parse_pricing_section(merged.get("pricing"))
+    except Exception as exc:
+        _log.warning("ignoring pricing in %s: %s", path, exc)
+        parsed = {}
+    _config_pricing_cache = (primary, include_stamps, parsed)
     return parsed
 
 
@@ -210,28 +321,43 @@ def normalize_model_id(model: str) -> str:
     return name
 
 
+def _best_rates(table: Mapping[str, Rates], model: str) -> Rates | None:
+    """Longest id that matches the raw or normalized model.
+
+    An exact id beats another id of the same length. That keeps ``org/model``
+    from sticking on a short prefix of the raw string when the normalized name
+    is priced on its own.
+    """
+    candidates: list[str] = []
+    for candidate in (model, normalize_model_id(model)):
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    best: tuple[int, bool, str] | None = None
+    for candidate in candidates:
+        for key in table:
+            if not key or not candidate.startswith(key):
+                continue
+            rank = (len(key), key == candidate)
+            if best is None or rank > (best[0], best[1]):
+                best = (rank[0], rank[1], key)
+    if best is None:
+        return None
+    return table[best[2]]
+
+
 def pricing_for(model: str) -> Rates:
     """Return (input, output, cache_write, cache_read) $/M for ``model``.
 
     Looks in the built-in table, ``pricing:`` in monkeybot.yaml, and
     :func:`register_model_pricing`; for the same id the later source wins.
-    Exact match first, then longest known-prefix match, else zeros (warned once
-    per model per process). Hosted ids (Bedrock, Vertex) are normalized too.
-    Never raises.
+    The longest matching id wins across the raw id and the normalized hosted
+    id; an exact id beats a different id of the same length. Unknown models
+    cost zero and warn once per model per process. Never raises.
     """
     table = {**MODEL_PRICING, **_config_pricing(), **_registered_pricing}
-    for candidate in (model, normalize_model_id(model)):
-        exact = table.get(candidate)
-        if exact is not None:
-            return exact
-
-        best_key: str | None = None
-        for key in table:
-            if candidate.startswith(key) and (best_key is None or len(key) > len(best_key)):
-                best_key = key
-
-        if best_key is not None:
-            return table[best_key]
+    found = _best_rates(table, model)
+    if found is not None:
+        return found
 
     if model not in _warned_unknown_models:
         _warned_unknown_models.add(model)
@@ -253,13 +379,18 @@ def estimate_cost(
 ) -> float:
     """Return estimated USD cost using :func:`pricing_for`. Unknown model → 0.0.
 
-    ``cache_retention`` selects the Anthropic cache-write tier when the model
-    has a non-zero write rate (Claude family): ``short``/``none`` use the table's
-    5-minute 1.25× rate; ``long`` uses 2× input for 1-hour TTL writes. OpenAI /
-    Gemini keep ``cache_write=0`` so retention is a no-op for them.
+    ``cache_retention`` selects the Anthropic cache-write tier for Claude-family
+    ids (the normalized name starts with ``claude``) when the write rate is
+    non-zero: ``short``/``none`` use the configured 5-minute rate; ``long`` uses
+    2× input for 1-hour TTL writes. Other models use ``cache_write`` as configured.
     """
     rin, rout, rcw, rcr = pricing_for(model)
-    if cache_retention == "long" and rin > 0 and rcw > 0:
+    if (
+        cache_retention == "long"
+        and rin > 0
+        and rcw > 0
+        and normalize_model_id(model).startswith("claude")
+    ):
         rcw = rin * _ANTHROPIC_LONG_CACHE_WRITE_MULTIPLIER
     return (
         input_tokens * rin

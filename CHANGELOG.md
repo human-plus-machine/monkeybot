@@ -8,7 +8,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Deployments can price models the harness does not ship with. A `pricing:` section in `monkeybot.yaml` maps a model id to `input`, `output`, `cache_write`, and `cache_read` in USD per 1M tokens, with optional `aliases`. Edits apply on the next lookup without a restart, and `monkeybot validate` rejects missing, negative, or unknown fields. Embedders can call `monkeybot.providers.pricing.register_model_pricing(...)` instead; registered rates win over YAML, which wins over the built-in table for the same id.
+- Deployments can price models the harness does not ship with. A `pricing:` section in `monkeybot.yaml` maps a model id to `input`, `output`, `cache_write`, and `cache_read` in USD per 1M tokens, with optional `aliases`. Edits to that file, or to a file it includes, apply on the next lookup without a restart. `monkeybot validate` rejects a missing, negative, unknown, or non-numeric field, a duplicate id, or an alias that is not a list of ids. Embedders can call `monkeybot.providers.pricing.register_model_pricing(...)` instead; registered rates win over YAML, which wins over the built-in table for the same id. The longest matching id wins, and a pinned agent root is not replaced by the working directory.
 
 ### Changed
 

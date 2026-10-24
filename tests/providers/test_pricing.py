@@ -29,6 +29,8 @@ def _isolated_pricing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterat
     monkeypatch.setattr(pricing, "_registered_pricing", {})
     monkeypatch.setattr(pricing, "_warned_unknown_models", set())
     monkeypatch.setattr(pricing, "_config_pricing_cache", None)
+    monkeypatch.setattr(pricing, "_resolved_key", None)
+    monkeypatch.setattr(pricing, "_resolved_path", None)
     yield
 
 
@@ -227,6 +229,98 @@ def test_register_model_pricing_aliases_and_prefix_match() -> None:
     assert pricing_for("acme-chat@2026-10-01") == (1.0, 2.0, 0.0, 0.0)
 
 
+def test_exact_normalized_id_beats_same_length_raw_prefix() -> None:
+    register_model_pricing("ab", input=9, output=9)
+    register_model_pricing("cd", input=1, output=2)
+    assert pricing_for("ab/cd") == (1.0, 2.0, 0.0, 0.0)
+    assert pricing_for("ab") == (9.0, 9.0, 0.0, 0.0)
+
+
+def test_shorter_raw_prefix_does_not_hide_a_longer_normalized_id() -> None:
+    """org/model ids must keep the longer bare id when both are priced.
+
+    ``deepseek-ai/...`` starts with the shorter id, but the normalized name
+    matches ``deepseek-v4.1-flash``. Longest id wins, same as the built-in table.
+    """
+    register_model_pricing("deepseek-ai", input=9, output=9)
+    register_model_pricing("deepseek-v4.1-flash", input=0.30, output=1.20, cache_read=0.03)
+    assert pricing_for(DEEPSEEK) == (0.30, 1.20, 0.0, 0.03)
+    assert pricing_for("deepseek-ai") == (9.0, 9.0, 0.0, 0.0)
+
+
+def test_short_registered_prefix_does_not_steal_builtin_hosted_id() -> None:
+    register_model_pricing("us", input=9, output=9)
+    assert pricing_for("us") == (9.0, 9.0, 0.0, 0.0)
+    assert pricing_for("us.amazon.nova-pro-v1:0") == pricing_for("nova-pro")
+    register_model_pricing("us.amazon.nova-pro-v1:0", input=4, output=4)
+    assert pricing_for("us.amazon.nova-pro-v1:0") == (4.0, 4.0, 0.0, 0.0)
+
+
+def test_long_cache_multiplier_stays_on_claude_family() -> None:
+    register_model_pricing("deepseek-v4", input=1, output=2, cache_write=0.5, cache_read=0.1)
+    kwargs = {"cache_creation_tokens": 1_000_000}
+    short = estimate_cost("deepseek-v4", 0, 0, cache_retention="short", **kwargs)
+    long = estimate_cost("deepseek-v4", 0, 0, cache_retention="long", **kwargs)
+    assert short == long == pytest.approx(0.5)
+    hosted = estimate_cost(
+        "jp.anthropic.claude-sonnet-4-6",
+        0,
+        0,
+        cache_creation_tokens=1_000_000,
+        cache_retention="long",
+    )
+    assert hosted == pytest.approx(6.0)
+
+
+def test_missing_config_path_warns_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_CONFIG", "/nonexistent/monkeybot.yaml")
+    with caplog.at_level("WARNING", logger="monkeybot.core.config.yaml_loader"):
+        assert pricing_for("gpt-5") == (1.25, 10.00, 0.00, 0.125)
+        assert pricing_for("gpt-5") == (1.25, 10.00, 0.00, 0.125)
+    assert caplog.text.count("not a file") == 1
+
+
+def test_included_pricing_reloads_when_include_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    include = tmp_path / "rates.yaml"
+    include.write_text(
+        "pricing:\n  my-model:\n    input: 1\n    output: 2\n",
+        encoding="utf-8",
+    )
+    _write_config(tmp_path / "monkeybot.yaml", "includes: [rates.yaml]\n", monkeypatch)
+    assert pricing_for("my-model") == (1.0, 2.0, 0.0, 0.0)
+    include.write_text(
+        "pricing:\n  my-model:\n    input: 4\n    output: 5\n",
+        encoding="utf-8",
+    )
+    st = include.stat()
+    os.utime(include, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    assert pricing_for("my-model") == (4.0, 5.0, 0.0, 0.0)
+
+
+def test_pinned_agent_root_beats_cwd_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = tmp_path / "agent" / "monkeybot_config"
+    workspace = tmp_path / "workspace" / "monkeybot_config"
+    agent.mkdir(parents=True)
+    workspace.mkdir(parents=True)
+    (agent / "monkeybot.yaml").write_text(
+        "pricing:\n  my-model:\n    input: 1\n    output: 2\n",
+        encoding="utf-8",
+    )
+    (workspace / "monkeybot.yaml").write_text(
+        "pricing:\n  my-model:\n    input: 9\n    output: 9\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path / "agent"))
+    monkeypatch.chdir(tmp_path / "workspace")
+    assert pricing_for("my-model") == (1.0, 2.0, 0.0, 0.0)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -247,7 +341,16 @@ def test_register_model_pricing_rejects_bad_rates(kwargs: dict[str, float], mess
         ({"m": {"output": 1}}, "missing input"),
         ({"m": {"input": 1, "output": 1, "cache_hit": 0.1}}, "unknown field"),
         ({"m": {"input": 1, "output": 1, "aliases": "other"}}, "aliases must be a list"),
+        ({"m": {"input": 1, "output": 1, "aliases": {"other": True}}}, "aliases must be a list"),
+        ({"m": {"input": 1, "output": 1, "cache_read": None}}, "must be a number"),
         ({"m": 0.3}, "mapping of rates"),
+        (
+            {
+                "a": {"input": 1, "output": 1, "aliases": ["b"]},
+                "b": {"input": 2, "output": 2},
+            },
+            "listed more than once",
+        ),
     ],
 )
 def test_parse_pricing_section_errors(section: object, message: str) -> None:
