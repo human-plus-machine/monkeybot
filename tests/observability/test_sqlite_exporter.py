@@ -304,7 +304,11 @@ def test_idempotent_reexport(tmp_path: Path) -> None:
     trace_id = format(finished[0].context.trace_id, "032x")
 
     sqlite.export(finished)
-    finished[0]._attributes["input.value"] = "v2"  # type: ignore[attr-defined]
+    # Finished spans freeze their attribute map in OpenTelemetry SDK 1.45.
+    finished[0]._attributes = {  # type: ignore[attr-defined]
+        **dict(finished[0].attributes or {}),
+        "input.value": "v2",
+    }
     sqlite.export(finished)
     sqlite.shutdown()
 
