@@ -91,6 +91,44 @@ def test_migrate_keeps_an_explicit_gemma_palace(tmp_path: Path) -> None:
     )
 
 
+def test_migrate_skips_invalid_yaml(tmp_path: Path) -> None:
+    agent = tmp_path / "broken"
+    config = agent / "monkeybot_config"
+    config.mkdir(parents=True)
+    (config / "monkeybot.yaml").write_text(
+        "memory:\n  embedding_model: embeddinggemma-300m\n  broken: [\n",
+        encoding="utf-8",
+    )
+    palace = agent / "memory" / "mempalace"
+    palace.mkdir(parents=True)
+    identity_path = palace / EMBEDDER_IDENTITY_FILE
+    identity_path.write_text("embeddinggemma-300m\n", encoding="utf-8")
+
+    result = migrate_agent_embedding(agent)
+
+    assert result["action"] == "noop"
+    assert identity_path.read_text().strip() == "embeddinggemma-300m"
+    assert "embeddinggemma-300m" in (config / "monkeybot.yaml").read_text()
+
+
+def test_migrate_does_not_touch_identity_when_yaml_stays_legacy(tmp_path: Path) -> None:
+    """Identity must not move ahead of config (embedder mismatch)."""
+    agent = tmp_path / "default"
+    _write_agent(agent, "embeddinggemma-300m", identity="embeddinggemma-300m")
+    identity_path = agent / "memory" / "mempalace" / EMBEDDER_IDENTITY_FILE
+
+    from unittest.mock import patch
+
+    with patch(
+        "monkeybot.core.memory.migrate_embedding._rewrite_config_files",
+        return_value=False,
+    ):
+        result = migrate_agent_embedding(agent)
+
+    assert result["action"] == "failed"
+    assert identity_path.read_text().strip() == "embeddinggemma-300m"
+
+
 def test_migrate_all_local_agents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "home"
     alpha = home / "agents" / "alpha"

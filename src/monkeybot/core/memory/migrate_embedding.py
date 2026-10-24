@@ -68,15 +68,25 @@ def rewrite_legacy_embedding_model(text: str, *, model: str = TARGET_EMBEDDING_M
     return rewritten
 
 
-def _load_yaml(path: Path) -> dict[str, Any]:
+def _load_yaml(path: Path) -> tuple[dict[str, Any], bool]:
+    """Return ``(document, parse_ok)``.
+
+    ``parse_ok`` is false when the file exists but is not valid YAML or not a mapping.
+    Missing files are treated as parse-ok with an empty document.
+    """
     if not path.is_file():
-        return {}
+        return {}, True
     try:
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
         logger.warning("Cannot read %s for embedding migration: %r", path, exc)
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
+        return {}, False
+    if loaded is None:
+        return {}, True
+    if not isinstance(loaded, dict):
+        logger.warning("Cannot read %s for embedding migration: root is not a mapping", path)
+        return {}, False
+    return loaded, True
 
 
 def _configured_model(doc: dict[str, Any]) -> str:
@@ -179,11 +189,33 @@ def _migrate_agent_embedding(root: Path) -> dict[str, Any]:
         "identity_updated": False,
     }
     config_dir = root / "monkeybot_config"
-    doc = _load_yaml(config_dir / "monkeybot.yaml")
+    config_path = config_dir / "monkeybot.yaml"
+    doc, yaml_ok = _load_yaml(config_path)
+    if not yaml_ok:
+        logger.warning("Skipping embedding migration for %s until monkeybot.yaml is valid", root)
+        return result
     configured = _configured_model(doc)
     palace = _palace_for(root, doc)
     identity = _read_identity(palace)
     if not _needs_migration(configured=configured, identity=identity):
+        return result
+
+    # Rewrite config before touching the palace identity. A palace with MiniLM
+    # vectors but a legacy identity string still opens once config says minilm;
+    # the reverse (identity=minilm, config=legacy) trips embedder mismatch.
+    result["yaml_updated"] = _rewrite_config_files(config_dir)
+    doc_after, yaml_ok_after = _load_yaml(config_path)
+    if not yaml_ok_after:
+        result["action"] = "failed"
+        logger.warning("Embedding migration failed for %s: monkeybot.yaml is not valid", root)
+        return result
+    configured_after = _configured_model(doc_after).strip().lower()
+    if configured_after in LEGACY_EMBEDDING_MODELS:
+        result["action"] = "failed"
+        logger.warning(
+            "Embedding migration failed for %s: config still names a legacy embedder",
+            root,
+        )
         return result
 
     if (
@@ -199,7 +231,6 @@ def _migrate_agent_embedding(root: Path) -> dict[str, Any]:
             return result
         result["identity_updated"] = True
 
-    result["yaml_updated"] = _rewrite_config_files(config_dir)
     result["action"] = "migrated"
     logger.info("Recorded MiniLM as the embedder for %s", root.name)
     return result
@@ -208,7 +239,7 @@ def _migrate_agent_embedding(root: Path) -> dict[str, Any]:
 def migrate_agent_embedding(agent_root: Path) -> dict[str, Any]:
     """Rewrite one agent's legacy embedder name to ``minilm``."""
     root = agent_root.expanduser().resolve()
-    doc = _load_yaml(root / "monkeybot_config" / "monkeybot.yaml")
+    doc, _yaml_ok = _load_yaml(root / "monkeybot_config" / "monkeybot.yaml")
     palace = _palace_for(root, doc)
     if palace is not None and palace.is_dir():
         with _migration_lock(palace):
