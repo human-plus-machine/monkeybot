@@ -286,6 +286,17 @@ class SetActiveBranchRequest(BaseModel):
     branch_id: str = Field(min_length=1, max_length=64)
 
 
+class ChatTitleRequest(BaseModel):
+    """POST /api/chat-title body. Names one persisted chat from its opening turn."""
+
+    session_id: str = Field(min_length=1, max_length=128)
+
+    @field_validator("session_id")
+    @classmethod
+    def _session_id(cls, value: str) -> str:
+        return validate_session_id_component(value.strip())
+
+
 def error_payload_dict(code: str, message: str, request_id: str) -> dict[str, Any]:
     """Build a JSON-serializable error body for JSONResponse."""
     return {"error": {"code": code, "message": message, "request_id": request_id}}
