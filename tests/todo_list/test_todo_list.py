@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
 
 from monkeybot.core.context import TurnContext, build_context
+from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.prompts.prompt import (
     TODO_LIST_HEADING,
     compose_system_prompt,
@@ -16,6 +18,7 @@ from monkeybot.core.prompts.prompt import (
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.todo_list import (
+    TodoListReminder,
     TodoListStore,
     TodoListTool,
     todo_list_enabled_from_env,
@@ -240,8 +243,8 @@ async def test_volatile_tail_includes_todo_list_when_non_empty(tmp_path: Path) -
     )
     parts = compose_volatile_tail_parts(ctx)
     assert TODO_LIST_HEADING in parts["todos"]
-    assert "1. [done] First" in parts["todos"]
-    assert "2. [pending] Second" in parts["todos"]
+    assert "- t1 [done] First" in parts["todos"]
+    assert "- t2 [pending] Second" in parts["todos"]
     full = compose_system_prompt(ctx)
     assert "## Todo list" in full
 
@@ -307,3 +310,168 @@ async def test_build_context_and_executor_dispatch_todo_list(tmp_path: Path) -> 
     payload = json.loads(text)
     assert payload["ok"] is True
     assert payload["item"]["text"] == "Ship it"
+
+
+def _ctx(store: TodoListStore | None = None) -> TurnContext:
+    return TurnContext(
+        thread_id="t",
+        request_id="r",
+        agent_md="# Agent",
+        memory_index=[],
+        skills=[],
+        tools=[],
+        user_id=None,
+        parent_run_id=None,
+        model="gemini-2.5-flash",
+        todo_store=store,
+    )
+
+
+@pytest.mark.asyncio
+async def test_todo_list_start_keeps_one_in_progress_and_clear(tmp_path: Path) -> None:
+    store = TodoListStore("sess-start", workspace_root=tmp_path, mirror_to_disk=False)
+    tool = TodoListTool(store)
+    await tool.execute({"action": "add", "text": ["Draft notes", "Run tests", "Ship"]})
+
+    started = json.loads(await tool.execute({"action": "start", "id": "t1"}))
+    assert started["ok"] is True
+    assert started["item"]["status"] == "in_progress"
+    assert [item.status for item in store.items] == ["in_progress", "pending", "pending"]
+
+    switched = json.loads(await tool.execute({"action": "start", "id": "t2"}))
+    assert switched["ok"] is True
+    assert [item.status for item in store.items] == ["pending", "in_progress", "pending"]
+    assert store.format_lines().splitlines()[1] == "- t2 [in_progress] Run tests"
+
+    again = json.loads(await tool.execute({"action": "start", "id": "t2"}))
+    assert again["ok"] is True
+    assert [item.status for item in store.items] == ["pending", "in_progress", "pending"]
+
+    missing = json.loads(await tool.execute({"action": "start", "id": "t9"}))
+    assert missing["ok"] is False
+
+    done = json.loads(await tool.execute({"action": "complete", "id": "t2"}))
+    assert done["item"]["status"] == "done"
+
+    cleared = json.loads(await tool.execute({"action": "clear"}))
+    assert cleared["ok"] is True
+    assert cleared["items"] == []
+    assert store.items == ()
+    # Issued ids are not reused after a clear.
+    added = json.loads(await tool.execute({"action": "add", "text": "Next"}))
+    assert added["item"]["id"] == "t4"
+
+
+@pytest.mark.asyncio
+async def test_todo_list_hydrates_in_progress(tmp_path: Path) -> None:
+    store = TodoListStore("sess-hydrate", workspace_root=tmp_path)
+    await store.add("A")
+    await store.add("B")
+    await store.start("t2")
+
+    fresh = TodoListStore("sess-hydrate", workspace_root=tmp_path)
+    await fresh.hydrate_from_disk()
+    assert [(item.id, item.status, item.text) for item in fresh.items] == [
+        ("t1", "pending", "A"),
+        ("t2", "in_progress", "B"),
+    ]
+    nxt = await fresh.add("C")
+    assert not isinstance(nxt, str)
+    assert nxt.id == "t3"
+
+
+@pytest.mark.asyncio
+async def test_todo_reminder_nags_once_until_the_list_is_updated(tmp_path: Path) -> None:
+    store = TodoListStore("s", workspace_root=tmp_path, mirror_to_disk=False)
+    await store.add("Draft notes")
+    ctx = _ctx(store)
+    reminder = TodoListReminder(stale_after=2)
+    mgr = HookManager()
+    reminder.register(mgr)
+
+    async def fire(tool: str, thread_id: str = "t") -> HookPayload:
+        return await mgr.fire(
+            HookPayload(
+                event=HookEvent.PRE_TOOL,
+                thread_id=thread_id,
+                request_id="r",
+                ctx=ctx,
+                tool_name=tool,
+                tool_args={},
+            )
+        )
+
+    assert (await fire("read_file")).inject_text is None
+    nag = await fire("grep")
+    assert nag.inject_text is not None
+    assert "unchanged for 2 tool calls" in nag.inject_text
+    assert "`start`" in nag.inject_text
+    assert (await fire("read_file")).inject_text is None
+
+    assert (await fire("todo_list")).inject_text is None
+    assert (await fire("read_file")).inject_text is None
+    assert (await fire("grep")).inject_text is not None
+
+    await store.complete("t1")
+    assert (await fire("read_file")).inject_text is None
+    assert (await fire("grep")).inject_text is None
+
+
+@pytest.mark.asyncio
+async def test_todo_reminder_treats_in_progress_as_open(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    store = TodoListStore("s", workspace_root=tmp_path, mirror_to_disk=False)
+    await store.add("Draft notes")
+    await store.start("t1")
+    reminder = TodoListReminder(stale_after=1)
+    mgr = HookManager()
+    reminder.register(mgr)
+
+    with caplog.at_level(logging.INFO, logger="monkeybot.todo_list.hook"):
+        nag = await mgr.fire(
+            HookPayload(
+                event=HookEvent.PRE_TOOL,
+                thread_id="t",
+                request_id="r",
+                ctx=_ctx(store),
+                tool_name="read_file",
+                tool_args={},
+            )
+        )
+    assert nag.inject_text is not None
+    assert any(
+        record.message.startswith("todo reminder injected") and "count=1" in record.message
+        for record in caplog.records
+    )
+
+    quiet = await mgr.fire(
+        HookPayload(
+            event=HookEvent.PRE_TOOL,
+            thread_id="t",
+            request_id="r",
+            ctx=_ctx(store),
+            tool_name="read_file",
+            tool_args={},
+        )
+    )
+    assert quiet.inject_text is None
+
+
+@pytest.mark.asyncio
+async def test_todo_reminder_ignores_missing_store() -> None:
+    reminder = TodoListReminder(stale_after=1)
+    mgr = HookManager()
+    reminder.register(mgr)
+    none_store = await mgr.fire(
+        HookPayload(
+            event=HookEvent.PRE_TOOL,
+            thread_id="other",
+            request_id="r",
+            ctx=_ctx(),
+            tool_name="read_file",
+            tool_args={},
+        )
+    )
+    assert none_store.inject_text is None

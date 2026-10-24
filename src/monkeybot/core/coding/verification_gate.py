@@ -339,14 +339,16 @@ class VerificationGate:
 
     @staticmethod
     def _open_todos(payload: HookPayload, state: _MessageState) -> list[str]:
-        """Pending todo texts, but only when this message edited files or touched the list.
+        """Open todo texts (pending or in progress).
+
+        Only when this message edited files or touched the list.
 
         Todos left over from an earlier task must not nag every unrelated answer.
         """
         store = payload.ctx.todo_store
         if store is None or not (state.wrote or state.todo_touched):
             return []
-        return [item.text for item in store.items if item.status == "pending"]
+        return [item.text for item in store.items if item.status != "done"]
 
     def _problems(self, payload: HookPayload) -> tuple[list[str], list[str]]:
         state = self._state(payload.thread_id)

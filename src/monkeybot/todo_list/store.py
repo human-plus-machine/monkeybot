@@ -25,7 +25,7 @@ from monkeybot.core.persistence.transcript import now_iso, resolve_session_artif
 
 logger = logging.getLogger(__name__)
 
-TodoStatus = Literal["pending", "done"]
+TodoStatus = Literal["pending", "in_progress", "done"]
 
 _MAX_ITEMS = 50
 _MAX_TEXT_CHARS = 500
@@ -95,12 +95,14 @@ class TodoListStore:
         return [asdict(item) for item in self._items]
 
     def format_lines(self) -> str:
-        """Numbered status lines for the volatile prompt, or ``\"\"`` when empty."""
+        """Id-tagged status lines for the volatile prompt, or ``\"\"`` when empty.
+
+        Ids (``t1``) are what ``start``, ``complete``, and ``remove`` require.
+        Numbering from 1 drifted from those ids after a removal.
+        """
         if not self._items:
             return ""
-        return "\n".join(
-            f"{i}. [{item.status}] {item.text}" for i, item in enumerate(self._items, start=1)
-        )
+        return "\n".join(f"- {item.id} [{item.status}] {item.text}" for item in self._items)
 
     async def add(self, text: str) -> TodoItem | str:
         """Append a pending item. Returns the item or an error message string."""
@@ -142,6 +144,38 @@ class TodoListStore:
         self._log_mutate("add", ids)
         await self._mirror_to_disk()
         return added
+
+    async def start(self, item_id: str) -> TodoItem | str:
+        """Mark one item in progress. Any other in-progress item returns to pending.
+
+        At most one item is ``in_progress``. Starting an item that is already the
+        sole in-progress item is a no-op. Returns the item or an error string.
+        """
+        idx = self._index_of(item_id)
+        if idx is None:
+            return f"todo_list item id not found: {item_id!r}."
+        changed = False
+        for i, item in enumerate(self._items):
+            if i != idx and item.status == "in_progress":
+                self._items[i] = TodoItem(id=item.id, text=item.text, status="pending")
+                changed = True
+        current = self._items[idx]
+        if current.status != "in_progress":
+            self._items[idx] = TodoItem(id=current.id, text=current.text, status="in_progress")
+            changed = True
+        started = self._items[idx]
+        if changed:
+            self._log_mutate("start", started.id)
+            await self._mirror_to_disk()
+        return started
+
+    async def clear(self) -> None:
+        """Drop every item. Ids already issued are not reused."""
+        if not self._items:
+            return
+        self._items.clear()
+        self._log_mutate("clear", "")
+        await self._mirror_to_disk()
 
     async def complete(self, item_id: str) -> TodoItem | str:
         """Mark an item done. Returns the item or an error message string."""
@@ -206,7 +240,7 @@ class TodoListStore:
                 item_id = str(entry.get("id") or "").strip()
                 text = str(entry.get("text") or "")
                 status = entry.get("status")
-                if not item_id or status not in ("pending", "done"):
+                if not item_id or status not in ("pending", "in_progress", "done"):
                     continue
                 restored.append(TodoItem(id=item_id, text=text, status=status))
                 match = _ITEM_ID_RE.match(item_id)

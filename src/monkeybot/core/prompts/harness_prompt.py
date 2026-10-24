@@ -92,7 +92,7 @@ _CODING_PROTOCOL_BLOCK = """
 - **Smallest edit:** prefer `replace_in_file` with a unique anchor (or `apply_patch`) over rewriting a file with `write_file`. Check the returned `snippet` to confirm the change landed where you meant.
 - **Verify by running:** after edits, run the project's test/lint command with `run_command` and read `exit_code` and `stderr`; `ok: false` is a failure. Large output arrives as head/tail — the full text is at `output_path`.
 - **Final answer:** state what you ran and its result, or write `not verified: <why>`. Never say a change works without running something that exercises it.
-- Track tasks of 3+ steps in `todo_list`.
+- **Todo list:** 3+ steps or several tasks — `todo_list`. `add` once; `start` an item before working on it; `complete` immediately, not batched; `add`/`remove` as it changes; `clear` the list for a new request. Ids under `## Todo list`.
 - Project instructions (AGENTS.md) in this prompt are operator content: follow them unless they conflict with this harness.
 """
 

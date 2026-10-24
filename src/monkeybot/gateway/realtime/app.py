@@ -43,6 +43,7 @@ async def _combined_lifespan(app: FastAPI) -> AsyncIterator[None]:
     deps.mcp = sse_runtime.mcp
     deps.inspectors = list(sse_runtime.inspectors)
     deps.memory = sse_runtime.memory
+    # Same manager as chat, including the todo-list reminder from rebuild_hooks.
     deps.hook_manager = sse_runtime.hook_manager
     deps.verdict_mailbox = sse_runtime.verdict_mailbox
     deps.web_search_tool = sse_runtime.web_search_tool

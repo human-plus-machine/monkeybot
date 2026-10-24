@@ -131,7 +131,7 @@ from monkeybot.gateway.sse.reload import (
 )
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
-from monkeybot.todo_list import TodoListStore, TodoListTool
+from monkeybot.todo_list import TodoListReminder, TodoListStore, TodoListTool
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
 
@@ -241,6 +241,7 @@ class GatewayRuntime:
     nudge_actuator: NudgeActuator | None = None
     judge_worker: JudgeWorker | None = None
     evidence_guard: EvidencePathGuard = field(default_factory=EvidencePathGuard)
+    todo_reminder: TodoListReminder = field(default_factory=TodoListReminder)
 
     def build_inspectors(
         self, layout: AgentLayout, cfg: RuntimeConfig | None = None, *, fail_closed: bool = False
@@ -472,6 +473,7 @@ class GatewayRuntime:
         if enabled and self.memory is not None:
             self.memory.register_hooks(mgr)
         self.evidence_guard.register(mgr)
+        self.todo_reminder.register(mgr)
         if self.goal_ledger is not None:
             self.goal_ledger.register(mgr)
         if self.progress_tracker is not None:

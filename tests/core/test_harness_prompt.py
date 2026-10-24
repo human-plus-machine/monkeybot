@@ -198,6 +198,8 @@ def test_coding_protocol_block_is_always_present() -> None:
         "`exit_code`",
         "`not verified: <why>`",
         "`todo_list`",
+        "`start` an item",
+        "`clear` the list",
         "operator content",
     ):
         assert needle in coding, needle
