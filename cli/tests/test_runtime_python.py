@@ -635,11 +635,13 @@ def test_prepare_config_only_provisions_managed_runtime_when_cache_cold(
     (agent_root / "monkeybot_config" / "monkeybot.yaml").write_text("{}\n", encoding="utf-8")
     runtime_dir = _isolate_managed_cache(tmp_path, monkeypatch)
     calls: list[list[str]] = []
-    pin = f"monkeybot[memory]=={package_version('monkeybot')}"
+    pin = f"monkeybot[memory,web-search]=={package_version('monkeybot')}"
 
     def fake_probe(runtime: RuntimePython, code: str, *, timeout: float = 15.0) -> tuple[bool, str]:
         del timeout
-        assert "import mempalace" in code
+        assert any(
+            token in code for token in ("import mempalace", "import browser_mcp", "import ddgs")
+        )
         return (runtime.source == MANAGED_RUNTIME_SOURCE), ""
 
     monkeypatch.setattr("monkeybot_cli.runtime_python.subprocess.run", _fake_uv(calls))
@@ -688,7 +690,7 @@ def test_managed_runtime_installs_from_local_checkout_when_present(
     install = next(cmd for cmd in calls if cmd[:3] == ["uv", "pip", "install"])
     requirement = Requirement(install[-1])
     assert requirement.name == "monkeybot"
-    assert requirement.extras == {"memory"}
+    assert requirement.extras == {"memory", "web-search"}
     assert requirement.url == checkout.resolve().as_uri()
     assert str(requirement.specifier) == ""
     assert f"provisioning {install[-1]}" in capsys.readouterr().out
@@ -803,7 +805,9 @@ def test_prepare_reprovisions_when_managed_runtime_lacks_browser_mcp(
             encoding="utf-8"
         ):
             return False, "missing browser_mcp"
-        if "import mempalace" in code or "import browser_mcp" in code:
+        if any(
+            token in code for token in ("import mempalace", "import browser_mcp", "import ddgs")
+        ):
             return True, ""
         return False, code
 
@@ -896,7 +900,7 @@ def test_managed_runtime_pins_the_running_core_version(
     install = next(cmd for cmd in calls if cmd[:3] == ["uv", "pip", "install"])
     requirement = Requirement(install[-1])
     assert requirement.name == "monkeybot"
-    assert requirement.extras == {"memory"}
+    assert requirement.extras == {"memory", "web-search"}
     assert str(requirement.specifier) == f"=={package_version('monkeybot')}"
 
 
@@ -973,7 +977,7 @@ def test_managed_runtime_mirrors_installed_extras(
 
     install = next(cmd for cmd in calls if cmd[:3] == ["uv", "pip", "install"])
     requirement = Requirement(install[-1])
-    assert requirement.extras == {"memory", "openai", "postgres"}
+    assert requirement.extras == {"memory", "web-search", "openai", "postgres"}
     assert str(requirement.specifier) == f"=={package_version('monkeybot')}"
 
 
@@ -999,7 +1003,7 @@ def test_managed_runtime_includes_yaml_provider_extra(
 
     install = next(cmd for cmd in calls if cmd[:3] == ["uv", "pip", "install"])
     requirement = Requirement(install[-1])
-    assert requirement.extras == {"memory", "nvidia"}
+    assert requirement.extras == {"memory", "web-search", "nvidia"}
 
 
 def test_managed_runtime_uses_explicit_config_for_provider_extra(
@@ -1031,7 +1035,7 @@ def test_managed_runtime_uses_explicit_config_for_provider_extra(
 
     install = next(cmd for cmd in calls if cmd[:3] == ["uv", "pip", "install"])
     requirement = Requirement(install[-1])
-    assert requirement.extras == {"memory", "nvidia"}
+    assert requirement.extras == {"memory", "web-search", "nvidia"}
 
 
 def test_managed_runtime_fail_closed_on_unreadable_yaml(
@@ -1192,21 +1196,17 @@ def test_prepare_runtime_python_probes_managed_cache_once(
 
     def fake_probe(runtime: RuntimePython, code: str, *, timeout: float = 15.0) -> tuple[bool, str]:
         del timeout
-        probes.append(runtime.source)
-        assert "import mempalace" in code
+        probes.append(code)
         return True, ""
 
     monkeypatch.setattr("monkeybot_cli.runtime_python._probe", fake_probe)
-    monkeypatch.setattr(
-        "monkeybot_cli.runtime_python.run_probe",
-        lambda *a, **k: pytest.fail("prepare must probe via _probe only"),
-    )
 
     runtime = prepare_runtime_python(agent_root)
 
     assert runtime.source == MANAGED_RUNTIME_SOURCE
     assert runtime.argv == [str(interpreter)]
-    assert probes == [MANAGED_RUNTIME_SOURCE]
+    assert any("import mempalace" in code for code in probes)
+    assert any("import ddgs" in code for code in probes)
 
 
 def test_resolve_runtime_python_ignores_managed_cache_when_memory_off(

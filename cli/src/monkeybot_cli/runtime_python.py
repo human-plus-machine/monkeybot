@@ -11,17 +11,19 @@ Resolution order for an agent root:
 1. ``<root>/.venv/bin/python`` (or the Windows variant) — direct, no subprocess overhead.
 2. ``uv run python`` — when ``<root>/pyproject.toml`` exists but no ``.venv``.
 3. ``<cache>/monkeybot/runtimes/<key>/bin/python`` — a CLI-managed venv holding
-   ``monkeybot[memory]`` and ``monkeybot-browser-mcp``. When this process is
+   ``monkeybot[memory,web-search]`` and ``monkeybot-browser-mcp``. When this process is
    running from a source checkout (or ``MONKEYBOT_CHECKOUT`` points at one),
    the install is that tree plus extras from PyPI; otherwise it is
-   ``monkeybot[memory]==<running version>``. Used only for config-only trees
+   ``monkeybot[memory,web-search]==<running version>``. Used only for config-only trees
    with memory enabled when a previously provisioned cache interpreter exists.
    The managed runtime also mirrors provider/storage extras present in the CLI
    env (excluding extras whose probe module is a base dep) and the extra
    required by the agent's YAML ``model.provider`` (so a thin CLI still gets
    ``tiktoken`` for NVIDIA/OpenAI). The browser package is installed here
    because the gateway sets ``MONKEYBOT_PYTHON`` to this interpreter, and the
-   browser server is ``python -m browser_mcp.server``.
+   browser server is ``python -m browser_mcp.server``. ``web-search`` is always
+   installed: DuckDuckGo is the default backend, and a cache that cannot import
+   ``ddgs`` is rebuilt.
 4. ``sys.executable`` — legacy / config-only trees (just ``monkeybot_config/``, no
    ``pyproject.toml``). In this case extras must be installed in the CLI env,
    unless memory is enabled and ``prepare_runtime_python`` provisions (3).
@@ -108,6 +110,7 @@ if not (_key({COMPATIBLE_CORE_LOWER_VERSION!r}) <= _key(ver) < _key({COMPATIBLE_
 """.strip()
 MEMORY_PROBE = f"import mempalace\n{CORE_PROBE}"
 BROWSER_MCP_PROBE = "import browser_mcp"
+WEB_SEARCH_PROBE = "import ddgs"
 
 
 class RuntimeUpgradeError(RuntimeError):
@@ -422,6 +425,8 @@ def _managed_if_ready(
         return None
     if not _browser_mcp_importable(runtime, checkout):
         return None
+    if not run_probe(runtime, WEB_SEARCH_PROBE):
+        return None
     return runtime
 
 
@@ -651,7 +656,9 @@ def provision_managed_memory_runtime(
 
     if shutil.which("uv") is None:
         raise _managed_runtime_error("uv was not found on PATH")
-    extra_spec = ",".join(("memory", *extras))
+    # web-search is not optional here. The tool is on by default, and mirroring
+    # only copies extras the CLI process can already import — a thin CLI never can.
+    extra_spec = ",".join(dict.fromkeys(("memory", "web-search", *extras)))
     requirements = [_managed_memory_requirement(monkeybot_version, extra_spec, checkout=checkout)]
     browser = _browser_mcp_requirement(checkout)
     if browser is not None:
@@ -712,6 +719,10 @@ def _install_managed_runtime(
             raise _managed_runtime_error(
                 _probe_failure_detail(staged, BROWSER_MCP_PROBE) or "browser_mcp did not import"
             )
+        if not run_probe(staged, WEB_SEARCH_PROBE):
+            raise _managed_runtime_error(
+                _probe_failure_detail(staged, WEB_SEARCH_PROBE) or "ddgs did not import"
+            )
         if runtime_dir.exists():
             _retire_runtime_dir(runtime_dir)
         os.replace(staging, runtime_dir)
@@ -764,6 +775,14 @@ def prepare_runtime_python(
         # MemPalace. Reprovision instead of spawning the browser server there.
         ok = False
         detail = "managed runtime is missing browser_mcp"
+    if (
+        ok
+        and memory_enabled
+        and runtime.source == MANAGED_RUNTIME_SOURCE
+        and not run_probe(runtime, WEB_SEARCH_PROBE)
+    ):
+        ok = False
+        detail = "managed runtime is missing ddgs"
     if ok:
         return runtime
     if not has_project:
