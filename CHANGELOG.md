@@ -6,7 +6,13 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Deployments can price models the harness does not ship with. A `pricing:` section in `monkeybot.yaml` maps a model id to `input`, `output`, `cache_write`, and `cache_read` in USD per 1M tokens, with optional `aliases`. Edits to that file, or to a file it includes, apply on the next lookup without a restart. `monkeybot validate` rejects a missing, negative, unknown, or non-numeric field, a duplicate id, or an alias that is not a list of ids. Embedders can call `monkeybot.providers.pricing.register_model_pricing(...)` instead; registered rates win over YAML, which wins over the built-in table for the same id. The longest matching id wins, and a pinned agent root is not replaced by the working directory.
+
 ### Changed
+
+- An unpriced model logs `unknown model for pricing lookup` once per process instead of on every usage event.
 
 - MCP servers marked `autoConnect` connect in parallel. Boot returns after reading `mcp.json` and finishes those connects in the background; the first turn waits only for the time still left and still sees the tools. `MCP_STRICT_LOAD` still waits for them and fails startup on a connect error.
 - The gateway opens the model provider's HTTP connection at startup with a models-list request and keeps that socket for 120 seconds, so the first turn does not wait on a cold connection.

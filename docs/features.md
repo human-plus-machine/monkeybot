@@ -414,6 +414,19 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Invariants:** Recorded once per user message on `TurnComplete`.
 
+**Model pricing:** `estimate_cost` reads the built-in `MODEL_PRICING` table, then `pricing:` in `monkeybot.yaml` (and files it includes), then rates from `register_model_pricing()`; for the same id the later source wins. The longest matching id wins across the raw id and the normalized hosted id. When `MONKEYBOT_AGENT_ROOT` or `MONKEYBOT_CONFIG` is set, that file is used instead of a config found from the working directory. An unpriced model costs `0` and warns once per process. Claude-family ids still price 1-hour cache writes at 2× input; other models use the configured `cache_write`.
+
+```yaml
+pricing:
+  deepseek-v4.1-flash:             # USD per 1M tokens
+    input: 0.30
+    output: 1.20
+    cache_read: 0.03               # cache_write defaults to 0
+    aliases: [deepseek-ai/deepseek-v4.1-flash-maas]
+```
+
+`register_model_pricing` only affects the calling process. Subagent and scheduler workers read `monkeybot.yaml`.
+
 ---
 
 ### 10. Memory subsystem
