@@ -104,6 +104,7 @@ from monkeybot.core.tools.background_jobs import (
 from monkeybot.core.tools.command_executor import BackgroundCommandExecutor
 from monkeybot.core.tools.fs_isolation import (
     JailRoots,
+    chroma_onnx_model_dirs,
     isolation_support,
     local_whisper_model_dirs,
     memory_hidden_paths,
@@ -2058,7 +2059,7 @@ class CoreToolExecutor(ToolExecutorPort):
             )
         return cwd
 
-    def _jail_roots(self, ctx: TurnContext) -> JailRoots:
+    def _jail_roots(self, ctx: TurnContext, cmd: str) -> JailRoots:
         """Deny-by-default filesystem policy for one `run_command` call.
 
         `deny` is the user's home directory — the only boundary that
@@ -2074,6 +2075,7 @@ class CoreToolExecutor(ToolExecutorPort):
         desktop app), PATH ``bin`` directories that sit inside the denied home
         (read-only — onefile tools such as bundled ``yt-dlp`` have to read
         their own executable), an installed on-device Whisper model directory
+        (read-only), Chroma's installed MiniLM model for ``mempalace``
         (read-only), and any folder the user has granted read access to,
         durably or for this turn (read-only).
         """
@@ -2113,6 +2115,8 @@ class CoreToolExecutor(ToolExecutorPort):
             deny.append(Path.home())
         read_only.extend(readable_bin_dirs_under_deny(deny))
         read_only.extend(local_whisper_model_dirs(deny=deny))
+        if cmd == "mempalace":
+            read_only.extend(chroma_onnx_model_dirs())
 
         return JailRoots(
             read_write=tuple(dict.fromkeys(p.resolve() for p in read_write)),
@@ -2172,7 +2176,7 @@ class CoreToolExecutor(ToolExecutorPort):
             if isinstance(executor, TerminalExecutor):
                 # jail_roots is a TerminalExecutor-only concept — SandboxExecutor
                 # runs in a container that already isolates the host filesystem.
-                jail_roots = self._jail_roots(ctx)
+                jail_roots = self._jail_roots(ctx, cmd)
                 execute_kwargs["jail_roots"] = jail_roots
                 # Same boundary: default caches live under the denied home.
                 # The container path keeps the host environment instead, and so

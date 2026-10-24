@@ -19,7 +19,7 @@ from monkeybot.core.llm.provider import Done, TextDelta, ToolCall, UsageEvent
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.mcp.mcp_client import MCPDiagnosticError, MCPServerNotConnectedError
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
-from monkeybot.core.tools.fs_isolation import IsolationSupport, isolation_support
+from monkeybot.core.tools.fs_isolation import IsolationSupport, JailRoots, isolation_support
 from monkeybot.core.tools.types import unwrap_tool_execution_result
 from monkeybot.core.types.types_tools import ToolDef
 from tests.core.memory.helpers import make_memory_subsystem
@@ -1712,6 +1712,54 @@ async def test_direct_mempalace_gets_no_toolchain_cache_env(
     # container can write it while mempalace runs on the host: a uv-bin entry
     # on PATH would let a planted `mempalace` script win `shutil.which`.
     assert set(seen[0]) == {"MEMPALACE_PALACE_PATH", "MEMPALACE_BACKEND"}
+
+
+@pytest.mark.asyncio
+async def test_only_mempalace_can_read_the_chroma_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.tools.terminal import ExecutionResult, TerminalExecutor
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    skills = workspace / "skills"
+    skills.mkdir()
+    palace = _mem_sub(tmp_path / "memory")
+    model_dir = (tmp_path / "chroma-model").resolve()
+    model_dir.mkdir()
+    seen: list[JailRoots] = []
+
+    async def fake_execute(self, command, args, timeout=60, **kwargs):
+        del self, command, args, timeout
+        seen.append(kwargs["jail_roots"])
+        return ExecutionResult(stdout="ok", stderr="", exit_code=0)
+
+    monkeypatch.setattr(TerminalExecutor, "execute", fake_execute)
+    monkeypatch.setattr(
+        "monkeybot.core.tools.core_tool_executor.isolation_support",
+        lambda: IsolationSupport("sandbox-exec", "test"),
+    )
+    monkeypatch.setattr(
+        "monkeybot.core.tools.core_tool_executor.chroma_onnx_model_dirs",
+        lambda: (model_dir,),
+    )
+    executor = CoreToolExecutor(
+        workspace_root=workspace,
+        memory=palace,
+        skills_path=skills,
+        mcp=_NoMCP(),
+    )
+    for call_id, argv in (("palace", ["mempalace", "search", "query"]), ("echo", ["echo", "ok"])):
+        out, err = unwrap_tool_execution_result(
+            await executor.execute(
+                call=ToolCall(call_id=call_id, name="run_command", args={"argv": argv}),
+                ctx=dataclasses.replace(_ctx(), user_id="u"),
+            )
+        )
+        assert err is None and out is not None
+
+    assert model_dir in seen[0].read_only
+    assert model_dir not in seen[1].read_only
 
 
 @pytest.mark.asyncio
