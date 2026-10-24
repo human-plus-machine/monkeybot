@@ -53,6 +53,7 @@ from .models import (
     AskUserPOST,
     AttachmentUploadResponse,
     CancelRequest,
+    ChatTitleRequest,
     CreateSessionRequest,
     CreateSessionResponse,
     DeleteSessionResponse,
@@ -559,6 +560,19 @@ def _chat_history_api_enabled() -> bool:
     """Opt out with ``MONKEYBOT_CHAT_HISTORY_API=0``."""
     v = os.environ.get("MONKEYBOT_CHAT_HISTORY_API", "1").strip().lower()
     return v not in ("0", "false", "no", "off")
+
+
+def _chat_title_provider(request: Request) -> Any:
+    """Chat provider for a title call.
+
+    Startup stores the runtime on the serving app. Tests can set the same
+    attribute. When it is missing, use the process runtime the gateway built.
+    """
+    runtime = getattr(request.app.state, "gateway_runtime", None)
+    if runtime is None:
+        from monkeybot.gateway.sse.app import gateway_runtime as runtime
+
+    return getattr(runtime, "provider", None)
 
 
 def _storage_backend(request: Request) -> Any:
@@ -1377,6 +1391,54 @@ def create_app(
             "branch_points": view.branch_points,
             "messages": messages_to_wire(view.messages, thread_id=key, include_anchors=True),
         }
+
+    @api.post("/api/chat-title")
+    async def chat_title(body: ChatTitleRequest, request: Request) -> dict[str, Any]:
+        """Name a chat from its first user message and the first assistant reply.
+
+        ``title`` is null when the reply has not landed yet, or the model call
+        fails. Callers retry. A failure here must not surface as a 500.
+        """
+        if not _chat_history_api_enabled():
+            raise APIError(
+                404,
+                "NOT_FOUND",
+                "Chat history API is disabled",
+                uuid.uuid4().hex,
+            )
+        from monkeybot.core.runtime.chat_title import (
+            CHAT_TITLE_TIMEOUT_SECONDS,
+            generate_chat_title,
+            opening_turn_texts,
+            title_model_id,
+        )
+        from monkeybot.core.runtime.history_rewrite import load_active_history
+
+        backend = _storage_backend(request)
+        key = body.session_id.strip()
+        try:
+            view = await load_active_history(backend.history(), backend.branches(), key, limit=None)
+        except Exception:
+            logger.warning("chat title history load failed %s", kv(session_id=key), exc_info=True)
+            return {"title": None}
+        user_text, assistant_text = opening_turn_texts(view.messages)
+        if not assistant_text.strip():
+            return {"title": None}
+        provider = _chat_title_provider(request)
+        if provider is None:
+            logger.warning("chat title skipped; no provider %s", kv(session_id=key))
+            return {"title": None}
+        model = title_model_id()
+        logger.info("chat title model call %s", kv(session_id=key, model=model))
+        try:
+            title = await asyncio.wait_for(
+                generate_chat_title(provider, model, user_text, assistant_text),
+                timeout=CHAT_TITLE_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            logger.warning("chat title generation failed %s", kv(session_id=key), exc_info=True)
+            return {"title": None}
+        return {"title": title}
 
     @api.delete("/api/chat-history/{session_id}")
     async def chat_history_delete(
