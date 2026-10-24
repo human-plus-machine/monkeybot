@@ -1502,7 +1502,7 @@ wheels = [
 
 [[package]]
 name = "mempalace"
-version = "3.9.0"
+version = "3.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "chromadb" },
@@ -1512,9 +1512,9 @@ dependencies = [
     { name = "pyyaml" },
     { name = "tokenizers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e1/48/b1157625ca3cf7481c18af0b6dd5f34214e40101a9979e5f01a30eed1081/mempalace-3.9.0.tar.gz", hash = "sha256:750221c8207d894a8e2f937279f29b250273ae17e723e622c51fa439a06c10f0", size = 25865721, upload-time = "2026-08-31T10:26:29.478Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b2/c5/c54c9950efe2b1e797ac05e352fafb660aa8fd4d8dfac08e889c084ec6ab/mempalace-3.11.0.tar.gz", hash = "sha256:5e5ff52671d5d751113d9067555d69d0ef77b672df1fbdc64dbc16f360639214", size = 26662966, upload-time = "2026-10-14T05:37:09.794Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/92/98/1bbd0be92fb8638d941ffc27e62aec0aef05cb74434c37416ef916cc4808/mempalace-3.9.0-py3-none-any.whl", hash = "sha256:41ab339f72c5670280d8461b2837a22b0b25ef8a017dfebd31eabb1903101f30", size = 786247, upload-time = "2026-08-31T10:26:27.366Z" },
+    { url = "https://files.pythonhosted.org/packages/8d/fb/24cde4c9f29472483a7f33441d6e154bf56f45c6840fcffdb69f94853859/mempalace-3.11.0-py3-none-any.whl", hash = "sha256:43e4c690e339b66e86a3177fe4eea15da3d9541ecbd58e671431c1e13dc1bf0c", size = 1073747, upload-time = "2026-10-14T05:37:06.886Z" },
 ]
 
 [[package]]
@@ -1654,7 +1654,7 @@ wheels = [
 
 [[package]]
 name = "monkeybot"
-version = "3.8.0"
+version = "3.10.0"
 source = { editable = "../../" }
 dependencies = [
     { name = "aiosqlite" },
@@ -1713,7 +1713,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "langfuse", marker = "extra == 'evals'", specifier = ">=3.0.0" },
     { name = "mcp", specifier = ">=1.27.1,<2" },
-    { name = "mempalace", marker = "extra == 'memory'", specifier = ">=3.7.0,<4" },
+    { name = "mempalace", marker = "extra == 'memory'", specifier = ">=3.11,<3.12" },
     { name = "monkeybot", extras = ["cli"], marker = "extra == 'cli-realtime'" },
     { name = "monkeybot", extras = ["realtime"], marker = "extra == 'cli'" },
     { name = "monkeybot", extras = ["realtime"], marker = "extra == 'realtime-gemini'" },
@@ -1770,6 +1770,7 @@ dev = [
     { name = "pytest", specifier = ">=8.3.0" },
     { name = "pytest-asyncio", specifier = ">=0.24.0" },
     { name = "pytest-cov", specifier = ">=6.0.0" },
+    { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "ruff", specifier = ">=0.8.0" },
     { name = "tiktoken", specifier = ">=0.7.0" },
     { name = "typer", specifier = ">=0.12.0" },
@@ -1804,7 +1805,7 @@ dev = [{ name = "pytest", specifier = ">=8.0.0" }]
 
 [[package]]
 name = "monkeybot-cli"
-version = "0.9.0"
+version = "0.11.0"
 source = { editable = "../../cli" }
 dependencies = [
     { name = "httpx" },

@@ -84,7 +84,7 @@ MemPalace capture, wake-up, and search teaching are on by default. Turn them off
 |---|---|---|
 | `enabled` | `true` | Set `false` to skip capture, wake-up, and prompt teaching |
 | `backend` | `chroma` | Alternate MemPalace vector backend |
-| `embedding_model` | `embeddinggemma-300m` | Match the embedder the palace was built with |
+| `embedding_model` | `minilm` | MemPalace's default embedder. `embeddinggemma-300m` is a legacy alias; startup rewrites it to `minilm` |
 
 ## `subagents`
 

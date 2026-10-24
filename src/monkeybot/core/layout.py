@@ -315,6 +315,16 @@ def bootstrap_agent_layout(
     except Exception as exc:  # noqa: BLE001 — layout must still boot
         _log.warning("Memory layout migrate skipped: %r", exc)
 
+    # One-shot: embeddinggemma-300m → minilm. Those palaces were already filed
+    # with MiniLM, so this rewrites the name and does not rebuild the index.
+    # Runs for every local agent so an app update covers palaces not yet opened.
+    try:
+        from monkeybot.core.memory.migrate_embedding import migrate_all_agent_embeddings
+
+        migrate_all_agent_embeddings(include=root)
+    except Exception as exc:  # noqa: BLE001 — layout must still boot
+        _log.warning("Embedding model migrate skipped: %r", exc)
+
     env_file = root / ".env"
     if env_file.is_file():
         load_dotenv(env_file, override=False)

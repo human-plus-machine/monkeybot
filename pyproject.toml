@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-memory = ["mempalace>=3.7.0,<4"]
+memory = ["mempalace>=3.11,<3.12"]
 gemini = ["google-genai>=1.0.0"]
 vertex = [
     "google-genai>=1.0.0",
