@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from monkeybot.core.config.settings import ConfigError, normalize_model_provider
+from monkeybot.providers.pricing import parse_pricing_section
 
 SUPPORTED_MEMORY_BACKENDS = frozenset({"local", "gcs", "drive"})
 SUPPORTED_SECRETS_PROVIDERS = frozenset({"env", "gcp_secret_manager"})
@@ -216,6 +217,13 @@ def _validate_realtime_config(doc: dict[str, Any]) -> None:
         )
 
 
+def _validate_pricing(doc: dict[str, Any]) -> None:
+    try:
+        parse_pricing_section(doc.get("pricing"))
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
 def validate_monkeybot_yaml_doc(doc: dict[str, Any], *, env: dict[str, str] | None = None) -> None:
     """Validate a parsed monkeybot.yaml document (new schema).
 
@@ -239,6 +247,7 @@ def validate_monkeybot_yaml_doc(doc: dict[str, Any], *, env: dict[str, str] | No
 
     _validate_harness_mode(doc)
     _validate_realtime_config(doc)
+    _validate_pricing(doc)
 
     flat: dict[str, str] = {}
     if isinstance(model, dict) and model.get("provider"):
