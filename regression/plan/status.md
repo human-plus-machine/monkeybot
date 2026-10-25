@@ -37,12 +37,12 @@ Status values (same for tasks and phases): `todo`, `in-progress`, `blocked`, `do
 
 | ID | Status | Owner | Updated | Ref | Note |
 |---|---|---|---|---|---|
-| P0A-01 | done | cursor | 2026-10-25 | uncommitted | baseline 3320 collected, 3295 passed, 25 skipped |
-| P0A-02 | done | cursor | 2026-10-25 | uncommitted | postToolUseFailure added; live notice confirmed |
-| P0A-03 | done | cursor | 2026-10-25 | uncommitted | helpers in testkit; differing doubles kept for D7 |
-| P0A-04 | done | cursor | 2026-10-25 | uncommitted | tier-1 tests in tests/unit; observability has no __init__.py |
-| P0A-05 | done | cursor | 2026-10-25 | uncommitted | integration and acceptance tests are t2; ci-local.sh passes |
-| P0A-06 | done | cursor | 2026-10-25 | uncommitted | empty test dirs removed; exit checks hold |
+| P0A-01 | done | cursor | 2026-10-25 | #335 | baseline 3320 collected, 3295 passed, 25 skipped |
+| P0A-02 | done | cursor | 2026-10-25 | #336 | postToolUseFailure added; live notice confirmed |
+| P0A-03 | done | cursor | 2026-10-25 | #336 | helpers in testkit; differing doubles kept for D7 |
+| P0A-04 | done | cursor | 2026-10-25 | #336 | tier-1 tests in tests/unit; observability has no __init__.py |
+| P0A-05 | done | cursor | 2026-10-25 | #336 | integration and acceptance tests are t2; ci-local.sh passes |
+| P0A-06 | done | cursor | 2026-10-25 | #336 | empty test dirs removed; exit checks hold |
 | P0B-01 | todo | | | | |
 | P0B-02 | todo | | | | |
 | P0B-03 | todo | | | | |
