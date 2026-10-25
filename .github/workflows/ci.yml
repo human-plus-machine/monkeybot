@@ -26,10 +26,10 @@ jobs:
         run: uv run ruff format --check .
 
       - name: Mypy
-        run: uv run mypy src/monkeybot
+        run: uv run mypy src/monkeybot testkit
 
       - name: Pytest
-        run: uv run pytest tests/ -q -n auto
+        run: uv run pytest tests regression -m "t1 or t2 or t3" -q -n auto
 
       - name: CLI pytest
         working-directory: cli

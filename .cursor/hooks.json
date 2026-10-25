@@ -16,6 +16,18 @@
         "timeout": 2400,
         "failClosed": true
       }
+    ],
+    "postToolUse": [
+      {
+        "command": ".cursor/hooks/test-failure-notice.py",
+        "matcher": "Shell"
+      }
+    ],
+    "postToolUseFailure": [
+      {
+        "command": ".cursor/hooks/test-failure-notice.py",
+        "matcher": "Shell"
+      }
     ]
   }
 }

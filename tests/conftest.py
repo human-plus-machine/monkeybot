@@ -5,11 +5,12 @@ from __future__ import annotations
 import gc
 import os
 import threading
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-pytest_plugins = ["tests.observability.conftest"]
+pytest_plugins = ["tests.unit.observability.conftest"]
 
 
 @pytest.fixture(autouse=True)
@@ -95,6 +96,15 @@ def _clear_provider_sdk_clients() -> Any:
     clear_sdk_clients()
     yield
     clear_sdk_clients()
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Keep tests/evals in the t1-or-t2-or-t3 gate until P1-12 removes them."""
+    evals = Path(config.rootpath) / "tests" / "evals"
+    for item in items:
+        path = Path(str(item.path))
+        if path == evals or evals in path.parents:
+            item.add_marker(pytest.mark.t2)
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
