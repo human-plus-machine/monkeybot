@@ -10,7 +10,7 @@ Clone only if you are changing monkeybot itself (end users should use `uv tool i
 git clone https://github.com/human-plus-machine/monkeybot.git
 cd monkeybot && uv sync
 cd cli && uv sync
-uv tool install --editable .
+uv tool install --editable . --overrides src/monkeybot_cli/overrides.txt
 ```
 
 For live eval smoke runs against a local gateway, use [`evals/smoke_agent/`](evals/smoke_agent/) (see [docs/live-evals.md](docs/live-evals.md)).

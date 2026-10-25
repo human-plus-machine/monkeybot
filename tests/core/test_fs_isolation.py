@@ -484,12 +484,13 @@ def test_seatbelt_profile_allows_headless_browser_and_child_signals():
     for line in (
         "(allow signal (target same-sandbox))",
         '(allow iokit-open (iokit-user-client-class "RootDomainUserClient"))',
+        '(allow iokit-open (iokit-user-client-class "IOSurfaceRootUserClient"))',
         '(allow mach-register (global-name-regex #"^org\\.chromium\\."))',
         "(allow ipc-posix-sem)",
     ):
         assert line in profile
-    # Headless Chromium needs one IOKit class and its own Mach names, not
-    # every user client and every bootstrap name.
+    # Headless Chromium needs those two IOKit classes and its own Mach names,
+    # not every user client and every bootstrap name.
     assert "(allow iokit-open)" not in profile
     assert "(allow mach-register)" not in profile
 
@@ -788,10 +789,14 @@ class TestMacJailBootstrap:
                 read_only=(shell.parent,),
                 shared_write=(Path(tempfile.gettempdir()).resolve(),),
             )
-            page = (
-                "data:text/html,<body><script>"
+            # Chrome 145 prints nothing for a scripted data: URL, and it will
+            # not create a WebGL context unless SwiftShader is requested.
+            page = workspace / "webgl.html"
+            page.write_text(
+                "<body><script>"
                 "var g=document.createElement('canvas').getContext('webgl');"
-                "document.body.textContent='WEBGL='+(g?'ok':'none')</script>"
+                "document.body.textContent='WEBGL='+(g?'ok':'none')</script>",
+                encoding="utf-8",
             )
             proc = self._run(
                 roots,
@@ -799,9 +804,11 @@ class TestMacJailBootstrap:
                     str(shell),
                     "--headless",
                     "--no-sandbox",
+                    "--enable-unsafe-swiftshader",
+                    "--virtual-time-budget=2000",
                     f"--user-data-dir={workspace / 'profile'}",
                     "--dump-dom",
-                    page,
+                    page.as_uri(),
                 ],
                 cwd=workspace,
             )

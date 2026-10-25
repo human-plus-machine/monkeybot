@@ -176,7 +176,7 @@ Only if the user is changing monkeybot itself (not creating an agent):
 git clone https://github.com/human-plus-machine/monkeybot.git
 cd monkeybot && uv sync
 cd cli && uv sync
-uv tool install --editable .
+uv tool install --editable . --overrides src/monkeybot_cli/overrides.txt
 ```
 
 ## Rules

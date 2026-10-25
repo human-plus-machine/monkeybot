@@ -34,7 +34,7 @@ unset VIRTUAL_ENV
 
 echo "==> uv tool install monkeybot-cli (isolated tool env)"
 uv tool uninstall monkeybot-cli >/dev/null 2>&1 || true
-uv tool install --find-links "$WHEELS" monkeybot-cli
+uv tool install --find-links "$WHEELS" --overrides "$ROOT/cli/src/monkeybot_cli/overrides.txt" monkeybot-cli
 
 command -v monkeybot >/dev/null
 monkeybot --help >/dev/null

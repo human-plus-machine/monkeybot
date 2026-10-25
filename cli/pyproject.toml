@@ -23,6 +23,8 @@ monkeybot = "monkeybot_cli.main:main"
 
 [tool.uv]
 # browser-harness 0.1.13 pins pillow==12.3.0, which is still inside the Pillow 13 advisory range.
+# uv lock and uv sync honor this. uv tool install and uv pip install do not;
+# those commands pass src/monkeybot_cli/overrides.txt via --overrides.
 override-dependencies = ["pillow>=13"]
 
 [tool.uv.sources]

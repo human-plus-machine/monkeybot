@@ -57,6 +57,7 @@ def test_run_new_creates_bundle(tmp_path: Path) -> None:
     assert f"monkeybot[gemini,sandbox,web-search,memory]{COMPATIBLE_CORE_RANGE}" in pyproject
     assert '"monkeybot-browser-mcp>=0.2.0,<1"' in pyproject
     assert "[tool.uv]\npackage = false" in pyproject
+    assert 'override-dependencies = ["pillow>=13"]' in pyproject
     assert "[tool.uv.sources]" not in pyproject
 
 

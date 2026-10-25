@@ -335,6 +335,8 @@ def write_agent_pyproject(
             "]\n"
             "\n[tool.uv]\n"
             "package = false\n"
+            "# browser-harness pins Pillow 12.3.0; 13 is the patched release.\n"
+            'override-dependencies = ["pillow>=13"]\n'
         ),
         encoding="utf-8",
     )

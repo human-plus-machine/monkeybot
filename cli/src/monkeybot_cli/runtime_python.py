@@ -708,8 +708,20 @@ def _install_managed_runtime(
         interpreter = _managed_interpreter(staging)
         if interpreter is None:
             raise _managed_runtime_error(f"no interpreter was created in {staging}")
+        # browser-harness pins pillow==12.3.0. The checkout override in
+        # pyproject.toml is not read by `uv pip install`.
+        overrides = Path(__file__).resolve().parent / "overrides.txt"
         _run_provisioning(
-            ["uv", "pip", "install", "--python", str(interpreter), *requirements],
+            [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                str(interpreter),
+                "--overrides",
+                str(overrides),
+                *requirements,
+            ],
             "uv pip install",
         )
         staged = RuntimePython([str(interpreter)], MANAGED_RUNTIME_SOURCE, agent_root)

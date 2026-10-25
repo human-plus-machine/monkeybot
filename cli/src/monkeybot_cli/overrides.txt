@@ -1,0 +1,5 @@
+# browser-harness 0.1.13 requires pillow==12.3.0. That release is inside
+# advisories fixed in Pillow 13. [tool.uv] override-dependencies applies this
+# floor to uv lock and uv sync only. uv tool install and uv pip install need
+# this file via --overrides.
+pillow>=13
