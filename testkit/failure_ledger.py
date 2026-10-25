@@ -12,6 +12,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from testkit.failures.catalog import catalog_expect
 from testkit.failures.store import (
     append_index,
     append_jsonl,
@@ -161,7 +162,7 @@ class LedgerWriter:
                 "artifacts": list(fields.get("artifacts") or []),
                 "repro": fields.get("repro") or repro_command(nodeid),
                 "fingerprint": fp,
-                "catalog_expect": None,
+                "catalog_expect": catalog_expect(case_id),
             }
             if "live" in fields:
                 record["live"] = fields["live"]

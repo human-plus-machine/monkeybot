@@ -1,0 +1,14 @@
+id: regression/t2/loop/scenarios/loop/turn_completion
+case: T2-LOOP-01
+description: Basic task reaches TurnComplete without errors
+mode: scripted
+driver: loop
+messages:
+- Say hello
+script:
+- - type: text
+    text: Hello!
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true

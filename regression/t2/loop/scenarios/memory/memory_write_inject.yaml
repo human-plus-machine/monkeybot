@@ -1,0 +1,18 @@
+id: regression/t2/loop/scenarios/memory/memory_write_inject
+case: T2-MEM-08
+description: Known memory line appears in injected context
+mode: scripted
+driver: loop
+messages:
+- Tell me about project-alpha
+memory:
+  index:
+  - project-alpha is the main initiative for Q3
+script:
+- - type: text
+    text: project-alpha is...
+  - type: done
+assertions:
+  memory_injected:
+    contains: project-alpha is the main initiative for Q3
+  turn_completed: true

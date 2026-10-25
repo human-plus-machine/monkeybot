@@ -1,0 +1,21 @@
+id: regression/t2/loop/scenarios/shell/run_command
+case: T2-SHELL-01
+description: Shell request triggers a shell-category tool
+mode: scripted
+driver: loop
+messages:
+- Run `echo hello` and tell me what it printed.
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      command: echo hello
+  - type: done
+- - type: text
+    text: It printed hello.
+  - type: done
+assertions:
+  tool_categories_used:
+  - shell
+  turn_completed: true

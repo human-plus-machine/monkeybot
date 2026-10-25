@@ -1,0 +1,36 @@
+id: regression/t2/loop/scenarios/file/tool_replace_apply_patch
+case: T2-FILE-17
+description: Edit request triggers replace_in_file, follow-up multi-file edit triggers apply_patch
+mode: scripted
+driver: loop
+messages:
+- 'Fix the typo in notes.txt: change ''helo'' to ''hello'', then also add a new line to config.txt.'
+script:
+- - type: tool_call
+    call_id: c1
+    name: replace_in_file
+    args:
+      path: notes.txt
+      old_string: helo
+      new_string: hello
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: apply_patch
+    args:
+      patch_text: |
+        *** Begin Patch
+        *** Update File: config.txt
+        @@
+        -old line
+        +old line
+        +new line
+        *** End Patch
+  - type: done
+- - type: text
+    text: Fixed the typo and updated config.txt.
+  - type: done
+assertions:
+  tool_categories_used:
+  - write
+  turn_completed: true

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from testkit.failures.catalog import catalog_expect
 from testkit.failures.store import list_run_files, read_jsonl, run_failures
 
 REPO = Path(__file__).resolve().parents[3]
@@ -342,7 +343,11 @@ def test_case_marker_and_path_tier(pytester: pytest.Pytester, inner: Path) -> No
     assert marked["tier"] == "t2"
     assert marked["case"] == "T2-LOOP-07"
     assert marked["area"] == "LOOP"
-    assert marked["catalog_expect"] is None
+    assert marked["catalog_expect"] == catalog_expect("T2-LOOP-07")
+    assert marked["catalog_expect"] == (
+        "Three identical `read_file` calls: `doom_loop`; next provider request has empty tools; "
+        "recovery note in system text."
+    )
     pathed = next(record for nodeid, record in by_node.items() if "test_path.py" in nodeid)
     assert pathed["tier"] == "t1"
     assert pathed["case"] is None

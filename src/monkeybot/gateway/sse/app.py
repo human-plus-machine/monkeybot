@@ -99,7 +99,7 @@ from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.runtime.loop_hooks import _fire_hook
 from monkeybot.core.runtime.loop_messages import _user_text_from_content
-from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
+from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider, scripted_provider_from_env
 from monkeybot.core.tools.background_jobs import jobs_killed_at_turn_end_error
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.grant_store import build_grants_persist_hook
@@ -947,6 +947,9 @@ def _default_agent_path(bus: SessionBus) -> Path:
 
 def _scripted_fake_provider() -> Provider:
     """Deterministic provider for ``MODEL_PROVIDER=fake`` (tests and local dev)."""
+    scripted = scripted_provider_from_env()
+    if scripted is not None:
+        return scripted
     raw = current_env("MONKEYBOT_FAKE_PROVIDER_EVENTS", "")
     if not raw:
         return ScriptedFakeProvider(

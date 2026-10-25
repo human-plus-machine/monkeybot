@@ -54,7 +54,7 @@ from monkeybot.core.subagents.subagent_proto import (
     resolve_default_agent_md_path,
     resolve_project_path,
 )
-from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
+from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider, scripted_provider_from_env
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
 from monkeybot.core.tools.path_grant_inspector import PathGrantInspector
@@ -240,6 +240,10 @@ def _resolve_provider() -> Provider:
     )
     if mode != "fake":
         return get_provider_config(provider=mode, config=cfg).provider
+
+    scripted = scripted_provider_from_env()
+    if scripted is not None:
+        return scripted
 
     import json
 

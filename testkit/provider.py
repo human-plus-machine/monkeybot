@@ -6,7 +6,12 @@ from collections.abc import AsyncIterator, Sequence
 from typing import cast
 
 from monkeybot.core.llm.provider import Message, ProviderEvent
-from monkeybot.core.testing.mocks_provider import fake_provider_prompt_tokens
+from monkeybot.core.testing.mocks_provider import (
+    ScriptedProvider as ScriptedProvider,
+)
+from monkeybot.core.testing.mocks_provider import (
+    fake_provider_prompt_tokens,
+)
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.types.types_tools import ToolDef
 
