@@ -43,13 +43,13 @@ Status values (same for tasks and phases): `todo`, `in-progress`, `blocked`, `do
 | P0A-04 | done | cursor | 2026-10-25 | #336 | tier-1 tests in tests/unit; observability has no __init__.py |
 | P0A-05 | done | cursor | 2026-10-25 | #336 | integration and acceptance tests are t2; ci-local.sh passes |
 | P0A-06 | done | cursor | 2026-10-25 | #336 | empty test dirs removed; exit checks hold |
-| P0B-01 | done | cursor | 2026-10-25 | uncommitted | strict multi-turn ScriptedProvider; fake script env |
-| P0B-02 | done | cursor | 2026-10-25 | uncommitted | scenario models; 104 selftests passed |
-| P0B-03 | done | cursor | 2026-10-25 | uncommitted | assertion keys and 8 invariants; 151 selftests |
-| P0B-04 | done | cursor | 2026-10-25 | uncommitted | loop driver and YAML collector; throwaway scenario deleted |
-| P0B-05 | done | cursor | 2026-10-25 | uncommitted | 19 scenarios migrated; error codes read from ToolCallResult.error |
-| P0B-06 | done | cursor | 2026-10-25 | uncommitted | 419 catalog rows; pairing test; prompt prints Expect |
-| P0B-07 | done | cursor | 2026-10-25 | uncommitted | root conftest loads otel fixtures; gate under 2 min |
+| P0B-01 | done | cursor | 2026-10-25 | #337 | strict multi-turn ScriptedProvider; fake script env |
+| P0B-02 | done | cursor | 2026-10-25 | #337 | scenario models; 104 selftests passed |
+| P0B-03 | done | cursor | 2026-10-25 | #337 | assertion keys and 8 invariants; 151 selftests |
+| P0B-04 | done | cursor | 2026-10-25 | #337 | loop driver and YAML collector; throwaway scenario deleted |
+| P0B-05 | done | cursor | 2026-10-25 | #337 | 19 scenarios migrated; error codes read from ToolCallResult.error |
+| P0B-06 | done | cursor | 2026-10-25 | #337 | 419 catalog rows; pairing test; prompt prints Expect |
+| P0B-07 | done | cursor | 2026-10-25 | #337 | root conftest loads otel fixtures; gate under 2 min |
 | P1-01 | todo | | | | |
 | P1-02 | todo | | | | |
 | P1-03 | todo | | | | |
