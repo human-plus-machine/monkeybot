@@ -103,7 +103,7 @@ uv tool install monkeybot-cli
 
 # Harness contributors only (editable checkout):
 #   uv sync --extra cli            # or cli-realtime
-#   cd cli && uv tool install --editable .
+#   cd cli && uv tool install --editable . --overrides src/monkeybot_cli/overrides.txt
 ```
 
 ---

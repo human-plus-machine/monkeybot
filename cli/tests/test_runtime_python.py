@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from packaging.requirements import Requirement
 
+import monkeybot_cli.runtime_python as runtime_python_mod
 from monkeybot_cli.runtime_python import (
     CORE_PROBE,
     MANAGED_RUNTIME_SOURCE,
@@ -662,6 +663,8 @@ def test_prepare_config_only_provisions_managed_runtime_when_cache_cold(
         "install",
         "--python",
         str(staging / "bin" / "python"),
+        "--overrides",
+        str(Path(runtime_python_mod.__file__).resolve().parent / "overrides.txt"),
         pin,
     ]
     assert f"provisioning {pin}" in capsys.readouterr().out
@@ -902,6 +905,8 @@ def test_managed_runtime_pins_the_running_core_version(
     assert requirement.name == "monkeybot"
     assert requirement.extras == {"memory", "web-search"}
     assert str(requirement.specifier) == f"=={package_version('monkeybot')}"
+    override_at = install.index("--overrides")
+    assert install[override_at + 1].endswith(f"{Path('monkeybot_cli') / 'overrides.txt'}")
 
 
 def test_managed_runtime_fail_closed_when_install_fails(

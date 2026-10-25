@@ -99,7 +99,8 @@ dev = [
 [tool.uv]
 default-groups = ["dev"]
 # browser-harness 0.1.13 pins pillow==12.3.0. That pin is inside the
-# Pillow 13 advisory range, so the lock overrides it.
+# Pillow 13 advisory range, so the lock overrides it. Tool and pip installs
+# pass cli/src/monkeybot_cli/overrides.txt; this table does not apply to them.
 override-dependencies = ["pillow>=13"]
 
 [tool.uv.sources]

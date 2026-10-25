@@ -25,6 +25,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `uv tool install` of the CLI resolves again. browser-harness 0.1.13 pins Pillow 12.3.0, and declaring Pillow 13 as a normal dependency conflicts with that pin. Lock and sync already override it; tool and pip installs now pass the same override.
+
 - OpenAI-compatible providers still import when that tiktoken encoding file cannot be read at startup. Token counting raises the same error on the turn that needs the encoder, and a later successful read is cached as usual.
 - Cancelling gateway, harness, or subagent startup while an `autoConnect` server is still connecting closes that server instead of leaving its process behind.
 - The managed memory runtime installs `monkeybot-browser-mcp` next to `monkeybot[memory]`. A cached runtime that cannot import `browser_mcp` is rebuilt, so a local CLI gateway can start the browser server with its own interpreter.
