@@ -119,13 +119,14 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["monkeybot"]
+known-first-party = ["monkeybot", "testkit", "regression"]
 
 [tool.ruff.lint.per-file-ignores]
 # ensure_gateway_runtime_env() must run before monkeybot imports read os.environ
 "src/monkeybot/gateway/sse/app.py" = ["E402"]
 
 [tool.mypy]
+files = ["src/monkeybot", "testkit"]
 python_version = "3.11"
 strict = true
 warn_return_any = true

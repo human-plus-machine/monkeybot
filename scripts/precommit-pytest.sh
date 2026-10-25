@@ -24,5 +24,5 @@ if ((${#test_files[@]} > 0)); then
   [[ $code -eq 5 ]] && exit 0
   exit "$code"
 else
-  uv run pytest tests/ -q --co -q --no-header
+  uv run pytest tests regression --co -q
 fi

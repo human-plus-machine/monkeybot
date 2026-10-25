@@ -24,7 +24,7 @@ repos:
         name: pytest (changed tests or collection check)
         entry: bash scripts/precommit-pytest.sh
         language: system
-        files: ^(src/monkeybot|tests)/.*\.py$
+        files: ^(src/monkeybot|testkit|tests|regression)/.*\.py$
         pass_filenames: true
 
       - id: local-ci

@@ -39,6 +39,7 @@ workspace/.monkeybot/
 
 # Testing & coverage
 /test-runs/
+/.cursor/hooks/.state/
 .pytest_cache/
 .coverage
 htmlcov/

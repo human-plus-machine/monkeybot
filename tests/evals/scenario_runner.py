@@ -23,8 +23,12 @@ from monkeybot.core.runtime.loop import run
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.read_ledger import FileReadLedger
 from monkeybot.core.tools.types import ToolExecutionResult
-from tests.core.test_core_tool_executor import _mem_sub, _NoMCP
-from tests.core.test_loop import AllowInspector, FakeHistory, FakeProvider, RecordingExecutor
+from testkit.executors import RecordingExecutor
+from testkit.history import FakeHistory
+from testkit.inspectors import AllowInspector
+from testkit.mcp import NoMCP as _NoMCP
+from testkit.memory import mem_sub as _mem_sub
+from testkit.provider import FakeProvider
 from tests.evals.eval_hook import EvalHook, EvalRecord
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
