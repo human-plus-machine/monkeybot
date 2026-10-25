@@ -1,4 +1,4 @@
-"""CLI, fingerprint, and open/mark behavior. The catalog Expect line arrives in P0B-06."""
+"""CLI, fingerprint, and open/mark behavior."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import pytest
 
 from testkit.failure_ledger import LedgerWriter
 from testkit.failures.__main__ import main, render_prompt
+from testkit.failures.catalog import catalog_expect
 from testkit.failures.store import (
     area_of,
     fingerprint,
@@ -136,7 +137,7 @@ def test_failure_reopens_after_a_pass(tmp_path: Path, capsys: pytest.CaptureFixt
     assert "count=2" in text
 
 
-def test_mark_round_trip_and_prompt_omits_expect(
+def test_mark_round_trip_and_prompt_includes_expect(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     writer = LedgerWriter(tmp_path)
@@ -183,16 +184,18 @@ def test_mark_round_trip_and_prompt_omits_expect(
 
     assert main(["--ledger-dir", str(tmp_path), "prompt", fp]) == 0
     brief = capsys.readouterr().out
+    expect = catalog_expect("T1-GW-01")
+    assert expect
     assert "Fix the code under test, not the assertion" in brief
     assert "T1-GW-01" in brief
     assert "needs a fix" in brief
-    assert not any(line.startswith("Expect") for line in brief.splitlines())
+    assert f"Expect: {expect}" in brief
     assert render_prompt(failed) == brief
 
     assert main(["--ledger-dir", str(tmp_path), "show", f"{writer.run_id}:1"]) == 0
     shown = json.loads(capsys.readouterr().out)
     assert shown["fingerprint"] == fp
-    assert shown["catalog_expect"] is None
+    assert shown["catalog_expect"] == expect
 
     assert main(["--ledger-dir", str(tmp_path), "export", "--format", "json"]) == 0
     exported = json.loads(capsys.readouterr().out)
@@ -203,6 +206,26 @@ def test_mark_round_trip_and_prompt_omits_expect(
     latest = capsys.readouterr().out
     assert writer.run_id in latest
     assert "tests/unit/test_a.py::test_one" in latest
+
+
+def test_prompt_prints_catalog_expect(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    writer = LedgerWriter(tmp_path)
+    writer.start(argv=["pytest"], markexpr=None, workers=1)
+    failed = _fail(
+        writer,
+        "regression/t2/loop/scenarios/loop/turn_completion.yaml::turn_completion",
+        message="turn did not finish",
+        case="T2-LOOP-01",
+    )
+    writer.finish(exit_status=1, counts=_COUNTS_FAIL, outcomes=[])
+    fp = str(failed["fingerprint"])
+    assert main(["--ledger-dir", str(tmp_path), "prompt", fp]) == 0
+    brief = capsys.readouterr().out
+    expect = "Text-only turn completes, one provider call."
+    assert catalog_expect("T2-LOOP-01") == expect
+    assert f"Expect: {expect}" in brief
+    assert "Fix the code under test, not the assertion" in brief
+    assert failed["catalog_expect"] == expect
 
 
 def test_killed_writer_is_marked_incomplete(tmp_path: Path) -> None:

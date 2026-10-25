@@ -17,15 +17,15 @@ Status values (same for tasks and phases): `todo`, `in-progress`, `blocked`, `do
 ## Current
 
 - **In progress:** none
-- **Last update:** 2026-10-25, P0A-06 done
-- **Next task:** P0B-01
+- **Last update:** 2026-10-25, P0B-07 done
+- **Next task:** P1-01
 
 ## Phases
 
 | Phase | Name | Tasks | Done | Status | Exit check | Completed |
 |---|---|---|---|---|---|---|
 | [0a](phases/phase-0a-tier1-reorg.md) | Tier-1 reorganization and failure ledger | 6 | 6 | done | P0A-06 | 2026-10-25 |
-| [0b](phases/phase-0b-foundations.md) | Foundations and docs/testing.md | 7 | 0 | todo | P0B-07 | |
+| [0b](phases/phase-0b-foundations.md) | Foundations and docs/testing.md | 7 | 7 | done | P0B-07 | 2026-10-25 |
 | [1](phases/phase-1-t2-harness-logic.md) | T2 harness logic | 18 | 0 | todo | P1-18 | |
 | [2](phases/phase-2-contracts-and-gateway.md) | Contracts and gateway | 10 | 0 | todo | all P2 tasks done | |
 | [3](phases/phase-3-record-replay.md) | Record / replay | 4 | 0 | todo | all P3 tasks done | |
@@ -43,13 +43,13 @@ Status values (same for tasks and phases): `todo`, `in-progress`, `blocked`, `do
 | P0A-04 | done | cursor | 2026-10-25 | #336 | tier-1 tests in tests/unit; observability has no __init__.py |
 | P0A-05 | done | cursor | 2026-10-25 | #336 | integration and acceptance tests are t2; ci-local.sh passes |
 | P0A-06 | done | cursor | 2026-10-25 | #336 | empty test dirs removed; exit checks hold |
-| P0B-01 | todo | | | | |
-| P0B-02 | todo | | | | |
-| P0B-03 | todo | | | | |
-| P0B-04 | todo | | | | |
-| P0B-05 | todo | | | | |
-| P0B-06 | todo | | | | |
-| P0B-07 | todo | | | | |
+| P0B-01 | done | cursor | 2026-10-25 | uncommitted | strict multi-turn ScriptedProvider; fake script env |
+| P0B-02 | done | cursor | 2026-10-25 | uncommitted | scenario models; 104 selftests passed |
+| P0B-03 | done | cursor | 2026-10-25 | uncommitted | assertion keys and 8 invariants; 151 selftests |
+| P0B-04 | done | cursor | 2026-10-25 | uncommitted | loop driver and YAML collector; throwaway scenario deleted |
+| P0B-05 | done | cursor | 2026-10-25 | uncommitted | 19 scenarios migrated; error codes read from ToolCallResult.error |
+| P0B-06 | done | cursor | 2026-10-25 | uncommitted | 419 catalog rows; pairing test; prompt prints Expect |
+| P0B-07 | done | cursor | 2026-10-25 | uncommitted | root conftest loads otel fixtures; gate under 2 min |
 | P1-01 | todo | | | | |
 | P1-02 | todo | | | | |
 | P1-03 | todo | | | | |
@@ -213,4 +213,84 @@ Catalog:   n/a before P0B-06
 Recorded failures not fixed: test-runs/20261025T204513Z-76ae692-86445.jsonl, case null, test-runs/test_p0a06_hook_probe.py, AssertionError: P0A-06 hook probe (probe deleted). test-runs/20261025T204543Z-76ae692-88316.jsonl, case null, test-runs/test_p0a06_hook_probe.py, AssertionError: P0A-06 hook probe (probe deleted; this is the run whose shell exit was 1 and whose notice came from postToolUseFailure).
 Open questions: none
 Next:      P0B-01
+
+### 2026-10-25 P0B-02 cursor
+Task:      P0B-02 Scenario schema (models only)
+Status:    done
+Changed:   regression/schema/{__init__,scenario,events,steps}.py; regression/selftest/{__init__,test_scenario_schema}.py
+Verify:    uv run pytest regression/selftest -q → collected 104, 104 passed in 0.17s. uv run mypy testkit regression/schema → 1 error, testkit/context.py:80 unused type: ignore (pre-existing; file not edited). regression/schema reported no mypy errors.
+Catalog:   n/a before P0B-06
+Recorded failures not fixed: none
+Open questions: none
+Next:      P0B-03
+
+### 2026-10-25 P0B-01 cursor
+Task:      P0B-01 Multi-turn strict ScriptedProvider
+Status:    done
+Changed:   src/monkeybot/core/testing/mocks_provider.py (ScriptedProvider, RaiseStep, YAML/JSON loader; ScriptedFakeProvider unchanged). testkit/provider.py re-exports ScriptedProvider. tests/unit/testkit/test_scripted_provider.py. Extra, step 5: src/monkeybot/gateway/sse/app.py and src/monkeybot/core/subagents/subagent_worker.py call scripted_provider_from_env when MONKEYBOT_FAKE_PROVIDER_SCRIPT is set; unset still uses MONKEYBOT_FAKE_PROVIDER_EVENTS and the existing defaults. The script path is not an ENV_MAP key, so a snapshot without it falls through to the process environment.
+Verify:    uv run pytest tests/unit/testkit tests/unit/core/testing -q → 48 passed in 124.00s. uv run pytest tests -q -n auto → 3324 passed, 25 skipped in 78.42s. uv run mypy src/monkeybot testkit → Success: no issues found in 279 source files.
+Catalog:   n/a before P0B-06
+Recorded failures not fixed: none
+Open questions: none
+Next:      P0B-04 waits on P0B-03 (P0B-02 is already done; P0B-03 is in progress)
+
+### 2026-10-25 P0B-03 cursor
+Task:      P0B-03 Assertion engine and global invariants
+Status:    done
+Changed:   regression/schema/assertions.py, regression/schema/invariants.py, regression/selftest/test_assertions.py, regression/selftest/test_invariants.py. regression/schema/scenario.py calls validate_assertions at the end of the mode validator so wrong-mode keys and verifier_on/verifier_off with EVAL_VERIFIER_MODE unset fail at load; assertions stay stored unparsed. evals/assertions.py was not edited. tests/contracts/goldens/sse/schema.json does not exist; sse_schema reads that path and fails closed, and the selftests pass a temporary schema instead of inventing one.
+Verify:    uv run pytest regression/selftest -q → 151 passed in 0.28s (the previous 104 schema tests still pass).
+Catalog:   n/a before P0B-06
+Recorded failures not fixed: none
+Open questions: none
+Next:      P0B-04
+
+### 2026-10-25 P0B-04 cursor
+Task:      P0B-04 Loop driver, record hook, YAML collector
+Status:    done
+Changed:   regression/plugin.py (options and t2 YAML collection). regression/conftest.py (T4/T5 deselected unless --live; tier marks kept). pytest.ini addopts adds -p regression.plugin. regression/drivers/{__init__.py,loop.py}. git mv tests/evals/eval_hook.py → regression/drivers/record.py. tests/evals/scenario_runner.py import path only. regression/fixtures/configs/agent.base.yaml. Throwaway regression/t2/loop/scenarios/p0b04_probe.yaml created, run, and deleted.
+Verify:    uv run pytest regression -k p0b04_probe --collect-only → node id regression/t2/loop/scenarios/p0b04_probe.yaml::p0b04_probe; 166 collected, 165 deselected, 1 selected; -m t2 collected that item. uv run pytest regression -k p0b04_probe -n auto -q → 14 workers [1 item], 1 passed in 7.36s. Broken assertion plus a leftover script turn: uv run pytest regression/t2/loop/scenarios/p0b04_probe.yaml -n auto -q → 1 failed in 7.32s; strict_script and response_contains both fired. Ledger test-runs/20261025T221458Z-d57f399-61565.jsonl has tier t2 and case T2-LOOP-P0B04. Probe file deleted. uv run pytest regression -q → 164 passed, 1 error in 1.37s (151 selftests passed). uv run pytest tests/evals --co -q → 20 collected. CI=true uv run pytest regression/selftest --co -q --update-golden → exit 4, "--update-golden is refused when CI is set".
+Catalog:   n/a before P0B-06
+Recorded failures not fixed: test-runs/20261025T221458Z-d57f399-61565.jsonl, case T2-LOOP-P0B04, regression/t2/loop/scenarios/p0b04_probe.yaml::p0b04_probe, strict_script leftover plus response_contains 'not-in-the-reply' (throwaway deleted; assertion not weakened). test-runs/20261025T221539Z-d57f399-64137.jsonl, case null, regression/t2/python/test_observability_integration.py::test_integrated_run_task_subagent_shares_parent_trace_id, fixture 'otel_memory_exporter' not found. That fixture is registered from tests/conftest.py, which a regression-only run does not load. Not edited.
+Open questions: none
+Next:      P0B-05
+
+### 2026-10-25 P0B-05 cursor
+Task:      P0B-05 Migrate the 19 tests/evals scenarios
+Status:    blocked (T2-CODE-01 tool_error_codes cannot see details.code)
+Changed:   git mv of the 19 tests/evals/scenarios/*.yaml files into regression/t2/loop/scenarios/<area>/ with the §4.4 names, then converted to the unified schema (messages, script, memory.index, hooks: [verification_gate], case, mode: scripted, driver: loop, text_delta → text). Executors left as they were. max_turns dropped (not a legal assertion key; it was a loop cap, not a checked assertion). memory_injected: true became memory_injected.contains of the seeded line. tests/evals/scenarios/ removed. tests/evals/test_agent_behavior.py and tests/evals/scenario_runner.py not deleted. tests/evals/test_verifier_port.py not moved.
+Verify:    uv run pytest regression/t2/loop -q → 1 failed, 18 passed in 43.28s. The 18 passed with invariants on and no invariants_skip. Did not run uv run pytest regression/t2 -q and did not mark done.
+Catalog:   n/a before P0B-06
+Recorded failures not fixed: test-runs/20261025T222328Z-d57f399-92360.jsonl, case T2-CODE-01, regression/t2/loop/scenarios/coding/read_before_write.yaml::read_before_write, tool_error_codes: missing ['read_before_write'] (saw []). The first replace_in_file event has that code in ToolCallResult.error and result ''. _result_failed only parses result. The old scenario_runner parsed result.error. Workspace assertions on the same run passed. Prior, not re-run and not fixed: test-runs/20261025T221539Z-d57f399-64137.jsonl, case null, regression/t2/python/test_observability_integration.py::test_integrated_run_task_subagent_shares_parent_trace_id, fixture 'otel_memory_exporter' not found.
+Open questions: May P0B-05 teach regression/schema/assertions.py _result_failed to take details.code from a JSON envelope on ToolCallResult.error when result has none? That file is outside this task's list. The alternative is to leave T2-CODE-01 failing. I did not add invariants_skip or script_partial, and I did not change the assertion.
+Next:      P0B-06 once unblocked; status.md Next task stays P0B-05
+
+### 2026-10-25 P0B-05 cursor
+Task:      P0B-05 Migrate the 19 tests/evals scenarios
+Status:    done
+Changed:   regression/schema/assertions.py (_result_failed reads details.code from a JSON envelope on ToolCallResult.error when the result body has none; a result-body code still wins; a non-JSON error string is still a failure and adds no code). regression/selftest/test_assertions.py (code only on the error field; non-JSON error invents no code). 19 YAML files under regression/t2/loop/scenarios/<area>/ via git mv from tests/evals/scenarios/, converted to the unified schema. Deleted tests/evals/test_agent_behavior.py and tests/evals/scenario_runner.py. tests/evals/test_verifier_port.py stays. tests/evals/scenarios/ removed.
+Verify:    uv run pytest regression/selftest -q → 153 passed in 0.28s. uv run pytest regression/t2/loop -q → 19 passed in 43.24s, invariants on, no invariants_skip. uv run pytest regression/t2 -q → 32 passed, 1 error in 44.27s.
+Catalog:   n/a before P0B-06
+Recorded failures not fixed: test-runs/20261025T223103Z-d57f399-19977.jsonl, case null, regression/t2/python/test_observability_integration.py::test_integrated_run_task_subagent_shares_parent_trace_id, fixture 'otel_memory_exporter' not found. That fixture is registered from tests/conftest.py, which a regression-only pytest does not load. Not edited.
+Open questions: none
+Next:      P0B-06
+
+### 2026-10-25 P0B-06 cursor
+Task:      P0B-06 docs/testing.md, catalog parser, pairing test
+Status:    done
+Changed:   docs/testing.md (sections 1–9; §8 is 419 rows). testkit/failures/catalog.py (stdlib parser). testkit/failure_ledger.py and testkit/failures/__main__.py (catalog_expect on the record and on prompt). tests/contracts/{__init__,conftest,test_catalog_pairing}.py. tests/unit/testkit/test_failures_cli.py (prompt prints Expect). tests/unit/testkit/test_failure_ledger.py (T2-LOOP-07 catalog_expect is the catalog sentence; the old assertion was None). The 19 migrated scenarios already had case:. Throwaway generator deleted.
+Verify:    uv run pytest tests/contracts/test_catalog_pairing.py -q → 1 passed in 0.68s; uncovered total: 401 of 419. Bogus ID: turn_completion.yaml case set to T2-LOOP-99 → FAILED, AssertionError: regression/t2/loop/scenarios/loop/turn_completion.yaml cites T2-LOOP-99, which is not in the catalog (test-runs/20261025T225641Z-d57f399-12105.jsonl). Restored case: T2-LOOP-01; pairing re-run 1 passed. uv run pytest tests/unit/testkit -q → 44 passed in 124.25s. mypy on catalog.py, __main__.py, failure_ledger.py → success.
+Catalog:   419 §8 rows. 18 Test cells filled, covering all 19 migrated files (T2-TODO-01 lists both todo scenarios). T1-STORE-02, T1-STORE-09, T1-STORE-10, and T1-STORE-11 have an empty Expect because the §6 Asserts cell was empty.
+Recorded failures not fixed: test-runs/20261025T225641Z-d57f399-12105.jsonl, case null, tests/contracts/test_catalog_pairing.py::test_catalog_pairing, AssertionError: turn_completion.yaml cites T2-LOOP-99 (deliberate probe; case restored to T2-LOOP-01). Prior, not re-run and not fixed: test-runs/20261025T223103Z-d57f399-19977.jsonl, case null, regression/t2/python/test_observability_integration.py::test_integrated_run_task_subagent_shares_parent_trace_id, fixture 'otel_memory_exporter' not found.
+Open questions: none
+Next:      P0B-07
+
+### 2026-10-25 P0B-07 cursor
+Task:      P0B-07 Wire regression into the gates; phase exit
+Status:    done
+Changed:   conftest.py (new; pytest_plugins loads tests.unit.observability.conftest when opentelemetry is installed). tests/conftest.py (that pytest_plugins line removed). scripts/ci-local.sh, .pre-commit-config.yaml, and scripts/precommit-pytest.sh already included regression; marker expression unchanged.
+Verify:    uv run pytest regression/t2/loop -q → 19 passed in 43.46s; no invariants_skip in those scenarios. uv run pytest tests/contracts/test_catalog_pairing.py -q → 1 passed in 0.71s; uncovered total: 401 of 419. time uv run pytest regression -m "t1 or t2 or t3" -q -n auto → 186 passed in 17.49s, 21.224s total, exit 0. bash scripts/ci-local.sh → exit 0. Inside it, pytest tests regression -m "t1 or t2 or t3" -q -n auto collected 3518 items and exited 0 (ledger 20261025T231606Z, 23:16:06Z–23:17:55Z); the same command printed 3493 passed, 25 skipped, 71 warnings in 109.12s. No "Plugin already registered". cli pytest 357 passed in 25.13s; browser-mcp 320 passed, 18 skipped in 0.98s.
+Catalog:   pairing test green; uncovered total 401 of 419; no catalog edits
+Recorded failures not fixed: none
+Open questions: none
+Next:      P1-01
 

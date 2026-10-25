@@ -1,0 +1,53 @@
+id: regression/t2/loop/scenarios/coding/fix_failing_test
+case: T2-CODE-04
+description: Scripted read -> edit -> verify -> report run against a real executor and the calc_repo fixture
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: fixtures/coding/calc_repo
+messages:
+- The divide-by-zero test fails. Fix calc/ops.py without touching the tests.
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: calc/ops.py
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: replace_in_file
+    args:
+      path: calc/ops.py
+      old_string: |2
+            return a / b
+      new_string: |2
+            if b == 0:
+                raise ValueError("division by zero")
+            return a / b
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: run_command
+    args:
+      argv:
+      - python
+      - -m
+      - pytest
+      - -q
+      - -p
+      - no:cacheprovider
+  - type: done
+- - type: text
+    text: 'Fixed divide() to raise ValueError on zero. Ran python -m pytest -q: 5 passed.'
+  - type: done
+assertions:
+  tool_categories_used:
+  - write
+  - shell
+  workspace_file_contains:
+    calc/ops.py: division by zero
+  workspace_command_passes:
+  - python -m pytest -q -p no:cacheprovider
+  turn_completed: true
+  no_errors: true

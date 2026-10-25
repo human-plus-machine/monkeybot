@@ -1,0 +1,21 @@
+id: regression/t2/loop/scenarios/web/web_search
+case: T2-WEB-01
+description: Current-events question triggers web_search tool
+mode: scripted
+driver: loop
+messages:
+- What's the latest news on the Rust 1.80 release?
+script:
+- - type: tool_call
+    call_id: c1
+    name: web_search
+    args:
+      query: Rust 1.80 release notes
+  - type: done
+- - type: text
+    text: Rust 1.80 was released with several new stabilized APIs.
+  - type: done
+assertions:
+  tool_categories_used:
+  - web_search
+  turn_completed: true

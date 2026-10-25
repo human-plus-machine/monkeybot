@@ -1,4 +1,9 @@
-"""Mark regression items by the tier directory they live in."""
+"""Mark regression items by the tier directory they live in.
+
+T4 and T5 stay out of a default run. ``--live`` (registered in
+``regression.plugin``) collects them. The other regression options are
+registered there and do nothing in this file.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +12,7 @@ from pathlib import Path
 import pytest
 
 _TIERS = ("t1", "t2", "t3", "t4", "t5")
+_LIVE_TIERS = ("t4", "t5")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -20,3 +26,11 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(pytest.mark.t1)
         elif tier in _TIERS:
             item.add_marker(getattr(pytest.mark, tier))
+    if config.getoption("live"):
+        return
+    dropped = [item for item in items if any(item.get_closest_marker(name) for name in _LIVE_TIERS)]
+    if not dropped:
+        return
+    config.hook.pytest_deselected(items=dropped)
+    dropped_ids = {id(item) for item in dropped}
+    items[:] = [item for item in items if id(item) not in dropped_ids]

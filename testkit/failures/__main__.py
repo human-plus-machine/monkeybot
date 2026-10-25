@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from testkit.failures.catalog import catalog_expect
 from testkit.failures.store import (
     default_ledger_dir,
     find_failure,
@@ -108,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def render_prompt(record: dict[str, Any]) -> str:
-    """Fix brief. The catalog Expect line is added in P0B-06."""
+    """Fix brief, including the catalog Expect text for the case id."""
     path = record.get("path") or ""
     frame = top_in_repo_frame(str(record.get("traceback") or ""))
     related: list[str] = []
@@ -123,25 +124,43 @@ def render_prompt(record: dict[str, Any]) -> str:
         "",
         f"Fingerprint: {record.get('fingerprint')}",
         f"Case: {record.get('case')}",
-        f"Tier: {record.get('tier')}",
-        f"Area: {record.get('area')}",
-        f"Node: {record.get('nodeid')}",
-        f"Phase: {record.get('phase')}",
-        f"Outcome: {record.get('outcome')}",
-        f"Error: {record.get('exc_type')}: {record.get('message')}",
-        f"Repro: {record.get('repro')}",
-        "",
-        "Traceback:",
-        str(record.get("traceback") or ""),
-        "",
-        "Related files:",
     ]
+    expect = _catalog_expect_line(record)
+    if expect is not None:
+        lines.append(f"Expect: {expect}")
+    lines.extend(
+        [
+            f"Tier: {record.get('tier')}",
+            f"Area: {record.get('area')}",
+            f"Node: {record.get('nodeid')}",
+            f"Phase: {record.get('phase')}",
+            f"Outcome: {record.get('outcome')}",
+            f"Error: {record.get('exc_type')}: {record.get('message')}",
+            f"Repro: {record.get('repro')}",
+            "",
+            "Traceback:",
+            str(record.get("traceback") or ""),
+            "",
+            "Related files:",
+        ]
+    )
     if related:
         lines.extend(f"- {item}" for item in related)
     else:
         lines.append("-")
     lines.append("")
     return "\n".join(lines)
+
+
+def _catalog_expect_line(record: dict[str, Any]) -> str | None:
+    case = record.get("case")
+    live = catalog_expect(str(case)) if case else None
+    if live:
+        return live
+    stored = record.get("catalog_expect")
+    if isinstance(stored, str) and stored.strip():
+        return stored.strip()
+    return None
 
 
 def render_export(directory: Path, fmt: str) -> str:

@@ -10,8 +10,6 @@ from typing import Any
 
 import pytest
 
-pytest_plugins = ["tests.unit.observability.conftest"]
-
 
 @pytest.fixture(autouse=True)
 def _default_sandbox_disabled(monkeypatch: pytest.MonkeyPatch) -> None:

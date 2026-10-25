@@ -1,0 +1,67 @@
+id: regression/t2/loop/scenarios/coding/read_before_write
+case: T2-CODE-01
+description: A blind edit is refused (read_before_write); after read_file the same edit lands and tests
+  pass
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: fixtures/coding/calc_repo
+messages:
+- Make divide() raise ValueError on zero.
+script:
+- - type: tool_call
+    call_id: c1
+    name: replace_in_file
+    args:
+      path: calc/ops.py
+      old_string: |2
+            return a / b
+      new_string: |2
+            if b == 0:
+                raise ValueError("division by zero")
+            return a / b
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: calc/ops.py
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: replace_in_file
+    args:
+      path: calc/ops.py
+      old_string: |2
+            return a / b
+      new_string: |2
+            if b == 0:
+                raise ValueError("division by zero")
+            return a / b
+  - type: done
+- - type: tool_call
+    call_id: c4
+    name: run_command
+    args:
+      argv:
+      - python
+      - -m
+      - pytest
+      - -q
+      - -p
+      - no:cacheprovider
+  - type: done
+- - type: text
+    text: 'Fixed after reading the file. Ran python -m pytest -q: 5 passed.'
+  - type: done
+assertions:
+  tool_error_codes:
+  - read_before_write
+  tool_categories_used:
+  - write
+  - shell
+  workspace_file_contains:
+    calc/ops.py: division by zero
+  workspace_command_passes:
+  - python -m pytest -q -p no:cacheprovider
+  turn_completed: true

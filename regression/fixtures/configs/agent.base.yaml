@@ -1,0 +1,21 @@
+# Base config every scripted scenario's config: merges over.
+# model.* is YAML-only. config.env wins over these values for one run.
+
+harness:
+  mode: turn_based
+
+runtime:
+  log_level: WARNING
+
+model:
+  provider: fake
+  name: fake
+  context_window: 200000
+  max_turns: 10
+
+memory:
+  enabled: false
+
+coding:
+  verification_gate:
+    enabled: false

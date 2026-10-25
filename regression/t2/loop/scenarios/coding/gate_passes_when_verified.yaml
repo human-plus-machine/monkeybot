@@ -1,0 +1,50 @@
+id: regression/t2/loop/scenarios/coding/gate_passes_when_verified
+case: T2-CODE-03
+description: 'A verified edit is not held back: the first final answer is accepted'
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: fixtures/coding/calc_repo
+hooks:
+- verification_gate
+messages:
+- Fix divide() and tell me it works.
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: calc/ops.py
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: replace_in_file
+    args:
+      path: calc/ops.py
+      old_string: |2
+            return a / b
+      new_string: |2
+            if b == 0:
+                raise ValueError("division by zero")
+            return a / b
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: run_command
+    args:
+      argv:
+      - python
+      - -m
+      - pytest
+      - -q
+      - -p
+      - no:cacheprovider
+  - type: done
+- - type: text
+    text: 'Fixed; python -m pytest -q: 5 passed.'
+  - type: done
+assertions:
+  provider_calls: 4
+  workspace_command_passes:
+  - python -m pytest -q -p no:cacheprovider
+  turn_completed: true
