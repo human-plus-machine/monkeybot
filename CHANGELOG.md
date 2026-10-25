@@ -26,6 +26,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - `uv tool install` of the CLI resolves again. browser-harness 0.1.13 pins Pillow 12.3.0, and declaring Pillow 13 as a normal dependency conflicts with that pin. Lock and sync already override it; tool and pip installs now pass the same override.
+- Jailed headless Chromium can allocate its WebGL backbuffer again. Chrome 145 needs the IOSurface user client, and SwiftShader has to be requested explicitly.
 
 - OpenAI-compatible providers still import when that tiktoken encoding file cannot be read at startup. Token counting raises the same error on the turn that needs the encoder, and a later successful read is cached as usual.
 - Cancelling gateway, harness, or subagent startup while an `autoConnect` server is still connecting closes that server instead of leaving its process behind.

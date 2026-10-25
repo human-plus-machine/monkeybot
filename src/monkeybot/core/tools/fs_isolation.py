@@ -614,10 +614,12 @@ def _seatbelt_jail_profile(roots: JailRoots) -> str:
         # GPU grandchildren included. `same-sandbox` reaches every jailed
         # descendant and nothing outside the jail (pid 1 stays denied).
         "(allow signal (target same-sandbox))",
-        # Headless Chromium (cadgen snapshot) SIGSEGVs under deny-default
-        # without these. Measured against chromium-headless-shell with WebGL
-        # (SwiftShader): one IOKit class and its own bootstrap names suffice.
+        # Headless Chromium SIGSEGVs under deny-default without Mach bootstrap
+        # and RootDomainUserClient. Chrome 145 also allocates the WebGL
+        # backbuffer as an IOSurface; without that user client the context
+        # comes back as WEBGL=none.
         '(allow iokit-open (iokit-user-client-class "RootDomainUserClient"))',
+        '(allow iokit-open (iokit-user-client-class "IOSurfaceRootUserClient"))',
         '(allow mach-register (global-name-regex #"^org\\.chromium\\."))',
         "(allow mach-lookup)",
         "(allow sysctl-read)",
