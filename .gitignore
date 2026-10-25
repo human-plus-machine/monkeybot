@@ -38,6 +38,7 @@ workspace/.monkeybot/
 *.sqlite.writer-pid
 
 # Testing & coverage
+/test-runs/
 .pytest_cache/
 .coverage
 htmlcov/
