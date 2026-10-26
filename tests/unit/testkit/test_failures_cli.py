@@ -285,6 +285,29 @@ def test_prune_keeps_recent_runs_and_ignores_subfolders(
     assert main(["--ledger-dir", str(tmp_path), "prune"]) == 0
 
 
+def test_prune_removes_an_empty_timestamp_folder(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_TEST_LEDGER_KEEP", "1")
+    monkeypatch.setenv("MONKEYBOT_TEST_LEDGER_DAYS", "30")
+    old_dir = tmp_path / "20200101T000000Z"
+    old_dir.mkdir()
+    old = old_dir / "20200101T000000Z-abcdef0-1.jsonl"
+    old.write_text("{}\n", encoding="utf-8")
+    old.with_name(old.name.replace(".jsonl", ".outcomes.tsv.gz")).write_bytes(b"")
+    kept_dir = tmp_path / "20261025T000000Z"
+    kept_dir.mkdir()
+    kept = kept_dir / "20261025T000000Z-abcdef0-2.jsonl"
+    kept.write_text("{}\n", encoding="utf-8")
+    kept.with_name(kept.name.replace(".jsonl", ".outcomes.tsv.gz")).write_bytes(b"")
+
+    removed = prune(tmp_path)
+    assert old.name in removed
+    assert not old_dir.exists()
+    assert kept.is_file()
+    assert kept_dir.is_dir()
+
+
 def test_group_latest_lists_every_run_in_the_group(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

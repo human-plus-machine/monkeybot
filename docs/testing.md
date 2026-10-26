@@ -100,7 +100,7 @@ When at least one failure was recorded, the plugin prints:
 
 ```text
 ==================== monkeybot failure ledger ====================
-4 failures recorded to test-runs/20261025T153012Z-3f2a9c1-48211.jsonl
+4 failures recorded to test-runs/20261025T153012Z/20261025T153012Z-3f2a9c1-48211.jsonl
   T2-LOOP-07  regression/t2/loop/scenarios/loop/doom_identical_read.yaml   AssertionError
   T1-GW-01    tests/contracts/test_sse_schema.py::test_every_kind           ValidationError
   ...

@@ -373,4 +373,7 @@ def test_run_file_is_valid_jsonl(pytester: pytest.Pytester, inner: Path) -> None
     assert latest["complete"] is True
     assert latest["run_id"]
     assert (inner / "index.jsonl").is_file()
+    stamp = files[0].name.split("-", 1)[0]
+    assert files[0].parent == inner / stamp
     assert files[0].with_name(files[0].name.replace(".jsonl", ".outcomes.tsv.gz")).is_file()
+    assert not (inner / files[0].name).exists()
