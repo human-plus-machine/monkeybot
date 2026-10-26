@@ -51,7 +51,12 @@ from regression.drivers.bundles.subagents import (
 from regression.drivers.bundles.verifier import verifier_store_snapshot
 from regression.drivers.bundles.workspace import resolve_workspace
 from regression.drivers.record import EvalHook, EvalRecord
-from regression.drivers.support.config import _LiveConfig, _scenario_config, _with_gate_enabled
+from regression.drivers.support.config import (
+    _LiveConfig,
+    _scenario_config,
+    _with_gate_enabled,
+    refresh_scenario_env,
+)
 from regression.drivers.support.env import _expand_scenario_env, _pushed_env
 from regression.drivers.support.executor import _ObservedExecutor
 from regression.drivers.support.paths import _SESSION_ID
@@ -225,6 +230,9 @@ async def _run(scenario: Scenario, workdir: Path) -> LoopRun:
         history = FakeHistory(list(scenario.history))
         clock = FakeClock()
         _expand_scenario_env(ctx.env, ctx.workspace)
+        ctx.cfg = refresh_scenario_env(ctx.cfg, ctx.env)
+        if isinstance(ctx.executor, _ObservedExecutor):
+            ctx.executor._inner._config = ctx.cfg
         groups = _session_groups(scenario, ctx.messages, ctx.workspace, ctx.tokens)
         with _pushed_env(ctx.env), _installed_secret_scanner(ctx.scanner_mode):
             events, slices = await _drive(

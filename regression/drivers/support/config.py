@@ -94,6 +94,21 @@ def _snapshot_from_document(
     return cfg
 
 
+def refresh_scenario_env(cfg: RuntimeConfig, env: Mapping[str, str]) -> RuntimeConfig:
+    """Fold expanded scenario env into the snapshot the child process reads.
+
+    ``DB_URL`` and the other scenario keys are captured before ``{workspace}``
+    exists. The task worker prefers this snapshot over the process environment,
+    then anchors a relative sqlite URL at the agent root. Leaving the token
+    unexpanded writes ``{workspace}/child.db`` under the fixture config tree.
+    """
+    merged = dict(cfg.env_values)
+    merged.update(env)
+    if merged == dict(cfg.env_values):
+        return cfg
+    return _snapshot_with_env(cfg, merged, base_digest=cfg.digest)
+
+
 def _scenario_config(
     scenario: Scenario, workdir: Path
 ) -> tuple[RuntimeConfig, dict[str, str], dict[str, Any], Path]:
