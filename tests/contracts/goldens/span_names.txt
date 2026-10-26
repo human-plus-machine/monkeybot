@@ -1,0 +1,41 @@
+monkeybot.context.summarize
+  openinference.span.kind
+  request.id
+  thread.id
+
+monkeybot.llm.stream
+  gen_ai.operation.name
+  gen_ai.request.model
+  openinference.span.kind
+  request.id
+  thread.id
+
+monkeybot.run
+  agent.name
+  input.value
+  langfuse.observation.input
+  langfuse.trace.input
+  openinference.span.kind
+  request.id
+  thread.id
+  trace.input
+  user.message
+
+monkeybot.subagent
+  openinference.span.kind
+  parent.run.id
+  request.id
+  thread.id
+
+monkeybot.tool
+  openinference.span.kind
+  request.id
+  thread.id
+  tool.call_id
+  tool.name
+
+monkeybot.turn
+  openinference.span.kind
+  request.id
+  thread.id
+  turn.index

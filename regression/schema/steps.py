@@ -476,6 +476,15 @@ def _predicate_matches(pred: EventPredicate, event: object) -> bool:
     return pred.call_id is None or _event_call_id(event) == pred.call_id
 
 
+def predicate_matches(pred: EventPredicate, event: object) -> bool:
+    """Whether ``event`` is the kind ``pred`` names.
+
+    ``nth`` is not applied here. The driver counts matching events and fires
+    the step when the count reaches ``pred.nth``.
+    """
+    return _predicate_matches(pred, event)
+
+
 def _event_name(event: object) -> str | None:
     for attr in ("tool", "tool_name", "name"):
         value = event_field(event, attr)
@@ -529,4 +538,5 @@ __all__ = [
     "TouchFileStep",
     "execute_step",
     "loop_driver_rejection",
+    "predicate_matches",
 ]

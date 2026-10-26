@@ -1743,6 +1743,21 @@ class PostgresOutboxStore:
         except (ValueError, IndexError):
             return 0
 
+    async def release_processing(self, *, lease_owner: str) -> int:
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE memory_outbox
+                SET status = 'pending', lease_owner = NULL, lease_expires_at = NULL
+                WHERE status = 'processing' AND lease_owner = $1
+                """,
+                lease_owner,
+            )
+        try:
+            return int(str(result).split()[-1])
+        except (ValueError, IndexError):
+            return 0
+
     async def gc_committed(self, *, days: int = 7) -> int:
         cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
         async with self._pool.acquire() as conn:

@@ -1,0 +1,4 @@
+# Every tool call asks. Realtime scenarios use this for the confirmation frame.
+default: ask
+
+rules: []

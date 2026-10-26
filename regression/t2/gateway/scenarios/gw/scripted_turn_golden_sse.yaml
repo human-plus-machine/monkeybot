@@ -1,0 +1,16 @@
+id: regression/t2/gateway/scenarios/gw/scripted_turn_golden_sse
+case: T2-GW-01
+description: Gateway driver, scripted provider, frames equal t3/sse/basic_turn.sse
+mode: scripted
+driver: gateway
+messages:
+  - Say hello
+script:
+  - - type: text
+      text: hello
+    - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  sse:
+    golden: regression/t3/sse/basic_turn.sse

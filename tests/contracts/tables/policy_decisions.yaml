@@ -1,0 +1,297 @@
+# T1-POL-01. (tool, args, policy fixture) -> allow|deny|confirm + grant_kind.
+rows:
+  - id: tier_listed_allow
+    inspector: command_tier
+    tool: run_command
+    args: {argv: [git, status]}
+    allowed_commands: [git, ls]
+    deny_patterns: []
+    expect: {kind: allow, grant_kind: null}
+  - id: tier_unknown_confirm
+    inspector: command_tier
+    tool: run_command
+    args: {argv: [ffmpeg, -version]}
+    allowed_commands: [git]
+    deny_patterns: []
+    expect: {kind: confirm, grant_kind: command}
+  - id: tier_pip_install_deny
+    inspector: command_tier
+    tool: run_command
+    args: {argv: [pip, install, leftpad]}
+    allowed_commands: [git, pip]
+    expect: {kind: deny, grant_kind: null}
+  - id: tier_npm_i_deny
+    inspector: command_tier
+    tool: run_command
+    args: {argv: [npm, i, leftpad]}
+    allowed_commands: [npm]
+    expect: {kind: deny, grant_kind: null}
+  - id: tier_uv_add_deny
+    inspector: command_tier
+    tool: run_command
+    args: {argv: [uv, add, requests]}
+    allowed_commands: [uv]
+    expect: {kind: deny, grant_kind: null}
+  - id: tier_brew_install_deny
+    inspector: command_tier
+    tool: run_command
+    args: {argv: [brew, install, jq]}
+    allowed_commands: [brew]
+    expect: {kind: deny, grant_kind: null}
+  - id: tier_grant_file_allow
+    inspector: command_tier
+    tool: run_command
+    args: {argv: [ffmpeg, -version]}
+    allowed_commands: [git]
+    deny_patterns: []
+    grants: {commands: [ffmpeg]}
+    expect: {kind: allow, grant_kind: null}
+  - id: tier_turn_grant_allow
+    inspector: command_tier
+    tool: run_command
+    args: {argv: [ffmpeg, -version]}
+    allowed_commands: [git]
+    deny_patterns: []
+    turn_command_grants: [ffmpeg]
+    expect: {kind: allow, grant_kind: null}
+  - id: tier_other_tool_allow
+    inspector: command_tier
+    tool: read_file
+    args: {path: readme.txt}
+    allowed_commands: [git]
+    deny_patterns: []
+    expect: {kind: allow, grant_kind: null}
+  - id: tier_missing_argv_deny
+    inspector: command_tier
+    tool: run_command
+    args: {}
+    allowed_commands: [git]
+    deny_patterns: []
+    expect: {kind: deny, grant_kind: null}
+  - id: tier_deny_pattern_beats_allowlist
+    inspector: command_tier
+    tool: run_command
+    args: {argv: [git, push]}
+    allowed_commands: [git]
+    deny_patterns: ["push"]
+    expect: {kind: deny, grant_kind: null}
+  - id: tier_empty_deny_patterns_unknown_confirms
+    inspector: command_tier
+    tool: run_command
+    args: {argv: [ffmpeg, -version]}
+    allowed_commands: [git]
+    deny_patterns: []
+    expect: {kind: confirm, grant_kind: command}
+  - id: rules_substring_deny
+    inspector: rules
+    tool: run_command
+    args: {argv: [bash, -c, "rm -rf /"]}
+    denied_patterns: ["rm -rf"]
+    expect: {kind: deny, grant_kind: null}
+  - id: rules_no_match_allow
+    inspector: rules
+    tool: read_file
+    args: {path: readme.txt}
+    denied_patterns: ["DROP TABLE"]
+    expect: {kind: allow, grant_kind: null}
+  - id: rules_pattern_in_path_deny
+    inspector: rules
+    tool: read_file
+    args: {path: "../secrets/x"}
+    denied_patterns: ["../secrets"]
+    expect: {kind: deny, grant_kind: null}
+  - id: rules_empty_allow
+    inspector: rules
+    tool: write_file
+    args: {path: a.txt}
+    denied_patterns: []
+    expect: {kind: allow, grant_kind: null}
+  - id: path_relative_allow
+    inspector: path_grant
+    tool: read_file
+    args: {path: readme.txt}
+    expect: {kind: allow, grant_kind: null}
+  - id: path_outside_home_deny
+    inspector: path_grant
+    tool: read_file
+    args: {path: "{outside}"}
+    expect: {kind: deny, grant_kind: null}
+  - id: path_dotenv_deny
+    inspector: path_grant
+    tool: read_file
+    args: {path: "{home_env}"}
+    expect: {kind: deny, grant_kind: null}
+  - id: path_home_file_confirm
+    inspector: path_grant
+    tool: read_file
+    args: {path: "{home_file}"}
+    expect: {kind: confirm, grant_kind: path}
+  - id: path_turn_grant_allow
+    inspector: path_grant
+    tool: read_file
+    args: {path: "{home_file}"}
+    turn_path_grants: ["{home_file_dir}"]
+    expect: {kind: allow, grant_kind: null}
+  - id: path_grant_file_allow
+    inspector: path_grant
+    tool: read_file
+    args: {path: "{home_file}"}
+    grants: {paths: ["{home_file_dir}"]}
+    expect: {kind: allow, grant_kind: null}
+  - id: path_write_not_covered_allow
+    inspector: path_grant
+    tool: write_file
+    args: {path: "{outside}"}
+    expect: {kind: allow, grant_kind: null}
+  - id: path_workspace_absolute_allow
+    inspector: path_grant
+    tool: read_file
+    args: {path: "{workspace_file}"}
+    workspace: "{workspace_root}"
+    expect: {kind: allow, grant_kind: null}
+  - id: path_grep_confirm
+    inspector: path_grant
+    tool: grep
+    args: {path: "{home_file}"}
+    expect: {kind: confirm, grant_kind: path}
+  - id: path_glob_confirm
+    inspector: path_grant
+    tool: glob
+    args: {root: "{home_file_dir}"}
+    expect: {kind: confirm, grant_kind: path}
+  - id: path_load_file_confirm
+    inspector: path_grant
+    tool: load_file
+    args: {path: "{home_file}"}
+    expect: {kind: confirm, grant_kind: path}
+  - id: perm_default_allow
+    inspector: permission
+    tool: read_file
+    args: {path: readme.txt}
+    permission_default: allow
+    expect: {kind: allow, grant_kind: null}
+  - id: perm_deny_rule
+    inspector: permission
+    tool: write_file
+    args: {path: a.txt}
+    permission_default: allow
+    rules:
+      - {tool: write_file, pattern: "*", effect: deny}
+    expect: {kind: deny, grant_kind: null}
+  - id: perm_ask_confirm
+    inspector: permission
+    tool: run_command
+    args: {argv: [git, status]}
+    permission_default: allow
+    rules:
+      - {tool: run_command, pattern: "git *", effect: ask}
+    expect: {kind: confirm, grant_kind: null}
+  - id: perm_ask_noninteractive_deny
+    inspector: permission
+    tool: run_command
+    args: {argv: [git, status]}
+    allow_ask: false
+    permission_default: allow
+    rules:
+      - {tool: run_command, pattern: "git *", effect: ask}
+    expect: {kind: deny, grant_kind: null}
+  - id: perm_last_allow_wins
+    inspector: permission
+    tool: write_file
+    args: {path: a.txt}
+    permission_default: deny
+    rules:
+      - {tool: write_file, pattern: "*", effect: deny}
+      - {tool: write_file, pattern: "*", effect: allow}
+    expect: {kind: allow, grant_kind: null}
+  - id: perm_last_deny_wins
+    inspector: permission
+    tool: write_file
+    args: {path: a.txt}
+    permission_default: allow
+    rules:
+      - {tool: write_file, pattern: "*", effect: allow}
+      - {tool: write_file, pattern: "*", effect: deny}
+    expect: {kind: deny, grant_kind: null}
+  - id: perm_session_approval_allow
+    inspector: permission
+    tool: write_file
+    args: {path: secret.txt}
+    permission_default: allow
+    session_allow: [write_file, secret.txt]
+    rules:
+      - {tool: write_file, pattern: "*", effect: deny}
+    expect: {kind: allow, grant_kind: null}
+  - id: perm_default_deny
+    inspector: permission
+    tool: read_file
+    args: {path: readme.txt}
+    permission_default: deny
+    expect: {kind: deny, grant_kind: null}
+  - id: loop_start_confirm
+    inspector: loop_start
+    tool: start_loop
+    args: {prompt: "check the inbox", interval: 20s, max_ticks: 3}
+    expect: {kind: confirm, grant_kind: null}
+  - id: loop_start_empty_prompt_still_confirms
+    inspector: loop_start
+    tool: start_loop
+    args: {}
+    expect: {kind: confirm, grant_kind: null}
+  - id: loop_other_tool_allow
+    inspector: loop_start
+    tool: pause_loop
+    args: {loop_id: daily}
+    expect: {kind: allow, grant_kind: null}
+  - id: computer_app_confirm
+    inspector: computer
+    tool: computer_open_app
+    args: {app: Calculator}
+    expect: {kind: confirm, grant_kind: null}
+  - id: computer_terminal_deny
+    inspector: computer
+    tool: computer_open_app
+    args: {app: Terminal}
+    expect: {kind: deny, grant_kind: null}
+  - id: computer_bad_scheme_deny
+    inspector: computer
+    tool: computer_open_url
+    args: {url: "javascript:alert(1)"}
+    expect: {kind: deny, grant_kind: null}
+  - id: computer_https_confirm
+    inspector: computer
+    tool: computer_open_url
+    args: {url: "https://example.com"}
+    expect: {kind: confirm, grant_kind: null}
+  - id: computer_approval_allow
+    inspector: computer
+    tool: computer_open_app
+    args: {app: Calculator}
+    approvals:
+      - {tool: computer_open_app, resource: Calculator, scope: resource}
+    expect: {kind: allow, grant_kind: null}
+  - id: computer_user_deny_beats_approval
+    inspector: computer
+    tool: computer_open_app
+    args: {app: Calculator}
+    rules:
+      - {tool: computer_open_app, pattern: "*", effect: deny}
+    approvals:
+      - {tool: computer_open_app, resource: Calculator, scope: resource}
+    expect: {kind: deny, grant_kind: null}
+  - id: computer_ask_noninteractive_deny
+    inspector: computer
+    tool: computer_open_app
+    args: {app: Calculator}
+    allow_ask: false
+    expect: {kind: deny, grant_kind: null}
+  - id: computer_ssh_deny
+    inspector: computer
+    tool: computer_list_dir
+    args: {path: "{ssh}"}
+    expect: {kind: deny, grant_kind: null}
+  - id: computer_non_computer_allow
+    inspector: computer
+    tool: read_file
+    args: {path: readme.txt}
+    expect: {kind: allow, grant_kind: null}

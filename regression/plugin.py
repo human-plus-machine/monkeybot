@@ -96,13 +96,28 @@ class ScenarioFile(pytest.File):
 
 
 class ScenarioItem(pytest.Item):
-    """Runs one YAML scenario through the loop driver."""
+    """Runs one YAML scenario through its driver. Loop is the default."""
 
     def runtest(self) -> None:
         from regression.drivers.loop import run_scenario
         from regression.schema.scenario import load_scenario
 
         scenario = load_scenario(self.path)
+        if scenario.driver == "realtime":
+            from regression.drivers.realtime import run_scenario as run_realtime_scenario
+
+            asyncio.run(run_realtime_scenario(scenario))
+            return
+        if scenario.driver == "gateway":
+            from regression.drivers.gateway import run_scenario as run_gateway_scenario
+            from regression.schema.sse_norm import update_golden
+
+            token = update_golden.set(bool(self.config.getoption("update_golden")))
+            try:
+                asyncio.run(run_gateway_scenario(scenario))
+            finally:
+                update_golden.reset(token)
+            return
         asyncio.run(run_scenario(scenario))
 
     def repr_failure(

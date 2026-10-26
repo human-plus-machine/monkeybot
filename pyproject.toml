@@ -94,6 +94,7 @@ dev = [
     "monkeybot[memory]",
     # Native goal persistence tests hit a real Postgres via asyncpg.
     "monkeybot[postgres]",
+    "jsonschema>=4.26.0",
 ]
 
 [tool.uv]

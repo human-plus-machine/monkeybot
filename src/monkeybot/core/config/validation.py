@@ -8,6 +8,11 @@ from monkeybot.core.config.settings import ConfigError, normalize_model_provider
 from monkeybot.providers.pricing import parse_pricing_section
 
 SUPPORTED_MEMORY_BACKENDS = frozenset({"local", "gcs", "drive"})
+# YAML memory.backend is the local MemPalace engine. The palace opens a folder
+# on disk and does not pass this value into the store, so chroma is the only
+# value that matches what the app does. Object-store schemes (s3, gcs, drive)
+# are a different setting, MEMORY_BACKEND / paths.memory_storage_uri.
+SUPPORTED_PALACE_BACKENDS = frozenset({"chroma"})
 SUPPORTED_SECRETS_PROVIDERS = frozenset({"env", "gcp_secret_manager"})
 SUPPORTED_MODEL_PROVIDERS = frozenset(
     {
@@ -224,6 +229,22 @@ def _validate_pricing(doc: dict[str, Any]) -> None:
         raise ConfigError(str(exc)) from exc
 
 
+def _validate_memory_backend(doc: dict[str, Any]) -> None:
+    """Reject a palace engine name the app cannot open."""
+    memory = doc.get("memory")
+    if not isinstance(memory, dict) or "backend" not in memory:
+        return
+    raw = memory.get("backend")
+    name = str(raw).strip() if raw is not None else ""
+    if name in SUPPORTED_PALACE_BACKENDS:
+        return
+    supported = ", ".join(sorted(SUPPORTED_PALACE_BACKENDS))
+    raise ConfigError(
+        f"memory.backend is set to {raw!r} which is not supported.\n"
+        f"Currently supported backends: {supported}"
+    )
+
+
 def validate_monkeybot_yaml_doc(doc: dict[str, Any], *, env: dict[str, str] | None = None) -> None:
     """Validate a parsed monkeybot.yaml document (new schema).
 
@@ -235,6 +256,7 @@ def validate_monkeybot_yaml_doc(doc: dict[str, Any], *, env: dict[str, str] | No
         ConfigError: If unsupported provider or missing required configuration.
     """
     env = env or {}
+    _validate_memory_backend(doc)
     model_raw = doc.get("model")
     model: dict[str, Any] = model_raw if isinstance(model_raw, dict) else {}
     provider_raw = str(model.get("provider", "gemini")).strip().lower()

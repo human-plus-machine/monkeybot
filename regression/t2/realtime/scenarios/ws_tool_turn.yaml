@@ -1,0 +1,32 @@
+id: regression/t2/realtime/scenarios/ws_tool_turn
+case: T2-RT-02
+description: A tool call returns a result and the model continues.
+mode: scripted
+driver: realtime
+executor: real
+messages:
+- Read note.txt
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: note.txt
+  - type: done
+- - type: text
+    text: continued
+  - type: done
+invariants_skip:
+- name: turn_complete
+  reason: The websocket turn ends on a usage frame, not TurnComplete.
+assertions:
+  events_sequence:
+  - type: tool_call
+    call_id: c1
+    name: read_file
+  - type: tool_result
+    call_id: c1
+  - type: text_delta
+    delta: continued
+  events_absent:
+  - error

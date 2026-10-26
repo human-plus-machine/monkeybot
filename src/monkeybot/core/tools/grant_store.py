@@ -20,13 +20,21 @@ from __future__ import annotations
 
 import contextlib
 import datetime
+import hashlib
 import json
+import logging
 import os
 import tempfile
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+# (resolved path, sha256 of the unreadable bytes). The same damage warns once.
+# A later, different corruption has a new digest and warns again.
+_warned_unreadable: set[tuple[str, str]] = set()
 
 _LOCK_SUFFIX = ".lock"
 _LOCK_STALE_S = 5.0
@@ -94,15 +102,39 @@ def _file_lock(path: Path) -> Iterator[None]:
             lock_path.unlink()
 
 
-def load_grants(path: Path) -> Grants:
+def _warn_unreadable(path: Path, raw: str) -> None:
+    digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
+    key = (str(path.resolve()), digest)
+    if key in _warned_unreadable:
+        return
+    _warned_unreadable.add(key)
+    logger.warning(
+        "grants file %s is unreadable; saved approvals are ignored until it is valid JSON",
+        path,
+    )
+
+
+def _parse_grants(path: Path) -> Grants | None:
+    """Return the grants, or None when the file exists but is not a JSON object.
+
+    A missing file is an empty grant list. None means the bytes on disk were
+    left in place and must not be rewritten.
+    """
     if not path.exists():
         return Grants()
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return Grants()
+        raw = path.read_text(encoding="utf-8")
+    except OSError:
+        _warn_unreadable(path, "")
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        _warn_unreadable(path, raw)
+        return None
     if not isinstance(data, dict):
-        return Grants()
+        _warn_unreadable(path, raw)
+        return None
 
     commands: list[CommandGrant] = []
     for item in data.get("commands", []) if isinstance(data.get("commands"), list) else []:
@@ -132,6 +164,11 @@ def load_grants(path: Path) -> Grants:
     return Grants(commands=tuple(commands), paths=tuple(paths))
 
 
+def load_grants(path: Path) -> Grants:
+    parsed = _parse_grants(path)
+    return Grants() if parsed is None else parsed
+
+
 def _write_atomic(path: Path, grants: Grants) -> None:
     payload = {
         "version": 1,
@@ -154,17 +191,27 @@ def _write_atomic(path: Path, grants: Grants) -> None:
         raise
 
 
-def add_command_grant(path: Path, *, command: str, created_at: str) -> None:
+def add_command_grant(path: Path, *, command: str, created_at: str) -> bool:
+    """Append a command grant. Return False when the file is unreadable.
+
+    A damaged file is left on disk. Rewriting it would drop every approval
+    that was in the unreadable bytes.
+    """
     with _file_lock(path):
-        grants = load_grants(path)
+        grants = _parse_grants(path)
+        if grants is None:
+            return False
         commands = [c for c in grants.commands if c.command != command]
         commands.append(CommandGrant(command=command, created_at=created_at))
         _write_atomic(path, Grants(commands=tuple(commands), paths=grants.paths))
+        return True
 
 
 def remove_command_grant(path: Path, *, command: str) -> bool:
     with _file_lock(path):
-        grants = load_grants(path)
+        grants = _parse_grants(path)
+        if grants is None:
+            return False
         remaining = tuple(c for c in grants.commands if c.command != command)
         if len(remaining) == len(grants.commands):
             return False
@@ -172,17 +219,23 @@ def remove_command_grant(path: Path, *, command: str) -> bool:
         return True
 
 
-def add_path_grant(path: Path, *, folder: str, mode: str, created_at: str) -> None:
+def add_path_grant(path: Path, *, folder: str, mode: str, created_at: str) -> bool:
+    """Append a path grant. Return False when the file is unreadable."""
     with _file_lock(path):
-        grants = load_grants(path)
+        grants = _parse_grants(path)
+        if grants is None:
+            return False
         paths = [p for p in grants.paths if p.path != folder]
         paths.append(PathGrant(path=folder, mode=mode, created_at=created_at))
         _write_atomic(path, Grants(commands=grants.commands, paths=tuple(paths)))
+        return True
 
 
 def remove_path_grant(path: Path, *, folder: str) -> bool:
     with _file_lock(path):
-        grants = load_grants(path)
+        grants = _parse_grants(path)
+        if grants is None:
+            return False
         remaining = tuple(p for p in grants.paths if p.path != folder)
         if len(remaining) == len(grants.paths):
             return False
@@ -211,11 +264,9 @@ def build_grants_persist_hook(grants_path: Path) -> Callable[[str, str], bool]:
     def _persist(tool: str, resource: str) -> bool:
         created_at = datetime.datetime.now(datetime.UTC).isoformat()
         if tool == "run_command":
-            add_command_grant(grants_path, command=resource, created_at=created_at)
-            return True
+            return add_command_grant(grants_path, command=resource, created_at=created_at)
         if tool in PATH_GRANT_TOOLS:
-            add_path_grant(grants_path, folder=resource, mode="read", created_at=created_at)
-            return True
+            return add_path_grant(grants_path, folder=resource, mode="read", created_at=created_at)
         return True
 
     return _persist

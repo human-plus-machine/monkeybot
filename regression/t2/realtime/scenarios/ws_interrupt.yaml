@@ -1,0 +1,33 @@
+id: regression/t2/realtime/scenarios/ws_interrupt
+case: T2-RT-04
+description: Interrupt while the assistant is speaking, and the partial reply is committed.
+mode: scripted
+driver: realtime
+executor: real
+script_partial: true
+messages:
+- Say hello
+script:
+- - type: text
+    text: partial reply
+steps:
+- action: interrupt
+  when:
+    event: text_delta
+    nth: 1
+invariants_skip:
+- name: turn_complete
+  reason: Interrupt ends the socket before an assistant boundary, so the wire has no TurnComplete.
+assertions:
+  events_sequence:
+  - type: text_delta
+    delta: partial reply
+  - type: interrupt
+  - type: interrupted
+  history:
+    roles:
+    - user
+    - assistant
+    blocks_include:
+    - type: text
+      text_contains: partial reply

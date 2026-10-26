@@ -1,0 +1,32 @@
+id: regression/t2/realtime/scenarios/ws_text_turn
+case: T2-RT-01
+description: WebSocket connect, client text, text deltas, turn boundary, and a usage frame.
+mode: scripted
+driver: realtime
+executor: real
+messages:
+- Say hello
+script:
+- - type: text
+    text: Hello there
+  - type: done
+invariants_skip:
+- name: turn_complete
+  reason: The websocket turn ends on a usage frame, not TurnComplete.
+assertions:
+  events_sequence:
+  - type: connected
+  - type: text
+    text: Say hello
+  - type: text_delta
+  - type: turn_boundary
+  - type: usage
+  events_absent:
+  - error
+  history:
+    roles:
+    - user
+    - assistant
+    blocks_include:
+    - type: text
+      text_contains: Hello there

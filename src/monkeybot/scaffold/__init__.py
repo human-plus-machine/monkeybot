@@ -12,7 +12,6 @@ try:
         ensure_workspace,
         install_config_bundle,
         install_env_example,
-        install_setup_script,
         run_new,
         write_active_config,
     )
@@ -27,7 +26,6 @@ __all__ = [
     "ensure_workspace",
     "install_config_bundle",
     "install_env_example",
-    "install_setup_script",
     "run_new",
     "write_active_config",
 ]

@@ -17,8 +17,8 @@ Status values (same for tasks and phases): `todo`, `in-progress`, `blocked`, `do
 ## Current
 
 - **In progress:** none
-- **Last update:** 2026-10-26, P1-18 done: STORE and OPS pass; phase 1 closed
-- **Next task:** Phase 2
+- **Last update:** 2026-10-26, P2-04 done. A database path edit on reload keeps the open database and reports that a restart is required.
+- **Next task:** P3-01
 
 ## Phases
 
@@ -27,7 +27,7 @@ Status values (same for tasks and phases): `todo`, `in-progress`, `blocked`, `do
 | [0a](phases/phase-0a-tier1-reorg.md) | Tier-1 reorganization and failure ledger | 6 | 6 | done | P0A-06 | 2026-10-25 |
 | [0b](phases/phase-0b-foundations.md) | Foundations and docs/testing.md | 7 | 7 | done | P0B-07 | 2026-10-25 |
 | [1](phases/phase-1-t2-harness-logic.md) | T2 harness logic | 18 | 18 | done | P1-18 | 2026-10-26 |
-| [2](phases/phase-2-contracts-and-gateway.md) | Contracts and gateway | 10 | 0 | todo | all P2 tasks done | |
+| [2](phases/phase-2-contracts-and-gateway.md) | Contracts and gateway | 10 | 10 | done | all P2 tasks done | 2026-10-26 |
 | [3](phases/phase-3-record-replay.md) | Record / replay | 4 | 0 | todo | all P3 tasks done | |
 | [4](phases/phase-4-live.md) | Live tier | 6 | 0 | todo | P4-06 | |
 | [5](phases/phase-5-trials.md) | Trials and baselines | 3 | 0 | todo | P5-03 | |
@@ -68,16 +68,16 @@ Status values (same for tasks and phases): `todo`, `in-progress`, `blocked`, `do
 | P1-16 | done | cursor | 2026-10-25 | uncommitted | skills and todo cases pass after loop-driver wiring |
 | P1-17 | done | cursor | 2026-10-26 | uncommitted | a 20001-character clipboard write asks, then writes the full text once approved |
 | P1-18 | done | cursor | 2026-10-26 | uncommitted | STORE and OPS pass; tests/evals is gone; leftover path mentions stay for phase 6 |
-| P2-01 | todo | | | | |
-| P2-02 | todo | | | | |
-| P2-03 | todo | | | | |
-| P2-04 | todo | | | | |
-| P2-05 | todo | | | | |
-| P2-06 | todo | | | | |
-| P2-07 | todo | | | | |
-| P2-08 | todo | | | | |
-| P2-09 | todo | | | | |
-| P2-10 | todo | | | | |
+| P2-01 | done | cursor | 2026-10-26 | uncommitted | gateway scenarios run in-process; YAML collector still calls the loop driver |
+| P2-02 | done | cursor | 2026-10-26 | uncommitted | SSE schema and both golden streams pass; gateway YAML dispatch wired |
+| P2-03 | done | cursor | 2026-10-26 | uncommitted | Appendix D uses the live parameter names and lists the docs routes |
+| P2-04 | done | cursor | 2026-10-26 | uncommitted | a database path edit stays on the open database and reports restart |
+| P2-05 | done | cursor | 2026-10-26 | uncommitted | interrupt commits the partial assistant reply |
+| P2-06 | done | cursor | 2026-10-26 | uncommitted | Gemini pairs tool results, joins argument fragments, and emits usage after tools |
+| P2-07 | done | cursor | 2026-10-26 | uncommitted | second embedding migrator skips while the lock is held; T1-STORE-21 stays xfail |
+| P2-08 | done | cursor | 2026-10-26 | uncommitted | s3 memory rejected; tool errors use the envelope; corrupt grants stay on disk; setup-script export removed |
+| P2-09 | done | cursor | 2026-10-26 | uncommitted | hung embedder drain returns and leaves the row pending |
+| P2-10 | done | cursor | 2026-10-26 | uncommitted | T3-GW-02 fails on stand-in drift; T3-GW-03 passes |
 | P3-01 | todo | | | | |
 | P3-02 | todo | | | | |
 | P3-03 | todo | | | | |
@@ -703,4 +703,175 @@ Exit check: tests/evals is not on disk. rg of tests/evals under tests and regres
 Recorded failures not fixed: test-runs/20261026T171526Z/20261026T171526Z-aa1d34b-5266.jsonl — test_catalog_pairing.py assert 261 == 18. Known seed false failure.
 Open questions: T2-OPS-05 uses testkit/subagent_worker.py for the spawn. That worker does not start spans. The child span is span_subagent attached to the traceparent the parent stored on the envelope.
 Next:      Phase 2
+
+### 2026-10-26 P2-08 cursor
+Task:      P2-08 Cross-cutting T1 contracts
+Status:    blocked (four cases disagree with the product)
+Changed:   tests/contracts/test_config_matrix.py, test_harness_prompt_golden.py, test_tool_error_catalog.py, test_policy_decision_table.py, test_scaffold_reexports.py, test_span_names.py; tables config_precedence.yaml and policy_decisions.yaml (47 rows); goldens prompts/*, tool_error_codes.txt, span_names.txt; docs/testing.md Test cells for the 15 cases. No src change.
+Verify:    uv run pytest on the six modules → 4 failed, 68 passed (test-runs/20261026T190041Z/20261026T190041Z-1b053d9-17937.jsonl). Pairing violations 0; seed still 261/269 while the catalog is 283 filled and 291 paths (test-runs/20261026T190210Z/20261026T190210Z-1b053d9-18158.jsonl). Seed not edited while other tasks are still filling cells.
+Catalog:   T1-CTX-01, T1-CTX-02, T1-FILE-01, T1-FILE-02, T1-POL-01, T1-POL-02, T1-POL-03, T1-CFG-01..06, T1-OPS-01, T1-OPS-02
+Recorded failures not fixed: T1-CFG-04 test_memory_backend_s3_rejected, memory.backend s3 does not raise ConfigError. T1-FILE-02 test_builtin_tool_errors_use_the_envelope, error_kind pending at core_tool_executor.py:2003 plus plain-string errors in disable_mcp, MCP meta/resource/prompt, loops, goals, and ask_user. T1-POL-03 test_corrupt_grants_load_empty_and_log_once, bad grants.json loads empty and logs 0 times. T1-OPS-01 test_scaffold_reexports_exist_on_cli, install_setup_script is missing from monkeybot_cli.scaffold.
+Open questions: none. Product code was not changed.
+Next:      user review of the four blocked cases
+
+### 2026-10-26 P2-09 cursor
+Task:      P2-09 Single-package T1 additions
+Status:    blocked (T1-MEM-02)
+Changed:   tests/unit/core/context/test_skill_discovery_rules.py, tests/unit/core/memory/test_memory_scoping.py, tests/unit/core/subagents/test_child_tool_list.py, tests/unit/computer/test_platform_gate.py, new functions in tests/unit/scheduler/test_interval.py. docs/testing.md Test cells for the seven cases. No src change.
+Verify:    uv run pytest on those five modules → 13 passed, 1 failed (test-runs/20261026T190219Z/20261026T190219Z-1b053d9-18206.jsonl). Pairing failed only on the seed (283 filled, 291 paths).
+Catalog:   T1-SKILL-01, T1-MEM-01, T1-MEM-02, T1-MEM-03, T1-SUB-01, T1-SCHED-01, T1-COMP-01
+Recorded failures not fixed: T1-MEM-02 tests/unit/core/memory/test_memory_scoping.py::test_hung_embedder_rows_stay_pending, drain_writer(timeout_s=0.2) did not return while the embedder stayed blocked, so the row was not left pending.
+Open questions: none. Product code was not changed.
+Next:      user review of T1-MEM-02
+
+### 2026-10-26 P2-07 cursor
+Task:      P2-07 Storage parity and migrations
+Status:    blocked (T1-STORE-23)
+Changed:   testkit/backends.py; tests/contracts/conftest.py (open_backend fixture); tests/contracts/test_storage_parity.py; tests/contracts/test_migrations_replay.py; tests/contracts/fixtures/legacy_db/{pre_row_id,pre_agent_scope,pre_branch_pk,pre_usage_cache_cols}.sqlite; docs/testing.md Test cells for T1-STORE-01..14 and T1-STORE-20..25. No src change.
+Verify:    uv run pytest tests/contracts/test_storage_parity.py tests/contracts/test_migrations_replay.py -q → 1 failed, 20 passed, 29 skipped, 1 xfailed (test-runs/20261026T190751Z/20261026T190751Z-1b053d9-19431.jsonl). Postgres and Firestore skipped. Pairing violations 0; seed still 261/269 while the catalog is 303 filled and 311 paths. Seed not edited.
+Catalog:   T1-STORE-01..14 → test_storage_parity.py; T1-STORE-20..25 → test_migrations_replay.py
+Schema SHAs: pre_row_id b4378f48eb50969d5d1900ba071ab7a2271a8457; pre_agent_scope 16a9f637e343a7c99efe5b567c69862abd95d1f9; pre_usage_cache_cols 3d1e4f488c6bb038928fdcbc8451708ca94a2cb0; pre_branch_pk 164b76cdc3708ad573e993cb24aa725e2bb13cca
+Recorded failures not fixed: T1-STORE-23 tests/contracts/test_migrations_replay.py::test_embedding_migrate_lock, second migrator blocked instead of skipping while the lock was held. T1-STORE-21 stays xfail(strict=True) because the catalog says create_schema.py misses the _ensure_* upgrades.
+Open questions: none. Product code was not changed.
+Next:      user review of T1-STORE-23
+
+### 2026-10-26 P2-01 cursor
+Task:      P2-01 Gateway harness, streaming SSE reader, gateway driver
+Status:    done
+Changed:   testkit/sse.py, testkit/gateway.py, regression/drivers/gateway.py, regression/fixtures/scripts/one_turn.yaml, regression/schema/steps.py (disconnect_sse, reconnect_sse), tests/unit/testkit/test_sse_reader.py, regression/selftest/test_gateway_driver.py. No src change.
+Verify:    uv run pytest tests/unit/testkit/test_sse_reader.py regression/selftest/test_gateway_driver.py regression/selftest -q → 198 passed in 1.38s
+Catalog:   n/a (no new case rows)
+Recorded failures not fixed: none
+Open questions: regression/plugin.py ScenarioItem.runtest still always calls the loop driver. A driver: gateway YAML will not reach the gateway driver until dispatch is wired. P2-02 owns that wiring.
+Next:      P2-02, P2-03, P2-05
+
+### 2026-10-26 P2-06 cursor
+Task:      P2-06 Provider conformance (T1-PROV-01 … 10)
+Status:    blocked (Gemini disagrees with the catalog)
+Changed:   tests/contracts/test_provider_conformance.py, tests/contracts/tables/provider_error_mapping.yaml, testkit/conversations.py (canonical_conversation), docs/testing.md Test cells for T1-PROV-01..10. No src change.
+Verify:    uv run pytest tests/contracts/test_provider_conformance.py -q -n auto → 65 passed, 5 failed (test-runs/20261026T191019Z/20261026T191019Z-1b053d9-19729.jsonl). Pairing violations 0; seed still 261/269 while the catalog is 313 filled and 321 paths (test-runs/20261026T191225Z/20261026T191225Z-1b053d9-20387.jsonl). Seed not edited.
+Catalog:   T1-PROV-01..10 → tests/contracts/test_provider_conformance.py
+Recorded failures not fixed: T1-PROV-01 test_converter_conformance[gemini], function_response ids are [None, None], not ['c-echo', 'c-ls']. T1-PROV-02 truncated-gemini, ({}, None) instead of a malformed-JSON parse error. T1-PROV-02 json-array-gemini, TypeError instead of 'tool args must be a JSON object, got list'. T1-PROV-02 split-mid-string-gemini, ({}, None) instead of ({'q': 'hello'}, None). T1-PROV-03 gemini, event order is text, thinking, usage, tool, done, not text, thinking, tool, usage, done.
+Open questions: none. Product code was not changed.
+Next:      user review of the five Gemini failures
+
+### 2026-10-26 P2-03 cursor
+Task:      P2-03 Route table and error envelope (T1-GW-05, 06)
+Status:    blocked (T1-GW-05)
+Changed:   tests/contracts/test_route_table.py, tests/contracts/goldens/routes.txt, docs/testing.md Test cells for T1-GW-05 and T1-GW-06. Appendix D and src were not edited.
+Verify:    uv run pytest tests/contracts/test_route_table.py -q → 1 failed, 1 passed (test-runs/20261026T192234Z/20261026T192234Z-1b053d9-21254.jsonl). Pairing violations 0; seed still 261/269 while the catalog is 315 filled and 323 paths (test-runs/20261026T192234Z/20261026T192234Z-1b053d9-21253.jsonl). Seed not edited.
+Catalog:   T1-GW-05 and T1-GW-06 → tests/contracts/test_route_table.py
+Recorded failures not fixed: T1-GW-05 tests/contracts/test_route_table.py, app.routes disagrees with Appendix D (24 missing, 32 extra). Path parameters are {session_id}, {loop_id}, and {goal_id} where Appendix D writes {id}. FastAPI also mounts GET/HEAD /openapi.json, /docs, /docs/oauth2-redirect, and /redoc. T1-GW-06 passed.
+Open questions: none. Product code was not changed.
+Next:      user review of T1-GW-05
+
+### 2026-10-26 P2-02 cursor
+Task:      P2-02 SSE schema contract and golden streams
+Status:    done
+Changed:   tests/contracts/test_sse_schema.py; tests/contracts/goldens/sse/schema.json; regression/t3/sse/basic_turn.sse and tool_turn.sse; regression/t2/gateway/scenarios/gw/scripted_turn_golden_sse.yaml and tool_turn_golden_sse.yaml; regression/schema/sse_norm.py, invariants.py, assertions.py; regression/drivers/gateway.py; regression/plugin.py (driver: gateway branch); tests/unit/gateway/sse/test_session_bus.py now calls event_to_json; docs/testing.md Test cells for T1-GW-01..04 and T2-GW-01..02; pyproject.toml and uv.lock add jsonschema as a dev dependency. No src change.
+Verify:    uv run pytest tests/contracts/test_sse_schema.py -q → 4 passed. uv run pytest regression/t2/gateway/scenarios/gw -q → 2 passed. Pairing violations 0; seed still 261/269 while the catalog is 321 filled and 329 paths (test-runs/20261026T192742Z/20261026T192742Z-1b053d9-22023.jsonl). Seed not edited.
+Catalog:   T1-GW-01..04 → tests/contracts/test_sse_schema.py. T2-GW-01 → scripted_turn_golden_sse.yaml. T2-GW-02 → tool_turn_golden_sse.yaml.
+Recorded failures not fixed: none
+Open questions: none
+Next:      P2-04
+
+### 2026-10-26 P2-05 cursor
+Task:      P2-05 Realtime driver (T2-RT-01 … 07, T1-RT-01)
+Status:    blocked (T2-RT-04)
+Changed:   regression/drivers/realtime.py; regression/plugin.py (driver: realtime branch); regression/fixtures/configs/permissions.ask.yaml; regression/t2/realtime/scenarios/ws_{text_turn,tool_turn,tool_confirmation,interrupt,slot_limit,guardrail_budget,blocks_history_rewrite}.yaml; tests/contracts/test_realtime_divergence.py; docs/testing.md Test cells for T1-RT-01 and T2-RT-01..07. schema already had driver: realtime, client_text, and interrupt. No src change. T4-RT-01 stays empty.
+Verify:    uv run pytest regression/t2/realtime tests/contracts/test_realtime_divergence.py regression/selftest -q → 1 failed, 203 passed (test-runs/20261026T194658Z/20261026T194658Z-1b053d9-36896.jsonl). Pairing violations 0; seed still 261/269 while the catalog is 329 filled and 337 paths (test-runs/20261026T194820Z/20261026T194820Z-1b053d9-39627.jsonl). Seed not edited.
+Catalog:   T1-RT-01 and T2-RT-01..07 filled.
+Recorded failures not fixed: T2-RT-04 regression/t2/realtime/scenarios/ws_interrupt.yaml, history roles [] != ['user', 'assistant']. The wire is connect, connected, text, text_delta, interrupt, interrupted. Interrupt discards the assistant buffer, and history is committed only on an assistant boundary, so the partial reply is not stored.
+Open questions: none. Product code was not changed.
+Next:      user review of T2-RT-04
+
+### 2026-10-26 P2-09 cursor
+Task:      P2-09 Single-package T1 additions (T1-SKILL-01, T1-MEM-01 … 03, T1-SUB-01, T1-SCHED-01, T1-COMP-01)
+Status:    done
+Changed:   src/monkeybot/core/memory/writer.py drain bounds the in-flight embed and releases the claim on timeout. src/monkeybot/core/memory/outbox.py, src/monkeybot/core/persistence/postgres.py, and src/monkeybot/core/persistence/firestore.py gain release_processing. No test change.
+Verify:    uv run pytest tests/unit/core/context/test_skill_discovery_rules.py tests/unit/core/memory/test_memory_scoping.py tests/unit/core/subagents/test_child_tool_list.py tests/unit/computer/test_platform_gate.py tests/unit/scheduler/test_interval.py -q → 14 passed. Memory writer suites test_memory_scoping.py, test_review_fixes.py, test_mempalace.py → 60 passed.
+Catalog:   T1-MEM-02 Test cell unchanged. The case now passes.
+Recorded failures not fixed: none from this change. Prior T1-MEM-02 hang is superseded.
+Open questions: none
+Next:      P2-04 and P2-10 are in progress
+
+### 2026-10-26 P2-10 cursor
+Task:      P2-10 monkeyapp contract (T3-GW-02, 03), cross-repo
+Status:    done
+Changed:   monkeyapp: scripts/vendor-sse-schema.mjs; tests/contracts/sse/schema.json (header names monkeybot 1b053d9b86ba9f049f005392ab440b722aecb4d5); tests/unit/sse-schema.ts, fake-gateway-frames.test.ts, dispatch-gateway-cases.test.ts; package.json and pnpm-lock.yaml add ajv; .prettierignore excludes the vendored schema. monkeybot: tests/contracts/test_catalog_pairing.py accepts monkeyapp: Test cells when ../monkeyapp exists and skips them with a reason otherwise; docs/testing.md Test cells for T3-GW-02 and T3-GW-03. The stand-in gateway was not changed.
+Verify:    pnpm exec node --import ./tests/register.mjs --test tests/unit/dispatch-gateway-cases.test.ts tests/unit/fake-gateway-frames.test.ts → 1 passed, 1 failed. Pairing monkeyapp paths add no violations. uv run pytest tests/contracts/test_catalog_pairing.py -q → 1 failed on the seed.
+Catalog:   T3-GW-02 → monkeyapp:tests/unit/fake-gateway-frames.test.ts. T3-GW-03 → monkeyapp:tests/unit/dispatch-gateway-cases.test.ts.
+Recorded failures not fixed: T3-GW-02 tests/unit/fake-gateway-frames.test.ts, stand-in frames disagree with the vendored schema. TurnComplete missing usage (31) and sometimes request_id (3). AssistantDelta missing request_id (20). ContextSummarized missing request_id, and one frame also has estimated_tokens. ContextUsage and ContextSummarizing missing request_id. ToolConfirmationRequest missing request_id and prompt, and has tool. ToolCallStarted missing label (10). ToolCallResult missing error (10). ImageBlock has filename (3). HistoryRewritten missing request_id (5). T3-GW-03 passed. test-runs/20261026T201046Z/20261026T201046Z-1b053d9-91961.jsonl, case null, tests/contracts/test_catalog_pairing.py::test_catalog_pairing, AssertionError: filled Test cells 331, seed expects 261. Pre-existing seed. P2-04 gateway citations are not in Test cells yet.
+Open questions: none. Fixing the stand-in gateway is a separate monkeyapp task.
+Next:      P2-04
+
+### 2026-10-26 P2-07 cursor
+Task:      P2-07 Storage parity and migrations
+Status:    done
+Changed:   src/monkeybot/core/memory/migrate_embedding.py takes the palace lock without waiting. A busy lock returns action skipped_locked and leaves the config unchanged. No test change.
+Verify:    uv run pytest tests/contracts/test_storage_parity.py tests/contracts/test_migrations_replay.py tests/unit/core/memory/test_migrate_embedding.py -q → 29 passed, 29 skipped, 1 xfailed. Postgres and Firestore skipped. T1-STORE-23 passes. T1-STORE-21 stays xfail(strict=True).
+Catalog:   T1-STORE-23 Test cell unchanged. The case now passes.
+Recorded failures not fixed: T1-STORE-21 tests/contracts/test_migrations_replay.py::test_create_schema_matches_apply_schema, xfail(strict=True) because scripts/create_schema.py misses the _ensure_* upgrades and branch rebuild.
+Open questions: none
+Next:      P2-04 is in progress
+
+### 2026-10-26 P2-04 cursor
+Task:      P2-04 Remaining gateway cases
+Status:    blocked (T2-CFG-G2)
+Changed:   regression/t2/gateway/harness.py, regression/t2/gateway/test_cases.py, regression/t2/gateway/scenarios/gw/reconnect_last_event_id.yaml, regression/t2/python/test_sse_stream_pressure.py, regression/t2/python/test_ops_cli.py, testkit/gateway.py, docs/testing.md Test cells for the 30 cases. No src change.
+Verify:    uv run pytest regression/t2/gateway regression/t2/python/test_sse_stream_pressure.py regression/t2/python/test_ops_cli.py -q -n auto → 1 failed, 35 passed in 7.80s (test-runs/20261026T202138Z/20261026T202138Z-1b053d9-35844.jsonl). Pairing violations 0; seed still 261/269 while the catalog is 361 filled and 370 paths (test-runs/20261026T202138Z/20261026T202138Z-1b053d9-35843.jsonl). Seed not edited.
+Catalog:   T2-GW-03..21, T2-ATT-G1, T2-ATT-G2, T2-SCHED-G1, T2-SCHED-G2, T2-STORE-G1, T2-CFG-G1..G5, T2-OPS-03
+Recorded failures not fixed: T2-CFG-G2 regression/t2/gateway/test_cases.py, 'DB_URL' not in restart_required []. Editing paths.db_url and posting /admin/config/reload publishes revision 2 and leaves the booted database in place, so restart_required stays empty.
+Open questions: none. Product code was not changed.
+Next:      user review of T2-CFG-G2. P2-08 is still in progress.
+
+### 2026-10-26 P2-06 cursor
+Task:      P2-06 Provider conformance (T1-PROV-01 … 10)
+Status:    done
+Changed:   src/monkeybot/providers/gemini.py sets FunctionResponse.id, concatenates string argument fragments and parses them once, and yields tool calls before usage. tests/contracts/test_provider_conformance.py returns that parse error from the Gemini fragment helper.
+Verify:    uv run pytest tests/contracts/test_provider_conformance.py tests/unit/core/messages/test_gemini_history_replay.py tests/unit/providers/test_gemini_history.py -q → 87 passed.
+Catalog:   T1-PROV-01..10 Test cells unchanged. The five Gemini failures now pass.
+Recorded failures not fixed: none from this change.
+Open questions: none
+Next:      P2-08 is in progress
+
+### 2026-10-26 P2-05 cursor
+Task:      P2-05 Realtime driver (T2-RT-01 … 07, T1-RT-01)
+Status:    done
+Changed:   src/monkeybot/core/runtime/utterance_buffer.py interrupt keeps spoken assistant text and drops undispatched tool calls. src/monkeybot/gateway/realtime/session.py returns that fragment. src/monkeybot/gateway/realtime/routes.py commits it through the assistant-boundary path before stopping the provider. tests/unit/core/runtime/test_utterance_buffer.py expects the kept text.
+Verify:    uv run pytest regression/t2/realtime tests/contracts/test_realtime_divergence.py regression/selftest -q → 204 passed. uv run pytest tests/unit/core/runtime/test_utterance_buffer.py tests/unit/gateway/realtime/test_session.py tests/unit/gateway/realtime/test_routes_client_text.py -q → 25 passed.
+Catalog:   T2-RT-04 Test cell unchanged. The case now passes.
+Recorded failures not fixed: none from this change. Prior T2-RT-04 empty history is superseded.
+Open questions: none
+Next:      P2-08 is in progress
+
+### 2026-10-26 P2-08 cursor
+Task:      P2-08 Cross-cutting T1 contracts
+Status:    done
+Changed:   validation.py rejects memory.backend other than chroma. core_tool_executor.py wraps MCP, loop, goal, and ask_user failures in the tool-error envelope. pending stays a kind and is listed in the contract. grant_store.py warns once per damaged file and refuses to rewrite it. monkeybot.scaffold no longer imports install_setup_script. docs/testing.md and 6D-file.md include pending. Unit tests expect the envelope and an unchanged corrupt grants file.
+Verify:    uv run pytest tests/contracts/test_config_matrix.py tests/contracts/test_tool_error_catalog.py tests/contracts/test_policy_decision_table.py tests/contracts/test_scaffold_reexports.py tests/contracts/test_harness_prompt_golden.py tests/contracts/test_span_names.py tests/unit/core/tools/test_grant_store.py tests/unit/core/config/test_config_extensions.py tests/unit/core/goals/test_goals.py regression/t2/loop/scenarios/scheduler/create_goal_requires_slash_goal.yaml -q → passed. The four previously failing cases pass.
+Catalog:   T1-FILE-02 Expect now includes pending. Other Test cells unchanged.
+Recorded failures not fixed: none from this change. The four blocked cases are superseded.
+Open questions: none
+Next:      P2-03 and P2-04 stay blocked
+
+### 2026-10-26 P2-03 cursor
+Task:      P2-03 Route table and error envelope (T1-GW-05, 06)
+Status:    done
+Changed:   regression/plan/reference/appendices.md Appendix D. Session, loop, and goal placeholders match the live names. The eight FastAPI documentation routes are listed. No src change. routes.txt was already the live set.
+Verify:    uv run pytest tests/contracts/test_route_table.py -q → 2 passed in 0.66s
+Catalog:   T1-GW-05 and T1-GW-06 Test cells unchanged. Both cases pass.
+Recorded failures not fixed: none from this change. Prior T1-GW-05 route mismatch is superseded.
+Open questions: none
+Next:      P2-04 stays blocked
+
+### 2026-10-26 P2-04 cursor
+Task:      P2-04 Remaining gateway cases
+Status:    done
+Changed:   src/monkeybot/core/config/snapshot.py reports a restart-tier key when the file value differs from the layout overlay and keeps the overlay. testkit/gateway.py can boot with DB_URL unset so paths.db_url is the setting in force. regression/t2/gateway/test_cases.py T2-CFG-G2 uses that. tests/unit/core/config/test_runtime_config_snapshot.py covers the overlay case.
+Verify:    uv run pytest regression/t2/gateway regression/t2/python/test_sse_stream_pressure.py regression/t2/python/test_ops_cli.py tests/unit/core/config/test_runtime_config_snapshot.py tests/unit/gateway/sse/test_config_reload.py -q -n auto → 126 passed in 8.89s
+Catalog:   T2-CFG-G2 Test cell unchanged. The case now passes.
+Recorded failures not fixed: none from this change. Prior T2-CFG-G2 empty restart_required is superseded. test-runs/20261026T203600Z/20261026T203600Z-1b053d9-93104.jsonl was the run before the overlay was reported.
+Open questions: none
+Next:      P3-01
 

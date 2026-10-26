@@ -1,0 +1,28 @@
+# T1-PROV-05. Each row is one create() sequence on the OpenAI-compat stream loop.
+# `attempts` is how many times the client is called before the row's outcome.
+rows:
+  - id: rate_limit
+    trigger: rate_limit
+    raises: ProviderRateLimitError
+    attempts: 3
+    provider: openai
+  - id: server_5xx
+    trigger: server_5xx
+    raises: ProviderServerError
+    attempts: 3
+    provider: openai
+  - id: tool_unsupported
+    trigger: tool_unsupported
+    retry: drop_tools
+    attempts: 2
+    provider: huggingface
+  - id: ollama_body_read_400
+    trigger: ollama_body_read_400
+    retry: strip_media
+    attempts: 2
+    provider: ollama
+  - id: no_retry_after_first_event
+    trigger: rate_limit_after_yield
+    raises: ProviderRateLimitError
+    attempts: 1
+    provider: openai

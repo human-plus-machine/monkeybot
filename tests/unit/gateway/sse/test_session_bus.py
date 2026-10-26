@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
 
 from monkeybot.core.persistence.transcript import TranscriptWriter
-from monkeybot.core.runtime.events import Thinking
+from monkeybot.core.runtime.events import Thinking, event_to_json
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
-from monkeybot.gateway.sse.sse import agent_event_to_wire_dict, format_active_requests
+from monkeybot.gateway.sse.sse import format_active_requests
 
 
 @pytest.mark.asyncio
@@ -87,10 +88,10 @@ async def test_live_queue_receives_after_replay() -> None:
 
 
 def test_agent_event_dict_maps_kind_to_type() -> None:
-    out = agent_event_to_wire_dict(Thinking(request_id="u1"))
+    out = json.loads(event_to_json(Thinking(request_id="u1")))
     assert out["type"] == "Thinking"
     assert out["request_id"] == "u1"
-    assert out["chat_request_id"] == "u1"
+    assert "chat_request_id" not in out
 
 
 def test_active_requests_frame_has_no_id_line() -> None:

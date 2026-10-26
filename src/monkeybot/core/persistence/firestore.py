@@ -1469,6 +1469,44 @@ class FirestoreOutboxStore:
         )
         return 1 if await retry_txn(transaction, self._ref(row_id)) else 0
 
+    async def release_processing(self, *, lease_owner: str) -> int:
+        n = 0
+        query = self._col.where(filter=FieldFilter("status", "==", "processing"))
+        async for doc in query.stream():
+            data = doc.to_dict() or {}
+            if str(data.get("lease_owner") or "") != lease_owner:
+                continue
+            transaction = self._client.transaction()
+
+            async def _release_body(
+                txn: firestore.AsyncTransaction,
+                ref: firestore.AsyncDocumentReference,
+            ) -> bool:
+                snapshot = await ref.get(transaction=txn)
+                if not snapshot.exists:
+                    return False
+                current = snapshot.to_dict() or {}
+                if str(current.get("status") or "") != "processing":
+                    return False
+                if str(current.get("lease_owner") or "") != lease_owner:
+                    return False
+                txn.update(
+                    ref,
+                    {"status": "pending", "lease_owner": None, "lease_expires_at": None},
+                )
+                return True
+
+            release_txn = cast(
+                Callable[
+                    [firestore.AsyncTransaction, firestore.AsyncDocumentReference],
+                    Awaitable[bool],
+                ],
+                firestore.async_transactional(_release_body),
+            )
+            if await release_txn(transaction, doc.reference):
+                n += 1
+        return n
+
     async def gc_committed(self, *, days: int = 7) -> int:
         cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
         query = self._col.where(filter=FieldFilter("status", "==", "committed"))

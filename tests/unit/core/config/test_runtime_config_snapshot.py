@@ -787,6 +787,25 @@ def test_reload_preserves_overlays_and_does_not_flag_them(
     assert ConfigTier.RESTART not in diff.tiers
 
 
+def test_reload_reports_db_url_when_file_differs_from_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.config.snapshot import overlay_env_values
+
+    monkeypatch.chdir(tmp_path)
+    yaml_path = _write_yaml(tmp_path, "paths:\n  db_url: sqlite:///old.db\n")
+    monkeypatch.delenv("DB_URL", raising=False)
+    apply_monkeybot_runtime_env()
+    store = get_config_store()
+    booted = store.current().env_values["DB_URL"]
+    overlay_env_values({"DB_URL": booted})
+    yaml_path.write_text("paths:\n  db_url: sqlite:///new.db\n", encoding="utf-8")
+    reloaded, diff = store.reload()
+    assert "DB_URL" in diff.changed_env_keys
+    assert ConfigTier.RESTART in diff.tiers
+    assert reloaded.env_values["DB_URL"] == booted
+
+
 def test_commit_mints_revision_under_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     yaml_path = _write_yaml(tmp_path, "model:\n  name: first\n")
