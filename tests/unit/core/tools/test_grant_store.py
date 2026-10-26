@@ -87,6 +87,15 @@ def test_load_grants_corrupt_json_returns_empty_not_raise(tmp_path: Path) -> Non
     assert grants.paths == ()
 
 
+def test_add_grant_leaves_corrupt_file_unchanged(tmp_path: Path) -> None:
+    path = tmp_path / "grants.json"
+    raw = "{not json"
+    path.write_text(raw, encoding="utf-8")
+    assert add_command_grant(path, command="ffmpeg", created_at="a") is False
+    assert add_path_grant(path, folder="/x", mode="read", created_at="a") is False
+    assert path.read_text(encoding="utf-8") == raw
+
+
 def test_commands_and_paths_independent(tmp_path: Path) -> None:
     path = tmp_path / "grants.json"
     add_command_grant(path, command="ffmpeg", created_at="a")

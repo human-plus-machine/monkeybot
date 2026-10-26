@@ -1,0 +1,25 @@
+id: regression/t2/gateway/scenarios/gw/tool_turn_golden_sse
+case: T2-GW-02
+description: Tool call plus result equals t3/sse/tool_turn.sse
+mode: scripted
+driver: gateway
+messages:
+  - Track a todo to write the release notes
+script:
+  - - type: tool_call
+      call_id: c1
+      name: todo_list
+      args:
+        action: add
+        text: Write release notes
+    - type: done
+  - - type: text
+      text: Added the todo.
+    - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  required_tools:
+    - todo_list
+  sse:
+    golden: regression/t3/sse/tool_turn.sse

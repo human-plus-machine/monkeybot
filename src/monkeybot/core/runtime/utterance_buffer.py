@@ -51,8 +51,9 @@ class UtteranceBuffer:
     """In-memory buffer for one realtime session.
 
     Accumulates user audio/text and assistant output. On a user turn boundary the
-    finalized user utterance is returned. On an interrupt, in-flight assistant output
-    is discarded while user input accumulated during the interruption is kept.
+    finalized user utterance is returned. On an interrupt, assistant text already
+    spoken is kept for history commit. Tool calls that have not been dispatched
+    are dropped. User input accumulated during the interruption is kept.
     """
 
     def __init__(self) -> None:
@@ -144,10 +145,18 @@ class UtteranceBuffer:
         self._assistant = AssistantTurn()
         return turn
 
-    def interrupt(self) -> None:
-        """User barge-in: keep any new user input, discard assistant output."""
+    def interrupt(self) -> AssistantTurn:
+        """User barge-in: keep user input and assistant text already spoken.
+
+        Undispatched tool calls are dropped. A tool that is already running is
+        outside this buffer; the session refuses interrupt in that state.
+        """
+        spoken = AssistantTurn(text=self._assistant.text.strip())
         self._in_assistant_turn = False
         self._assistant = AssistantTurn()
+        if not spoken.is_empty:
+            self._last_assistant_turn = spoken
+        return spoken
 
     @property
     def in_user_turn(self) -> bool:

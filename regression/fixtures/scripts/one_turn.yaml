@@ -1,0 +1,5 @@
+# One scripted provider turn. The gateway driver loads this shape through
+# MONKEYBOT_FAKE_PROVIDER_SCRIPT.
+- - type: text
+    text: hello
+  - type: done

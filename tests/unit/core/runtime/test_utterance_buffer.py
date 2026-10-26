@@ -52,15 +52,22 @@ class TestUtteranceBuffer:
         assert turn.tool_calls[0].name == "read_file"
         assert not buf.in_assistant_turn
 
-    def test_interrupt_keeps_user_input_discards_assistant(self) -> None:
+    def test_interrupt_keeps_spoken_assistant_text(self) -> None:
         buf = UtteranceBuffer()
         buf.add_user_text("what is the")
         buf.mark_user_turn_boundary()
         buf.add_assistant_text("The answer is")
-        # User barges in
+        buf.add_assistant_tool_call(
+            RealtimeToolCall(call_id="c1", name="read_file", args={"path": "x"})
+        )
+        # User barges in before the tool is dispatched.
         buf.add_user_text(" never mind, what about")
         buf.add_user_text(" something else")
-        buf.interrupt()
+        spoken = buf.interrupt()
+        assert spoken.text == "The answer is"
+        assert spoken.tool_calls == []
+        assert buf.current_assistant_turn().text == "The answer is"
+        assert buf.current_assistant_turn().tool_calls == []
         assert not buf.in_assistant_turn
         utterance = buf.mark_user_turn_boundary()
         assert utterance.text == "never mind, what about something else"

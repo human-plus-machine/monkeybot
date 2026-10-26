@@ -1,0 +1,23 @@
+id: regression/t2/realtime/scenarios/ws_slot_limit
+case: T2-RT-05
+description: A second upgrade past the slot limit is rejected before accept.
+mode: scripted
+driver: realtime
+executor: real
+config:
+  realtime:
+    session:
+      max_concurrent_sessions: 1
+invariants_skip:
+- name: turn_complete
+  reason: The rejected upgrade never starts a turn.
+assertions:
+  events_sequence:
+  - type: connected
+  - type: upgrade_rejected
+    status: 503
+    accepted: false
+  event_fields:
+    upgrade_rejected:
+      status: 503
+      accepted: false

@@ -168,15 +168,23 @@ def _rewrite_config_files(config_dir: Path) -> bool:
 
 
 @contextmanager
-def _migration_lock(palace: Path) -> Iterator[None]:
-    """Serialize two gateways that both start on the update that renames the model."""
+def _migration_lock(palace: Path) -> Iterator[bool]:
+    """Hold the migration lock, or report that another start already holds it.
+
+    The lock is non-blocking. The start that acquires it renames the model.
+    A second start skips and leaves the config unchanged.
+    """
     import fcntl
 
     lock_path = palace / ".embedding-migrate.lock"
     with lock_path.open("a+b") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try:
-            yield
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
@@ -237,12 +245,26 @@ def _migrate_agent_embedding(root: Path) -> dict[str, Any]:
 
 
 def migrate_agent_embedding(agent_root: Path) -> dict[str, Any]:
-    """Rewrite one agent's legacy embedder name to ``minilm``."""
+    """Rewrite one agent's legacy embedder name to ``minilm``.
+
+    When another start already holds the palace lock, return without writing.
+    """
     root = agent_root.expanduser().resolve()
     doc, _yaml_ok = _load_yaml(root / "monkeybot_config" / "monkeybot.yaml")
     palace = _palace_for(root, doc)
     if palace is not None and palace.is_dir():
-        with _migration_lock(palace):
+        with _migration_lock(palace) as acquired:
+            if not acquired:
+                logger.info(
+                    "Embedding migration skipped for %s; another start holds the lock",
+                    root.name,
+                )
+                return {
+                    "agent_root": str(root),
+                    "action": "skipped_locked",
+                    "yaml_updated": False,
+                    "identity_updated": False,
+                }
             return _migrate_agent_embedding(root)
     return _migrate_agent_embedding(root)
 

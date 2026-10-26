@@ -4176,13 +4176,17 @@ async def test_read_mcp_resource_requires_server_and_uri(tmp_path: Path) -> None
         call=ToolCall(name="read_mcp_resource", args={"uri": "docs://readme"}, call_id="r1"),
         ctx=ctx,
     )
-    assert missing_server.error == "read_mcp_resource requires server"
+    missing_server_body = json.loads(missing_server.error or "")
+    assert missing_server_body["message"] == "read_mcp_resource requires server"
+    assert missing_server_body["error_kind"] == "validation"
 
     missing_uri = await ex.execute(
         call=ToolCall(name="read_mcp_resource", args={"server": "docs"}, call_id="r2"),
         ctx=ctx,
     )
-    assert missing_uri.error == "read_mcp_resource requires uri"
+    missing_uri_body = json.loads(missing_uri.error or "")
+    assert missing_uri_body["message"] == "read_mcp_resource requires uri"
+    assert missing_uri_body["error_kind"] == "validation"
 
 
 @pytest.mark.asyncio
@@ -4201,13 +4205,17 @@ async def test_get_mcp_prompt_requires_server_and_prompt(tmp_path: Path) -> None
         call=ToolCall(name="get_mcp_prompt", args={"prompt": "summarize"}, call_id="p1"),
         ctx=ctx,
     )
-    assert missing_server.error == "get_mcp_prompt requires server"
+    missing_server_body = json.loads(missing_server.error or "")
+    assert missing_server_body["message"] == "get_mcp_prompt requires server"
+    assert missing_server_body["error_kind"] == "validation"
 
     missing_prompt = await ex.execute(
         call=ToolCall(name="get_mcp_prompt", args={"server": "docs"}, call_id="p2"),
         ctx=ctx,
     )
-    assert missing_prompt.error == "get_mcp_prompt requires prompt"
+    missing_prompt_body = json.loads(missing_prompt.error or "")
+    assert missing_prompt_body["message"] == "get_mcp_prompt requires prompt"
+    assert missing_prompt_body["error_kind"] == "validation"
 
 
 class _ResourcesMCPNotConnected(_NoMCP):

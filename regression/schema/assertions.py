@@ -8,6 +8,7 @@ used in the wrong mode, and ``verifier_on`` / ``verifier_off`` while
 
 from __future__ import annotations
 
+import difflib
 import fnmatch
 import hashlib
 import json
@@ -114,6 +115,7 @@ _SSE_KEYS = frozenset(
         "active_requests_once",
         "one_turn_complete_per_request",
         "replay_from",
+        "golden",
     }
 )
 _VERDICT_KEYS = frozenset(
@@ -191,6 +193,7 @@ class RunView:
     script_partial: bool = False
     driver: str | None = None
     second_reply_status: int | None = None
+    sse_wire: str = ""
 
 
 @dataclass
@@ -1668,7 +1671,41 @@ def _check_sse(active: Mapping[str, Any], run: RunView) -> list[str]:
                     failures.append(
                         f"sse: replay from {last_id!r} saw {actual}, expected {expected_ids}"
                     )
+    if "golden" in spec:
+        failures.extend(_check_sse_golden(spec["golden"], run))
     return failures
+
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _check_sse_golden(spec: object, run: RunView) -> list[str]:
+    if not isinstance(spec, str) or not spec.strip():
+        return ["sse: golden must be a path"]
+    from regression.schema.sse_norm import normalize_sse, update_golden
+
+    path = _REPO_ROOT / spec
+    normalized = normalize_sse(run.sse_wire)
+    if update_golden.get():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(normalized, encoding="utf-8")
+        return []
+    if not path.is_file():
+        return [f"sse: missing golden {spec}; re-run with --update-golden"]
+    expected = path.read_text(encoding="utf-8")
+    if expected == normalized:
+        return []
+    diff = "".join(
+        difflib.unified_diff(
+            expected.splitlines(keepends=True),
+            normalized.splitlines(keepends=True),
+            fromfile=spec,
+            tofile="actual",
+            n=1,
+        )
+    )
+    clipped = "\n".join(diff.splitlines()[:80])
+    return [f"sse: golden mismatch for {spec}\n{clipped}"]
 
 
 def _frame_id(frame: object) -> str:

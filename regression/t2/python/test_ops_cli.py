@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import signal
 import socket
@@ -169,3 +170,114 @@ def test_cli_new_then_validate(tmp_path: Path) -> None:
         timeout=60,
     )
     assert validated.returncode == 0, validated.stderr or validated.stdout
+
+
+_SCRIPTED_REPLY = "scripted-gateway-reply"
+_CHAT_SCRIPT = f"""\
+- - type: text
+    text: {_SCRIPTED_REPLY}
+  - type: done
+"""
+
+
+def _redact(text: str) -> str:
+    kept: list[str] = []
+    for line in text.splitlines():
+        lower = line.lower()
+        if any(
+            word in lower for word in ("token", "secret", "authorization", "api_key", "password")
+        ):
+            continue
+        kept.append(line)
+    return "\n".join(kept)[-800:]
+
+
+@pytest.mark.case("T2-OPS-03")
+async def test_cli_chat_prints_scripted_gateway_reply(tmp_path: Path) -> None:
+    """``monkeybot chat`` one message against an in-process gateway prints the scripted reply."""
+    import tempfile
+
+    import uvicorn
+
+    from monkeybot.core.config.runtime_env import reset_runtime_env_state_for_tests
+    from monkeybot.gateway.sse.app import create_app
+    from testkit.gateway import (
+        _DROP,
+        _ISOLATION,
+        _install_layout,
+        _install_script,
+        _pop_env,
+        _push_env,
+        _with_fake_provider,
+    )
+
+    with tempfile.TemporaryDirectory(prefix="mb-ops-chat-") as raw:
+        root = Path(raw)
+        script_path = _install_script(root, _CHAT_SCRIPT)
+        _install_layout(root, _with_fake_provider(None))
+        config_dir = root / "monkeybot_config"
+        updates = dict(_ISOLATION)
+        updates.update(
+            {
+                "MONKEYBOT_CONFIG": str(config_dir / "monkeybot.yaml"),
+                "MONKEYBOT_AGENT_ROOT": str(root),
+                "DB_URL": "sqlite:///data/monkeybot.db",
+                "MONKEYBOT_FAKE_PROVIDER_SCRIPT": str(script_path),
+                "AGENT_MD": str(config_dir / "AGENT.md"),
+                "MCP_CONFIG": str(config_dir / "mcp.json"),
+                "SKILLS_PATH": str(root / "skills"),
+                "MONKEYBOT_WORKSPACE_ROOT": str(root / "workspace"),
+                "MODEL_PROVIDER": "fake",
+            }
+        )
+        previous = _push_env(updates, _DROP)
+        reset_runtime_env_state_for_tests()
+        app = create_app()
+        port = _free_port()
+        config = uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+            access_log=False,
+        )
+        server = uvicorn.Server(config)
+        task = asyncio.create_task(server.serve())
+        try:
+            deadline = time.monotonic() + 30
+            while not server.started:
+                if task.done():
+                    raise AssertionError("in-process gateway exited before it bound a port")
+                if time.monotonic() > deadline:
+                    raise AssertionError("in-process gateway did not become ready")
+                await asyncio.sleep(0.05)
+            proc = await asyncio.create_subprocess_exec(
+                *_monkeybot(),
+                "chat",
+                "--url",
+                f"http://127.0.0.1:{port}",
+                "--cwd",
+                str(root),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=root,
+                env={
+                    "PATH": os.environ.get("PATH", ""),
+                    "HOME": str(tmp_path),
+                    "MONKEYBOT_CHAT_PLAIN": "1",
+                    "MONKEYBOT_CHAT_NO_ANIMATIONS": "1",
+                },
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(b"ping the gateway\n/bye\n"),
+                timeout=60,
+            )
+        finally:
+            server.should_exit = True
+            await asyncio.wait_for(task, timeout=20)
+            _pop_env(previous)
+            reset_runtime_env_state_for_tests()
+    text = stdout.decode()
+    assert proc.returncode == 0, _redact(stderr.decode())
+    assert _SCRIPTED_REPLY in text, _redact(text)

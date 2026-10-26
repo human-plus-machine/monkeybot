@@ -12,7 +12,7 @@ Gaps: no T2 runs the real executor for escapes, stale reads, incomplete scans, p
 | ID | Case | Asserts |
 |---|---|---|
 | T1-FILE-01 | `tool_error_code_catalog` | Every `details.code` raised in `src/` (AST scan of `WorkspaceError(...)`, `PatchError(...)`, ledger errors) is in Appendix A's enum; an undocumented new code fails. |
-| T1-FILE-02 | `envelope_shape_contract` | Every built-in tool error has `ok:false`, `error_kind ∈ {validation, policy, runtime, incomplete_scan, credential_egress_blocked}`, `message`, `hint`. Lists the known exceptions (`enable_mcp`, some `load_file`, `computer_*`) explicitly so a new exception fails. |
+| T1-FILE-02 | `envelope_shape_contract` | Every built-in tool error has `ok:false`, `error_kind ∈ {validation, policy, runtime, incomplete_scan, credential_egress_blocked, pending}`, `message`, `hint`. Lists the known exceptions (`enable_mcp`, some `load_file`, `computer_*`) explicitly so a new exception fails. |
 | T2-FILE-01 | `tool_read` (migrate, now real executor) | Content of a fixture file appears in the result. |
 | T2-FILE-02 | `read_paging_no_gap` | Two pages via `next_offset` concatenate to the file. |
 | T2-FILE-03 | `read_offset_past_eof` | `ok` with empty content (pins current behavior). |

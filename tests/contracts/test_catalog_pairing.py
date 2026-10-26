@@ -24,19 +24,21 @@ _ROOTS = ("regression", "tests")
 def test_catalog_pairing() -> None:
     catalog = load_catalog()
     _assert_seed_shape(catalog)
-    violations = _pairing_violations(catalog)
+    violations, skips = _pairing_violations(catalog)
     lines = list(catalog.uncovered_lines())
     contracts.UNCOVERED_LINES[:] = lines
     for line in lines:
         print(line)
+    for skip in skips:
+        print(skip)
     assert not violations, "\n".join(violations)
 
 
 def _assert_seed_shape(catalog: Catalog) -> None:
     assert len(catalog.rows) == 419
     filled = [row for row in catalog.rows if row.tests]
-    assert len(filled) == 261
-    assert sum(len(row.tests) for row in filled) == 269
+    assert len(filled) == 361
+    assert sum(len(row.tests) for row in filled) == 370
     ranged = catalog.covering("T4-CODE-05")
     assert ranged is not None and ranged.raw_id == "T4-CODE-04..10"
     earlier = catalog.covering("T4-CODE-03")
@@ -54,9 +56,10 @@ def _assert_seed_shape(catalog: Catalog) -> None:
     assert catalog_expect("T4-CODE-05") == ranged.expect
 
 
-def _pairing_violations(catalog: Catalog) -> list[str]:
+def _pairing_violations(catalog: Catalog) -> tuple[list[str], list[str]]:
     root = repo_root()
     violations: list[str] = []
+    skips: list[str] = []
     seen: dict[tuple[str, str, str], str] = {}
     for row in catalog.rows:
         for key in row.identity_keys():
@@ -66,7 +69,7 @@ def _pairing_violations(catalog: Catalog) -> list[str]:
             else:
                 seen[key] = row.raw_id
         for listed in row.tests:
-            violations.extend(_path_violations(root, row, listed, cited=False))
+            violations.extend(_path_violations(root, row, listed, cited=False, skips=skips))
     for path, case_id in _citations(root):
         parsed = parse_case_id(case_id)
         row = catalog.covering(case_id) if parsed is not None else None
@@ -77,11 +80,15 @@ def _pairing_violations(catalog: Catalog) -> list[str]:
             violations.append(
                 f"{path} cites {row.raw_id} but is not listed in that row's Test cell"
             )
-        violations.extend(_path_violations(root, row, path, cited=True))
-    return list(dict.fromkeys(violations))
+        violations.extend(_path_violations(root, row, path, cited=True, skips=skips))
+    return list(dict.fromkeys(violations)), skips
 
 
-def _path_violations(root: Path, row: CatalogRow, listed: str, *, cited: bool) -> list[str]:
+def _path_violations(
+    root: Path, row: CatalogRow, listed: str, *, cited: bool, skips: list[str]
+) -> list[str]:
+    if listed.startswith("monkeyapp:"):
+        return _monkeyapp_violations(root, row, listed, skips)
     violations: list[str] = []
     full = root / listed
     if not cited and not full.is_file():
@@ -93,6 +100,26 @@ def _path_violations(root: Path, row: CatalogRow, listed: str, *, cited: bool) -
             f"not {row.tier}"
         )
     return violations
+
+
+def _monkeyapp_violations(root: Path, row: CatalogRow, listed: str, skips: list[str]) -> list[str]:
+    """A ``monkeyapp:`` Test cell is checked only when the sibling repo is present."""
+    relative = listed.removeprefix("monkeyapp:").strip()
+    sibling = (root.parent / "monkeyapp").resolve()
+    parts = Path(relative).parts
+    if not relative or Path(relative).is_absolute() or ".." in parts:
+        return [f"{row.raw_id} Test cell names {listed}, which is not a path inside monkeyapp"]
+    if not sibling.is_dir():
+        skips.append(f"skip {listed}: {sibling} is not present")
+        return []
+    full = (sibling / relative).resolve()
+    try:
+        full.relative_to(sibling)
+    except ValueError:
+        return [f"{row.raw_id} Test cell names {listed}, which is not a path inside monkeyapp"]
+    if not full.is_file():
+        return [f"{row.raw_id} Test cell names {listed}, which does not exist"]
+    return []
 
 
 def _citations(root: Path) -> list[tuple[str, str]]:

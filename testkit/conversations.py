@@ -5,7 +5,14 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from monkeybot.core.llm.provider import Message
-from monkeybot.core.types.content_blocks import Image, Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import (
+    File,
+    Image,
+    Text,
+    Thinking,
+    ToolRequest,
+    ToolResponse,
+)
 from monkeybot.core.types.types_tools import ToolDef
 
 CANONICAL_TOOL_DEFS: tuple[ToolDef, ...] = (
@@ -89,6 +96,49 @@ def make_anthropic_stream_mock(events: list[object]) -> MagicMock:
     client = MagicMock()
     client.messages.stream = MagicMock(side_effect=lambda **_kw: _AsyncStreamCM())
     return client
+
+
+def canonical_conversation() -> list[Message]:
+    """System, user, assistant text + two parallel tool calls, media tool result, signed thinking.
+
+    Shared by provider converter contracts. Adapters that keep system text beside the
+    message list split this leading system row themselves.
+    """
+    return [
+        Message.text("system", "You are a careful assistant."),
+        Message.text("user", "look at these"),
+        Message(
+            role="assistant",
+            content=[
+                Thinking(thinking="checking both tools", signature="sig-canonical"),
+                Text(text="on it"),
+                ToolRequest(id="c-echo", name="echo", args={"x": 1}),
+                ToolRequest(id="c-ls", name="ls", args={}),
+            ],
+        ),
+        Message(
+            role="user",
+            content=[
+                ToolResponse(
+                    id="c-echo",
+                    tool_name="echo",
+                    result=[
+                        Text(text="done"),
+                        Image(mime_type="image/png", data="aW1n"),
+                        File(
+                            mime_type="application/pdf",
+                            data="JVBERi0xLjQKbm90IGEgcmVhbCBwZGY=",
+                        ),
+                    ],
+                ),
+                ToolResponse(
+                    id="c-ls",
+                    tool_name="ls",
+                    result=[Text(text="listed")],
+                ),
+            ],
+        ),
+    ]
 
 
 def typed_messages_turn_2b_tool_only() -> list[Message]:

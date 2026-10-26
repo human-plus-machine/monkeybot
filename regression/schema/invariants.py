@@ -9,11 +9,12 @@ reads ``tests/contracts/goldens/sse/schema.json`` and does not invent one.
 from __future__ import annotations
 
 import json
-import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+import jsonschema
 
 from monkeybot.core.runtime.events import EventDecodeError, event_to_json
 from regression.schema.assertions import RunView, event_field, event_type, history_orphan_ids
@@ -36,42 +37,6 @@ INVARIANT_NAMES: frozenset[str] = frozenset(
 )
 
 _CANCEL_TYPES = frozenset({"Cancel", "Cancelled", "RunCancelled"})
-_SCHEMA_ANNOTATIONS = frozenset(
-    {
-        "description",
-        "title",
-        "default",
-        "examples",
-        "$schema",
-        "$id",
-        "$comment",
-        "deprecated",
-    }
-)
-_SCHEMA_KEYWORDS = _SCHEMA_ANNOTATIONS | {
-    "type",
-    "properties",
-    "required",
-    "additionalProperties",
-    "items",
-    "enum",
-    "const",
-    "pattern",
-    "minLength",
-    "maxLength",
-    "minimum",
-    "maximum",
-    "exclusiveMinimum",
-    "exclusiveMaximum",
-    "minItems",
-    "maxItems",
-    "anyOf",
-    "oneOf",
-    "allOf",
-    "$ref",
-    "$defs",
-    "definitions",
-}
 
 
 def check_invariants(
@@ -252,6 +217,7 @@ def _turn_lock(run: RunView) -> list[str]:
 
 
 def _sse_schema(run: RunView, schema_path: Path) -> list[str]:
+    """Invariant 6. Every serialized gateway event validates against the golden schema."""
     if not schema_path.is_file():
         return [f"sse_schema: schema file not found: {schema_path}"]
     try:
@@ -260,16 +226,20 @@ def _sse_schema(run: RunView, schema_path: Path) -> list[str]:
         return [f"sse_schema: schema is not valid JSON ({exc})"]
     if not isinstance(loaded, dict):
         return ["sse_schema: schema root must be an object"]
+    try:
+        jsonschema.Draft202012Validator.check_schema(loaded)
+    except jsonschema.SchemaError as exc:
+        return [f"sse_schema: schema is not valid ({exc.message})"]
+    validator = jsonschema.Draft202012Validator(loaded)
     failures: list[str] = []
     for index, event in enumerate(_schema_events(run)):
         instance = _as_object(event)
         if instance is None:
             failures.append(f"sse_schema: event {index} is not a JSON object")
             continue
-        failures.extend(
-            f"sse_schema: event {index} {item}"
-            for item in _validate_instance(instance, loaded, loaded, "$")
-        )
+        messages = [error.message for error in validator.iter_errors(instance)]
+        if messages:
+            failures.append(f"sse_schema: event {index} {'; '.join(messages)}")
     return failures
 
 
@@ -307,196 +277,6 @@ def _as_object(event: object) -> dict[str, Any] | None:
         if isinstance(parsed, dict):
             return parsed
     return None
-
-
-def _validate_instance(
-    instance: object,
-    schema: dict[str, Any],
-    root: dict[str, Any],
-    path: str,
-) -> list[str]:
-    unsupported = sorted(set(schema) - _SCHEMA_KEYWORDS)
-    if unsupported:
-        return [f"{path}: unsupported schema keyword {unsupported}"]
-    if "$ref" in schema:
-        target = schema["$ref"]
-        if not isinstance(target, str):
-            return [f"{path}: $ref must be a string"]
-        try:
-            resolved = _resolve_ref(target, root)
-        except KeyError:
-            return [f"{path}: unresolvable $ref {target}"]
-        return _validate_instance(instance, resolved, root, path)
-    errors: list[str] = []
-    if "enum" in schema and instance not in schema["enum"]:
-        errors.append(f"{path}: {instance!r} is not in enum {schema['enum']!r}")
-    if "const" in schema and instance != schema["const"]:
-        errors.append(f"{path}: {instance!r} != const {schema['const']!r}")
-    if "type" in schema and not _type_matches(instance, schema["type"]):
-        errors.append(f"{path}: expected type {schema['type']!r}")
-        return errors
-    if isinstance(instance, str):
-        errors.extend(_string_errors(instance, schema, path))
-    if isinstance(instance, (int, float)) and not isinstance(instance, bool):
-        errors.extend(_number_errors(instance, schema, path))
-    if isinstance(instance, dict):
-        errors.extend(_object_errors(instance, schema, root, path))
-    if isinstance(instance, list):
-        errors.extend(_array_errors(instance, schema, root, path))
-    errors.extend(_combiner_errors(instance, schema, root, path))
-    return errors
-
-
-def _resolve_ref(ref: str, root: dict[str, Any]) -> dict[str, Any]:
-    if not ref.startswith("#/"):
-        raise KeyError(ref)
-    node: object = root
-    for raw_part in ref[2:].split("/"):
-        part = raw_part.replace("~1", "/").replace("~0", "~")
-        if not isinstance(node, dict) or part not in node:
-            raise KeyError(ref)
-        node = node[part]
-    if not isinstance(node, dict):
-        raise KeyError(ref)
-    return node
-
-
-def _type_matches(instance: object, expected: object) -> bool:
-    names = expected if isinstance(expected, list) else [expected]
-    return any(_one_type(instance, name) for name in names if isinstance(name, str))
-
-
-def _one_type(instance: object, name: str) -> bool:
-    if name == "object":
-        return isinstance(instance, dict)
-    if name == "array":
-        return isinstance(instance, list)
-    if name == "string":
-        return isinstance(instance, str)
-    if name == "integer":
-        return isinstance(instance, int) and not isinstance(instance, bool)
-    if name == "number":
-        return isinstance(instance, (int, float)) and not isinstance(instance, bool)
-    if name == "boolean":
-        return isinstance(instance, bool)
-    if name == "null":
-        return instance is None
-    return False
-
-
-def _string_errors(instance: str, schema: Mapping[str, Any], path: str) -> list[str]:
-    errors: list[str] = []
-    minimum = schema.get("minLength")
-    maximum = schema.get("maxLength")
-    if isinstance(minimum, int) and len(instance) < minimum:
-        errors.append(f"{path}: shorter than minLength {minimum}")
-    if isinstance(maximum, int) and len(instance) > maximum:
-        errors.append(f"{path}: longer than maxLength {maximum}")
-    pattern = schema.get("pattern")
-    if isinstance(pattern, str):
-        try:
-            if re.search(pattern, instance) is None:
-                errors.append(f"{path}: does not match pattern {pattern!r}")
-        except re.error as exc:
-            errors.append(f"{path}: invalid pattern {pattern!r} ({exc})")
-    return errors
-
-
-def _number_errors(instance: float, schema: Mapping[str, Any], path: str) -> list[str]:
-    errors: list[str] = []
-    minimum = schema.get("minimum")
-    maximum = schema.get("maximum")
-    exclusive_min = schema.get("exclusiveMinimum")
-    exclusive_max = schema.get("exclusiveMaximum")
-    if isinstance(minimum, (int, float)) and not isinstance(minimum, bool) and instance < minimum:
-        errors.append(f"{path}: {instance} < minimum {minimum}")
-    if isinstance(maximum, (int, float)) and not isinstance(maximum, bool) and instance > maximum:
-        errors.append(f"{path}: {instance} > maximum {maximum}")
-    if (
-        isinstance(exclusive_min, (int, float))
-        and not isinstance(exclusive_min, bool)
-        and instance <= exclusive_min
-    ):
-        errors.append(f"{path}: {instance} <= exclusiveMinimum {exclusive_min}")
-    if (
-        isinstance(exclusive_max, (int, float))
-        and not isinstance(exclusive_max, bool)
-        and instance >= exclusive_max
-    ):
-        errors.append(f"{path}: {instance} >= exclusiveMaximum {exclusive_max}")
-    return errors
-
-
-def _object_errors(
-    instance: dict[str, Any],
-    schema: Mapping[str, Any],
-    root: dict[str, Any],
-    path: str,
-) -> list[str]:
-    errors: list[str] = []
-    properties = schema.get("properties")
-    if not isinstance(properties, dict):
-        properties = {}
-    required = schema.get("required")
-    if isinstance(required, list):
-        for name in required:
-            if isinstance(name, str) and name not in instance:
-                errors.append(f"{path}: missing required {name!r}")
-    additional = schema.get("additionalProperties", True)
-    for name, value in instance.items():
-        child = f"{path}.{name}"
-        if name in properties and isinstance(properties[name], dict):
-            errors.extend(_validate_instance(value, properties[name], root, child))
-            continue
-        if additional is False:
-            errors.append(f"{path}: additional property {name!r}")
-        elif isinstance(additional, dict):
-            errors.extend(_validate_instance(value, additional, root, child))
-    return errors
-
-
-def _array_errors(
-    instance: list[Any],
-    schema: Mapping[str, Any],
-    root: dict[str, Any],
-    path: str,
-) -> list[str]:
-    errors: list[str] = []
-    minimum = schema.get("minItems")
-    maximum = schema.get("maxItems")
-    if isinstance(minimum, int) and len(instance) < minimum:
-        errors.append(f"{path}: fewer than minItems {minimum}")
-    if isinstance(maximum, int) and len(instance) > maximum:
-        errors.append(f"{path}: more than maxItems {maximum}")
-    items = schema.get("items")
-    if isinstance(items, dict):
-        for index, value in enumerate(instance):
-            errors.extend(_validate_instance(value, items, root, f"{path}[{index}]"))
-    return errors
-
-
-def _combiner_errors(
-    instance: object,
-    schema: Mapping[str, Any],
-    root: dict[str, Any],
-    path: str,
-) -> list[str]:
-    errors: list[str] = []
-    for name in ("allOf", "anyOf", "oneOf"):
-        group = schema.get(name)
-        if group is None:
-            continue
-        if not isinstance(group, list) or not all(isinstance(item, dict) for item in group):
-            errors.append(f"{path}: {name} must be a list of schemas")
-            continue
-        results = [not _validate_instance(instance, item, root, path) for item in group]
-        passed = sum(1 for item in results if item)
-        ok = (name == "allOf" and passed == len(results)) or (name == "anyOf" and passed > 0)
-        if name == "oneOf":
-            ok = passed == 1
-        if not ok:
-            errors.append(f"{path}: did not satisfy {name}")
-    return errors
 
 
 __all__ = [

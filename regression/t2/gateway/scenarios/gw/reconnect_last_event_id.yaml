@@ -1,0 +1,24 @@
+id: regression/t2/gateway/scenarios/gw/reconnect_last_event_id
+case: T2-GW-05
+description: Last-Event-ID 2 skips frames 1-2, replays the rest, then a fresh ActiveRequests.
+mode: scripted
+driver: gateway
+messages:
+  - Say hello
+script:
+  - - type: text
+      text: hello
+    - type: done
+steps:
+  - action: disconnect_sse
+    when: {event: TurnComplete}
+  - action: reconnect_sse
+    last_event_id: "2"
+    when: {event: TurnComplete}
+assertions:
+  turn_completed: true
+  no_errors: true
+  sse:
+    replay_from:
+      last_event_id: "2"
+      event_ids: ["3", "4", "5", "6", "7", "8"]

@@ -2578,6 +2578,7 @@ web-search = [
 dev = [
     { name = "anthropic", extra = ["bedrock", "vertex"] },
     { name = "asgi-lifespan" },
+    { name = "jsonschema" },
     { name = "monkeybot", extra = ["memory", "postgres"] },
     { name = "monkeybot-cli" },
     { name = "mypy" },
@@ -2667,6 +2668,7 @@ provides-extras = ["memory", "gemini", "vertex", "claude", "vertex-claude", "bed
 dev = [
     { name = "anthropic", extras = ["vertex", "bedrock"], specifier = ">=0.40.0" },
     { name = "asgi-lifespan", specifier = ">=2.1.0" },
+    { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "monkeybot", extras = ["memory"] },
     { name = "monkeybot", extras = ["postgres"] },
     { name = "monkeybot-cli", editable = "cli" },

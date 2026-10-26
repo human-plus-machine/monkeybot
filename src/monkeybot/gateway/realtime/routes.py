@@ -632,6 +632,12 @@ async def _handle_client_frames(
     ws: WebSocket,
     state: RealtimeConnectionState,
     input_format: AudioFormat,
+    *,
+    ctx: TurnContext | None = None,
+    history: HistoryStore | None = None,
+    deps: RealtimeDependencies | None = None,
+    attachment_store: Any | None = None,
+    attachment_catalog: Any | None = None,
 ) -> None:
     """Read frames from the client and forward audio/text to the provider."""
     async for raw in _receive_frames(ws):
@@ -673,7 +679,23 @@ async def _handle_client_frames(
             state.cancelled.set()
             if state.pending_responses:
                 state.abandon_pending_cancel_all()
-            state.handle_user_interrupt()
+            spoken = state.handle_user_interrupt()
+            if (
+                spoken is not None
+                and not spoken.is_empty
+                and ctx is not None
+                and history is not None
+                and deps is not None
+            ):
+                await _handle_assistant_boundary(
+                    ws,
+                    state,
+                    ctx,
+                    history,
+                    deps,
+                    attachment_store,
+                    attachment_catalog,
+                )
             await state.realtime_session.interrupt()
             await _send_frame(ws, ServerInterruptedFrame())
         elif isinstance(frame, ClientToolConfirmationResponseFrame):
@@ -735,7 +757,16 @@ async def _run_session(
         )
     )
     client_task = asyncio.create_task(
-        _handle_client_frames(ws, state, state.realtime_session.input_format)
+        _handle_client_frames(
+            ws,
+            state,
+            state.realtime_session.input_format,
+            ctx=ctx,
+            history=history,
+            deps=deps,
+            attachment_store=attachment_store,
+            attachment_catalog=attachment_catalog,
+        )
     )
     guardrail_task = asyncio.create_task(run_guardrails(state, config))
 
