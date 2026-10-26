@@ -144,7 +144,7 @@ async def open_gateway(
         config_dir = root / "monkeybot_config"
         updates["MONKEYBOT_CONFIG"] = str(config_dir / "monkeybot.yaml")
         updates["MONKEYBOT_AGENT_ROOT"] = str(root)
-        drop = _DROP
+        drop: tuple[str, ...] = _DROP
         if db_from_config:
             updates.pop("DB_URL", None)
             drop = (*_DROP, "DB_URL")
