@@ -199,6 +199,47 @@ async def test_rate_limit_holds_while_a_judge_call_is_in_flight() -> None:
 
 
 @pytest.mark.asyncio
+async def test_newer_checkpoint_cancels_an_older_in_flight_judge() -> None:
+    mailbox = _mailbox()
+
+    class _CheckpointPort:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.started = asyncio.Event()
+
+        async def verify(self, intent: object, evidence: EvidenceBundle) -> VerifierVerdict:
+            del intent
+            self.calls += 1
+            status = "stuck"
+            if evidence.inner_turn == 1:
+                self.started.set()
+                await asyncio.sleep(5)
+                status = "drifting"
+            return VerifierVerdict(
+                request_id=evidence.request_id,
+                verdict_id=f"t{evidence.inner_turn}",
+                checkpoint_id=f"{evidence.request_id}:{evidence.inner_turn}",
+                status=status,
+                severity="nudge",
+            )
+
+    port = _CheckpointPort()
+    worker = JudgeWorker(
+        mailbox,
+        port,
+        ledger_fn=lambda: None,
+        config=VerifierJudgeConfig(max_verdicts_per_message=10, min_turns_between_verdicts=0),
+    )
+    worker.enqueue(_evidence("r1", 1))
+    await port.started.wait()
+    worker.enqueue(_evidence("r1", 4))
+    await asyncio.sleep(0.05)
+    ready = mailbox.take_ready("t1", "r1")
+    assert [verdict.status for verdict in ready] == ["stuck"]
+    worker.close()
+
+
+@pytest.mark.asyncio
 async def test_pending_is_marked_while_in_flight_and_cleared_after() -> None:
     mailbox = _mailbox()
     worker = JudgeWorker(

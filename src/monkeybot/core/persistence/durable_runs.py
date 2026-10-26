@@ -11,6 +11,7 @@ from typing import cast
 
 import aiosqlite
 
+from monkeybot.core.persistence.scheduled_loops import resolve_now_ms
 from monkeybot.core.persistence.sqlite import TaskReentrantLock, with_conn_lock
 
 # Single envelope type for stdin protocol + durable persistence (avoid drift).
@@ -176,9 +177,11 @@ class SQLiteRunStore:
         return int(cursor.rowcount) == 1
 
     @with_conn_lock
-    async def list_stale_claims(self, stale_after_ms: int) -> list[SubagentRunRow]:
+    async def list_stale_claims(
+        self, stale_after_ms: int, now_ms: int | None = None
+    ) -> list[SubagentRunRow]:
         """Return ``running`` rows whose claim lease is older than ``stale_after_ms``."""
-        cutoff = int(time.time() * 1000) - stale_after_ms
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         columns = ", ".join(_SUBAGENT_COLUMNS)
         cursor = await self._conn.execute(
             f"""
@@ -199,13 +202,14 @@ class SQLiteRunStore:
         stale_after_ms: int,
         *,
         worker_id: str | None = None,
+        now_ms: int | None = None,
     ) -> bool:
         """Atomically reset one stale ``running`` claim back to ``pending``.
 
         Returns True only when this caller won the reset. Used before reclaim
-        kill so a renewed heartbeat cannot be killed while the claim stays live.
+        kill         so a renewed heartbeat cannot be killed while the claim stays live.
         """
-        cutoff = int(time.time() * 1000) - stale_after_ms
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         if worker_id is None:
             cursor = await self._conn.execute(
                 """
@@ -239,9 +243,9 @@ class SQLiteRunStore:
         return int(cursor.rowcount) == 1
 
     @with_conn_lock
-    async def reset_stale_claims(self, stale_after_ms: int) -> int:
+    async def reset_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int:
         """Reset ``running`` rows with stale ``claimed_at`` back to ``pending``."""
-        cutoff = int(time.time() * 1000) - stale_after_ms
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         cursor = await self._conn.execute(
             """
             UPDATE subagent_runs

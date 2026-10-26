@@ -1,0 +1,38 @@
+id: regression/t2/loop/scenarios/web/browser_stop_on_disconnect
+case: T2-WEB-05
+description: Disconnecting the server named browser calls browser_stop before the session closes.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Disconnect the browser MCP server.
+config:
+  env:
+    MCP_CONFIG: regression/t2/loop/scenarios/web/browser_mcp.json
+    MB_BROWSER_STOP_MARKER: "{workspace}/browser-stop.txt"
+script:
+- - type: tool_call
+    call_id: c1
+    name: disable_mcp
+    args:
+      name: browser
+  - type: done
+- - type: text
+    text: Disconnected.
+  - type: done
+assertions:
+  provider_calls: 2
+  provider_request:
+  - n: 1
+    tools_include:
+    - browser__browser_stop
+    - disable_mcp
+  - n: 2
+    tools_exclude:
+    - browser__browser_stop
+  workspace_file_contains:
+    browser-stop.txt: browser_stop
+  required_tools:
+  - disable_mcp
+  turn_completed: true
+  no_errors: true

@@ -1,0 +1,34 @@
+id: regression/t2/loop/scenarios/subagents/expect_files_absent
+case: T2-SUB-03
+description: A missing expect_files path does not flip ok when the child exits cleanly
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Look for the report
+config:
+  env:
+    MONKEYBOT_SUBAGENT_SCRIPT: testkit/subagent_worker.py
+    AGENT_MD: evals/smoke_agent/monkeybot_config/AGENT.md
+script:
+- - type: tool_call
+    call_id: c1
+    name: task
+    args:
+      task: absent_file
+      expect_files:
+      - missing.txt
+  - type: done
+- - type: text
+    text: The file was not required for ok.
+  - type: done
+assertions:
+  required_tools:
+  - task
+  turn_completed: true
+  workspace_file_absent:
+  - missing.txt
+  event_fields:
+    ToolCallResult:
+      result:
+        regex: '"ok": true.*"artifact_exists": false'

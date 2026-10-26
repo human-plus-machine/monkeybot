@@ -1,0 +1,35 @@
+id: regression/t2/loop/scenarios/loop/repair_missing_tool_result
+case: T2-LOOP-31
+description: A tool request with no result is repaired only on the provider view. Stored rows stay unchanged.
+mode: scripted
+driver: loop
+invariants_skip:
+- name: history_pairs
+  reason: stored history keeps the tool request with no result; the repair is only on the provider view
+messages:
+- answer the missing result
+history:
+- role: assistant
+  content:
+  - type: toolRequest
+    id: missing-31
+    name: read_file
+    args:
+      path: a.txt
+script:
+- - type: text
+    text: stored stays
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  history:
+    row_count: 3
+    roles:
+    - assistant
+    - user
+    - assistant
+    no_repaired_rows: true
+  provider_request:
+  - n: 1
+    messages_contain: was interrupted or its result is missing

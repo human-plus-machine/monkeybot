@@ -5,7 +5,7 @@
 
 Fix these during the relevant phase; several make current results misleading.
 
-1. Live CI provider mismatch: workflow has only `NVIDIA_API_KEY` and an NVIDIA judge; smoke agent is `ollama-cloud` / `glm-5.3-flash` needing `OLLAMA_API_KEY`; baseline was recorded with `JUDGE_PROVIDER=fake` and $0 cost. **Resolution:** Ollama Cloud for agent and judge (5.11); the old baseline is replaced by a fresh one in Phase 5 rather than reused.
+1. Live CI provider mismatch: workflow has only `NVIDIA_API_KEY` and an NVIDIA judge; smoke agent is `ollama-cloud` / `glm-5.3-flash` needing `OLLAMA_API_KEY`; baseline was recorded with `JUDGE_PROVIDER=fake` and $0 cost. **Resolution:** Ollama Cloud for agent and judge (5.11); the old baseline is replaced by a fresh one in Phase 5 rather than reused. GitHub is not given `OLLAMA_API_KEY` (D1, 2026-10-26); live jobs run locally, and P4-05 drops the secret gate instead of swapping keys.
 2. `ci.yml` is `workflow_dispatch` only; `docs/live-evals.md` says `tests/evals` runs on every push/PR. (D2)
 3. `monkeybot.verifier-on.yaml` has `judge.enabled: false` and `max_severity: none`; drift results so far measure tracker verdicts only. `docs/live-evals.md` still says the verifier-on config is a parsed no-op.
 4. `tool_categories_used` is an intersection, not a subset.

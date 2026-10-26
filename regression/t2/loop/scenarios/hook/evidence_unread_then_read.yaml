@@ -1,0 +1,50 @@
+id: regression/t2/loop/scenarios/hook/evidence_unread_then_read
+case: T2-HOOK-09
+description: An unread real file is flagged once; a later read_file clears the notice.
+mode: scripted
+driver: loop
+executor: recording
+workspace_fixture: drift_ws
+hooks:
+  - evidence_guard
+messages:
+  - Cite the model.
+script:
+  - - type: text
+      text: "Evidence: src/models.py"
+    - type: tool_call
+      call_id: c1
+      name: read_file
+      args:
+        path: DONE.txt
+    - type: done
+  - - type: tool_call
+      call_id: c2
+      name: read_file
+      args:
+        path: src/models.py
+    - type: done
+  - - type: text
+      text: "Evidence: src/models.py"
+    - type: tool_call
+      call_id: c3
+      name: read_file
+      args:
+        path: DONE.txt
+    - type: done
+  - - type: text
+      text: Done.
+    - type: done
+assertions:
+  provider_calls: 4
+  provider_request:
+    - n: 2
+      system_contains: "## Evidence verification required"
+    - n: 2
+      system_contains: src/models.py
+    - n: 3
+      system_not_contains: "## Evidence verification required"
+    - n: 4
+      system_not_contains: "## Evidence verification required"
+  turn_completed: true
+  no_errors: true

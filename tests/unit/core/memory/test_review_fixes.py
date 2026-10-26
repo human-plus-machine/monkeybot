@@ -69,7 +69,10 @@ def _subsystem(
 
 
 @pytest.mark.asyncio
-async def test_recall_is_thread_scoped(db_url: str, tmp_path: Path) -> None:
+async def test_recall_is_thread_scoped(
+    db_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_MEMORY_SHARE_THREADS", "false")
     sub = _subsystem(tmp_path, db_url)
     await sub.ensure_ready()
     await sub.enqueue(
@@ -96,6 +99,78 @@ async def test_recall_is_thread_scoped(db_url: str, tmp_path: Path) -> None:
     injected = "\n".join(payload.inject_memory_lines)
     assert "beta secret" in injected
     assert "alpha secret" not in injected
+    await sub.close()
+
+
+def test_format_thread_wake_up_drops_other_chat() -> None:
+    from monkeybot.core.memory.palace import DrawerRecord, format_thread_wake_up
+
+    drawers = [
+        DrawerRecord(
+            drawer_id="a",
+            content="alpha secret",
+            wing="main",
+            room="conversation",
+            filed_at="2026-01-01T00:00:00",
+            metadata={"thread_id": "t1"},
+        ),
+        DrawerRecord(
+            drawer_id="b",
+            content="beta secret",
+            wing="main",
+            room="conversation",
+            filed_at="2026-01-02T00:00:00",
+            metadata={"thread_id": "t2"},
+        ),
+    ]
+    text = format_thread_wake_up("identity", drawers, wing="main", thread_id="t2")
+    assert "beta secret" in text
+    assert "alpha secret" not in text
+
+
+@pytest.mark.asyncio
+async def test_recall_shares_threads_by_default(
+    db_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("MONKEYBOT_MEMORY_SHARE_THREADS", raising=False)
+    sub = _subsystem(tmp_path, db_url)
+    await sub.ensure_ready()
+    await sub.enqueue(
+        thread_id="t1", turn_id="1", message_id="m1", role="user", content="alpha secret"
+    )
+    await sub.enqueue(
+        thread_id="t2", turn_id="1", message_id="m2", role="user", content="beta secret"
+    )
+    await sub.drain_writer(timeout_s=2)
+    t2 = await sub.recall(wing="main", room="conversation", thread_id="t2")
+    texts = [d.content for d in t2]
+    assert "beta secret" in texts
+    assert "alpha secret" in texts
+    briefing = "\n".join(await sub.load_index(thread_id="t2"))
+    assert "alpha secret" in briefing
+    assert "beta secret" in briefing
+    await sub.close()
+
+
+@pytest.mark.asyncio
+async def test_wake_up_hides_other_thread_when_share_off(
+    db_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_MEMORY_SHARE_THREADS", "0")
+    sub = _subsystem(tmp_path, db_url)
+    await sub.ensure_ready()
+    await sub.enqueue(
+        thread_id="t1", turn_id="1", message_id="m1", role="user", content="alpha secret"
+    )
+    await sub.enqueue(
+        thread_id="t2", turn_id="1", message_id="m2", role="user", content="beta secret"
+    )
+    await sub.drain_writer(timeout_s=2)
+    briefing = "\n".join(await sub.load_index(thread_id="t2"))
+    assert "beta secret" in briefing
+    assert "alpha secret" not in briefing
+    t2 = await sub.recall(wing="main", room="conversation", thread_id="t2")
+    assert not any("alpha secret" in d.content for d in t2)
     await sub.close()
 
 

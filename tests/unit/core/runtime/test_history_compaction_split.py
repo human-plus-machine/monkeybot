@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from monkeybot.core.attachments.text import render_attachment_descriptor_text
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.runtime.history_compaction import (
     SUMMARY_KEEP_HEAD_COUNT,
@@ -43,6 +44,53 @@ def test_split_requires_room_for_middle() -> None:
     )
     assert middle == []
     assert len(head) + len(tail) == SUMMARY_KEEP_HEAD_COUNT + SUMMARY_KEEP_TAIL_MIN
+
+
+def test_split_keeps_a_tool_pair_when_the_response_blows_the_budget() -> None:
+    older = _msgs(6, chars=400)
+    request = Message(
+        role="assistant",
+        content=[ToolRequest(id="cut", name="read_file", args={"path": "a.txt"})],
+    )
+    response = Message(
+        role="user",
+        content=[
+            ToolResponse(
+                id="cut",
+                tool_name="read_file",
+                result=[Text(text="R" * 5000)],
+            )
+        ],
+    )
+    newest = Message(role="user", content=[Text(text="go")])
+    messages = [*older, request, response, newest]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert request in tail
+    assert response in tail
+    assert head + middle + tail == messages
+    assert middle
+
+
+def test_split_pins_attachment_descriptor_text() -> None:
+    descriptor = Message(
+        role="user",
+        content=[
+            Text(
+                text=render_attachment_descriptor_text(
+                    attachment_id="att-pin",
+                    filename="photo.png",
+                    mime_type="image/png",
+                    description="pinned photo",
+                )
+            )
+        ],
+    )
+    messages = [*_msgs(4, chars=80), descriptor, *_msgs(8, chars=80)]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=100)
+    assert descriptor not in head + middle + tail
+    summary = Message(role="assistant", content=[Text(text="[Context Summary]: mid")])
+    rebuilt = rebuild_compacted_history(messages, head=head, summary=summary, tail=tail)
+    assert descriptor in rebuilt
 
 
 def test_split_keeps_minimum_tail_on_tiny_window() -> None:

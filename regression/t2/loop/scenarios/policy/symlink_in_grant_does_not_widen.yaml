@@ -1,0 +1,31 @@
+id: regression/t2/loop/scenarios/policy/symlink_in_grant_does_not_widen
+case: T2-POL-06
+description: A symlink inside a grant that points outside the grant is denied.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Read the symlink inside the granted folder.
+policy:
+  command_allowlist: default
+  grants: default
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: "{grant_root}/link_out"
+  - type: done
+- - type: text
+    text: The symlink was denied.
+  - type: done
+assertions:
+  tool_error_codes:
+  - path_needs_grant
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    error:
+      regex: '\A(?![\s\S]*OUTSIDE-GRANT)[\s\S]*path_needs_grant'
+  turn_completed: true
+  no_errors: true

@@ -1,0 +1,54 @@
+id: regression/t2/loop/scenarios/shell/bg_job_cap
+case: T2-SHELL-12
+description: A background job past max_background_jobs returns a cap error
+mode: scripted
+driver: loop
+executor: real
+config:
+  env:
+    SANDBOX_MAX_BACKGROUND_JOBS: "1"
+    SANDBOX_ENABLED: "false"
+messages:
+- Start two background sleeps.
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      argv:
+      - python
+      - -c
+      - import time; time.sleep(30)
+      background: true
+      timeout: 60
+  - type: tool_call
+    call_id: c2
+    name: run_command
+    args:
+      argv:
+      - python
+      - -c
+      - import time; time.sleep(30)
+      background: true
+      timeout: 60
+  - type: done
+- - type: text
+    text: Both jobs were started.
+  - type: done
+- - type: text
+    text: Still waiting on the first job.
+  - type: done
+- - type: text
+    text: Still waiting on the first job.
+  - type: done
+- - type: text
+    text: Ending with the first job still running.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c2
+    error_kind: runtime
+    error:
+      regex: too many background jobs
+  turn_completed: true

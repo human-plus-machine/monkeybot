@@ -1,0 +1,60 @@
+id: regression/t2/loop/scenarios/verifier/no_progress_budget_burn_not_mailboxed
+case: T2-VER-09
+description: no_progress and budget_burn are logged only and never become mailbox verdicts.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: drift_ws
+hooks:
+- verifier
+messages:
+- Inspect the tree with tools and no commentary.
+config:
+  verifier:
+    enabled: true
+    ledger:
+      enabled: false
+    tracker:
+      enabled: true
+    judge:
+      enabled: false
+    escalation:
+      max_severity: nudge
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: src/models.py
+  - type: usage
+    input_tokens: 120000
+    output_tokens: 10
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: DONE.txt
+  - type: usage
+    input_tokens: 120000
+    output_tokens: 10
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: read_file
+    args:
+      path: db/migrations/001_init.sql
+  - type: usage
+    input_tokens: 120000
+    output_tokens: 10
+  - type: done
+- - type: text
+    text: Done.
+  - type: done
+assertions:
+  turn_completed: true
+  verdicts:
+    max: 0
+    signals_exclude:
+    - no_progress
+    - budget_burn

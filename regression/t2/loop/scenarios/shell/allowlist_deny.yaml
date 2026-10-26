@@ -1,0 +1,33 @@
+id: regression/t2/loop/scenarios/shell/allowlist_deny
+case: T2-SHELL-03
+description: curl is denied by the command allowlist before it can write a file
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Download a page with curl into side_effect.txt.
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      argv:
+      - curl
+      - -o
+      - side_effect.txt
+      - http://127.0.0.1:9/
+  - type: done
+- - type: text
+    text: curl was denied.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    error_kind: policy
+    error:
+      regex: Command 'curl' not allowed
+  workspace_file_absent:
+  - side_effect.txt
+  turn_completed: true
+  no_errors: true

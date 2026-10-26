@@ -1,0 +1,27 @@
+id: regression/t2/loop/scenarios/loop/max_turns_not_on_clean_finish
+case: T2-LOOP-03
+description: A text answer on the last allowed turn is a clean finish and does not trip the turn cap.
+mode: scripted
+driver: loop
+config:
+  model.max_turns: 2
+messages:
+- look then answer
+script:
+- - type: tool_call
+    call_id: t1
+    name: read_file
+    args:
+      path: a.txt
+  - type: done
+- - type: text
+    text: finished cleanly
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  interventions: []
+  response_contains: finished cleanly
+  events_absent:
+  - HarnessIntervention

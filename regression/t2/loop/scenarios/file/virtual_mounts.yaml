@@ -1,0 +1,66 @@
+id: regression/t2/loop/scenarios/file/virtual_mounts
+case: T2-FILE-30
+description: skills/ and artifacts/ resolve to their own roots and do not fall back to each other.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Check the skills and artifacts mounts.
+script:
+- - type: tool_call
+    call_id: c1
+    name: write_file
+    args:
+      path: artifacts/marker.txt
+      content: ARTIFACTS_ONLY_TOKEN
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: artifacts/marker.txt
+  - type: tool_call
+    call_id: c3
+    name: read_file
+    args:
+      path: notes.txt
+  - type: tool_call
+    call_id: c4
+    name: read_file
+    args:
+      path: skills/marker.txt
+  - type: tool_call
+    call_id: c5
+    name: read_file
+    args:
+      path: skills/notes.txt
+  - type: tool_call
+    call_id: c6
+    name: read_file
+    args:
+      path: artifacts/notes.txt
+  - type: done
+- - type: text
+    text: The mounts do not fall back.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    result:
+      regex: ARTIFACTS_ONLY_TOKEN
+  - type: ToolCallResult
+    result:
+      regex: A note inside the hostile workspace
+  - type: ToolCallResult
+    error:
+      regex: '\A(?![\s\S]*ARTIFACTS_ONLY_TOKEN)[\s\S]*not_found'
+  - type: ToolCallResult
+    error:
+      regex: '\A(?![\s\S]*A note inside the hostile workspace)[\s\S]*not_found'
+  - type: ToolCallResult
+    error:
+      regex: '\A(?![\s\S]*A note inside the hostile workspace)[\s\S]*not_found'
+  tool_error_codes:
+  - not_found
+  turn_completed: true

@@ -1,0 +1,62 @@
+id: regression/t2/loop/scenarios/verifier/free_text_constraint_never_matches
+case: T2-VER-05
+description: A free_text constraint never emits constraint_touch, including when the path equals the text.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: drift_ws
+hooks:
+- verifier
+messages:
+- Do not be silly.
+config:
+  verifier:
+    enabled: true
+    ledger:
+      enabled: true
+      model: fake
+    tracker:
+      enabled: true
+    judge:
+      enabled: false
+    escalation:
+      max_severity: nudge
+  env:
+    MONKEYBOT_CLASSIFIER_ROWS: '[{"intent":"new_goal","relates_to":null,"constraints":[{"kind":"free_text","pattern":"do
+      not be silly","verbatim":"do not be silly"}]}]'
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: src/models.py
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: write_file
+    args:
+      path: do not be silly.txt
+      content: x
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: read_file
+    args:
+      path: do not be silly.txt
+  - type: done
+- - type: tool_call
+    call_id: c4
+    name: write_file
+    args:
+      path: do not be silly.txt
+      content: y
+  - type: done
+- - type: text
+    text: Done.
+  - type: done
+assertions:
+  turn_completed: true
+  verdicts:
+    max: 0
+    signals_exclude:
+    - constraint_touch

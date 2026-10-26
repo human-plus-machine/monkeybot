@@ -1,0 +1,7 @@
+# The deny list is omitted so loading uses the built-in deny patterns.
+allowed_commands:
+  - echo
+  - ls
+  - python3
+allowed_path_prefixes:
+  - ./src/

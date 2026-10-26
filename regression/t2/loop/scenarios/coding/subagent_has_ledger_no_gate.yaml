@@ -1,0 +1,48 @@
+id: regression/t2/loop/scenarios/coding/subagent_has_ledger_no_gate
+case: T2-CODE-18
+description: The child ledger refuses an unread edit and the child final answer is not gate-held
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+hooks:
+  - verification_gate
+config:
+  memory:
+    enabled: false
+  env:
+    MONKEYBOT_SUBAGENT_SCRIPT: "{repo_root}/src/monkeybot/core/subagents/subagent_worker.py"
+    MONKEYBOT_CONFIG: "{repo_root}/regression/fixtures/configs/agent.base.yaml"
+    MONKEYBOT_FAKE_PROVIDER_SCRIPT: "{repo_root}/regression/t2/loop/scenarios/coding/subagent_ledger_child.yml"
+    AGENT_MD: "{repo_root}/evals/smoke_agent/monkeybot_config/AGENT.md"
+    DB_URL: "sqlite:///{workspace}/child.db"
+messages:
+  - Ask the child to edit notes and add a file.
+script:
+  - - type: tool_call
+      call_id: c1
+      name: task
+      args:
+        task: Edit notes.txt and write child_made.txt
+        expect_files:
+          - child_made.txt
+    - type: done
+  - - type: text
+      text: Parent accepted the child.
+    - type: done
+assertions:
+  interventions: []
+  provider_calls: 2
+  response_contains: Parent accepted the child.
+  response_not_contains: final_answer_gate
+  subagent:
+    started: true
+    completed_ok: true
+    output_json_present: true
+  workspace_unchanged:
+    - notes.txt
+  workspace_file_contains:
+    child_made.txt: made by child
+  workspace_command_passes:
+    - python -c "import pathlib; files=list(pathlib.Path('.monkeybot/subagent-runs').glob('*/progress.jsonl')); assert files, 'no progress'; text='\n'.join(p.read_text() for p in files); assert 'read_before_write' in text, 'ledger'; assert 'Child finished without running tests.' in text, 'final'; assert 'final_answer_gate' not in text, 'gated'; assert 'TurnComplete' in text"
+  turn_completed: true

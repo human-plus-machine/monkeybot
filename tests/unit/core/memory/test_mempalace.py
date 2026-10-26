@@ -286,7 +286,10 @@ def test_create_palace_requires_memory_extra(
 
 
 @pytest.mark.asyncio
-async def test_recall_is_thread_scoped(db_url: str, tmp_path: Path) -> None:
+async def test_recall_is_thread_scoped(
+    db_url: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("MONKEYBOT_MEMORY_SHARE_THREADS", "false")
     sub = _subsystem(tmp_path, db_url)
     await sub.ensure_ready()
     await sub.enqueue(

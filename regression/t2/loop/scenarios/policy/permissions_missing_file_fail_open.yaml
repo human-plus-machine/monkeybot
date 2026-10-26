@@ -1,0 +1,34 @@
+id: regression/t2/loop/scenarios/policy/permissions_missing_file_fail_open
+case: T2-POL-10
+description: A missing permissions file does not deny; the soft ruleset fails open.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Push with no permissions file.
+policy:
+  command_allowlist: default
+  permissions: missing
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      argv:
+      - git
+      - push
+      - origin
+  - type: done
+- - type: text
+    text: The push was not denied by a ruleset.
+  - type: done
+assertions:
+  events_absent:
+  - ToolConfirmationRequest
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    result:
+      regex: '\A(?![\s\S]*denied by the later overlap rule)[\s\S]*not a git repository'
+  turn_completed: true
+  no_errors: true

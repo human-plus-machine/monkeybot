@@ -1,0 +1,29 @@
+id: regression/t2/loop/scenarios/file/patch_add_existing
+case: T2-FILE-20
+description: Adding a patch file that already exists is already_exists.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Add notes.txt again.
+script:
+- - type: tool_call
+    call_id: c1
+    name: apply_patch
+    args:
+      patch_text: |
+        *** Begin Patch
+        *** Add File: notes.txt
+        +new
+        *** End Patch
+  - type: done
+- - type: text
+    text: The destination already exists.
+  - type: done
+assertions:
+  tool_error_codes:
+  - already_exists
+  workspace_unchanged:
+  - notes.txt
+  turn_completed: true

@@ -1,0 +1,37 @@
+id: regression/t2/loop/scenarios/skills/skills_path_hot_reload
+case: T2-SKILL-05
+description: paths.skills_path is hot; the next user turn's volatile skills section uses the new tree.
+mode: scripted
+driver: loop
+executor: real
+messages:
+  - Which skills are installed?
+  - Which skills are installed after the path change?
+invariants_skip:
+  - name: turn_complete
+    reason: paths.skills_path is read on the next user message, and that message completes a second turn
+script:
+  - - type: text
+      text: Diagnostics and plain are installed.
+    - type: done
+  - - type: text
+      text: The skills path now has no installed skills.
+    - type: done
+steps:
+  - action: reload_config
+    config:
+      paths.skills_path: alt-skills
+    when:
+      event: text
+      nth: 1
+assertions:
+  turn_completed: true
+  provider_calls: 2
+  provider_request:
+    - n: 1
+      system_contains: |-
+        ## Skills
+        - diagnostics — Inspect a failing run and report the first error.
+        - plain — Print the workspace layout before changing files.
+    - n: 2
+      system_not_contains: diagnostics — Inspect a failing run and report the first error.

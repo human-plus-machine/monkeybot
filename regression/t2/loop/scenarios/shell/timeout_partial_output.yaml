@@ -1,0 +1,71 @@
+id: regression/t2/loop/scenarios/shell/timeout_partial_output
+case: T2-SHELL-09
+description: A timed-out command spills partial output and its process group is gone
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Run a command that prints and then sleeps past its timeout.
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      argv:
+      - python
+      - -c
+      - |
+        import os, time
+        from pathlib import Path
+        print("PARTIAL-OUT", flush=True)
+        child = os.fork()
+        if child == 0:
+            Path("child.pid").write_text(str(os.getpid()))
+            time.sleep(60)
+        else:
+            Path("parent.pid").write_text(str(os.getpid()))
+            time.sleep(0.3)
+            time.sleep(60)
+      timeout: 3
+  - type: tool_call
+    call_id: c2
+    name: run_command
+    args:
+      argv:
+      - python
+      - -c
+      - |
+        import os, time
+        from pathlib import Path
+        for name in ("parent.pid", "child.pid"):
+            path = Path(name)
+            if not path.is_file():
+                print(name + " missing")
+                continue
+            pid = int(path.read_text())
+            state = "alive"
+            for _ in range(20):
+                try:
+                    os.kill(pid, 0)
+                except OSError:
+                    state = "gone"
+                    break
+                time.sleep(0.05)
+            print(name + " " + state)
+  - type: done
+- - type: text
+    text: The command timed out and the process group is gone.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    error_kind: runtime
+    error:
+      regex: partial_output_path.*PARTIAL-OUT
+  - type: ToolCallResult
+    call_id: c2
+    result:
+      regex: parent\.pid gone.*child\.pid gone
+  turn_completed: true
+  no_errors: true

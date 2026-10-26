@@ -77,6 +77,7 @@ from testkit.context import _ctx, _ctx_with_task
 from testkit.executors import RecordingExecutor
 from testkit.history import FakeHistory
 from testkit.inspectors import AllowInspector
+from testkit.pending_bus import PresetPendingBus
 from testkit.provider import FakeProvider
 
 
@@ -167,19 +168,6 @@ class ConfirmInspector:
     async def check(self, call, ctx):
         del call, ctx
         return Decision(kind="confirm", message=None)
-
-
-class PresetPendingBus:
-    """Registers pending futures with optional pre-resolved payloads (Story 5 loop tests)."""
-
-    def __init__(self, preset: dict[str, Any]) -> None:
-        self._preset = preset
-
-    def register_pending(self, key: str) -> asyncio.Future[Any]:
-        fut = asyncio.get_running_loop().create_future()
-        if key in self._preset:
-            fut.set_result(self._preset[key])
-        return fut
 
 
 @pytest.mark.asyncio

@@ -9,7 +9,7 @@ Existing: T1 `tests/core/memory/*`, `test_migrate_embedding.py`, `test_memory_la
 
 | ID | Case | Asserts |
 |---|---|---|
-| T1-MEM-01 | `share_threads_flag` | `MONKEYBOT_MEMORY_SHARE_THREADS` off: thread B recall excludes thread A; on: includes. |
+| T1-MEM-01 | `share_threads_flag` | Default on: thread B recall includes thread A. `MONKEYBOT_MEMORY_SHARE_THREADS` off: thread B recall excludes thread A. |
 | T1-MEM-02 | `drain_timeout_keeps_pending` | Hung embedder: rows stay `pending` after `drain_writer`. |
 | T1-MEM-03 | `object_store_uri_fallback` | `gcs://` / `s3://` memory URI falls back to local; `palace_path_from_uri` raises for object stores. |
 | T2-MEM-01 | `outbox_ingest_then_inject` | Turn 1 persists; `drain_writer`; turn 2 `PRE_TURN` injects the turn-1 text (content check). |

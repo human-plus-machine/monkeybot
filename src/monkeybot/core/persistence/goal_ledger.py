@@ -110,6 +110,7 @@ class Classification:
     intent: Intent
     relates_to: str | None
     constraints: tuple[ConstraintDraft, ...]
+    done_when: tuple[str, ...] = ()
 
 
 def new_entry_id() -> str:

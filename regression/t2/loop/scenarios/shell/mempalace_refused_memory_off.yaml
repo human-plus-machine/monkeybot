@@ -1,0 +1,34 @@
+id: regression/t2/loop/scenarios/shell/mempalace_refused_memory_off
+case: T2-SHELL-16
+description: With memory off, mempalace is a policy error and is not spawned
+mode: scripted
+driver: loop
+executor: real
+config:
+  memory:
+    enabled: false
+messages:
+- Search memory.
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      argv:
+      - mempalace
+      - search
+      - hello
+      timeout: 5
+  - type: done
+- - type: text
+    text: Memory is off.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    error_kind: policy
+    error:
+      regex: Memory is unavailable
+  turn_completed: true
+  no_errors: true

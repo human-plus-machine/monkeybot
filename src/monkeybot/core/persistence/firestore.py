@@ -50,6 +50,7 @@ from monkeybot.core.persistence.durable_runs import (
 from monkeybot.core.persistence.errors import AmbiguousCommitError
 from monkeybot.core.persistence.firestore_scheduled_loops import FirestoreScheduledLoopStore
 from monkeybot.core.persistence.row_ids import loaded_row_id, row_id_for_insert
+from monkeybot.core.persistence.scheduled_loops import resolve_now_ms
 from monkeybot.core.persistence.thread_summary import (
     ChatThreadSummary,
     is_hidden_thread_id,
@@ -910,8 +911,10 @@ class FirestoreRunStore:
         )
         return bool(await renew_txn(transaction, doc_ref))
 
-    async def list_stale_claims(self, stale_after_ms: int) -> list[SubagentRunRow]:
-        cutoff = int(time.time() * 1000) - stale_after_ms
+    async def list_stale_claims(
+        self, stale_after_ms: int, now_ms: int | None = None
+    ) -> list[SubagentRunRow]:
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         query = (
             self._client.collection(self._collection)
             .where(filter=FieldFilter("status", "==", "running"))
@@ -931,8 +934,9 @@ class FirestoreRunStore:
         stale_after_ms: int,
         *,
         worker_id: str | None = None,
+        now_ms: int | None = None,
     ) -> bool:
-        cutoff = int(time.time() * 1000) - stale_after_ms
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         doc_ref = self._doc(run_id)
         transaction = self._client.transaction()
 
@@ -965,8 +969,8 @@ class FirestoreRunStore:
         )
         return bool(await reset_txn(transaction, doc_ref))
 
-    async def reset_stale_claims(self, stale_after_ms: int) -> int:
-        cutoff = int(time.time() * 1000) - stale_after_ms
+    async def reset_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int:
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         query = (
             self._client.collection(self._collection)
             .where(filter=FieldFilter("status", "==", "running"))
@@ -1111,8 +1115,8 @@ class FirestoreSessionTurnLockStore:
     def _doc(self, session_id: str) -> firestore.AsyncDocumentReference:
         return self._client.collection(self._collection).document(session_id)
 
-    async def release_stale_claims(self, stale_after_ms: int) -> int:
-        cutoff = int(time.time() * 1000) - stale_after_ms
+    async def release_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int:
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         query = self._client.collection(self._collection).where(
             filter=FieldFilter("claimed_at_ms", "<", cutoff)
         )

@@ -1,0 +1,50 @@
+id: regression/t2/loop/scenarios/shell/bg_killed_at_turn_end
+case: T2-SHELL-14
+description: A job still running at the end is nudged by the turn guard before the turn kills it
+mode: scripted
+driver: loop
+executor: real
+config:
+  env:
+    SANDBOX_ENABLED: "false"
+messages:
+- Start a long job and finish.
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      argv:
+      - python
+      - -c
+      - import time; time.sleep(30)
+      background: true
+      timeout: 60
+  - type: done
+- - type: text
+    text: The job is only started.
+  - type: done
+- - type: text
+    text: The job is only started.
+  - type: done
+- - type: text
+    text: The job is only started.
+  - type: done
+- - type: text
+    text: Ending anyway.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    result:
+      regex: '"background": true'
+  - type: HarnessIntervention
+    intervention: background_jobs_nudge
+  - type: Error
+    error:
+      regex: kills them
+  interventions_include:
+  - background_jobs_nudge
+  error_contains: kills them
+  turn_completed: true

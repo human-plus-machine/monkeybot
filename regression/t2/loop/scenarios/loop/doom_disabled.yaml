@@ -1,0 +1,48 @@
+id: regression/t2/loop/scenarios/loop/doom_disabled
+case: T2-LOOP-11
+description: DOOM_LOOP_THRESHOLD 0 disables identical-call detection.
+mode: scripted
+driver: loop
+config:
+  env:
+    DOOM_LOOP_THRESHOLD: '0'
+messages:
+- read the same file many times
+script:
+- - type: tool_call
+    call_id: r1
+    name: read_file
+    args:
+      path: notes.txt
+  - type: tool_call
+    call_id: r2
+    name: read_file
+    args:
+      path: notes.txt
+  - type: tool_call
+    call_id: r3
+    name: read_file
+    args:
+      path: notes.txt
+  - type: tool_call
+    call_id: r4
+    name: read_file
+    args:
+      path: notes.txt
+  - type: tool_call
+    call_id: r5
+    name: read_file
+    args:
+      path: notes.txt
+  - type: done
+- - type: text
+    text: still going
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  tool_calls:
+    read_file: 5
+  interventions: []
+  response_contains: still going

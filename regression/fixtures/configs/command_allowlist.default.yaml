@@ -1,0 +1,12 @@
+# Default run_command policy for scripted scenarios.
+allowed_commands:
+  - echo
+  - ls
+  - python3
+  - git
+allowed_path_prefixes:
+  - ./src/
+  - ./tests/
+deny_patterns:
+  - "pip3?\\s+install"
+  - "^sudo\\s+"

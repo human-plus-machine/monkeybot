@@ -1,0 +1,4 @@
+{"control": true}
+{"type": "ToolCallStarted", "request_id": "child", "tool": "task", "label": "task", "args": {"task": "nested"}, "call_id": "n1"}
+{"type": "ToolCallResult", "request_id": "child", "tool": "task", "result": "", "error": "unknown tool: task", "call_id": "n1"}
+{"type": "TurnComplete", "request_id": "child"}

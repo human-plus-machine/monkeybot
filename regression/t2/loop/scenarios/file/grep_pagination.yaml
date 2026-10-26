@@ -1,0 +1,54 @@
+id: regression/t2/loop/scenarios/file/grep_pagination
+case: T2-FILE-26
+description: max_matches and offset page through every match and total_match_count stays stable.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Page through hit matches.
+script:
+- - type: tool_call
+    call_id: c1
+    name: write_file
+    args:
+      path: page.txt
+      content: |
+        hit 1
+        hit 2
+        hit 3
+        hit 4
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: grep
+    args:
+      pattern: hit
+      file_glob: page.txt
+      max_matches: 2
+      offset: 0
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: grep
+    args:
+      pattern: hit
+      file_glob: page.txt
+      max_matches: 2
+      offset: 2
+  - type: done
+- - type: text
+    text: Paged through four hits.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    result:
+      regex: '"bytes":'
+  - type: ToolCallResult
+    result:
+      regex: 'hit 1[\s\S]*"total_match_count": 4'
+  - type: ToolCallResult
+    result:
+      regex: 'hit 3[\s\S]*"total_match_count": 4'
+  turn_completed: true

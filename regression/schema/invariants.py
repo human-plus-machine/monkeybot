@@ -127,14 +127,26 @@ def _skip_names(skips: Sequence[object] | None) -> frozenset[str]:
 
 
 def _turn_complete(run: RunView) -> list[str]:
-    indexes = [
-        index for index, event in enumerate(run.events) if event_type(event) == "TurnComplete"
-    ]
-    if len(indexes) != 1:
-        return [f"turn_complete: expected exactly one TurnComplete, saw {len(indexes)}"]
-    if indexes[0] != len(run.events) - 1:
+    """One TurnComplete per request, and the trajectory ends on one.
+
+    Two user messages in one session are two requests. One request that
+    completes twice is still a failure.
+    """
+    completes = [event for event in run.events if event_type(event) == "TurnComplete"]
+    if not completes:
+        return ["turn_complete: expected exactly one TurnComplete, saw 0"]
+    if event_type(run.events[-1]) != "TurnComplete":
         return ["turn_complete: TurnComplete is not the last event"]
-    return []
+    counts: Counter[str] = Counter()
+    for event in completes:
+        request_id = event_field(event, "request_id")
+        counts[request_id if isinstance(request_id, str) else ""] += 1
+    failures: list[str] = []
+    for request_id, count in sorted(counts.items()):
+        if count != 1:
+            label = request_id or "(none)"
+            failures.append(f"turn_complete: request {label} has {count} TurnComplete events")
+    return failures
 
 
 def _tool_call_results(run: RunView) -> list[str]:

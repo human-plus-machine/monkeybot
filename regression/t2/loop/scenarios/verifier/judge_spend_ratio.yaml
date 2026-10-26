@@ -1,0 +1,73 @@
+id: regression/t2/loop/scenarios/verifier/judge_spend_ratio
+case: T2-VER-19
+description: Once judge tokens exceed max_spend_ratio of agent tokens, the judge is not called again.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: drift_ws
+hooks:
+- verifier
+messages:
+- Fail several reads.
+config:
+  verifier:
+    enabled: true
+    ledger:
+      enabled: false
+    tracker:
+      enabled: true
+    judge:
+      enabled: true
+      model: fake
+      max_spend_ratio: 0.25
+      min_turns_between_verdicts: 0
+      max_verdicts_per_message: 10
+    escalation:
+      max_severity: nudge
+  env:
+    MONKEYBOT_JUDGE_SCRIPT: '{"completions":[{"mode":"valid","body":"{\"status\":\"drifting\",\"severity\":\"nudge\",\"confidence\":0.8,\"rationale\":\"write_without_read\",\"correction\":\"FREEFORM_DROP_ME\"}","input_tokens":100,"output_tokens":0},{"mode":"valid","body":"{\"status\":\"drifting\",\"severity\":\"nudge\",\"confidence\":0.8,\"rationale\":\"write_without_read\",\"correction\":\"FREEFORM_DROP_ME\"}","input_tokens":1,"output_tokens":0}]}'
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: missing_a.txt
+  - type: usage
+    input_tokens: 1
+    output_tokens: 0
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: missing_b.txt
+  - type: usage
+    input_tokens: 1
+    output_tokens: 0
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: read_file
+    args:
+      path: missing_c.txt
+  - type: usage
+    input_tokens: 1
+    output_tokens: 0
+  - type: done
+- - type: tool_call
+    call_id: c4
+    name: read_file
+    args:
+      path: missing_d.txt
+  - type: usage
+    input_tokens: 1
+    output_tokens: 0
+  - type: done
+- - type: text
+    text: Done.
+  - type: done
+assertions:
+  turn_completed: true
+  verdicts:
+    min: 1
+    max: 1

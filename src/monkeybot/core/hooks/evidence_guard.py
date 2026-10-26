@@ -1,7 +1,7 @@
 """POST-turn evidence-path verification for ``Evidence:`` citations.
 
 Scans assistant text for ``Evidence: <path>`` lines and injects a correction
-notice on the next model step (``PRE_TURN`` / ``PRE_TOOL``) when:
+notice on the next model request when:
 
 * a cited path does not exist under the workspace root (fabrication), or
 * a cited path exists but was never opened with ``read_file`` (or located via
@@ -15,10 +15,12 @@ import json
 import logging
 import re
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
+from monkeybot.core.llm.provider import Message
+from monkeybot.core.types.content_blocks import Text
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +126,13 @@ class _ThreadEvidenceState:
 
 
 class EvidencePathGuard:
-    """Scan assistant Evidence citations; inject corrections on the next step.
+    """Scan assistant Evidence citations; inject corrections on the next request.
+
+    ``AFTER_PROVIDER_RESPONSE`` is fire-and-forget, so the scan usually finishes
+    at the settlement barrier, after ``PRE_TOOL`` of the citing step has already
+    run. ``BEFORE_PROVIDER_REQUEST`` is the next awaited point, and that is the
+    request the notice belongs on. ``PRE_TURN`` and ``PRE_TOOL`` still inject
+    when the notice is already queued.
 
     Tracks ``read_file`` / ``glob`` confirmations so citations sourced only
     from ``grep`` match lines trigger a one-shot read-and-verify notice (F22).
@@ -142,6 +150,7 @@ class EvidencePathGuard:
         manager.register(HookEvent.POST_TOOL, self.on_post_tool)
         manager.register(HookEvent.PRE_TURN, self.on_pre_turn)
         manager.register(HookEvent.PRE_TOOL, self.on_pre_tool)
+        manager.register(HookEvent.BEFORE_PROVIDER_REQUEST, self.on_before_provider)
 
     def _state(self, thread_id: str) -> _ThreadEvidenceState:
         existing = self._by_thread.get(thread_id)
@@ -234,16 +243,38 @@ class EvidencePathGuard:
     async def on_pre_tool(self, payload: HookPayload) -> None:
         self._inject(payload)
 
-    def _inject(self, payload: HookPayload) -> None:
+    async def on_before_provider(self, payload: HookPayload) -> None:
+        notice = self._inject(payload)
+        if not notice or payload.provider_messages is None:
+            return
+        payload.provider_messages = _splice_system_notice(list(payload.provider_messages), notice)
+
+    def _inject(self, payload: HookPayload) -> str | None:
         state = self._state(payload.thread_id)
         if not state.pending:
-            return
+            return None
         notice = state.pending
         state.pending = None
         if payload.inject_text:
             payload.inject_text = f"{payload.inject_text.rstrip()}\n\n{notice}"
         else:
             payload.inject_text = notice
+        return notice
+
+
+def _splice_system_notice(messages: list[Message], notice: str) -> list[Message]:
+    """Append ``notice`` to the leading system message of this provider request."""
+    updated: list[Message] = []
+    applied = False
+    for message in messages:
+        if not applied and message.role == "system":
+            updated.append(replace(message, content=[*message.content, Text(text=f"\n\n{notice}")]))
+            applied = True
+        else:
+            updated.append(message)
+    if not applied:
+        updated.insert(0, Message(role="system", content=[Text(text=notice)]))
+    return updated
 
 
 def _paths_from_glob_result(result: str | None) -> list[str]:

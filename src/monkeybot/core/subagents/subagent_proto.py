@@ -154,10 +154,12 @@ class SubagentEnvelope:
     subagent_type: str | None = None
     parent_session_id: str | None = None
     child_thread_id: str | None = None
+    skills: tuple[str, ...] = ()
+    """Skill names from the persona. Empty means the child keeps the full skills tree."""
 
     def to_json(self) -> str:
         """Serialize to a compact JSON object for stdin (UTF-8)."""
-        payload: dict[str, str] = {
+        payload: dict[str, Any] = {
             "task": self.task,
             "context": self.context,
             "memory_storage_uri": self.memory_storage_uri,
@@ -174,6 +176,8 @@ class SubagentEnvelope:
             payload["parent_session_id"] = self.parent_session_id
         if self.child_thread_id is not None:
             payload["child_thread_id"] = self.child_thread_id
+        if self.skills:
+            payload["skills"] = list(self.skills)
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     @classmethod
@@ -197,6 +201,7 @@ class SubagentEnvelope:
             subagent_type=_opt_str_field(decoded, "subagent_type"),
             parent_session_id=_opt_str_field(decoded, "parent_session_id"),
             child_thread_id=_opt_str_field(decoded, "child_thread_id"),
+            skills=_opt_str_tuple(decoded, "skills"),
         )
 
 
@@ -225,6 +230,17 @@ def _opt_str_field(data: dict[str, Any], key: str) -> str | None:
         raise ValueError(f"envelope: {key!r} must be a string")
     stripped = val.strip()
     return stripped or None
+
+
+def _opt_str_tuple(data: dict[str, Any], key: str) -> tuple[str, ...]:
+    if key not in data:
+        return ()
+    val = data.get(key)
+    if not isinstance(val, list) or any(
+        not isinstance(item, str) or not item.strip() for item in val
+    ):
+        raise ValueError(f"envelope: {key!r} must be a list of non-empty strings")
+    return tuple(item.strip() for item in val)
 
 
 def _opt_model(data: dict[str, Any]) -> str:

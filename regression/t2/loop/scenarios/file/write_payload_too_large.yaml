@@ -1,0 +1,29 @@
+id: regression/t2/loop/scenarios/file/write_payload_too_large
+case: T2-FILE-14
+description: Content over WORKSPACE_WRITE_MAX_BYTES is payload_too_large.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+config:
+  env:
+    WORKSPACE_WRITE_MAX_BYTES: "4"
+messages:
+- Write a payload over the byte cap.
+script:
+- - type: tool_call
+    call_id: c1
+    name: write_file
+    args:
+      path: too_big.txt
+      content: too-big
+  - type: done
+- - type: text
+    text: Payload rejected.
+  - type: done
+assertions:
+  tool_error_codes:
+  - payload_too_large
+  workspace_file_absent:
+  - too_big.txt
+  turn_completed: true

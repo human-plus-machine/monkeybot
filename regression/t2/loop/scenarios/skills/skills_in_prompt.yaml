@@ -1,0 +1,21 @@
+id: regression/t2/loop/scenarios/skills/skills_in_prompt
+case: T2-SKILL-04
+description: The system prompt ## Skills section lists discovered names and descriptions.
+mode: scripted
+driver: loop
+executor: real
+messages:
+  - What skills are installed?
+script:
+  - - type: text
+      text: Diagnostics and plain are installed.
+    - type: done
+assertions:
+  turn_completed: true
+  provider_calls: 1
+  provider_request:
+    - n: 1
+      system_contains: |-
+        ## Skills
+        - diagnostics — Inspect a failing run and report the first error.
+        - plain — Print the workspace layout before changing files.

@@ -1,0 +1,37 @@
+id: regression/t2/loop/scenarios/scheduler/start_loop_requires_stop_guard
+case: T2-SCHED-03
+description: start_loop without max_ticks, max_runtime, or unbounded is a validation error.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Start a loop that checks the deploy every 5 minutes, with no stop guard.
+script:
+- - type: tool_call
+    call_id: c-enable
+    name: enable_loops
+    args: {}
+  - type: done
+- - type: tool_call
+    call_id: c-start
+    name: start_loop
+    args:
+      prompt: "BUSINESS: check the deploy"
+      interval: 5m
+      loop_id: loop-unguarded
+  - type: done
+- - type: text
+    text: That loop was rejected.
+  - type: done
+assertions:
+  turn_completed: true
+  provider_calls: 3
+  required_tools:
+  - start_loop
+  store:
+    loops: 0
+  events_sequence:
+  - type: ToolCallResult
+    tool: start_loop
+    error:
+      regex: 'scheduled loops require max_ticks, max_runtime, or unbounded=true'

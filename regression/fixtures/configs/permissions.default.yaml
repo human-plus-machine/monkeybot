@@ -1,0 +1,4 @@
+# Soft ruleset used when a scenario does not name a tighter permissions file.
+default: allow
+
+rules: []

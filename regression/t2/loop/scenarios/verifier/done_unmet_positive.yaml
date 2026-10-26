@@ -1,0 +1,45 @@
+id: regression/t2/loop/scenarios/verifier/done_unmet_positive
+case: T2-VER-06
+description: 'Done-when DONE.txt, and the turn ends without writing it: done_unmet, status stuck.'
+mode: scripted
+driver: loop
+executor: recording
+hooks:
+- verifier
+messages:
+- Finish when DONE.txt exists.
+config:
+  verifier:
+    enabled: true
+    ledger:
+      enabled: true
+      model: fake
+    tracker:
+      enabled: true
+    judge:
+      enabled: false
+    escalation:
+      max_severity: nudge
+  env:
+    MONKEYBOT_CLASSIFIER_ROWS: '[{"intent":"new_goal","relates_to":null,"constraints":[],"done_when":["DONE.txt"]}]'
+script:
+- - type: text
+    text: I am finished.
+  - type: done
+assertions:
+  turn_completed: true
+  verdicts:
+    min: 1
+    status_in:
+    - stuck
+    severity_max: none
+    signals_include:
+    - done_unmet
+    signals_exclude:
+    - write_without_read
+    - error_streak
+    - rewrite_churn
+    - constraint_touch
+    - repeat_correction
+    - no_progress
+    - budget_burn

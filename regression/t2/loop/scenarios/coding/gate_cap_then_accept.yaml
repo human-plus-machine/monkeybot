@@ -1,0 +1,38 @@
+id: regression/t2/loop/scenarios/coding/gate_cap_then_accept
+case: T2-CODE-11
+description: max_rejections 1 accepts and streams the second final answer
+mode: scripted
+driver: loop
+executor: recording
+hooks:
+  - verification_gate
+config:
+  coding:
+    verification_gate:
+      max_rejections: 1
+messages:
+  - Edit the module.
+script:
+  - - type: tool_call
+      call_id: w1
+      name: write_file
+      args:
+        path: a.py
+        content: "x = 1\n"
+    - type: done
+  - - type: text
+      text: REJECTED-UNVERIFIED-PHRASE
+    - type: done
+  - - type: text
+      text: ACCEPTED-AFTER-CAP-PHRASE
+    - type: done
+tool_results:
+  w1:
+    ok: true
+assertions:
+  interventions:
+    - final_answer_gate
+  provider_calls: 3
+  response_contains: ACCEPTED-AFTER-CAP-PHRASE
+  response_not_contains: REJECTED-UNVERIFIED-PHRASE
+  turn_completed: true

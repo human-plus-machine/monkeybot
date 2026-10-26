@@ -1,0 +1,44 @@
+id: regression/t2/loop/scenarios/file/patch_rollback
+case: T2-FILE-19
+description: An injected mid-apply failure is rollback_failed and details lists dirty paths.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+config:
+  env:
+    MB_LOOP_PATCH_FAIL: rollback
+messages:
+- Apply a patch that fails in the middle.
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: notes.txt
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: apply_patch
+    args:
+      patch_text: |
+        *** Begin Patch
+        *** Add File: added.txt
+        +hello
+        *** Update File: notes.txt
+        @@
+        -A note inside the hostile workspace.
+        +A note inside the hostile workspace changed.
+        *** End Patch
+  - type: done
+- - type: text
+    text: Rollback reported dirty paths.
+  - type: done
+assertions:
+  tool_error_codes:
+  - rollback_failed
+  events_sequence:
+  - type: ToolCallResult
+    error:
+      regex: 'rollback_failed[\s\S]*dirty_paths'
+  turn_completed: true

@@ -1,0 +1,41 @@
+id: regression/t2/loop/scenarios/file/patch_update_requires_read
+case: T2-FILE-21
+description: Update and Delete of an unread file are read_before_write.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Patch notes.txt and delete src/app.py without reading them.
+script:
+- - type: tool_call
+    call_id: c1
+    name: apply_patch
+    args:
+      patch_text: |
+        *** Begin Patch
+        *** Update File: notes.txt
+        @@
+        -A note inside the hostile workspace.
+        +changed
+        *** End Patch
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: apply_patch
+    args:
+      patch_text: |
+        *** Begin Patch
+        *** Delete File: src/app.py
+        *** End Patch
+  - type: done
+- - type: text
+    text: Both edits were refused.
+  - type: done
+assertions:
+  tool_error_codes:
+  - read_before_write
+  workspace_unchanged:
+  - notes.txt
+  - src/app.py
+  turn_completed: true

@@ -8,6 +8,7 @@ import time
 
 import aiosqlite
 
+from monkeybot.core.persistence.scheduled_loops import resolve_now_ms
 from monkeybot.core.persistence.sqlite import TaskReentrantLock, with_conn_lock
 
 _DEFAULT_STALE_MS = 600_000
@@ -36,8 +37,8 @@ class SQLiteSessionTurnLockStore:
         self._lock = lock or TaskReentrantLock()
 
     @with_conn_lock
-    async def release_stale_claims(self, stale_after_ms: int) -> int:
-        cutoff = int(time.time() * 1000) - stale_after_ms
+    async def release_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int:
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         cursor = await self._conn.execute(
             """
             UPDATE session_turn_locks

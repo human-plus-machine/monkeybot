@@ -1,0 +1,147 @@
+id: regression/t2/loop/scenarios/todo/reminder_once
+case: T2-TODO-05
+description: The stale-list reminder fires once, stays quiet, then fires again after the list changes.
+mode: scripted
+driver: loop
+executor: real
+config:
+  model:
+    max_turns: 30
+messages:
+  - Keep an open todo and do other file reads before touching the list again.
+script:
+  - - type: tool_call
+      call_id: add1
+      name: todo_list
+      args:
+        action: add
+        text: Draft notes
+    - type: done
+  - - type: tool_call
+      call_id: r01
+      name: read_file
+      args:
+        path: r01.txt
+    - type: done
+  - - type: tool_call
+      call_id: r02
+      name: read_file
+      args:
+        path: r02.txt
+    - type: done
+  - - type: tool_call
+      call_id: r03
+      name: read_file
+      args:
+        path: r03.txt
+    - type: done
+  - - type: tool_call
+      call_id: r04
+      name: read_file
+      args:
+        path: r04.txt
+    - type: done
+  - - type: tool_call
+      call_id: r05
+      name: read_file
+      args:
+        path: r05.txt
+    - type: done
+  - - type: tool_call
+      call_id: r06
+      name: read_file
+      args:
+        path: r06.txt
+    - type: done
+  - - type: tool_call
+      call_id: r07
+      name: read_file
+      args:
+        path: r07.txt
+    - type: done
+  - - type: tool_call
+      call_id: r08
+      name: read_file
+      args:
+        path: r08.txt
+    - type: done
+  - - type: tool_call
+      call_id: r09
+      name: read_file
+      args:
+        path: r09.txt
+    - type: done
+  - - type: tool_call
+      call_id: r10
+      name: read_file
+      args:
+        path: r10.txt
+    - type: done
+  - - type: tool_call
+      call_id: add2
+      name: todo_list
+      args:
+        action: add
+        text: Ship the notes
+    - type: done
+  - - type: tool_call
+      call_id: q01
+      name: read_file
+      args:
+        path: q01.txt
+    - type: done
+  - - type: tool_call
+      call_id: q02
+      name: read_file
+      args:
+        path: q02.txt
+    - type: done
+  - - type: tool_call
+      call_id: q03
+      name: read_file
+      args:
+        path: q03.txt
+    - type: done
+  - - type: tool_call
+      call_id: q04
+      name: read_file
+      args:
+        path: q04.txt
+    - type: done
+  - - type: tool_call
+      call_id: q05
+      name: read_file
+      args:
+        path: q05.txt
+    - type: done
+  - - type: tool_call
+      call_id: q06
+      name: read_file
+      args:
+        path: q06.txt
+    - type: done
+  - - type: tool_call
+      call_id: q07
+      name: read_file
+      args:
+        path: q07.txt
+    - type: done
+  - - type: tool_call
+      call_id: q08
+      name: read_file
+      args:
+        path: q08.txt
+    - type: done
+  - - type: text
+      text: The list was stale, then updated, then stale again.
+    - type: done
+assertions:
+  turn_completed: true
+  provider_calls: 21
+  provider_request:
+    - n: 10
+      system_contains: "Todo list unchanged for 8 tool calls"
+    - n: 11
+      system_not_contains: "Todo list unchanged for 8 tool calls"
+    - n: 21
+      system_contains: "Todo list unchanged for 8 tool calls"

@@ -1,0 +1,48 @@
+id: regression/t2/loop/scenarios/loop/background_nudge_then_release
+case: T2-LOOP-16
+description: Text is held while a background job runs, then released after the job is killed.
+mode: scripted
+driver: loop
+executor: real
+config:
+  env:
+    SANDBOX_ENABLED: 'false'
+messages:
+- start a job then answer
+script:
+- - type: tool_call
+    call_id: bg
+    name: run_command
+    args:
+      argv:
+      - python3
+      - -c
+      - import time; time.sleep(60)
+      background: true
+      timeout: 120
+  - type: done
+- - type: text
+    text: HELD1
+  - type: done
+- - type: text
+    text: HELD2
+  - type: done
+- - type: tool_call
+    call_id: kill
+    name: kill_command
+    args:
+      job_id: '{job_id}'
+  - type: done
+- - type: text
+    text: RELEASED
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  interventions:
+  - intervention: background_jobs_nudge
+  - intervention: background_jobs_nudge
+  response_contains: RELEASED
+  response_not_contains:
+  - HELD1
+  - HELD2

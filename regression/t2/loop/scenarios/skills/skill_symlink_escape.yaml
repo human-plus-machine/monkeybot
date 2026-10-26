@@ -1,0 +1,27 @@
+id: regression/t2/loop/scenarios/skills/skill_symlink_escape
+case: T2-SKILL-03
+description: Reading the escape symlink under the skills root is path_escape.
+mode: scripted
+driver: loop
+executor: real
+messages:
+  - Read the skill path that leaves the skills root.
+script:
+  - - type: tool_call
+      call_id: read
+      name: read_file
+      args:
+        path: skills/escape
+    - type: done
+  - - type: text
+      text: That path is outside the skills root.
+    - type: done
+assertions:
+  turn_completed: true
+  tool_error_codes:
+    - path_escape
+  events_sequence:
+    - type: ToolCallResult
+      call_id: read
+      error:
+        regex: path_escape

@@ -1,0 +1,27 @@
+id: regression/t2/loop/scenarios/store/usage_recorded_on_turn_complete
+case: T2-STORE-02
+description: One turn_usage row per user message matches TurnComplete.usage.
+mode: scripted
+driver: loop
+messages:
+- count tokens
+script:
+- - type: usage
+    input_tokens: 3
+    output_tokens: 4
+  - type: text
+    text: counted
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  event_fields:
+    TurnComplete:
+      usage:
+        input_tokens: 3
+        output_tokens: 4
+        cached_tokens: 0
+        cache_read_tokens: 0
+        cache_creation_tokens: 0
+  store:
+    usage: 1

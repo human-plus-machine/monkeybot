@@ -1,0 +1,23 @@
+id: regression/t2/loop/scenarios/skills/slash_unknown_skill
+case: T2-SKILL-06
+description: /nope stays user text and does not open an invoked-skill section.
+mode: scripted
+driver: loop
+executor: real
+messages:
+  - /nope do this anyway
+script:
+  - - type: text
+      text: There is no skill named nope.
+    - type: done
+assertions:
+  turn_completed: true
+  provider_calls: 1
+  provider_request:
+    - n: 1
+      messages_contain: /nope do this anyway
+      system_contains: |-
+        ## Skills
+        - diagnostics — Inspect a failing run and report the first error.
+        - plain — Print the workspace layout before changing files.
+      system_not_contains: "## Invoked skill"

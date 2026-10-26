@@ -1,0 +1,30 @@
+id: regression/t2/loop/scenarios/loop/ask_user_non_interactive
+case: T2-LOOP-33
+description: ask_user without an interactive bus returns an error and does not hang.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- ask without a bus
+script:
+- - type: tool_call
+    call_id: c1
+    name: ask_user
+    args:
+      question: Continue?
+  - type: done
+- - type: text
+    text: continued
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    error:
+      regex: only available in an interactive chat
+  events_absent:
+  - AskUserRequest
+  response_contains: continued

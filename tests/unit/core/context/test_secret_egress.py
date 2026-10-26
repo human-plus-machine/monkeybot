@@ -244,6 +244,21 @@ def test_scan_and_redact_redacts_hit_message() -> None:
     assert block.text == "[withheld: credential detected]"
 
 
+class _RaisingScanner:
+    def scan(self, texts: list[str]) -> list[Hit]:
+        raise RuntimeError("secret scanner failed")
+
+
+def test_scan_and_redact_withholds_when_scanner_raises() -> None:
+    messages = [Message(role="assistant", content=[Text(text="mb-hook-canary")])]
+    outcome = scan_and_redact(messages, scanner=_RaisingScanner())  # type: ignore[arg-type]
+    assert len(outcome.hits) == 1
+    assert outcome.hit_message_indices == frozenset({0})
+    block = outcome.messages[0].content[0]
+    assert isinstance(block, Text)
+    assert block.text == "[withheld: credential detected]"
+
+
 def test_scan_and_redact_no_hits_returns_original() -> None:
     messages = [Message(role="assistant", content=[Text(text="clean")])]
     outcome = scan_and_redact(messages, scanner=_FakeScanner([]))

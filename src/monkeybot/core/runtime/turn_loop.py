@@ -19,6 +19,7 @@ from monkeybot.core.context import (
     refresh_memory_index,
 )
 from monkeybot.core.context.epoch import ContextEpochTracker, EpochAdmit
+from monkeybot.core.context.project_context import load_project_instructions
 from monkeybot.core.hooks import HookEvent, HookManager
 from monkeybot.core.llm.provider import (
     Done,
@@ -391,6 +392,16 @@ def _stash_escalation(
     mailbox.arm_escalation(thread_id, verdict, max_severity=capped)
 
 
+def _write_nudge_unresolved(state: _TurnState) -> bool:
+    """True when this request still owes a read for a write-without-read nudge."""
+    mailbox = state.ctx.verdict_mailbox
+    if mailbox is None:
+        return False
+    return "write_without_read" in mailbox.active_nudge_signals(
+        state.ctx.thread_id, state.ctx.request_id
+    )
+
+
 def _arm_replan_from_mailbox(state: _TurnState) -> str | None:
     """Reuse doom-loop ``force_no_tools`` for a drained ``replan`` verdict.
 
@@ -410,6 +421,7 @@ def _arm_replan_from_mailbox(state: _TurnState) -> str | None:
         return None
     if not note:
         return None
+    state.verifier_replan_turn = True
     state.doom_tracker.force_no_tools = True
     existing = state.doom_tracker.recovery_note
     state.doom_tracker.recovery_note = f"{existing}\n\n{note}" if existing else note
@@ -512,6 +524,11 @@ class _TurnState:
     resolved_messages: list[Message] = dataclasses.field(default_factory=list)
     stream_thinking: int | None = None
     action: TurnAction | None = None
+    # This inner turn consumed a verifier replan, so a text reply is the plan
+    # restatement and the loop calls the model once more with tools restored.
+    verifier_replan_turn: bool = False
+    # Doom-loop and replan recovery empty the tool list for this inner turn.
+    tools_suppressed: bool = False
     pending: dict[str, ToolCall] = dataclasses.field(default_factory=dict)
     assistant_text: str = ""
     thinking_text: str = ""
@@ -521,6 +538,23 @@ class _TurnState:
     provider_stream_failed: bool = False
     tools_dirty_reason: str | None = None
     tools_schema_hash: str = ""
+
+
+async def _reload_project_instructions(ctx: TurnContext) -> TurnContext:
+    """Re-read AGENTS.md so a change between inner turns opens a new epoch.
+
+    Instructions are part of the stable prefix. The file can change while a
+    reply is still running; the next provider call has to see the new text.
+    """
+    config = ctx.config
+    root = ctx.workspace_root
+    if config is None or root is None:
+        return ctx
+    names = config.coding.project_instructions_files
+    instructions = await asyncio.to_thread(load_project_instructions, root, names)
+    if instructions == ctx.project_instructions:
+        return ctx
+    return dataclasses.replace(ctx, project_instructions=instructions)
 
 
 async def _prepare_turn_context(
@@ -536,6 +570,7 @@ async def _prepare_turn_context(
 
     state.chat_messages = await _load_agent_chat_history(history, state.ctx.thread_id)
     state.ctx = await refresh_memory_index(state.ctx)
+    state.ctx = await _reload_project_instructions(state.ctx)
     state.turn_input_text = latest_user_message_text(state.chat_messages) or state.user_text
     set_turn_io(input_value=state.turn_input_text)
 
@@ -579,6 +614,7 @@ async def _prepare_turn_context(
             detail=replan_note,
         )
     force_no_tools, doom_loop_note = state.doom_tracker.consume_recovery()
+    state.tools_suppressed = force_no_tools
     combined_extra = _combine_extras(combined_extra, doom_loop_note)
     state.turn_runtime_notes = combined_extra
     state.system = _append_extra_system_text(system, combined_extra)
@@ -1662,6 +1698,33 @@ async def _handle_empty_or_final_text(
         yield evt
     if state.action in ("continue", "break"):
         return
+    # A write-without-read reminder stays until that path is read. Ending on the
+    # text reply would drop the later inner turns that still have to read it.
+    # Tool-suppressing recovery (replan, doom loop) still owns that turn.
+    unresolved_write = _write_nudge_unresolved(state) and not state.tools_suppressed
+    if cleaned_text and (state.verifier_replan_turn or unresolved_write):
+        for evt in _release_held_text(state):
+            yield evt
+        assist_blocks: list[ContentBlock] = []
+        thinking = _thinking_block(state)
+        if thinking is not None:
+            assist_blocks.append(thinking)
+        assist_blocks.append(Text(text=cleaned_text))
+        # The next provider call reloads history, so this write cannot be deferred.
+        await persist_message(
+            history,
+            Message(role="assistant", content=assist_blocks),
+            thread_id=state.ctx.thread_id,
+            turn_id=state.ctx.request_id,
+            memory=state.ctx.memory,
+            ingest=True,
+        )
+        last_assistant[0] = cleaned_text
+        state.turn_output_text = cleaned_text
+        state.verifier_replan_turn = False
+        state.needs_followup_after_tools = False
+        state.action = "continue"
+        return
     async for evt in _gate_final_answer(state, hook_manager=hook_manager, candidate=cleaned_text):
         yield evt
     if state.action == "continue":
@@ -1673,15 +1736,15 @@ async def _handle_empty_or_final_text(
         # right after), so nothing reads it again in-loop. Keeping it
         # off the await path means the Firestore write does not delay
         # TurnComplete / the user-visible reply. Awaited at the tail.
-        assist_blocks: list[ContentBlock] = []
+        final_blocks: list[ContentBlock] = []
         thinking = _thinking_block(state)
         if thinking is not None:
-            assist_blocks.append(thinking)
-        assist_blocks.append(Text(text=cleaned_text))
+            final_blocks.append(thinking)
+        final_blocks.append(Text(text=cleaned_text))
         state.assistant_write_task = asyncio.create_task(
             persist_message(
                 history,
-                Message(role="assistant", content=assist_blocks),
+                Message(role="assistant", content=final_blocks),
                 thread_id=state.ctx.thread_id,
                 turn_id=state.ctx.request_id,
                 memory=state.ctx.memory,
@@ -1911,6 +1974,8 @@ async def _run_inner_core(
         # must finish (or time out) before the next provider call.
         await _drain_hook_settlement(hook_manager)
 
+        state.verifier_replan_turn = False
+        state.tools_suppressed = False
         state.turn_index += 1
         state.turn_input_text = state.user_text
         state.turn_output_text = ""

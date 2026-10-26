@@ -1,0 +1,43 @@
+id: regression/t2/loop/scenarios/verifier/write_without_read_negative
+case: T2-VER-01
+description: Read then write of the same path emits no write_without_read verdict.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: drift_ws
+hooks:
+- verifier
+messages:
+- Update src/models.py after reading it.
+config:
+  verifier:
+    enabled: true
+    ledger:
+      enabled: false
+    tracker:
+      enabled: true
+    judge:
+      enabled: false
+    escalation:
+      max_severity: nudge
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: src/models.py
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: write_file
+    args:
+      path: src/models.py
+      content: "class User:\n    id: int\n    email: str\n"
+  - type: done
+- - type: text
+    text: Done.
+  - type: done
+assertions:
+  turn_completed: true
+  verdicts:
+    max: 0

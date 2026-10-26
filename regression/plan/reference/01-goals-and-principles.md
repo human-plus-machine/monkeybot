@@ -35,7 +35,7 @@ Non-goals:
 | A3 | Given a fixed provider output, clock, and filesystem, the harness is deterministic. | Mostly true. Exceptions found: background summary timing, hook settlement timeouts (`MONKEYBOT_HOOK_SETTLEMENT_TIMEOUT_S`), scheduler wall clock, `POST_TOOL` hooks scheduled in the background, xdist ordering. Section 5.1 adds a fake clock and explicit settlement waits. |
 | A4 | Live runs can be turned into replay cassettes. | Verified. `TranscriptWriter` `ProviderResponse` records hold full `text`, `thinking`, `tool_requests[{call_id,name,args}]` and `usage`. They do not hold token deltas, so golden SSE streams need a new capture. |
 | A5 | One live run proves little. | True by construction; that is what T5 is for. |
-| A6 | Live runs have a working provider key. | **Resolved by the owner (2026-10-25):** all live runs use Ollama Cloud with the `OLLAMA_API_KEY` from the local environment (section 5.11). Today's workflow only has `NVIDIA_API_KEY`, so it is switched to `OLLAMA_API_KEY`; CI can only run live jobs once that is also a repository secret (D1). |
+| A6 | Live runs have a working provider key. | **Resolved by the owner (2026-10-25):** all live runs use Ollama Cloud with the `OLLAMA_API_KEY` from the local environment (section 5.11). **Resolved (2026-10-26, D1):** that key is not a GitHub secret. Live smoke and live trials run locally. |
 | A7 | The deterministic suites run on every PR. | **False.** `.github/workflows/ci.yml` is `workflow_dispatch` only. The real gate is the pre-push hook running `scripts/ci-local.sh`. See D2. |
 | A8 | monkeyapp can vendor a schema file from monkeybot. | Not verified. Cross-repo change. |
 | A9 | An agent that sees a failing test will try to fix it, and the owner does not want that by default. | Given by the owner. |
@@ -60,6 +60,6 @@ Non-goals:
 - Whether Cursor's `postToolUse` `additional_context` is shown to the model for every `Shell` call in every agent mode, and whether other agents (Claude Code in `.claude/worktrees`, cloud agents) read `.cursor/rules` and `.cursor/hooks.json`. If not, they only get the run-output banner.
 - Whether `OLLAMA_API_KEY` is visible to every process that starts a live run. It was not set in the agent's sandboxed shell or in the repo `.env` when this was written, so it is presumably exported in the owner's own terminal profile. The preflight in 5.11 makes a missing key a loud failure, not a skip.
 - Ollama Cloud's rate limits and quota for this key, and so how many T5 trials fit in one night.
-- Which Ollama Cloud model names are available to this key for the judge (D12).
+- Which Ollama Cloud model names are available to this key for the judge. Decided 2026-10-26 (D12): `glm-5.3-flash`, the same model as the agent.
 - Whether xdist forwards collection errors from workers to the controller in every pytest-xdist version pinned here; the ledger test (5.9.6) checks it.
 - Whether the existing `tests/evals` suite is collected in every local pre-push run. `ci-local.sh` runs `pytest tests/`, which includes it, but `--if-needed` can skip the whole run.

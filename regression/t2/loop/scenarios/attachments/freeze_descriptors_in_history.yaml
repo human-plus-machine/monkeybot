@@ -1,0 +1,38 @@
+id: regression/t2/loop/scenarios/attachments/freeze_descriptors_in_history
+case: T2-ATT-06
+description: After the turn, history holds an image descriptor instead of media bytes.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: att_ws
+invariants_skip:
+- name: turn_complete
+  reason: the second user message is what observes the frozen descriptor, and that message completes a second turn
+messages:
+- Load tiny.png.
+- What was in that image?
+script:
+- - type: tool_call
+    call_id: c1
+    name: load_file
+    args:
+      path: tiny.png
+  - type: done
+- - type: text
+    text: Loaded the image.
+  - type: done
+- - type: text
+    text: The image was shown earlier.
+  - type: done
+assertions:
+  provider_calls: 3
+  event_fields:
+    ImageBlock:
+      mime_type: image/png
+  provider_request:
+  - n: 3
+    messages_contain: image shown earlier
+  required_tools:
+  - load_file
+  turn_completed: true
+  no_errors: true

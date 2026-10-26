@@ -1,0 +1,42 @@
+id: regression/t2/loop/scenarios/mcp/env_interpolation_missing
+case: T2-MCP-08
+description: ${MISSING} becomes an empty string, so the fixture command is python and the server still loads.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Enable the fixture server whose command interpolates a missing variable.
+config:
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.progressive.json
+script:
+- - type: tool_call
+    call_id: c1
+    name: enable_mcp
+    args:
+      name: fixture
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: fixture__echo
+    args:
+      text: interpolated
+  - type: done
+- - type: text
+    text: Loaded.
+  - type: done
+assertions:
+  provider_calls: 3
+  provider_request:
+  - n: 2
+    tools_include:
+    - fixture__echo
+  events_sequence:
+  - type: ToolCallResult
+    tool: fixture__echo
+    result: "echo: interpolated"
+  required_tools:
+  - enable_mcp
+  - fixture__echo
+  turn_completed: true
+  no_errors: true

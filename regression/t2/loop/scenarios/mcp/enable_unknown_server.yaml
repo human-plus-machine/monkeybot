@@ -1,0 +1,31 @@
+id: regression/t2/loop/scenarios/mcp/enable_unknown_server
+case: T2-MCP-10
+description: enable_mcp of a name that is not in the catalog returns the pinned error string, not an envelope.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Enable an MCP server that is not configured.
+config:
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.progressive.json
+script:
+- - type: tool_call
+    call_id: c1
+    name: enable_mcp
+    args:
+      name: missing
+  - type: done
+- - type: text
+    text: Unknown server.
+  - type: done
+assertions:
+  provider_calls: 2
+  event_fields:
+    ToolCallResult:
+      tool: enable_mcp
+      error: "Unknown MCP server 'missing'. Known configured servers: fixture"
+  required_tools:
+  - enable_mcp
+  turn_completed: true
+  no_errors: true

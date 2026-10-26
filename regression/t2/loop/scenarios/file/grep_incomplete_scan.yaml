@@ -1,0 +1,28 @@
+id: regression/t2/loop/scenarios/file/grep_incomplete_scan
+case: T2-FILE-25
+description: An oversized file in scope is incomplete_scan.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Search huge.txt.
+script:
+- - type: tool_call
+    call_id: c1
+    name: grep
+    args:
+      pattern: H
+      file_glob: huge.txt
+  - type: done
+- - type: text
+    text: The scan was incomplete.
+  - type: done
+assertions:
+  tool_error_codes:
+  - incomplete_scan
+  events_sequence:
+  - type: ToolCallResult
+    error:
+      regex: '"ok": false[\s\S]*incomplete_scan[\s\S]*files_skipped_oversized'
+  turn_completed: true

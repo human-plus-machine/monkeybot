@@ -1,0 +1,18 @@
+- - type: tool_call
+    call_id: c1
+    name: replace_in_file
+    args:
+      path: notes.txt
+      old_string: "A note inside the hostile workspace."
+      new_string: "CHANGED BY UNREAD EDIT"
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: write_file
+    args:
+      path: child_made.txt
+      content: "made by child\n"
+  - type: done
+- - type: text
+    text: Child finished without running tests.
+  - type: done

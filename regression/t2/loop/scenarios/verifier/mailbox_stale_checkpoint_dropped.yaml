@@ -1,0 +1,62 @@
+id: regression/t2/loop/scenarios/verifier/mailbox_stale_checkpoint_dropped
+case: T2-VER-14
+description: A slower verdict for an older checkpoint is not applied after a newer one lands.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: drift_ws
+hooks:
+- verifier
+messages:
+- Fail several reads.
+config:
+  verifier:
+    enabled: true
+    ledger:
+      enabled: false
+    tracker:
+      enabled: true
+    judge:
+      enabled: true
+      model: fake
+      min_turns_between_verdicts: 0
+      max_verdicts_per_message: 10
+    escalation:
+      max_severity: nudge
+  env:
+    MONKEYBOT_JUDGE_SCRIPT: '{"completions":[{"mode":"valid","body":"{\"status\":\"drifting\",\"severity\":\"nudge\",\"confidence\":0.8,\"rationale\":\"write_without_read\",\"correction\":\"FREEFORM_DROP_ME\"}","hang_s":0.4},{"mode":"valid","body":"{\"status\":\"stuck\",\"severity\":\"nudge\",\"confidence\":0.9,\"rationale\":\"error_streak\",\"correction\":\"FREEFORM_DROP_ME\"}"}]}'
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: missing_a.txt
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: missing_b.txt
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: read_file
+    args:
+      path: missing_c.txt
+  - type: done
+- - type: tool_call
+    call_id: c4
+    name: read_file
+    args:
+      path: missing_d.txt
+  - type: done
+- - type: text
+    text: Done.
+  - type: done
+assertions:
+  turn_completed: true
+  verdicts:
+    min: 1
+    max: 1
+    status_in:
+    - stuck

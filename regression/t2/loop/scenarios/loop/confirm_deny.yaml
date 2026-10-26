@@ -1,0 +1,36 @@
+id: regression/t2/loop/scenarios/loop/confirm_deny
+case: T2-LOOP-24
+description: Denying a confirmation records the denial and does not execute the tool.
+mode: scripted
+driver: loop
+messages:
+- read a file
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: a.txt
+  - type: done
+- - type: text
+    text: denied and continued
+  - type: done
+steps:
+- action: confirm_tool
+  decision: deny
+  call_id: c1
+  when:
+    event: tool_confirmation
+    call_id: c1
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  tool_calls:
+    read_file: 1
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    error:
+      regex: denied by user
+  response_contains: denied and continued

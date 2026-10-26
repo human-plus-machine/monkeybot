@@ -50,6 +50,11 @@ GOAL_CONTINUATION_PREFIX = "[GOAL CONTINUATION · goal_id="
 logger = logging.getLogger(__name__)
 
 
+def resolve_now_ms(now_ms: int | None = None) -> int:
+    """Epoch milliseconds. ``None`` reads the wall clock."""
+    return int(time.time() * 1000) if now_ms is None else now_ms
+
+
 class OpenGoalExistsError(ValueError):
     """A backend rejected creation because the session already has an open goal."""
 
@@ -522,9 +527,11 @@ class SQLiteScheduledLoopStore:
         return _map_loop_tuples(rows)
 
     @with_conn_lock
-    async def claim_tick(self, loop_id: str, worker_id: str) -> ScheduledLoopRow | None:
+    async def claim_tick(
+        self, loop_id: str, worker_id: str, now_ms: int | None = None
+    ) -> ScheduledLoopRow | None:
         """Atomically mark a due loop as in-flight; returns None if not claimable."""
-        now_ms = int(time.time() * 1000)
+        now_ms = resolve_now_ms(now_ms)
         cursor = await self._conn.execute(
             """
             UPDATE scheduled_loops
@@ -542,9 +549,9 @@ class SQLiteScheduledLoopStore:
         return await self.get(loop_id)
 
     @with_conn_lock
-    async def release_stale_claims(self, stale_after_ms: int) -> int:
+    async def release_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int:
         """Reset in-flight ticks with no heartbeat after ``stale_after_ms``."""
-        cutoff = int(time.time() * 1000) - stale_after_ms
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         cursor = await self._conn.execute(
             """
             UPDATE scheduled_loops
@@ -576,9 +583,11 @@ class SQLiteScheduledLoopStore:
         return int(cursor.rowcount)
 
     @with_conn_lock
-    async def renew_tick_claim(self, loop_id: str, worker_id: str) -> bool:
+    async def renew_tick_claim(
+        self, loop_id: str, worker_id: str, now_ms: int | None = None
+    ) -> bool:
         """Extend the in-flight claim lease for a worker that is still executing a tick."""
-        now_ms = int(time.time() * 1000)
+        now_ms = resolve_now_ms(now_ms)
         cursor = await self._conn.execute(
             """
             UPDATE scheduled_loops
@@ -599,11 +608,12 @@ class SQLiteScheduledLoopStore:
         *,
         worker_id: str,
         error: str | None = None,
+        now_ms: int | None = None,
     ) -> ScheduledLoopRow | None:
         row = await self.get(loop_id)
         if row is None or not row.tick_in_flight or row.worker_id != worker_id:
             return None
-        now_ms = int(time.time() * 1000)
+        now_ms = resolve_now_ms(now_ms)
         result = resolve_complete_tick(row, error=error, now_ms=now_ms)
         await self._conn.execute(
             """
@@ -630,7 +640,14 @@ class SQLiteScheduledLoopStore:
         return await self.get(loop_id)
 
     @with_conn_lock
-    async def defer_tick(self, loop_id: str, *, worker_id: str, reason: str) -> bool:
+    async def defer_tick(
+        self,
+        loop_id: str,
+        *,
+        worker_id: str,
+        reason: str,
+        now_ms: int | None = None,
+    ) -> bool:
         """Release claim and push next tick forward (e.g. session busy).
 
         ``WHERE worker_id`` + ``tick_in_flight = 1`` prevents clearing a claim that
@@ -639,7 +656,7 @@ class SQLiteScheduledLoopStore:
         row = await self.get(loop_id)
         if row is None or row.worker_id != worker_id or not row.tick_in_flight:
             return False
-        now_ms = int(time.time() * 1000)
+        now_ms = resolve_now_ms(now_ms)
         cursor = await self._conn.execute(
             """
             UPDATE scheduled_loops

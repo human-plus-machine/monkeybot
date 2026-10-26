@@ -1,0 +1,42 @@
+id: regression/t2/loop/scenarios/mcp/meta_tools_only_when_connected
+case: T2-MCP-03
+description: Resource and prompt tools are absent before connect and present after enable_mcp.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Connect the fixture MCP server.
+config:
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.progressive.json
+script:
+- - type: tool_call
+    call_id: c1
+    name: enable_mcp
+    args:
+      name: fixture
+  - type: done
+- - type: text
+    text: Connected.
+  - type: done
+assertions:
+  provider_calls: 2
+  provider_request:
+  - n: 1
+    tools_include:
+    - enable_mcp
+    tools_exclude:
+    - list_mcp_resources
+    - read_mcp_resource
+    - list_mcp_prompts
+    - get_mcp_prompt
+  - n: 2
+    tools_include:
+    - list_mcp_resources
+    - read_mcp_resource
+    - list_mcp_prompts
+    - get_mcp_prompt
+  required_tools:
+  - enable_mcp
+  turn_completed: true
+  no_errors: true

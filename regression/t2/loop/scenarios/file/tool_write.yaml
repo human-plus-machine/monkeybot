@@ -1,22 +1,37 @@
 id: regression/t2/loop/scenarios/file/tool_write
 case: T2-FILE-08
-description: File edit request triggers a write-category tool
+description: A new file is created with the exact bytes that were written.
 mode: scripted
 driver: loop
+executor: real
+workspace_fixture: hostile_ws
 messages:
-- Create a file named notes.txt with the text 'hello'.
+- Create created.txt with the text hello.
 script:
 - - type: tool_call
     call_id: c1
     name: write_file
     args:
-      path: notes.txt
+      path: created.txt
       content: hello
   - type: done
+- - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: created.txt
+  - type: done
 - - type: text
-    text: Done, I created notes.txt.
+    text: Created created.txt.
   - type: done
 assertions:
-  tool_categories_used:
-  - write
+  events_sequence:
+  - type: ToolCallResult
+    result:
+      regex: '"bytes": 5'
+  - type: ToolCallResult
+    result:
+      regex: '"content": "     1\|hello"[\s\S]*"total_lines": 1'
+  workspace_file_contains:
+    created.txt: hello
   turn_completed: true

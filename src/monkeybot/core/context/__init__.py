@@ -1083,6 +1083,7 @@ async def build_context(
     verdict_mailbox: VerdictMailbox | None = None,
     session_id: str | None = None,
     read_ledger: FileReadLedger | None = None,
+    skill_names: Sequence[str] | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -1092,6 +1093,8 @@ async def build_context(
         agent_md_path: Path to AGENT.md (must be non-empty).
         memory: Optional memory subsystem; when set, L0+L1 wake-up is loaded.
         skills_path: Root directory for skill folders (each with ``SKILL.md``).
+        skill_names: When set, only these skill directory names are visible on the turn.
+            ``None`` keeps every skill under ``skills_path``.
         mcp_client: Client exposing ``all_tools()`` for MCP-registered tools.
             ``wait_until_ready`` runs before the catalog and tool list are read, so a
             background autoConnect still in flight is included in this turn.
@@ -1133,8 +1136,11 @@ async def build_context(
         ValueError: When AGENT.md is missing or empty after normalization.
     """
     agent_md = _load_agent_md(agent_md_path)
-    memory_index = await memory.load_index() if memory is not None else []
+    memory_index = await memory.load_index(thread_id=thread_id) if memory is not None else []
     skills = _discover_skills(skills_path)
+    if skill_names is not None:
+        allowed = {name for name in skill_names if name}
+        skills = [skill for skill in skills if skill.name in allowed]
     registry = subagent_registry or {}
     type_names = sorted(registry)
     personas = tuple((name, registry[name].description) for name in type_names)
@@ -1201,7 +1207,7 @@ async def refresh_memory_index(ctx: TurnContext) -> TurnContext:
         return ctx
 
     try:
-        fresh = await ctx.memory.load_index()
+        fresh = await ctx.memory.load_index(thread_id=ctx.thread_id)
         return dataclasses.replace(ctx, memory_index=fresh)
     except Exception as exc:
         _log.warning(

@@ -1,0 +1,29 @@
+id: regression/t2/loop/scenarios/subagents/ledger_context_forwarded
+case: T2-SUB-17
+description: format_subagent_context reaches the task envelope
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Hand the goal ledger to a child
+config:
+  env:
+    MONKEYBOT_SUBAGENT_SCRIPT: testkit/subagent_worker.py
+    AGENT_MD: evals/smoke_agent/monkeybot_config/AGENT.md
+script:
+- - type: tool_call
+    call_id: c1
+    name: task
+    args:
+      task: echo
+      context: ""
+  - type: done
+- - type: text
+    text: Ledger forwarded.
+  - type: done
+assertions:
+  required_tools:
+  - task
+  turn_completed: true
+  workspace_file_contains:
+    child_echo.json: "Parent goal ledger:"

@@ -1,0 +1,36 @@
+id: regression/t2/loop/scenarios/mcp/name_prefix_split
+case: T2-MCP-07
+description: Longest server prefix wins, so fix__extra__echo calls server fix__extra rather than fix.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Echo through the longer server prefix.
+config:
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.two_prefix.json
+script:
+- - type: tool_call
+    call_id: c1
+    name: fix__extra__echo
+    args:
+      text: prefix-split
+  - type: done
+- - type: text
+    text: Routed.
+  - type: done
+assertions:
+  provider_calls: 2
+  provider_request:
+  - n: 1
+    tools_include:
+    - fix__echo
+    - fix__extra__echo
+  events_sequence:
+  - type: ToolCallResult
+    tool: fix__extra__echo
+    result: "echo: prefix-split"
+  required_tools:
+  - fix__extra__echo
+  turn_completed: true
+  no_errors: true

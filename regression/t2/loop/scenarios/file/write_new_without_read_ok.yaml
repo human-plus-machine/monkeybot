@@ -1,0 +1,30 @@
+id: regression/t2/loop/scenarios/file/write_new_without_read_ok
+case: T2-FILE-09
+description: A new path writes without a prior read.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Create fresh.txt.
+script:
+- - type: tool_call
+    call_id: c1
+    name: write_file
+    args:
+      path: fresh.txt
+      content: fresh-bytes
+  - type: done
+- - type: text
+    text: Wrote fresh.txt.
+  - type: done
+assertions:
+  tool_error_codes_absent:
+  - read_before_write
+  workspace_file_contains:
+    fresh.txt: fresh-bytes
+  events_sequence:
+  - type: ToolCallResult
+    result:
+      regex: '"ok": true'
+  turn_completed: true

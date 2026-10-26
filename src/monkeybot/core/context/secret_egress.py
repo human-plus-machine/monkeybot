@@ -437,7 +437,17 @@ def scan_and_redact(
     units = extract_scan_units(messages)
     if not units:
         return ScanOutcome(list(messages), [], frozenset())
-    hits = scanner.scan([u.text for u in units])
+    try:
+        hits = scanner.scan([u.text for u in units])
+    except Exception:
+        # A scanner that throws did not clear the text. Withhold every unit in
+        # this call so the secret cannot ride out on the next provider request.
+        logger.warning(
+            "secret scan raised; withholding %d unscanned text(s)",
+            len(units),
+            exc_info=True,
+        )
+        hits = [Hit(index=index, kind="secret") for index in range(len(units))]
     if not hits:
         return ScanOutcome(list(messages), [], frozenset())
     hit_message_indices = frozenset(units[h.index].message_index for h in hits)

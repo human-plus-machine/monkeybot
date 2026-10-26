@@ -15,6 +15,7 @@ from monkeybot.core.memory.palace import (
     EMBEDDER_IDENTITY_FILE,
     DrawerRecord,
     default_identity_text,
+    drawer_visible_to_thread,
 )
 
 
@@ -64,11 +65,13 @@ class InMemoryPalace:
     def get_drawer(self, drawer_id: str) -> DrawerRecord | None:
         return self._drawers.get(drawer_id)
 
-    def wake_up(self, wing: str | None = None) -> str:
+    def wake_up(self, wing: str | None = None, thread_id: str | None = None) -> str:
         identity = (self.palace_path / "identity.txt").read_text(encoding="utf-8").strip()
         drawers = list(self._drawers.values())
         if wing:
             drawers = [d for d in drawers if d.wing == wing]
+        if thread_id:
+            drawers = [d for d in drawers if drawer_visible_to_thread(d.metadata, thread_id)]
         drawers.sort(key=lambda d: d.filed_at, reverse=True)
         lines = [identity, "", "## L1 — ESSENTIAL STORY"]
         if not drawers:

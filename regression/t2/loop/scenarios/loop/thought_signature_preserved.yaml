@@ -1,0 +1,26 @@
+id: regression/t2/loop/scenarios/loop/thought_signature_preserved
+case: T2-LOOP-35
+description: A tool call thought signature is still on the next provider request.
+mode: scripted
+driver: loop
+messages:
+- call then continue
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: a.txt
+    metadata:
+      thought_signature: sig-keep-35
+  - type: done
+- - type: text
+    text: continued
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  provider_request:
+  - n: 2
+    messages_contain: sig-keep-35

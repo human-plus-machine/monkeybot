@@ -1,0 +1,32 @@
+id: regression/t2/loop/scenarios/loop/thinking_block_order
+case: T2-LOOP-34
+description: Thinking closes before text, and text closes before the tool call starts.
+mode: scripted
+driver: loop
+messages:
+- think then call
+script:
+- - type: thinking
+    text: private reasoning
+  - type: text
+    text: visible
+  - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: a.txt
+  - type: done
+- - type: text
+    text: done
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  events_sequence:
+  - type: ThinkingBlockStarted
+  - type: ThinkingBlockDelta
+  - type: ThinkingBlockComplete
+  - type: AssistantTextStarted
+  - type: AssistantDelta
+  - type: AssistantTextEnded
+  - type: ToolCallStarted

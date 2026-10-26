@@ -1,0 +1,39 @@
+id: regression/t2/loop/scenarios/loop/repair_orphan_tool_response
+case: T2-LOOP-30
+description: An orphan tool response is repaired only on the provider view. Stored rows stay unchanged.
+mode: scripted
+driver: loop
+invariants_skip:
+- name: history_pairs
+  reason: stored history keeps the orphan tool response; the repair is only on the provider view
+messages:
+- answer the orphan
+history:
+- role: user
+  content:
+  - type: toolResponse
+    id: orphan-30
+    toolName: read_file
+    isError: false
+    result:
+    - type: text
+      text: orphan-body-30
+script:
+- - type: text
+    text: stored stays
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  history:
+    row_count: 3
+    roles:
+    - user
+    - user
+    - assistant
+    no_repaired_rows: true
+  provider_request:
+  - n: 1
+    messages_contain: orphan-body-30
+  - n: 1
+    messages_contain: toolRequest orphan-30

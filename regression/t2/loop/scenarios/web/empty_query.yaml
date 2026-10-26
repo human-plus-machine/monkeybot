@@ -1,0 +1,32 @@
+id: regression/t2/loop/scenarios/web/empty_query
+case: T2-WEB-02
+description: A blank web_search query returns ok false and does not call the backend.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Search for nothing.
+config:
+  env:
+    WEB_SEARCH_BACKEND: fake
+script:
+- - type: tool_call
+    call_id: c1
+    name: web_search
+    args:
+      query: "   "
+  - type: done
+- - type: text
+    text: The query was empty.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    tool: web_search
+    result:
+      regex: '"ok": false.*"web_search requires a non-empty query\."'
+  required_tools:
+  - web_search
+  turn_completed: true
+  no_errors: true

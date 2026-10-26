@@ -86,6 +86,8 @@ MemPalace capture, wake-up, and search teaching are on by default. Turn them off
 | `backend` | `chroma` | Alternate MemPalace vector backend |
 | `embedding_model` | `minilm` | MemPalace's default embedder. `embeddinggemma-300m` is a legacy alias; startup rewrites it to `minilm` |
 
+Chats in one project share saved lines by default, including the wake-up briefing. Set `MONKEYBOT_MEMORY_SHARE_THREADS=0` to keep each chat's lines in that chat. Unset, `1`, `true`, `yes`, and `on` share.
+
 ## `subagents`
 
 Global defaults for `task` calls, plus optional named personas:

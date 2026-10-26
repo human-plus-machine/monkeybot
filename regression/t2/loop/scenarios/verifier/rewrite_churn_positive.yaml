@@ -1,0 +1,70 @@
+id: regression/t2/loop/scenarios/verifier/rewrite_churn_positive
+case: T2-VER-03
+description: The third rewrite of one read path emits rewrite_churn after min_turn_before_verdict.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: drift_ws
+hooks:
+- verifier
+messages:
+- Rewrite src/models.py several times.
+config:
+  verifier:
+    enabled: true
+    ledger:
+      enabled: false
+    tracker:
+      enabled: true
+    judge:
+      enabled: false
+    escalation:
+      max_severity: nudge
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: src/models.py
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: write_file
+    args:
+      path: src/models.py
+      content: v1
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: write_file
+    args:
+      path: src/models.py
+      content: v2
+  - type: done
+- - type: tool_call
+    call_id: c4
+    name: write_file
+    args:
+      path: src/models.py
+      content: v3
+  - type: done
+- - type: text
+    text: Done.
+  - type: done
+assertions:
+  turn_completed: true
+  verdicts:
+    min: 1
+    status_in:
+    - drifting
+    severity_max: none
+    signals_include:
+    - rewrite_churn
+    signals_exclude:
+    - write_without_read
+    - error_streak
+    - constraint_touch
+    - repeat_correction
+    - done_unmet
+    - no_progress
+    - budget_burn

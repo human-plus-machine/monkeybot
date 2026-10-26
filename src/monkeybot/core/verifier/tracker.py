@@ -289,7 +289,9 @@ class ProgressTracker:
                     if keyed.match_key == constraint.match_key:
                         count = n
                         break
-                if count >= 2:
+                # A correction entry is the user stating the rule. Touching that
+                # path is the repeat. A goal constraint with no correction stays a touch.
+                if count >= 1:
                     signals.append("repeat_correction")
                 else:
                     signals.append("constraint_touch")

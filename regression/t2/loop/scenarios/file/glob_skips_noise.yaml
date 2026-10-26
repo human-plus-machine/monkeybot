@@ -1,0 +1,34 @@
+id: regression/t2/loop/scenarios/file/glob_skips_noise
+case: T2-FILE-22
+description: "**/* omits node_modules, .venv, and build; node_modules/** includes the file."
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Glob the workspace, then glob node_modules.
+script:
+- - type: tool_call
+    call_id: c1
+    name: glob
+    args:
+      pattern: "**/*"
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: glob
+    args:
+      pattern: node_modules/**
+  - type: done
+- - type: text
+    text: Noise directories were skipped unless named.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    result:
+      regex: '"paths": \[(?![^\]]*node_modules)(?![^\]]*\.venv)(?![^\]]*"build/)[^\]]*src/app\.py[^\]]*\]'
+  - type: ToolCallResult
+    result:
+      regex: node_modules/left\.js
+  turn_completed: true

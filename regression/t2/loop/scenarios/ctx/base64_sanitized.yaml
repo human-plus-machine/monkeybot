@@ -1,0 +1,30 @@
+id: regression/t2/loop/scenarios/ctx/base64_sanitized
+case: T2-CTX-17
+description: A base64 blob in a tool result is redacted before the next provider call.
+mode: scripted
+driver: loop
+messages:
+- look
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      command: cat blob.txt
+  - type: done
+- - type: text
+    text: final-17
+  - type: done
+tool_results:
+  c1:
+    text: 'KEEP17 ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuv'
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_request:
+  - n: 2
+    messages_contain: KEEP17
+  - n: 2
+    messages_contain: '[omitted ~'
+  - n: 2
+    messages_not_contain: 'QRSTUVWXYZabcdefghijklmn'

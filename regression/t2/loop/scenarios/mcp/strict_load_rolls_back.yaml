@@ -1,0 +1,27 @@
+id: regression/t2/loop/scenarios/mcp/strict_load_rolls_back
+case: T2-MCP-06
+description: MCP_STRICT_LOAD aborts the failed autoConnect batch and rolls the good sibling back.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Start with a strict MCP load.
+config:
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.broken.json
+    MCP_STRICT_LOAD: "1"
+script:
+- - type: text
+    text: Load aborted.
+  - type: done
+assertions:
+  provider_calls: 1
+  provider_request:
+  - n: 1
+    tools_include:
+    - enable_mcp
+    tools_exclude:
+    - fixture__echo
+    - broken__echo
+  turn_completed: true
+  no_errors: true

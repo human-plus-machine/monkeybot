@@ -60,6 +60,43 @@ class Decision:
     route the "always" persist call to ``TurnContext.grants_persist`` instead
     of ``TurnContext.approvals_persist`` (the ``computer_*``-only overlay).
     ``None`` alongside a set ``grant_key`` is a caller bug, not a valid state."""
+    error_code: str | None = None
+    """Stable ``details.code`` for a deny. ``None`` leaves the tool error as
+    the plain message. A set code is wrapped into the same JSON envelope a
+    workspace error uses, so the model can tell a credential denial from a
+    generic protected-path refusal."""
+    error_kind: str | None = None
+    """Envelope ``error_kind`` when a deny has no ``error_code``. A coded deny
+    already uses ``policy``."""
+
+
+def format_denial(message: str | None, *, code: str | None, error_kind: str | None = None) -> str:
+    """Tool-error text for an inspector deny.
+
+    A denial with no code and no kind stays a plain sentence. A coded denial,
+    or one that names an ``error_kind``, is the built-in tool-error envelope
+    so callers that only see the tool result can name the reason.
+    """
+    text = message or "tool call denied"
+    kind = error_kind or ("policy" if code else None)
+    if kind is None:
+        return text
+    if code == "credential_denied":
+        hint = (
+            "A folder grant does not unlock a credential file. Do not copy, move, "
+            "or symlink it into the workspace to get around this."
+        )
+    else:
+        hint = "This call is denied by policy. Do not work around the denial."
+    payload: dict[str, Any] = {
+        "ok": False,
+        "error_kind": kind,
+        "message": text,
+        "hint": hint,
+    }
+    if code:
+        payload["details"] = {"code": code}
+    return json.dumps(payload, ensure_ascii=False)
 
 
 @dataclass(frozen=True)
@@ -575,6 +612,7 @@ class CommandTierInspector:
                         "deny_patterns; run the steps as separate argv calls or write the "
                         "content with write_file"
                     ),
+                    error_kind="policy",
                 )
             segments = []
         lines = [cmd_norm, *segments]

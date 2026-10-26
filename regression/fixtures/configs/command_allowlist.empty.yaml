@@ -1,0 +1,2 @@
+# Present but empty: load_command_tier_policy must raise.
+allowed_commands: []

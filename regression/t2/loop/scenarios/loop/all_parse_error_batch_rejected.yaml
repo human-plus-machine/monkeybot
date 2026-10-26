@@ -1,0 +1,38 @@
+id: regression/t2/loop/scenarios/loop/all_parse_error_batch_rejected
+case: T2-LOOP-05
+description: A batch whose every tool call failed to parse is rejected and not executed.
+mode: scripted
+driver: loop
+messages:
+- broken tools
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args: {}
+    parse_error: malformed arguments
+  - type: tool_call
+    call_id: c2
+    name: read_file
+    args: {}
+    parse_error: malformed arguments
+  - type: done
+- - type: text
+    text: continued after parse errors
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  tool_calls:
+    read_file: 2
+  interventions:
+  - intervention: truncated_batch
+    detail: all_parse_error
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    error: malformed arguments
+  - type: ToolCallResult
+    call_id: c2
+    error: malformed arguments

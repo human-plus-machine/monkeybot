@@ -13,7 +13,7 @@ Existing: T1 `test_verification_gate.py` (+3 `run()` tests), `test_project_conte
 | T2-CODE-02 | `gate_rejects_unverified` (migrate) | `interventions: [final_answer_gate]`, `provider_calls: 5`. |
 | T2-CODE-03 | `gate_passes_when_verified` (migrate) | No intervention. |
 | T2-CODE-04 | `fix_failing_test` (migrate) | `workspace_command_passes`. |
-| T2-CODE-05 | `gate_masked_exit` | `pytest && true` and `pytest \| tee x` do not count as verification. |
+| T2-CODE-05 | `gate_masked_exit` | `pytest \| tee x` does not count as verification. `pytest && true` does. |
 | T2-CODE-06 | `gate_non_executing_wrapper` | `cat pytest.log`, `echo pytest`, `git log` do not count. |
 | T2-CODE-07 | `gate_background_verify_not_counted` | `pytest` with `background:true` does not clear the gate. |
 | T2-CODE-08 | `gate_write_after_verify` | Verify, then another write: gate holds again. |

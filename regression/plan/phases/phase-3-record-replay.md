@@ -5,10 +5,10 @@
 ## Summary (from the roadmap, §8)
 
 - `t3/tools/from_transcript.py`; record the five catalogued T3a cassettes (T3-LOOP-01, 02, T3-CTX-01, T3-SHELL-01, T3-VER-01) from T4 runs. More cassettes (for example `coding/*`, `drift/*`) need new T3 catalog rows first, which the user approves.
-- `record_wire.py`; record `ollama_cloud/glm_tool_turn.json` first (the only T3b cassette the Ollama key can record); other providers per D13; `check_staleness.py`.
+- `record_wire.py`; record `ollama_cloud/glm_tool_turn.json` first (the only T3b cassette the Ollama key can record). Other providers stay unrecorded until that provider's key exists (D13). `check_staleness.py`.
 - `T3-*` replay tests.
 
-Exit: the five T3a cassettes and the Ollama T3b cassettes (plus any recorded under D13) replay green; staleness check wired into the local gate and CI; every T3 catalog row has a Test path except the D13-blocked ones.
+Exit: the five T3a cassettes and the Ollama T3b cassettes replay green; staleness check wired into the local gate and CI; every T3 catalog row has a Test path except T3-PROV-01..05 and the non-Ollama families of T3-PROV-06, which stay unrecorded until a key exists (D13).
 
 ## Tasks
 
@@ -61,7 +61,7 @@ Order:
 ### P3-03 — Wire cassettes and the staleness check (T3-PROV-06 for Ollama, T3-PROV-07, T3-PROV-08)
 
 - **Depends on:** P3-01, P4-02
-- **Blocked by:** user confirmation of the live recording; D13, for T3-PROV-01..05 and the non-Ollama families in T3-PROV-06
+- **Blocked by:** user confirmation of the live recording. D13 is decided (2026-10-26): do not record T3-PROV-01..05 or the non-Ollama families of T3-PROV-06 here, and do not invent their bytes from SDK examples.
 - **Read:** [05.5-cassettes.md](../reference/05.5-cassettes.md) §5.5.2; [6T-prov.md](../reference/06-coverage/6T-prov.md), the T3 rows; `src/monkeybot/providers/ollama*.py` and `providers/_openai_compat*`
 - **Creates:** `regression/t3/tools/{record_wire,check_staleness}.py`, `regression/t3/wire/ollama_cloud/{glm_tool_turn,thinking_only_completion}.json`, `regression/t3/test_replay_wire.py`
 - **Steps:**

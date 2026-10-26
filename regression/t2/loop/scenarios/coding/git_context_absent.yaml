@@ -1,0 +1,24 @@
+id: regression/t2/loop/scenarios/coding/git_context_absent
+case: T2-CODE-15
+description: A workspace that is not a git repo gets no git note and no error
+mode: scripted
+driver: loop
+executor: real
+hooks:
+  - git_context
+messages:
+  - What is the git status?
+script:
+  - - type: text
+      text: No repository here.
+    - type: done
+assertions:
+  provider_calls: 1
+  provider_request:
+    - n: 1
+      system_not_contains: "git: branch"
+  response_contains: No repository here.
+  events_absent:
+    - Error
+  turn_completed: true
+  no_errors: true

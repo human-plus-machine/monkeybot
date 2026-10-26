@@ -6,9 +6,9 @@
 
 - `t5/trials.py` with Wilson intervals, reliability vs capability classes, keyed baselines.
 - First baselines for the T4 suites `smoke`, `coding`, `coding_hard`, `drift` (both verifier configs), `subagents`, `memory`, `mcp`.
-- Nightly / manual workflow.
+- Local compare against the committed baselines (D1: no GitHub live job).
 
-Exit: baselines committed; release-gate job compares against them; a regressed trial verdict produces a ledger record with `trials` k/N and baseline k/N.
+Exit: baselines committed; a local release-gate compare runs against them; a regressed trial verdict produces a ledger record with `trials` k/N and baseline k/N. GitHub does not run this compare (D1).
 
 ## Tasks
 
@@ -40,7 +40,7 @@ Terms used in this phase:
 ### P5-02 — First baselines (live, takes hours)
 
 - **Depends on:** P5-01
-- **Blocked by:** user confirmation (time and Ollama usage); D12, for judged suites
+- **Blocked by:** user confirmation (time and Ollama usage). Judged suites use `ollama-cloud` / `glm-5.3-flash` (D12).
 - **Read:** [05.11-live-provider.md](../reference/05.11-live-provider.md), the "Rate and cost" paragraph; [05.6-pytest-reporting-trials.md](../reference/05.6-pytest-reporting-trials.md) §5.8
 - **Creates:** `regression/t5/baselines/<suite>[@<config>]__ollama-cloud__glm-5.3-flash.json` for each suite in the Summary
 - **Steps:**
@@ -50,13 +50,13 @@ Terms used in this phase:
 - **Verify:** a second, short trial run (N = 2) of `smoke` compares against the new baseline and reports a verdict, not "no baseline".
 - **Stop and ask if:** Ollama rate limits stop a suite. Do not switch providers, because the baselines are keyed to this one.
 
-### P5-03 — Nightly workflow, release-gate compare, gateway storms (T5-GW-01, 02)
+### P5-03 — Local release-gate compare and gateway storms (T5-GW-01, 02)
 
 - **Depends on:** P5-02, P2-01 (the storm tests use `testkit.gateway` and `testkit.sse`)
-- **Blocked by:** D1, for running in CI
+- **Blocked by:** none. D1 is decided (2026-10-26): do not add `.github/workflows/live-trials.yml`, and do not put `OLLAMA_API_KEY` in a GitHub workflow. The release-gate compare is a local command.
 - **Read:** [09-ci.md](../reference/09-ci.md), the `live-trials` row; [6U-gw.md](../reference/06-coverage/6U-gw.md), the T5 rows; [05.1-doubles.md](../reference/05.1-doubles.md), the gateway-harness row
 - **Creates:**
-  - `.github/workflows/live-trials.yml`: nightly and manual. On pull requests into `main` (release PRs) it runs `python -m regression.t5` against the committed baselines and fails on a `fail` verdict; that is the release-gate compare;
+  - the local compare: `uv run python -m regression.t5` against the committed baselines, failing on a `fail` verdict. Run it on this machine when a release is checked. Do not add a GitHub workflow for it;
   - `regression/t5/python/test_cancel_storm.py`, `regression/t5/python/test_reconnect_storm.py` (in-process gateway, scripted provider; `t5` and `slow` markers).
-- **Verify:** `uv run pytest regression/t5/python --live -q`. `--live` is needed only because every `t5` item is gated by it; these tests start no agent and need no key or network, and the preflight check runs only before T4 scenarios. Also run `rg -n 'evals/' .github/workflows/live-trials.yml` finds nothing.
-- **Done when:** the phase Summary exit criteria hold (the CI parts pending D1).
+- **Verify:** `uv run pytest regression/t5/python --live -q`. `--live` is needed only because every `t5` item is gated by it; these tests start no agent and need no key or network, and the preflight check runs only before T4 scenarios. `rg -n 'OLLAMA_API_KEY' .github/workflows` finds nothing added by this task.
+- **Done when:** the phase Summary exit criteria hold on a local compare. GitHub does not need `OLLAMA_API_KEY`.

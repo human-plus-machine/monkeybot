@@ -1,0 +1,30 @@
+id: regression/t2/loop/scenarios/attachments/attachment_symlink_leaf_rejected
+case: T2-ATT-07
+description: A symlinked attachment store leaf is rejected instead of read.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: att_ws
+messages:
+- Load the linked attachment.
+script:
+- - type: tool_call
+    call_id: c1
+    name: load_file
+    args:
+      attachment_id: att-link
+  - type: done
+- - type: text
+    text: The link was rejected.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    tool: load_file
+    error:
+      regex: "Unknown attachment_id: att-link"
+  required_tools:
+  - load_file
+  turn_completed: true
+  no_errors: true

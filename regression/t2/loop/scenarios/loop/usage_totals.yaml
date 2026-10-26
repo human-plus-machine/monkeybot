@@ -1,0 +1,28 @@
+id: regression/t2/loop/scenarios/loop/usage_totals
+case: T2-LOOP-36
+description: TurnComplete.usage sums usage events and leaves omitted token fields at 0.
+mode: scripted
+driver: loop
+messages:
+- count tokens
+script:
+- - type: usage
+    input_tokens: 3
+    output_tokens: 4
+  - type: usage
+    input_tokens: 1
+    output_tokens: 2
+  - type: text
+    text: counted
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  event_fields:
+    TurnComplete:
+      usage:
+        input_tokens: 4
+        output_tokens: 6
+        cached_tokens: 0
+        cache_read_tokens: 0
+        cache_creation_tokens: 0

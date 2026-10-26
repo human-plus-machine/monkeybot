@@ -1,0 +1,28 @@
+id: regression/t2/loop/scenarios/loop/grounding_event_passthrough
+case: T2-LOOP-39
+description: Grounding sources and search queries pass through unchanged.
+mode: scripted
+driver: loop
+messages:
+- ground the answer
+script:
+- - type: grounding
+    sources:
+    - title: Doc
+      url: https://example.test/a
+    search_queries:
+    - monkey query
+  - type: text
+    text: grounded
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  response_contains: grounded
+  event_fields:
+    GroundingEvent:
+      sources:
+      - title: Doc
+        url: https://example.test/a
+      search_queries:
+      - monkey query

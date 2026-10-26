@@ -1,0 +1,32 @@
+id: regression/t2/loop/scenarios/shell/unscreenable_script_fails_closed
+case: T2-SHELL-05
+description: bash -c nested past the deny-pattern walk depth is denied before execute
+mode: scripted
+driver: loop
+executor: real
+policy:
+  command_allowlist: no_deny_patterns
+messages:
+- Run a deeply nested shell.
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      argv:
+      - bash
+      - -c
+      - "bash -c \"bash -c 'bash -c \\\"echo hi\\\"' \""
+  - type: done
+- - type: text
+    text: The nested shell was denied.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    error_kind: policy
+    error:
+      regex: deeply nested shell
+  turn_completed: true
+  no_errors: true

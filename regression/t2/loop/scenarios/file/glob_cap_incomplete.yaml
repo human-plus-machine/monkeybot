@@ -1,0 +1,30 @@
+id: regression/t2/loop/scenarios/file/glob_cap_incomplete
+case: T2-FILE-23
+description: A glob over WORKSPACE_GLOB_MAX_PATHS is ok false and incomplete_scan, never an empty success.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+config:
+  env:
+    WORKSPACE_GLOB_MAX_PATHS: "1"
+messages:
+- Glob everything.
+script:
+- - type: tool_call
+    call_id: c1
+    name: glob
+    args:
+      pattern: "**/*"
+  - type: done
+- - type: text
+    text: The scan was incomplete.
+  - type: done
+assertions:
+  tool_error_codes:
+  - incomplete_scan
+  events_sequence:
+  - type: ToolCallResult
+    error:
+      regex: '"ok": false[\s\S]*incomplete_scan'
+  turn_completed: true

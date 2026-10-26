@@ -1,0 +1,27 @@
+id: regression/t2/loop/scenarios/memory/outbox_ingest_then_inject
+case: T2-MEM-01
+description: Turn 1 is persisted and drained; turn 2 PRE_TURN injects that text.
+mode: scripted
+driver: loop
+hooks:
+- memory
+messages:
+- remember turn-one-persisted-fact
+- What did the previous turn say?
+script:
+- - type: text
+    text: Noted the fact.
+  - type: done
+- - type: text
+    text: The previous turn mentioned it.
+  - type: done
+assertions:
+  memory_injected:
+    contains: turn-one-persisted-fact
+  store:
+    outbox:
+      min: 1
+  history:
+    row_count: 4
+  turn_completed: true
+  no_errors: true

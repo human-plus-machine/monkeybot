@@ -1,0 +1,25 @@
+id: regression/t2/loop/scenarios/web/backend_none_not_advertised
+case: T2-WEB-03
+description: WEB_SEARCH_BACKEND=none leaves web_search off the tool list.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Answer without searching.
+config:
+  env:
+    WEB_SEARCH_BACKEND: none
+script:
+- - type: text
+    text: No search tool is available.
+  - type: done
+assertions:
+  provider_calls: 1
+  provider_request:
+  - n: 1
+    tools_exclude:
+    - web_search
+  forbidden_tools:
+  - web_search
+  turn_completed: true
+  no_errors: true

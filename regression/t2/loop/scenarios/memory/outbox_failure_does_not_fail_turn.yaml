@@ -1,0 +1,26 @@
+id: regression/t2/loop/scenarios/memory/outbox_failure_does_not_fail_turn
+case: T2-MEM-04
+description: Outbox write fails after the history commit; the turn still completes.
+mode: scripted
+driver: loop
+hooks:
+- memory
+config:
+  env:
+    DB_URL: "sqlite:///:memory:"
+messages:
+- Remember this even if the outbox cannot.
+script:
+- - type: text
+    text: History kept the turn.
+  - type: done
+assertions:
+  history:
+    row_count: 2
+    roles:
+    - user
+    - assistant
+  store:
+    outbox: 0
+  turn_completed: true
+  no_errors: true

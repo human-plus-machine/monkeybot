@@ -55,6 +55,7 @@ _ASSERTION_MODES: dict[str, frozenset[str] | None] = {
     "no_errors": _MODES_ALL,
     "error_contains": _MODES_ALL,
     "events_sequence": frozenset({"scripted", "replay"}),
+    "context_usage_drops": frozenset({"scripted", "replay"}),
     "events_absent": _MODES_ALL,
     "event_fields": _MODES_ALL,
     "interventions": frozenset({"scripted", "replay"}),
@@ -103,6 +104,7 @@ _HISTORY_KEYS = frozenset(
         "summary_row",
         "row_ids_preserved",
         "no_repaired_rows",
+        "blocks_include",
     }
 )
 _STORE_KEYS = frozenset({"outbox", "usage", "loops", "goals", "branches"})
@@ -135,7 +137,10 @@ _REQUEST_KEYS = frozenset(
         "system_contains",
         "system_not_contains",
         "messages_contain",
+        "messages_not_contain",
         "no_vertex_google_search",
+        "thinking_budget",
+        "model",
     }
 )
 _FRAME_ID_SKIP = frozenset({"ActiveRequests", "ping"})
@@ -149,6 +154,8 @@ class ProviderRequest:
     system: str = ""
     messages: list[str] = field(default_factory=list)
     vertex_google_search: bool = False
+    thinking_budget: int | None = None
+    model: str = ""
 
 
 @dataclass
@@ -332,6 +339,7 @@ def evaluate(assertions: dict[str, Any] | list[Any] | None, run: RunView) -> lis
         _check_no_errors,
         _check_error_contains,
         _check_events_sequence,
+        _check_context_usage_drops,
         _check_events_absent,
         _check_event_fields,
         _check_interventions,
@@ -649,6 +657,16 @@ def _field_matches(actual: object, expected: object) -> bool:
             return re.search(pattern, actual) is not None
         except re.error:
             return False
+    if isinstance(expected, dict):
+        if actual is None or isinstance(actual, (str, bytes, int, float, bool)):
+            return False
+        for key, want in expected.items():
+            if not isinstance(key, str):
+                return False
+            got = actual.get(key) if isinstance(actual, dict) else getattr(actual, key, None)
+            if not _field_matches(got, want):
+                return False
+        return True
     return actual == expected
 
 
@@ -817,6 +835,29 @@ def _check_events_sequence(active: Mapping[str, Any], run: RunView) -> list[str]
     return []
 
 
+def _check_context_usage_drops(active: Mapping[str, Any], run: RunView) -> list[str]:
+    """True when a later ContextUsage is smaller than one before ContextSummarizing."""
+    if active.get("context_usage_drops") is not True:
+        return []
+    usages: list[tuple[int, int]] = []
+    summarizing: list[int] = []
+    for index, event in enumerate(_events(run)):
+        kind = event_type(event)
+        if kind == "ContextSummarizing":
+            summarizing.append(index)
+            continue
+        if kind != "ContextUsage":
+            continue
+        tokens = event_field(event, "estimated_tokens")
+        if isinstance(tokens, int) and not isinstance(tokens, bool):
+            usages.append((index, tokens))
+    for position, (start, before) in enumerate(usages):
+        for end, after in usages[position + 1 :]:
+            if after < before and any(start < marker < end for marker in summarizing):
+                return []
+    return ["context_usage_drops: estimated_tokens did not fall after ContextSummarizing"]
+
+
 def _check_events_absent(active: Mapping[str, Any], run: RunView) -> list[str]:
     if "events_absent" not in active:
         return []
@@ -981,8 +1022,28 @@ def _match_provider_request(
         failures.append(f"{label}: messages_contain {messages_needle!r} not in the messages")
     elif messages_needle is not None and not isinstance(messages_needle, str):
         failures.append(f"{label}: messages_contain must be a string")
+    messages_absent = matcher.get("messages_not_contain")
+    if isinstance(messages_absent, str) and messages_absent in blob:
+        failures.append(f"{label}: messages_not_contain {messages_absent!r} was in the messages")
+    elif messages_absent is not None and not isinstance(messages_absent, str):
+        failures.append(f"{label}: messages_not_contain must be a string")
+    expected_model = matcher.get("model")
+    if isinstance(expected_model, str) and request.model != expected_model:
+        failures.append(f"{label}: model {request.model!r} != {expected_model!r}")
+    elif expected_model is not None and not isinstance(expected_model, str):
+        failures.append(f"{label}: model must be a string")
     if matcher.get("no_vertex_google_search") is True and request.vertex_google_search:
         failures.append(f"{label}: vertex google search was enabled")
+    if "thinking_budget" in matcher:
+        expected_budget = matcher["thinking_budget"]
+        if expected_budget is not None and (
+            isinstance(expected_budget, bool) or not isinstance(expected_budget, int)
+        ):
+            failures.append(f"{label}: thinking_budget must be an integer or null")
+        elif request.thinking_budget != expected_budget:
+            failures.append(
+                f"{label}: thinking_budget {request.thinking_budget} != {expected_budget}"
+            )
     return failures
 
 
@@ -1297,7 +1358,65 @@ def _check_history(active: Mapping[str, Any], run: RunView) -> list[str]:
         repaired = [index for index, row in enumerate(rows) if _is_repaired_row(row)]
         if repaired:
             failures.append(f"history: repaired rows persisted at {repaired}")
+    if "blocks_include" in spec:
+        failures.extend(_history_blocks(rows, spec["blocks_include"]))
     return failures
+
+
+_BLOCK_SPEC_KEYS = frozenset({"type", "text_contains", "notification_type"})
+
+
+def _history_blocks(rows: Sequence[Message], spec: object) -> list[str]:
+    if not isinstance(spec, list):
+        return ["history: blocks_include must be a list of block matchers"]
+    failures: list[str] = []
+    for index, item in enumerate(spec):
+        if not isinstance(item, dict):
+            failures.append(f"history: blocks_include[{index}] must be a mapping")
+            continue
+        unknown = sorted(set(item) - _BLOCK_SPEC_KEYS)
+        if unknown:
+            failures.append(f"history: blocks_include[{index}] unknown matcher {unknown}")
+            continue
+        block_type = item.get("type")
+        if not isinstance(block_type, str) or not block_type:
+            failures.append(f"history: blocks_include[{index}] type must be a string")
+            continue
+        needle = item.get("text_contains")
+        if needle is not None and not isinstance(needle, str):
+            failures.append(f"history: blocks_include[{index}] text_contains must be a string")
+            continue
+        notification = item.get("notification_type")
+        if notification is not None and not isinstance(notification, str):
+            failures.append(f"history: blocks_include[{index}] notification_type must be a string")
+            continue
+        if not any(_block_matches(block, item) for row in rows for block in row.content):
+            failures.append(f"history: blocks_include[{index}] {block_type} was not kept")
+    return failures
+
+
+def _block_matches(block: object, spec: Mapping[str, Any]) -> bool:
+    if getattr(block, "TYPE", None) != spec["type"]:
+        return False
+    notification = spec.get("notification_type")
+    if isinstance(notification, str) and getattr(block, "notification_type", None) != notification:
+        return False
+    needle = spec.get("text_contains")
+    if not isinstance(needle, str):
+        return True
+    return needle in _block_haystack(block)
+
+
+def _block_haystack(block: object) -> str:
+    parts: list[str] = []
+    for name in ("text", "thinking", "msg", "attachment_id", "data"):
+        value = getattr(block, name, None)
+        if isinstance(value, str):
+            parts.append(value)
+    result = getattr(block, "result", None)
+    if isinstance(result, list):
+        parts.extend(_block_haystack(child) for child in result)
+    return "\n".join(parts)
 
 
 def _is_repaired_row(message: Message) -> bool:

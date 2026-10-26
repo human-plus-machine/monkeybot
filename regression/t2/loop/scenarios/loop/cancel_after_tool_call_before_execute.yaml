@@ -1,0 +1,33 @@
+id: regression/t2/loop/scenarios/loop/cancel_after_tool_call_before_execute
+case: T2-LOOP-22
+description: Cancel after a tool call is pending and before dispatch writes a synthetic cancelled result.
+mode: scripted
+driver: loop
+messages:
+- call a tool
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: a.txt
+  - type: text
+    text: after-call
+  - type: done
+steps:
+- action: cancel
+  when:
+    event: text
+    nth: 1
+assertions:
+  turn_completed: true
+  tool_calls:
+    read_file:
+      max: 0
+  error_contains: Request cancelled
+  history:
+    tool_pairs_intact: true
+    roles:
+    - user
+    - assistant
+    - user

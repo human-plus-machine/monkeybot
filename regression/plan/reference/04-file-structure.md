@@ -670,7 +670,7 @@ regression/                       +
     diff.py                           ← evals/diff.py
     score.py                          ← evals/scorer.py (LLM judge)
     report.py                         ← evals/report.py (also writes ledger records via LedgerWriter, P4-02)
-    eval_config.yaml                  ← evals/eval_config.yaml (judge_provider: ollama-cloud, judge_model: D12)
+    eval_config.yaml                  ← evals/eval_config.yaml (judge_provider: ollama-cloud, judge_model: glm-5.3-flash)
     preflight.py                  +   # OLLAMA_API_KEY present + one cheap stream call before any live suite (5.11)
     agent/                            ← evals/smoke_agent/
       pyproject.toml                  ← evals/smoke_agent/pyproject.toml
@@ -819,7 +819,7 @@ regression/                       +
 - `scripts/ci-local.sh`: `uv run pytest tests/` becomes `uv run pytest tests regression -m "t1 or t2 or t3" -q -n auto`. It exports `MONKEYBOT_TEST_RUN_GROUP` and `MONKEYBOT_TEST_TRIGGER` once at the top, and runs the `cli/` and `integrations/browser-mcp/` suites with `-p testkit.failure_ledger --ledger-dir $ROOT/test-runs` and the repo root on `PYTHONPATH`.
 - `.gitignore`: add `/test-runs/`, `/regression/t4/runs/`, `/regression/t4/agent/.env`, `/.cursor/hooks/.state/`; drop the `/evals/...` entries at cutover.
 - `.cursor/hooks.json`: add `postToolUse` → `.cursor/hooks/test-failure-notice.py` with matcher `Shell`, no `failClosed`.
-- `.github/workflows/live-eval-smoke.yml`: working directory `regression/t4/agent`, entry `python -m regression.t4`, `OLLAMA_API_KEY` (P4-05).
-- `.github/workflows/live-trials.yml` (new, P5-03): nightly T5 trials and the release-gate compare.
+- `.github/workflows/live-eval-smoke.yml`: paths move to `regression/t4/agent`. No provider secret (D1). The smoke suite runs locally (P4-06).
+- `.github/workflows/live-trials.yml`: not added. The release-gate compare runs locally (P5-03, D1).
 - `.github/workflows/ci.yml`: the same pytest command as `ci-local.sh` (P0A-05), the `evals/test_*.py` lines removed (P4-01), and the `cassette-staleness` step (P3-03).
 - `docs/live-evals.md`: paths updated to `regression/t4`.

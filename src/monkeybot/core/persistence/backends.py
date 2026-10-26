@@ -108,7 +108,9 @@ class RunStore(Protocol):
 
     async def renew_claim(self, run_id: str, worker_id: str) -> bool: ...
 
-    async def list_stale_claims(self, stale_after_ms: int) -> list[SubagentRunRow]: ...
+    async def list_stale_claims(
+        self, stale_after_ms: int, now_ms: int | None = None
+    ) -> list[SubagentRunRow]: ...
 
     async def reset_stale_claim(
         self,
@@ -116,9 +118,10 @@ class RunStore(Protocol):
         stale_after_ms: int,
         *,
         worker_id: str | None = None,
+        now_ms: int | None = None,
     ) -> bool: ...
 
-    async def reset_stale_claims(self, stale_after_ms: int) -> int: ...
+    async def reset_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int: ...
 
     async def record_completed(
         self,
@@ -163,9 +166,11 @@ class ScheduledLoopStore(Protocol):
 
     async def list_due(self, now_ms: int) -> list[ScheduledLoopRow]: ...
 
-    async def claim_tick(self, loop_id: str, worker_id: str) -> ScheduledLoopRow | None: ...
+    async def claim_tick(
+        self, loop_id: str, worker_id: str, now_ms: int | None = None
+    ) -> ScheduledLoopRow | None: ...
 
-    async def release_stale_claims(self, stale_after_ms: int) -> int: ...
+    async def release_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int: ...
 
     async def complete_tick(
         self,
@@ -173,11 +178,21 @@ class ScheduledLoopStore(Protocol):
         *,
         worker_id: str,
         error: str | None = None,
+        now_ms: int | None = None,
     ) -> ScheduledLoopRow | None: ...
 
-    async def defer_tick(self, loop_id: str, *, worker_id: str, reason: str) -> bool: ...
+    async def defer_tick(
+        self,
+        loop_id: str,
+        *,
+        worker_id: str,
+        reason: str,
+        now_ms: int | None = None,
+    ) -> bool: ...
 
-    async def renew_tick_claim(self, loop_id: str, worker_id: str) -> bool: ...
+    async def renew_tick_claim(
+        self, loop_id: str, worker_id: str, now_ms: int | None = None
+    ) -> bool: ...
 
     async def pause(self, loop_id: str) -> bool: ...
 
@@ -196,7 +211,7 @@ class SessionTurnLockStore(Protocol):
 
     async def is_busy(self, session_id: str) -> bool: ...
 
-    async def release_stale_claims(self, stale_after_ms: int) -> int: ...
+    async def release_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int: ...
 
 
 @runtime_checkable

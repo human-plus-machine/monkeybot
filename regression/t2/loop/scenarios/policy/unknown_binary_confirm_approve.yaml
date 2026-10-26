@@ -1,0 +1,39 @@
+id: regression/t2/loop/scenarios/policy/unknown_binary_confirm_approve
+case: T2-POL-01
+description: An unlisted binary asks for confirmation, and approve runs it.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Run date.
+policy:
+  command_allowlist: default
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      argv:
+      - date
+  - type: done
+- - type: text
+    text: date ran.
+  - type: done
+steps:
+- action: confirm_tool
+  decision: approve
+  call_id: c1
+  when:
+    event: tool_confirmation
+    call_id: c1
+assertions:
+  events_sequence:
+  - type: ToolConfirmationRequest
+    tool_name: run_command
+    tool_call_id: c1
+  - type: ToolCallResult
+    call_id: c1
+    result:
+      regex: '"ok": true'
+  turn_completed: true
+  no_errors: true

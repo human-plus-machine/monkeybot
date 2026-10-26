@@ -1,0 +1,11 @@
+# Last match wins. "git push…" matches both rules; the later deny is the result.
+default: allow
+
+rules:
+  - tool: run_command
+    pattern: "git *"
+    effect: allow
+  - tool: run_command
+    pattern: "git push*"
+    effect: deny
+    message: "git push is denied by the later overlap rule"

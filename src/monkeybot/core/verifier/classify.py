@@ -39,7 +39,8 @@ You classify one new human message against the currently open goals.
 Return ONLY compact JSON with this schema:
 {"intent":"new_goal|refinement|scope_change|correction|preempt|answer|noise",\
 "relates_to":"<entry_id or null>",\
-"constraints":[{"kind":"path_glob|tool_name|command_regex|free_text","pattern":"...","verbatim":"..."}]}
+"constraints":[{"kind":"path_glob|tool_name|command_regex|free_text","pattern":"...","verbatim":"..."}],\
+"done_when":["path or condition still required when the user says the work is finished"]}
 
 Rules:
 - intent is required. Use new_goal when this starts work, refinement when it narrows the open goal,
@@ -50,6 +51,8 @@ Rules:
 - Prefer typed constraints: path_glob for file/dir globs, tool_name for a tool, command_regex for shell.
   Use free_text only when you cannot type it. pattern is the glob/name/regex; verbatim is the user's words.
 - Do not invent constraints the user did not state.
+- done_when lists concrete paths or conditions the user said must be true when the work is finished.
+  Leave it empty when they did not name one.
 """
 
 _INTENT_VALUES = {item.value: item for item in Intent}
@@ -65,6 +68,12 @@ class ClassifierPort(Protocol):
         *,
         thread_id: str = "",
     ) -> Classification: ...
+
+
+def _done_when_items(raw: object) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        return ()
+    return tuple(item.strip() for item in raw if isinstance(item, str) and item.strip())
 
 
 def parse_classification(raw: str) -> Classification | None:
@@ -115,6 +124,7 @@ def parse_classification(raw: str) -> Classification | None:
         intent=intent,
         relates_to=relates_to,
         constraints=tuple(drafts),
+        done_when=_done_when_items(payload.get("done_when")),
     )
 
 

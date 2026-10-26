@@ -24,7 +24,7 @@ Exit: no references to the old paths (`rg "evals/|tests/evals|tests/core/|from t
   - the `.cursor/rules` files that mention old paths.
 - **Steps:**
   1. Run `rg -n 'evals/|tests/evals|tests/core/|from tests\.' --glob '!regression/plan/**' --glob '!CHANGELOG*'`. Fix every hit, or list it in the report with the reason it stays (for example a dated history doc).
-  2. Run the pairing test. Empty Test cells are allowed only for deferred cases: T4-RT-01, T5-GW-* if Phase 5 is deferred, and the D3- and D13-blocked cases. List each one in `docs/testing.md` §9 (Deferred coverage) with its reason. Do not write the reason into the catalog's Expect column.
+  2. Run the pairing test. Empty Test cells are allowed only for deferred cases: T4-RT-01, T5-GW-* if Phase 5 is deferred, the D3-blocked cases, and T3-PROV-01..05 plus the non-Ollama families of T3-PROV-06 until that provider's key exists (D13). List each one in `docs/testing.md` §9 (Deferred coverage) with its reason. Do not write the reason into the catalog's Expect column.
   3. Run the full gate set, plus one live smoke (confirmation needed).
 - **Verify:** `bash scripts/ci-local.sh`; `uv run pytest tests regression -m "t1 or t2 or t3" -q -n auto`; `uv run pytest tests/contracts/test_catalog_pairing.py -q`
 - **Done when:** the Summary exit criteria hold, and `status.md` shows every task `done` or `deferred`.
