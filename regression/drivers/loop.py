@@ -353,8 +353,8 @@ async def _drive(
         memory_lines = []
         original_load = hook_memory.load_index
 
-        async def _load_index() -> list[str]:
-            base = await original_load()
+        async def _load_index(thread_id: str | None = None) -> list[str]:
+            base = await original_load(thread_id=thread_id)
             return [*base, *(memory_lines or [])]
 
         hook_memory.load_index = _load_index
