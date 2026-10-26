@@ -1,0 +1,10 @@
+verifier:
+  enabled: true
+  ledger:
+    enabled: false
+  tracker:
+    enabled: true
+  judge:
+    enabled: false
+  escalation:
+    max_severity: nudge

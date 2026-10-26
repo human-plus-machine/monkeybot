@@ -1,0 +1,34 @@
+id: regression/t2/loop/scenarios/coding/git_env_isolation
+case: T2-CODE-16
+description: GIT_DIR pointing at another repo does not change the workspace git note
+mode: scripted
+driver: loop
+executor: real
+hooks:
+  - git_context
+config:
+  env:
+    GIT_DIR: "{workspace}/other/.git"
+    GIT_WORK_TREE: "{workspace}/other"
+messages:
+  - What is the git status?
+script:
+  - - type: text
+      text: Noted the workspace branch.
+    - type: done
+assertions:
+  provider_calls: 1
+  provider_request:
+    - n: 1
+      system_contains: "## Runtime notes"
+    - n: 1
+      system_contains: "git: branch workspace-branch"
+    - n: 1
+      system_contains: only_workspace.py
+    - n: 1
+      system_not_contains: other-branch
+    - n: 1
+      system_not_contains: only_other.py
+  response_contains: Noted the workspace branch.
+  turn_completed: true
+  no_errors: true

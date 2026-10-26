@@ -1,0 +1,39 @@
+id: regression/t2/loop/scenarios/verifier/preempt_negative
+case: T2-VER-08
+description: A preempt intent produces zero verdicts.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: drift_ws
+hooks:
+- verifier
+messages:
+- Do this other thing first.
+config:
+  verifier:
+    enabled: true
+    ledger:
+      enabled: true
+      model: fake
+    tracker:
+      enabled: true
+    judge:
+      enabled: false
+    escalation:
+      max_severity: nudge
+  env:
+    MONKEYBOT_CLASSIFIER_ROWS: '[{"intent":"preempt","relates_to":null,"constraints":[]}]'
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: src/models.py
+  - type: done
+- - type: text
+    text: Done.
+  - type: done
+assertions:
+  turn_completed: true
+  verdicts:
+    max: 0

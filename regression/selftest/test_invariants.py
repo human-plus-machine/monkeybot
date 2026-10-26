@@ -45,10 +45,24 @@ def _clean(run: RunView, *, schema_path: Path | None = None) -> None:
 
 def test_turn_complete_is_exactly_one_and_last() -> None:
     _clean(_loop({"type": "AssistantDelta", "delta": "hi"}, {"type": "TurnComplete"}))
+    _clean(
+        _loop(
+            {"type": "TurnComplete", "request_id": "r1"},
+            {"type": "AssistantDelta", "delta": "b", "request_id": "r2"},
+            {"type": "TurnComplete", "request_id": "r2"},
+        )
+    )
     _only(_loop({"type": "TurnComplete"}, {"type": "Error", "error": "after"}), "turn_complete")
     _only(_loop({"type": "AssistantDelta", "delta": "hi"}), "turn_complete")
     _only(
         _loop({"type": "TurnComplete"}, {"type": "TurnComplete"}),
+        "turn_complete",
+    )
+    _only(
+        _loop(
+            {"type": "TurnComplete", "request_id": "r1"},
+            {"type": "TurnComplete", "request_id": "r1"},
+        ),
         "turn_complete",
     )
 

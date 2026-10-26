@@ -1,0 +1,66 @@
+id: regression/t2/loop/scenarios/coding/gate_custom_verify_commands
+case: T2-CODE-12
+description: coding.verification_gate.verify_commands ["just check"] counts, and pytest does not
+mode: scripted
+driver: loop
+executor: recording
+hooks:
+  - verification_gate
+config:
+  coding:
+    verification_gate:
+      verify_commands:
+        - "just check"
+      max_rejections: 2
+messages:
+  - Edit the module and run the project check.
+script:
+  - - type: tool_call
+      call_id: w1
+      name: write_file
+      args:
+        path: a.py
+        content: "x = 1\n"
+    - type: done
+  - - type: tool_call
+      call_id: tests
+      name: run_command
+      args:
+        argv:
+          - pytest
+          - -q
+    - type: done
+  - - type: text
+      text: CLAIM-PYTEST-COUNTED
+    - type: done
+  - - type: tool_call
+      call_id: just
+      name: run_command
+      args:
+        argv:
+          - just
+          - check
+    - type: done
+  - - type: text
+      text: HONEST-JUST-CHECK-COUNTED
+    - type: done
+tool_results:
+  w1:
+    ok: true
+  tests:
+    ok: true
+    stdout: "5 passed"
+    stderr: ""
+    exit_code: 0
+  just:
+    ok: true
+    stdout: ok
+    stderr: ""
+    exit_code: 0
+assertions:
+  interventions:
+    - final_answer_gate
+  provider_calls: 5
+  response_contains: HONEST-JUST-CHECK-COUNTED
+  response_not_contains: CLAIM-PYTEST-COUNTED
+  turn_completed: true

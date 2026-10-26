@@ -1,0 +1,46 @@
+id: regression/t2/loop/scenarios/todo/single_in_progress
+case: T2-TODO-02
+description: Starting a second item demotes the previous in_progress item to pending.
+mode: scripted
+driver: loop
+executor: real
+messages:
+  - Track two tasks and switch which one is in progress.
+script:
+  - - type: tool_call
+      call_id: add
+      name: todo_list
+      args:
+        action: add
+        text:
+          - Draft notes
+          - Run tests
+    - type: done
+  - - type: tool_call
+      call_id: start1
+      name: todo_list
+      args:
+        action: start
+        id: t1
+    - type: done
+  - - type: tool_call
+      call_id: start2
+      name: todo_list
+      args:
+        action: start
+        id: t2
+    - type: done
+  - - type: text
+      text: Only Run tests is in progress.
+    - type: done
+assertions:
+  turn_completed: true
+  events_sequence:
+    - type: ToolCallResult
+      call_id: start1
+      result:
+        regex: '"id": "t1", "text": "Draft notes", "status": "in_progress"'
+    - type: ToolCallResult
+      call_id: start2
+      result:
+        regex: '"id": "t1", "text": "Draft notes", "status": "pending".*"id": "t2", "text": "Run tests", "status": "in_progress"'

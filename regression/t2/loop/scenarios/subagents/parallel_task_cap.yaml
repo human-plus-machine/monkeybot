@@ -1,0 +1,89 @@
+id: regression/t2/loop/scenarios/subagents/parallel_task_cap
+case: T2-SUB-11
+description: Twelve task calls in one batch overlap at most ten at a time
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Run twelve analyses together
+config:
+  env:
+    MONKEYBOT_SUBAGENT_SCRIPT: testkit/subagent_worker.py
+    AGENT_MD: evals/smoke_agent/monkeybot_config/AGENT.md
+script:
+- - type: tool_call
+    call_id: c1
+    name: task
+    args:
+      task: hold
+  - type: tool_call
+    call_id: c2
+    name: task
+    args:
+      task: hold
+  - type: tool_call
+    call_id: c3
+    name: task
+    args:
+      task: hold
+  - type: tool_call
+    call_id: c4
+    name: task
+    args:
+      task: hold
+  - type: tool_call
+    call_id: c5
+    name: task
+    args:
+      task: hold
+  - type: tool_call
+    call_id: c6
+    name: task
+    args:
+      task: hold
+  - type: tool_call
+    call_id: c7
+    name: task
+    args:
+      task: hold
+  - type: tool_call
+    call_id: c8
+    name: task
+    args:
+      task: hold
+  - type: tool_call
+    call_id: c9
+    name: task
+    args:
+      task: hold
+  - type: tool_call
+    call_id: c10
+    name: task
+    args:
+      task: hold
+  - type: tool_call
+    call_id: c11
+    name: task
+    args:
+      task: hold
+  - type: tool_call
+    call_id: c12
+    name: task
+    args:
+      task: hold
+  - type: done
+- - type: text
+    text: All twelve finished.
+  - type: done
+assertions:
+  required_tools:
+  - task
+  tool_calls:
+    task: 12
+  turn_completed: true
+  workspace_command_passes:
+  - |
+    python -c "from pathlib import Path
+    nums = [int(line) for line in Path('concurrency_peaks.txt').read_text().split() if line.strip()]
+    ok = len(nums) == 12 and 2 <= max(nums) <= 10
+    raise SystemExit(0 if ok else 1)"

@@ -1,0 +1,4 @@
+verifier:
+  enabled: true
+  escalation:
+    max_severity: block

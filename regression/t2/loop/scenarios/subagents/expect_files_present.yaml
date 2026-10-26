@@ -1,0 +1,37 @@
+id: regression/t2/loop/scenarios/subagents/expect_files_present
+case: T2-SUB-03
+description: expect_files finds the file the child wrote
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Write the report
+config:
+  env:
+    MONKEYBOT_SUBAGENT_SCRIPT: testkit/subagent_worker.py
+    AGENT_MD: evals/smoke_agent/monkeybot_config/AGENT.md
+script:
+- - type: tool_call
+    call_id: c1
+    name: task
+    args:
+      task: present_file
+      expect_files:
+      - report.txt
+  - type: done
+- - type: text
+    text: Report is there.
+  - type: done
+assertions:
+  required_tools:
+  - task
+  turn_completed: true
+  subagent:
+    artifact_exists:
+    - report.txt
+  event_fields:
+    ToolCallResult:
+      result:
+        regex: '"ok": true.*"artifact_exists": true'
+  workspace_file_contains:
+    report.txt: present

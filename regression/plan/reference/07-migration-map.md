@@ -25,6 +25,6 @@
 | `evals/test_*.py` (scripts) | `regression/selftest/` | Convert to real pytest; `test_diff.py` and `test_scorer.py` start running. `test_judge.py` becomes a `live` test. |
 | `evals/TEST_COVERAGE.md` | `regression/plan/reference/06-coverage/`, then `docs/testing.md` §8 | Delete after migration. |
 | `docs/live-evals.md` | Rewrite to point at `regression/` | Fix stale claims (section 11). |
-| `.github/workflows/live-eval-smoke.yml` | Same workflow, new paths | Swap `NVIDIA_API_KEY` for `OLLAMA_API_KEY` in the secret gate and both job envs; `JUDGE_PROVIDER: ollama-cloud`, `JUDGE_MODEL: <D12>`; replace "warn and skip" with the 5.11 preflight. |
+| `.github/workflows/live-eval-smoke.yml` | Same workflow, new paths | Drop the `NVIDIA_API_KEY` secret gate. Do not add `OLLAMA_API_KEY` (D1). The workflow does not start a live suite. Live smoke runs locally, with `JUDGE_PROVIDER: ollama-cloud` and `JUDGE_MODEL: glm-5.3-flash`. |
 
 During migration, `evals/` and `tests/evals/` keep working. Delete them only after phase 6's exit criteria. The tier-1 moves happen earlier (Phase 0a) as one mechanical change, so later phases only ever touch the new paths.

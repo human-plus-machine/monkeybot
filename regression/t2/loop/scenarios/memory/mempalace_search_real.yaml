@@ -1,8 +1,21 @@
 id: regression/t2/loop/scenarios/memory/mempalace_search_real
 case: T2-MEM-06
-description: Past-event query triggers mempalace search via run_command
+description: Seeded InMemoryPalace search returns this thread's drawer only.
 mode: scripted
 driver: loop
+executor: real
+hooks:
+- memory
+memory:
+  palace:
+  - drawer_id: this-thread
+    content: violet-drawer-fact
+    metadata:
+      thread_id: loop-scenario
+  - drawer_id: other-thread
+    content: crimson-other-drawer
+    metadata:
+      thread_id: other-thread
 messages:
 - What did we do yesterday?
 script:
@@ -13,12 +26,18 @@ script:
       argv:
       - mempalace
       - search
-      - yesterday
+      - violet
   - type: done
 - - type: text
     text: Yesterday we...
   - type: done
 assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    result:
+      regex: "(?s)\\A(?!.*crimson-other-drawer).*violet-drawer-fact"
   tool_categories_used:
   - shell
   turn_completed: true
+  no_errors: true

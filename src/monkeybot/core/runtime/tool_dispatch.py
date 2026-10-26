@@ -33,7 +33,7 @@ from monkeybot.core.messages.tool_integrity import cancelled_tool_result_text
 from monkeybot.core.path_safety import path_contained_under
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.runtime.context_budget import ContextBudgeter
-from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector
+from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector, format_denial
 from monkeybot.core.tools.permission import remember_always_approval, resource_for_call
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import ContentBlock, File, Image, Text, ToolResponse
@@ -263,6 +263,8 @@ class _InspectorGateOutcome:
 
     allowed: bool = True
     denial_message: str | None = None
+    denial_code: str | None = None
+    denial_kind: str | None = None
     decision: str = "allow"
 
 
@@ -368,6 +370,8 @@ async def _resolve_inspector_decision(
                 outcome.allowed = False
                 outcome.decision = "deny"
                 outcome.denial_message = decision.message
+                outcome.denial_code = decision.error_code
+                outcome.denial_kind = decision.error_kind
                 logger.debug(
                     "tool inspector deny %s",
                     kv(
@@ -547,7 +551,11 @@ async def _gate_chunk_calls(
             raise
 
         if not insp_outcome.allowed:
-            msg = insp_outcome.denial_message or "tool call denied"
+            msg = format_denial(
+                insp_outcome.denial_message,
+                code=insp_outcome.denial_code,
+                error_kind=insp_outcome.denial_kind,
+            )
             yield _started_event(
                 call,
                 ctx,

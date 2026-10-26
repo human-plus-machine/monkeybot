@@ -1,0 +1,31 @@
+id: regression/t2/loop/scenarios/web/max_results
+case: T2-WEB-04
+description: WEB_SEARCH_MAX_RESULTS=2 returns two fake results and drops the third.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Search the Rust 1.80 release notes.
+config:
+  env:
+    WEB_SEARCH_BACKEND: fake
+    WEB_SEARCH_MAX_RESULTS: "2"
+script:
+- - type: tool_call
+    call_id: c1
+    name: web_search
+    args:
+      query: Rust 1.80 release notes
+  - type: done
+- - type: text
+    text: Two results.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    tool: web_search
+    result:
+      regex: '(?s)"ok": true.*"title": "Rust 1.80".*"title": "Release notes"(?!.*"title": "Third hit")'
+  turn_completed: true
+  no_errors: true

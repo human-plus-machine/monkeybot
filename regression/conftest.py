@@ -7,6 +7,7 @@ registered there and do nothing in this file.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(pytest.mark.t1)
         elif tier in _TIERS:
             item.add_marker(getattr(pytest.mark, tier))
+    if sys.platform != "darwin":
+        for item in items:
+            if item.get_closest_marker("darwin_only") is not None:
+                item.add_marker(pytest.mark.skip(reason="darwin-only scenario"))
     if config.getoption("live"):
         return
     dropped = [item for item in items if any(item.get_closest_marker(name) for name in _LIVE_TIERS)]

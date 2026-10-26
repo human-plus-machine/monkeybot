@@ -1,0 +1,72 @@
+id: regression/t2/loop/scenarios/attachments/load_per_reply_cap
+case: T2-ATT-05
+description: The agent may load_file as many images as the turn needs. Six loads all succeed.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: att_ws
+messages:
+- Load six images.
+script:
+- - type: tool_call
+    call_id: c1
+    name: load_file
+    args:
+      path: i1.png
+  - type: tool_call
+    call_id: c2
+    name: load_file
+    args:
+      path: i2.png
+  - type: tool_call
+    call_id: c3
+    name: load_file
+    args:
+      path: i3.png
+  - type: tool_call
+    call_id: c4
+    name: load_file
+    args:
+      path: i4.png
+  - type: tool_call
+    call_id: c5
+    name: load_file
+    args:
+      path: i5.png
+  - type: tool_call
+    call_id: c6
+    name: load_file
+    args:
+      path: i6.png
+  - type: done
+- - type: text
+    text: Six images is over the cap.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    tool: load_file
+    error: null
+  - type: ToolCallResult
+    call_id: c2
+    tool: load_file
+    error: null
+  - type: ToolCallResult
+    call_id: c3
+    tool: load_file
+    error: null
+  - type: ToolCallResult
+    call_id: c4
+    tool: load_file
+    error: null
+  - type: ToolCallResult
+    call_id: c5
+    tool: load_file
+    error: null
+  - type: ToolCallResult
+    call_id: c6
+    tool: load_file
+    error: null
+  turn_completed: true
+  no_errors: true

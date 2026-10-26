@@ -1,0 +1,35 @@
+id: regression/t2/loop/scenarios/verifier/verifier_off_no_effect
+case: T2-VER-22
+description: 'All verifier flags off: no verifier events, and the provider request matches a verifier-less
+  turn.'
+mode: scripted
+driver: loop
+executor: recording
+hooks:
+- verifier
+messages:
+- Say hello.
+config:
+  verifier:
+    enabled: false
+    ledger:
+      enabled: false
+    tracker:
+      enabled: false
+    judge:
+      enabled: false
+    escalation:
+      max_severity: none
+script:
+- - type: text
+    text: Hello.
+  - type: done
+assertions:
+  turn_completed: true
+  events_absent:
+  - VerifierVerdict
+  provider_calls: 1
+  provider_request:
+  - n: 1
+    tools_empty: false
+    system_not_contains: '[Verifier]'

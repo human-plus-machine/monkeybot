@@ -1,0 +1,61 @@
+id: regression/t2/loop/scenarios/coding/gate_masked_exit
+case: T2-CODE-05
+description: pytest | tee x does not count as verification; pytest && true does
+mode: scripted
+driver: loop
+executor: recording
+hooks:
+  - verification_gate
+config:
+  coding:
+    verification_gate:
+      max_rejections: 2
+messages:
+  - Edit the module and prove it.
+script:
+  - - type: tool_call
+      call_id: w1
+      name: write_file
+      args:
+        path: a.py
+        content: "x = 1\n"
+    - type: done
+  - - type: tool_call
+      call_id: pipe
+      name: run_command
+      args:
+        command: "pytest | tee x"
+    - type: done
+  - - type: text
+      text: CLAIM-PIPE-VERIFIED
+    - type: done
+  - - type: tool_call
+      call_id: anded
+      name: run_command
+      args:
+        command: "pytest && true"
+    - type: done
+  - - type: text
+      text: CLAIM-AND-VERIFIED
+    - type: done
+tool_results:
+  w1:
+    ok: true
+  pipe:
+    ok: true
+    stdout: ""
+    stderr: ""
+    exit_code: 0
+  anded:
+    ok: true
+    stdout: "5 passed"
+    stderr: ""
+    exit_code: 0
+assertions:
+  interventions:
+    - final_answer_gate
+  provider_calls: 5
+  response_contains: CLAIM-AND-VERIFIED
+  response_not_contains:
+    - CLAIM-PIPE-VERIFIED
+  turn_completed: true

@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from monkeybot.core.context import TurnContext
@@ -57,6 +58,8 @@ class PendingSummary:
     # Tokens after ``cut`` when the job was started. A later suffix may grow up
     # to the tail budget, but not past the size this job already accepted.
     suffix_tokens: int
+    # Epoch ms when the job was scheduled. Freshness does not read this.
+    started_at_ms: int
     task: asyncio.Task[str | None]
 
 
@@ -210,12 +213,16 @@ async def maybe_start(
     history: HistoryStore,
     provider: Provider,
     preflight: int,
+    *,
+    clock: Callable[[], int] | None = None,
 ) -> None:
     """Start a summary when the thread is past 70% of the window and under the bar.
 
     Returns once the model call is scheduled. The call itself is not awaited.
     A job that is still fresh is left alone. A job whose rows after the cut have
     outgrown the tail it can keep is replaced, so the summary still covers the thread.
+    ``clock`` stamps when the job was scheduled. Omit it to use the wall clock.
+    The token band decides whether a job starts.
     """
     window = ctx.context_window_tokens
     if window <= 0:
@@ -249,6 +256,7 @@ async def maybe_start(
         ),
         name=f"background-summary-{ctx.thread_id}",
     )
+    started_at_ms = int(time.time() * 1000) if clock is None else clock()
     _pending[ctx.thread_id] = PendingSummary(
         cut=cut,
         covered=list(raw[:cut]),
@@ -258,6 +266,7 @@ async def maybe_start(
         window_tokens=window,
         base_len=len(raw),
         suffix_tokens=_tail_tokens(raw[cut:]),
+        started_at_ms=started_at_ms,
         task=task,
     )
     logger.debug(

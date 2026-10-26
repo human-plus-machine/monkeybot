@@ -1,0 +1,22 @@
+id: regression/t2/loop/scenarios/ctx/project_instructions_spoof_heading
+case: T2-CTX-14
+description: An AGENTS.md Runtime notes heading stays project text and does not become
+  the volatile tail.
+mode: scripted
+driver: loop
+workspace_fixture: hostile_ws
+messages:
+- read the project notes
+script:
+- - type: text
+    text: ok
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_request:
+  - n: 1
+    system_contains: This heading is project text
+    # Line-anchored. A demoted "### Runtime notes" line contains the old
+    # substring "## Runtime notes\nThis heading is project text".
+    system_not_contains: "\n## Runtime notes\nThis heading is project text"

@@ -1,0 +1,43 @@
+id: regression/t2/loop/scenarios/ctx/epoch_stable_change
+case: T2-CTX-11
+description: Changing AGENTS.md between inner turns opens a new context epoch.
+mode: scripted
+driver: loop
+workspace_fixture: hostile_ws
+messages:
+- look
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: notes.txt
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: src/app.py
+  - type: done
+- - type: text
+    text: done-11
+  - type: done
+tool_results:
+  c1:
+    text: n
+  c2:
+    text: a
+steps:
+- action: touch_file
+  path: AGENTS.md
+  size: 400
+  fill: x
+  when:
+    event: tool_result
+    nth: 1
+assertions:
+  turn_completed: true
+  no_errors: true
+  event_fields:
+    ContextEpochStarted:
+      epoch_id: 2

@@ -1,0 +1,2 @@
+{"control": true, "echo_envelope": "child_echo.json"}
+{"type": "TurnComplete", "request_id": "child"}

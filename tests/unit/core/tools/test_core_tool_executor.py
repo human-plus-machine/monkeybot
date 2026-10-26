@@ -2158,6 +2158,7 @@ async def test_run_command_cwd_escape_returns_validation_envelope(
     payload = json.loads(err)
     assert payload["ok"] is False
     assert payload["error_kind"] == "validation"
+    assert payload["details"]["code"] == "invalid_cwd"
 
 
 @pytest.mark.asyncio

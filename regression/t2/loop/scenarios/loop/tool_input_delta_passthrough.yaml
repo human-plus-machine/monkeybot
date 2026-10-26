@@ -1,0 +1,37 @@
+id: regression/t2/loop/scenarios/loop/tool_input_delta_passthrough
+case: T2-LOOP-38
+description: A tool input delta is forwarded and does not execute before the tool call starts.
+mode: scripted
+driver: loop
+messages:
+- stream a tool
+script:
+- - type: tool_input_delta
+    call_id: c1
+    name: read_file
+    delta: '{"path":'
+  - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: a.txt
+  - type: done
+- - type: text
+    text: after the call
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  tool_calls:
+    read_file: 1
+  events_sequence:
+  - type: ToolInputDelta
+    call_id: c1
+    tool: read_file
+    delta: '{"path":'
+  - type: ToolCallStarted
+    call_id: c1
+    tool: read_file
+  - type: ToolCallResult
+    call_id: c1
+    result: ok

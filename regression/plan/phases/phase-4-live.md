@@ -5,11 +5,11 @@
 ## Summary (from the roadmap, §8)
 
 - Move `evals/` into `regression/t4/`, unified schema, selftests as pytest.
-- Live setup per 5.11: Ollama Cloud agent and judge, `preflight.py`, `.env` fallback, workflow switched to `OLLAMA_API_KEY`.
+- Live setup per 5.11: Ollama Cloud agent and judge, `preflight.py`, `.env` fallback. Live smoke runs locally. GitHub does not get `OLLAMA_API_KEY` (D1).
 - Add new T4 cases (`T4-FILE-04`, `T4-MCP-04`, `T4-SCHED-*`, `T4-CTX-01` retuned, `T4-CTX-02`, `T4-HOOK-01`, `T4-MEM-03`, `T4-SUB-02`, `T4-SKILL-01`, `T4-GW-02`).
 - Split verifier configs.
 
-Exit: smoke suite green in CI on the chosen provider; scorecard posted; run JSON convertible to cassettes; a failing live scenario produces a ledger record with `live` provider/model and the run JSON path in `artifacts`.
+Exit: smoke suite green on a local run against Ollama Cloud; scorecard from that run; run JSON convertible to cassettes; a failing live scenario produces a ledger record with `live` provider/model and the run JSON path in `artifacts`. GitHub does not run this suite (D1).
 
 ## Tasks
 
@@ -55,14 +55,14 @@ Two entry points run T4, and both write to the failure ledger:
 ### P4-02 — Agent project, config split, judge config, preflight, ledger records
 
 - **Depends on:** P4-01
-- **Blocked by:** D12 (judge model), for the `judge_model` value only. While D12 is open, leave `judge_model` commented out with a `# D12` note; the scorer then falls back to the agent model.
+- **Blocked by:** none. D12 is decided: `judge_model` is `glm-5.3-flash` on `ollama-cloud`, the same model as the agent.
 - **Read:** [05.11-live-provider.md](../reference/05.11-live-provider.md) (all); [05.9-failure-ledger.md](../reference/05.9-failure-ledger.md) §5.9.3 (the `live` fields); [04-file-structure.md](../reference/04-file-structure.md) §4.4, the `t4/agent/` subtree only; [6U-gw.md](../reference/06-coverage/6U-gw.md), row T4-GW-01; [12-decisions.md](../reference/12-decisions.md), D12 only
 - **Creates / changes:**
   - `git mv evals/smoke_agent regression/t4/agent`;
   - `git mv regression/t4/agent/fixture_mcp_server.py regression/fixtures/mcp/fixture_mcp_server.py`. Then point every reference at the new path: `rg -n 'fixture_mcp_server' tests regression`. That covers `tests/unit/core/mcp/test_mcp_client.py` (path constant only), the T2 MCP path from P1-14, and the agent's `mcp.json`, which becomes `${MONKEYBOT_AGENT_ROOT}/../../fixtures/mcp/fixture_mcp_server.py`;
   - split `monkeybot.verifier-on.yaml` into `monkeybot.verifier-tracker.yaml` and `monkeybot.verifier-judge.yaml`; add `mcp.progressive.json`;
   - `regression/t4/preflight.py`;
-  - `regression/t4/eval_config.yaml`: `judge_provider: ollama-cloud`, `judge_model: <D12>`;
+  - `regression/t4/eval_config.yaml`: `judge_provider: ollama-cloud`, `judge_model: glm-5.3-flash`;
   - ledger records from the runner (in `report.py` or `runner.py`): one `LedgerWriter` failure per failed scenario, with `tier: t4`, `case`, the `live` block (provider, model, agent URL) and `artifacts: [<run JSON path>]`;
   - T4-GW-01 (the global live invariant) checked by the runner on every live scenario, with a selftest using a recorded run JSON;
   - `.gitignore` entries for `regression/t4/agent/.env`, `data/`, `workspace/` and `regression/t4/runs/`.
@@ -106,26 +106,24 @@ Two entry points run T4, and both write to the failure ledger:
 ### P4-05 — Live workflow and artifacts
 
 - **Depends on:** P4-03
-- **Blocked by:** D1 (the repository secret), for running in CI only. Writing the workflow proceeds without it.
+- **Blocked by:** none. D1 is decided (2026-10-26): do not add `OLLAMA_API_KEY` as a GitHub secret. The smoke suite runs locally in P4-06.
 - **Read:** [09-ci.md](../reference/09-ci.md), the `live-smoke` row; [05.11-live-provider.md](../reference/05.11-live-provider.md), the table; `.github/workflows/live-eval-smoke.yml` (all)
-- **Creates / changes:** `.github/workflows/live-eval-smoke.yml`. Keep its structure, triggers and scorecard posting, and change:
-  - secrets and env: `NVIDIA_API_KEY` → `OLLAMA_API_KEY`; `JUDGE_PROVIDER: ollama-cloud`; `JUDGE_MODEL` from `eval_config.yaml` (drop the hard-coded NVIDIA model);
-  - the "require secrets" job fails instead of skipping when the key is missing;
+- **Creates / changes:** `.github/workflows/live-eval-smoke.yml`. Keep its triggers. Do not add `OLLAMA_API_KEY`, `NVIDIA_API_KEY`, or any other provider key, and do not add a step that starts a live suite. Change:
+  - remove the secret gate and every job env that passes a provider key;
   - `working-directory` and the lockfile trigger paths: `evals/smoke_agent` → `regression/t4/agent`;
-  - `MONKEYBOT_AGENT_CONFIG: regression/t4/agent/monkeybot_config/monkeybot.yaml`;
-  - the run step: `uv run python -m regression.t4 --suite smoke --baseline regression/t4/baselines/smoke.json`;
-  - upload `test-runs/` and `regression/t4/runs/` as artifacts, pass or fail.
-- **Verify:** `uvx actionlint .github/workflows/live-eval-smoke.yml` if available, otherwise a careful read; `rg -n 'evals/|NVIDIA' .github/workflows/live-eval-smoke.yml` finds nothing.
-- **Done when:** the workflow references only new paths and the Ollama key.
+  - `MONKEYBOT_AGENT_CONFIG: regression/t4/agent/monkeybot_config/monkeybot.yaml`.
+  The scorecard and `test-runs/` come from the local smoke run in P4-06, not from this workflow.
+- **Verify:** `uvx actionlint .github/workflows/live-eval-smoke.yml` if available, otherwise a careful read; `rg -n 'evals/|OLLAMA_API_KEY|NVIDIA_API_KEY|secrets\.' .github/workflows/live-eval-smoke.yml` finds nothing.
+- **Done when:** the workflow references only new paths and requires no provider key.
 
 ### P4-06 — Live smoke; phase exit
 
 - **Depends on:** P4-04, P4-05
-- **Blocked by:** user confirmation; D1, for the "green in CI" part of the exit
+- **Blocked by:** user confirmation (the local live run)
 - **Read:** this phase file's Summary; `docs/live-evals.md` (how to start the agent gateway locally), with paths read as their new locations
 - **Steps:**
   1. Start the agent from `regression/t4/agent` as `docs/live-evals.md` describes, then run `uv run python -m regression.t4 --suite smoke --agent-url http://127.0.0.1:8787` once.
   2. Report pass/fail per case, the scorecard, and the ledger path.
   3. Do not fix live failures; they are signal for Phase 5 baselines or for later harness work.
   4. If no case failed, prove the ledger path once: run one scenario with a deliberately impossible assertion through a temporary copy (deleted afterwards), and check that its record has provider, model and the run JSON path.
-- **Done when:** the Summary exit criteria hold (the CI part pending D1, noted in `status.md`), and every T4 case except T4-RT-01 has a Test cell.
+- **Done when:** the Summary exit criteria hold on the local smoke run, and every T4 case except T4-RT-01 has a Test cell. GitHub does not need `OLLAMA_API_KEY`.

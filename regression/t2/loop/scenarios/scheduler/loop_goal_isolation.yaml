@@ -1,0 +1,33 @@
+id: regression/t2/loop/scenarios/scheduler/loop_goal_isolation
+case: T2-SCHED-04
+description: pause_loop on a goal id returns unknown loop.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Pause goal-isolated.
+script:
+- - type: tool_call
+    call_id: c-enable
+    name: enable_loops
+    args: {}
+  - type: done
+- - type: tool_call
+    call_id: c-pause
+    name: pause_loop
+    args:
+      loop_id: goal-isolated
+  - type: done
+- - type: text
+    text: That id is not a loop.
+  - type: done
+assertions:
+  turn_completed: true
+  provider_calls: 3
+  required_tools:
+  - pause_loop
+  events_sequence:
+  - type: ToolCallResult
+    tool: pause_loop
+    error:
+      regex: 'unknown loop: goal-isolated'

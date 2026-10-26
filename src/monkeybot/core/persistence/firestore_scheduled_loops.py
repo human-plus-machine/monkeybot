@@ -25,6 +25,7 @@ from monkeybot.core.persistence.scheduled_loops import (
     doc_to_scheduled_loop_row,
     planned_create,
     resolve_complete_tick,
+    resolve_now_ms,
 )
 
 logger = logging.getLogger(__name__)
@@ -260,9 +261,11 @@ class FirestoreScheduledLoopStore:
                 rows.append(row)
         return rows
 
-    async def claim_tick(self, loop_id: str, worker_id: str) -> ScheduledLoopRow | None:
+    async def claim_tick(
+        self, loop_id: str, worker_id: str, now_ms: int | None = None
+    ) -> ScheduledLoopRow | None:
         doc_ref = self._doc(loop_id)
-        now_ms = int(time.time() * 1000)
+        now_ms = resolve_now_ms(now_ms)
 
         async def _claim_body(
             txn: firestore.AsyncTransaction,
@@ -328,8 +331,8 @@ class FirestoreScheduledLoopStore:
 
         return bool(await self._in_transaction(doc_ref, _release_body))
 
-    async def release_stale_claims(self, stale_after_ms: int) -> int:
-        cutoff = int(time.time() * 1000) - stale_after_ms
+    async def release_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int:
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         query = (
             self._client.collection(self._collection)
             .where(filter=FieldFilter("tick_in_flight", "==", 1))
@@ -358,9 +361,10 @@ class FirestoreScheduledLoopStore:
         *,
         worker_id: str,
         error: str | None = None,
+        now_ms: int | None = None,
     ) -> ScheduledLoopRow | None:
         doc_ref = self._doc(loop_id)
-        now_ms = int(time.time() * 1000)
+        now_ms = resolve_now_ms(now_ms)
 
         async def _complete_body(
             txn: firestore.AsyncTransaction,
@@ -399,7 +403,14 @@ class FirestoreScheduledLoopStore:
             return None
         return await self.get(loop_id)
 
-    async def defer_tick(self, loop_id: str, *, worker_id: str, reason: str) -> bool:
+    async def defer_tick(
+        self,
+        loop_id: str,
+        *,
+        worker_id: str,
+        reason: str,
+        now_ms: int | None = None,
+    ) -> bool:
         """Release claim and push next tick forward (e.g. session busy).
 
         Must re-check ``worker_id`` + ``tick_in_flight`` inside a transaction —
@@ -435,12 +446,12 @@ class FirestoreScheduledLoopStore:
                     exc,
                 )
                 return False
-            now_ms = int(time.time() * 1000)
+            current_ms = resolve_now_ms(now_ms)
             update: dict[str, object] = {
                 "tick_in_flight": 0,
                 "worker_id": None,
                 "claimed_at_ms": None,
-                "next_tick_at_ms": now_ms + row.interval_ms,
+                "next_tick_at_ms": current_ms + row.interval_ms,
             }
             if row.kind != KIND_GOAL:
                 update["last_error"] = reason
@@ -449,9 +460,11 @@ class FirestoreScheduledLoopStore:
 
         return bool(await self._in_transaction(doc_ref, _defer_body))
 
-    async def renew_tick_claim(self, loop_id: str, worker_id: str) -> bool:
+    async def renew_tick_claim(
+        self, loop_id: str, worker_id: str, now_ms: int | None = None
+    ) -> bool:
         doc_ref = self._doc(loop_id)
-        now_ms = int(time.time() * 1000)
+        now_ms = resolve_now_ms(now_ms)
 
         async def _renew_body(
             txn: firestore.AsyncTransaction,

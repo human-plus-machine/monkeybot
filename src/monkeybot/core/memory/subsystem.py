@@ -33,9 +33,17 @@ class MemoryConfigurationError(RuntimeError):
     """Operator-facing misconfiguration; the process must not start without memory."""
 
 
+_SHARE_OFF = frozenset({"0", "false", "no", "off"})
+
+
 def _share_across_threads() -> bool:
+    """Chats in one project share saved lines unless the switch is explicitly off.
+
+    Unset, ``1``, ``true``, ``yes``, and ``on`` share. ``0``, ``false``, ``no``,
+    and ``off`` keep each chat's lines in that chat.
+    """
     raw = os.environ.get("MONKEYBOT_MEMORY_SHARE_THREADS", "").strip().lower()
-    return raw in ("1", "true", "yes")
+    return raw not in _SHARE_OFF
 
 
 def _is_missing_outbox_table(exc: BaseException) -> bool:
@@ -213,10 +221,15 @@ class MemorySubsystem:
             self._writer.start()
         self._ready = True
 
-    async def load_index(self) -> list[str]:
-        """L0+L1 wake-up lines for the system prompt."""
+    async def load_index(self, thread_id: str | None = None) -> list[str]:
+        """L0+L1 wake-up lines for the system prompt.
+
+        When chats are not shared, ``thread_id`` drops every other chat's drawers
+        from the briefing. Sharing on ignores ``thread_id`` and lists the wing.
+        """
         timer = Timer()
         wing = conversation_wing(workspace_id_from_env())
+        scoped = None if _share_across_threads() else thread_id
         with memory_span(
             "monkeybot.memory.wake_up",
             **{
@@ -227,7 +240,7 @@ class MemorySubsystem:
             },
         ):
             try:
-                text = await asyncio.to_thread(self._palace.wake_up, wing)
+                text = await asyncio.to_thread(self._palace.wake_up, wing, scoped)
             except Exception as extra:
                 logger.warning("memory wake-up failed: %r", extra)
                 return []

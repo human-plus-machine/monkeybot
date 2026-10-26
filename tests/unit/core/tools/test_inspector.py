@@ -1,5 +1,7 @@
 """Tests for CommandTierInspector and run_command policy YAML."""
 
+import json
+from importlib import resources
 from pathlib import Path
 
 import pytest
@@ -7,14 +9,14 @@ import yaml
 
 from monkeybot.core.context import TurnContext
 from monkeybot.core.tools.inspector import (
+    DEFAULT_DENY_PATTERNS,
     CommandTierConfigError,
     CommandTierInspector,
     Decision,
-    DEFAULT_DENY_PATTERNS,
     InspectorToolCall,
+    format_denial,
     load_command_tier_policy,
 )
-from importlib import resources
 
 
 def _minimal_ctx() -> TurnContext:
@@ -63,6 +65,28 @@ async def test_inspector_destructive_rm_denied_by_deny_pattern(tmp_path: Path) -
     d = await inspector.check(call, _minimal_ctx())
     assert d.kind == "deny"
     assert d.message
+
+
+@pytest.mark.asyncio
+async def test_deeply_nested_shell_is_a_policy_denial(tmp_path: Path) -> None:
+    policy = tmp_path / "policy.yaml"
+    policy.write_text(
+        "allowed_commands:\n  - echo\nallowed_path_prefixes:\n  - ./src/\n",
+        encoding="utf-8",
+    )
+    inspector = CommandTierInspector(policy)
+    call = InspectorToolCall(
+        "1",
+        "run_command",
+        {"argv": ["bash", "-c", 'bash -c "bash -c \'bash -c \\"echo hi\\"\'"']},
+    )
+    d = await inspector.check(call, _minimal_ctx())
+    assert d.kind == "deny"
+    assert d.error_kind == "policy"
+    assert d.message is not None and "deeply nested shell" in d.message
+    body = json.loads(format_denial(d.message, code=d.error_code, error_kind=d.error_kind))
+    assert body["error_kind"] == "policy"
+    assert "deeply nested shell" in body["message"]
 
 
 @pytest.mark.asyncio
@@ -188,7 +212,7 @@ def test_decision_confirm_variant_constructible() -> None:
 
 
 def test_load_policy_omitted_allowlists_use_terminal_defaults(tmp_path: Path) -> None:
-    from monkeybot.core.tools.terminal import ALLOWED_COMMANDS, ALLOWED_PATHS
+    from monkeybot.core.tools.terminal import ALLOWED_PATHS
 
     path = tmp_path / "t.yaml"
     path.write_text("allowed_commands:\n  - echo\n", encoding="utf-8")

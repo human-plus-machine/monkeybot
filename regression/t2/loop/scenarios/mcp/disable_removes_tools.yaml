@@ -1,0 +1,35 @@
+id: regression/t2/loop/scenarios/mcp/disable_removes_tools
+case: T2-MCP-02
+description: disable_mcp drops the connected server's tools from the next request.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Disconnect the fixture MCP server.
+config:
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.autoconnect.json
+script:
+- - type: tool_call
+    call_id: c1
+    name: disable_mcp
+    args:
+      name: fixture
+  - type: done
+- - type: text
+    text: Disconnected.
+  - type: done
+assertions:
+  provider_calls: 2
+  provider_request:
+  - n: 1
+    tools_include:
+    - fixture__echo
+    - disable_mcp
+  - n: 2
+    tools_exclude:
+    - fixture__echo
+  required_tools:
+  - disable_mcp
+  turn_completed: true
+  no_errors: true

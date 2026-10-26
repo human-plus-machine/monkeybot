@@ -1,0 +1,42 @@
+id: regression/t2/loop/scenarios/coding/gate_open_todos_reject
+case: T2-CODE-09
+description: An in_progress todo touched this message rejects the final answer
+mode: scripted
+driver: loop
+executor: real
+hooks:
+  - verification_gate
+messages:
+  - Track the parser and answer.
+script:
+  - - type: tool_call
+      call_id: add1
+      name: todo_list
+      args:
+        action: add
+        text: write the parser
+    - type: done
+  - - type: tool_call
+      call_id: start1
+      name: todo_list
+      args:
+        action: start
+        id: t1
+    - type: done
+  - - type: text
+      text: CLAIM-TODOS-DONE
+    - type: done
+  - - type: text
+      text: HONEST-PARSER-STILL-OPEN
+    - type: done
+assertions:
+  interventions:
+    - final_answer_gate
+  event_fields:
+    HarnessIntervention:
+      detail:
+        regex: "Open todo items: write the parser"
+  provider_calls: 4
+  response_contains: HONEST-PARSER-STILL-OPEN
+  response_not_contains: CLAIM-TODOS-DONE
+  turn_completed: true

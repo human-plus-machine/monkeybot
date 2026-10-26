@@ -35,7 +35,7 @@ Dependencies, not phase numbers, decide what can start: a task can begin when ev
 | P1-14 | `MCP` T2 cases | 1 | P1-01, P1-03 | none | [phase-1](phases/phase-1-t2-harness-logic.md) |
 | P1-15 | `MEM` T2 cases | 1 | P1-03, P1-11 | none | [phase-1](phases/phase-1-t2-harness-logic.md) |
 | P1-16 | `SKILL` and `TODO` T2 cases | 1 | P1-01, P1-03 | none | [phase-1](phases/phase-1-t2-harness-logic.md) |
-| P1-17 | `ATT`, `WEB`, `COMP` T2 cases | 1 | P1-01, P1-03, P1-14 | none (`COMP` runs on macOS only, D4) | [phase-1](phases/phase-1-t2-harness-logic.md) |
+| P1-17 | `ATT`, `WEB`, `COMP` T2 cases | 1 | P1-01, P1-03, P1-14 | none (`COMP` runs on a self-hosted Mac, D4 decided 2026-10-26) | [phase-1](phases/phase-1-t2-harness-logic.md) |
 | P1-18 | `STORE` and `OPS` T2 cases (not STORE-03, OPS-03); phase exit | 1 | P1-04 … P1-17 | none | [phase-1](phases/phase-1-t2-harness-logic.md) |
 | P2-01 | Gateway harness, SSE reader, gateway driver | 2 | P0B-07 | none | [phase-2](phases/phase-2-contracts-and-gateway.md) |
 | P2-02 | SSE schema contract and golden streams | 2 | P2-01 | none | [phase-2](phases/phase-2-contracts-and-gateway.md) |
@@ -49,17 +49,17 @@ Dependencies, not phase numbers, decide what can start: a task can begin when ev
 | P2-10 | monkeyapp contract (cross-repo) | 2 | P2-02 | user confirmation to edit monkeyapp | [phase-2](phases/phase-2-contracts-and-gateway.md) |
 | P3-01 | Cassette model, `from_transcript`, replay driver, T2-STORE-03 | 3 | P0B-07 | none | [phase-3](phases/phase-3-record-replay.md) |
 | P3-02 | Record the five T3a cassettes (live) | 3 | P3-01, P4-03 | user confirmation (live) | [phase-3](phases/phase-3-record-replay.md) |
-| P3-03 | Wire cassettes and staleness check | 3 | P3-01, P4-02 | user confirmation (live); D13 for non-Ollama providers | [phase-3](phases/phase-3-record-replay.md) |
+| P3-03 | Wire cassettes and staleness check | 3 | P3-01, P4-02 | user confirmation (live). D13 decided: non-Ollama cassettes stay unrecorded until a key exists | [phase-3](phases/phase-3-record-replay.md) |
 | P3-04 | Golden SSE from a cassette; MCP, subagent, wake-up replays | 3 | P3-01, P2-02 | none | [phase-3](phases/phase-3-record-replay.md) |
 | P4-01 | Move `evals/` code into `regression/t4/` and the selftests | 4 | P0B-07 | none | [phase-4](phases/phase-4-live.md) |
-| P4-02 | Agent project, MCP fixture move, config split, judge config, preflight, ledger records | 4 | P4-01 | D12 (judge model value only) | [phase-4](phases/phase-4-live.md) |
+| P4-02 | Agent project, MCP fixture move, config split, judge config, preflight, ledger records | 4 | P4-01 | none (D12 decided: `glm-5.3-flash`) | [phase-4](phases/phase-4-live.md) |
 | P4-03 | Convert the 29 live scenarios and suites | 4 | P4-02 | none | [phase-4](phases/phase-4-live.md) |
 | P4-04 | New T4 cases and suites | 4 | P4-03 | none (T4-RT-01 deferred) | [phase-4](phases/phase-4-live.md) |
-| P4-05 | Live workflow and artifacts | 4 | P4-03 | D1 (running in CI only) | [phase-4](phases/phase-4-live.md) |
-| P4-06 | Live smoke; phase exit | 4 | P4-04, P4-05 | user confirmation (live); D1 for the CI part | [phase-4](phases/phase-4-live.md) |
+| P4-05 | Live workflow and artifacts | 4 | P4-03 | none (D1 decided: live CI is local; no GitHub secret) | [phase-4](phases/phase-4-live.md) |
+| P4-06 | Live smoke; phase exit | 4 | P4-04, P4-05 | user confirmation (live) | [phase-4](phases/phase-4-live.md) |
 | P5-01 | Statistics, comparison, class lists | 5 | P4-06 | none | [phase-5](phases/phase-5-trials.md) |
-| P5-02 | First baselines (live, hours) | 5 | P5-01 | user confirmation (live); D12 for judged suites | [phase-5](phases/phase-5-trials.md) |
-| P5-03 | Nightly workflow, release-gate compare, gateway storms | 5 | P5-02, P2-01 | D1 (running in CI) | [phase-5](phases/phase-5-trials.md) |
+| P5-02 | First baselines (live, hours) | 5 | P5-01 | user confirmation (live); judge is `glm-5.3-flash` (D12) | [phase-5](phases/phase-5-trials.md) |
+| P5-03 | Nightly workflow, release-gate compare, gateway storms | 5 | P5-02, P2-01 | none (D1 decided: the compare runs locally) | [phase-5](phases/phase-5-trials.md) |
 | P6-01 | Cutover | 6 | every P1–P3 task done or deferred; P5-03 (or P4-06 with Phase 5 deferred) | none | [phase-6](phases/phase-6-cutover.md) |
 
 ## Open decisions that block tasks
@@ -68,8 +68,4 @@ Full text is in [12-decisions.md](reference/12-decisions.md). Only the user reso
 
 | Decision | Blocks |
 |---|---|
-| D1: add `OLLAMA_API_KEY` as a GitHub secret? | CI runs in P4-05, P4-06, P5-03 |
 | D3: Postgres / Firestore in CI | the non-sqlite part of P2-07 |
-| D4: macOS runner for `COMP` | CI runs of the P1-17 `COMP` cases (local runs proceed) |
-| D12: judge model on Ollama Cloud | the `judge_model` value in P4-02; judged suites in P5-02 |
-| D13: wire cassettes for non-Ollama providers | T3-PROV-01..05 and the non-Ollama families of T3-PROV-06, in P3-03 |

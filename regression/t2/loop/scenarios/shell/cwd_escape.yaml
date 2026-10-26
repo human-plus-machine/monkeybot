@@ -1,0 +1,26 @@
+id: regression/t2/loop/scenarios/shell/cwd_escape
+case: T2-SHELL-07
+description: cwd ../ is rejected as invalid_cwd
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Run echo from the parent directory.
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      argv:
+      - echo
+      - hi
+      cwd: ../
+  - type: done
+- - type: text
+    text: The cwd was rejected.
+  - type: done
+assertions:
+  tool_error_codes:
+  - invalid_cwd
+  turn_completed: true
+  no_errors: true

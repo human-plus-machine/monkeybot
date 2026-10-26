@@ -8,6 +8,7 @@ import logging
 import os
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -20,6 +21,13 @@ from monkeybot.scheduler.tick_result import TickInvokeResult, TickInvokeStatus
 logger = logging.getLogger(__name__)
 
 _DEFAULT_HEARTBEAT_INTERVAL_S = 30.0
+
+
+def _read_now_ms(clock: Callable[[], int] | None) -> int:
+    """Epoch milliseconds from ``clock``, or the wall clock when it is omitted."""
+    if clock is None:
+        return int(time.time() * 1000)
+    return clock()
 
 
 class SessionBusyChecker(Protocol):
@@ -108,13 +116,14 @@ async def _claim_heartbeat(
     worker_id: str,
     interval_s: float,
     stop: asyncio.Event,
+    clock: Callable[[], int] | None,
 ) -> None:
     while not stop.is_set():
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval_s)
             return
         except TimeoutError:
-            renewed = await store.renew_tick_claim(loop_id, worker_id)
+            renewed = await store.renew_tick_claim(loop_id, worker_id, now_ms=_read_now_ms(clock))
             if not renewed:
                 return
 
@@ -131,8 +140,13 @@ async def run_scheduler_loop(
     max_concurrency: int = 1,
     claim_heartbeat_interval_s: float = _DEFAULT_HEARTBEAT_INTERVAL_S,
     shutdown: asyncio.Event | None = None,
+    clock: Callable[[], int] | None = None,
 ) -> None:
-    """Poll due loops and invoke agent ticks until ``shutdown`` is set."""
+    """Poll due loops and invoke agent ticks until ``shutdown`` is set.
+
+    ``clock`` returns epoch milliseconds and is read on every poll and tick
+    write. Omit it to read the wall clock.
+    """
     semaphore = asyncio.Semaphore(max(1, max_concurrency))
     tick_tasks: set[asyncio.Task[None]] = set()
 
@@ -141,16 +155,16 @@ async def run_scheduler_loop(
 
     while shutdown is None or not shutdown.is_set():
         try:
-            released = await store.release_stale_claims(stale_claim_ms)
+            current_ms = _read_now_ms(clock)
+            released = await store.release_stale_claims(stale_claim_ms, now_ms=current_ms)
             if released:
                 logger.warning("scheduler released %d stale tick claims", released)
-            now_ms = int(time.time() * 1000)
-            due = await store.list_due(now_ms)
+            due = await store.list_due(current_ms)
             claimed_rows: list[ScheduledLoopRow] = []
             for candidate in due:
                 if shutdown is not None and shutdown.is_set():
                     break
-                claimed = await store.claim_tick(candidate.loop_id, worker_id)
+                claimed = await store.claim_tick(candidate.loop_id, worker_id, now_ms=current_ms)
                 if claimed is not None:
                     claimed_rows.append(claimed)
 
@@ -164,6 +178,7 @@ async def run_scheduler_loop(
                         row=row,
                         worker_id=worker_id,
                         claim_heartbeat_interval_s=claim_heartbeat_interval_s,
+                        clock=clock,
                     )
 
             for row in claimed_rows:
@@ -204,12 +219,14 @@ async def _execute_claimed_tick(
     row: ScheduledLoopRow,
     worker_id: str,
     claim_heartbeat_interval_s: float,
+    clock: Callable[[], int] | None = None,
 ) -> None:
     if row.skip_if_busy and await _session_is_busy(session_busy, row.session_id):
         deferred = await store.defer_tick(
             row.loop_id,
             worker_id=worker_id,
             reason="session busy; deferred",
+            now_ms=_read_now_ms(clock),
         )
         if deferred:
             logger.info(
@@ -233,6 +250,7 @@ async def _execute_claimed_tick(
             worker_id=worker_id,
             interval_s=claim_heartbeat_interval_s,
             stop=heartbeat_stop,
+            clock=clock,
         ),
         name=f"scheduler-heartbeat-{row.loop_id}",
     )
@@ -250,6 +268,7 @@ async def _execute_claimed_tick(
                 row.loop_id,
                 worker_id=worker_id,
                 reason="session busy; deferred",
+                now_ms=_read_now_ms(clock),
             )
             if deferred:
                 logger.info(
@@ -266,7 +285,12 @@ async def _execute_claimed_tick(
             return
 
         error = result.error if result.status is TickInvokeStatus.ERROR else None
-        completed = await store.complete_tick(row.loop_id, worker_id=worker_id, error=error)
+        completed = await store.complete_tick(
+            row.loop_id,
+            worker_id=worker_id,
+            error=error,
+            now_ms=_read_now_ms(clock),
+        )
         if error:
             logger.warning(
                 "scheduler tick failed loop_id=%s session_id=%s "
@@ -286,7 +310,12 @@ async def _execute_claimed_tick(
             )
     except Exception as exc:
         logger.exception("scheduler tick exception loop_id=%s", row.loop_id)
-        completed = await store.complete_tick(row.loop_id, worker_id=worker_id, error=str(exc))
+        completed = await store.complete_tick(
+            row.loop_id,
+            worker_id=worker_id,
+            error=str(exc),
+            now_ms=_read_now_ms(clock),
+        )
         if completed is not None and completed.status == "failed":
             logger.error(
                 "scheduler goal stopped after persistent failures "
@@ -319,6 +348,7 @@ def start_scheduler_background(
     stale_claim_ms: int | None = None,
     max_concurrency: int | None = None,
     claim_heartbeat_interval_s: float | None = None,
+    clock: Callable[[], int] | None = None,
 ) -> SchedulerHandle:
     settings = scheduler_settings()
     shutdown = asyncio.Event()
@@ -345,6 +375,7 @@ def start_scheduler_background(
                 else settings.claim_heartbeat_interval_s
             ),
             shutdown=shutdown,
+            clock=clock,
         ),
         name=f"monkeybot-scheduler-{wid}",
     )

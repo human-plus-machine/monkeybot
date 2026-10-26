@@ -1,0 +1,28 @@
+id: regression/t2/loop/scenarios/file/read_offset_past_eof
+case: T2-FILE-03
+description: read_file offset past EOF is ok with empty content.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Read notes.txt past the end.
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: notes.txt
+      offset: 10000
+  - type: done
+- - type: text
+    text: Empty page.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    result:
+      regex: '"ok": true[\s\S]*"content": ""[\s\S]*"truncated": false'
+  tool_error_codes_absent:
+  - invalid_offset
+  turn_completed: true

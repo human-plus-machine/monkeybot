@@ -1,0 +1,58 @@
+id: regression/t2/loop/scenarios/coding/gate_write_after_verify
+case: T2-CODE-08
+description: A passing pytest clears the gate, and a later write holds it again
+mode: scripted
+driver: loop
+executor: recording
+hooks:
+  - verification_gate
+messages:
+  - Edit the module, verify, then edit again.
+script:
+  - - type: tool_call
+      call_id: w1
+      name: write_file
+      args:
+        path: a.py
+        content: "x = 1\n"
+    - type: done
+  - - type: tool_call
+      call_id: tests
+      name: run_command
+      args:
+        argv:
+          - python
+          - -m
+          - pytest
+          - -q
+    - type: done
+  - - type: tool_call
+      call_id: w2
+      name: write_file
+      args:
+        path: a.py
+        content: "x = 2\n"
+    - type: done
+  - - type: text
+      text: CLAIM-STILL-VERIFIED
+    - type: done
+  - - type: text
+      text: HONEST-SECOND-WRITE-UNVERIFIED
+    - type: done
+tool_results:
+  w1:
+    ok: true
+  tests:
+    ok: true
+    stdout: "5 passed"
+    stderr: ""
+    exit_code: 0
+  w2:
+    ok: true
+assertions:
+  interventions:
+    - final_answer_gate
+  provider_calls: 5
+  response_contains: HONEST-SECOND-WRITE-UNVERIFIED
+  response_not_contains: CLAIM-STILL-VERIFIED
+  turn_completed: true

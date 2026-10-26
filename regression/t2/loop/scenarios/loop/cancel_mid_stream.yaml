@@ -1,0 +1,33 @@
+id: regression/t2/loop/scenarios/loop/cancel_mid_stream
+case: T2-LOOP-21
+description: Cancel during the first text delta keeps the partial reply and does not run the later tool.
+mode: scripted
+driver: loop
+messages:
+- start answering
+script:
+- - type: text
+    text: Hello partial
+  - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: a.txt
+  - type: done
+steps:
+- action: cancel
+  when:
+    event: text
+    nth: 1
+assertions:
+  turn_completed: true
+  tool_calls:
+    read_file:
+      max: 0
+  error_contains: Request cancelled
+  response_contains: Hello partial
+  history:
+    roles:
+    - user
+    - assistant
+    tool_pairs_intact: true

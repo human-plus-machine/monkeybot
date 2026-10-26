@@ -1,0 +1,24 @@
+id: regression/t2/loop/scenarios/loop/background_check_raises_fails_closed
+case: T2-LOOP-17
+description: A background-job check that raises ends the turn with the fail-closed error.
+mode: scripted
+driver: loop
+config:
+  env:
+    MONKEYBOT_TEST_BACKGROUND_JOBS_RAISE: "1"
+messages:
+- finish the turn
+script:
+- - type: tool_call
+    call_id: r1
+    name: read_file
+    args:
+      path: a.txt
+  - type: done
+- - type: text
+    text: should not finish cleanly
+  - type: done
+assertions:
+  error_contains: Could not check background jobs. Ending the turn kills any that are still running.
+  turn_completed: true
+  interventions: []

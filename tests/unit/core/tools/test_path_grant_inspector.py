@@ -193,6 +193,29 @@ class TestAskAndGrant:
         assert d.kind == "allow"
 
     @pytest.mark.asyncio
+    async def test_granted_credential_file_is_denied_with_code(
+        self, home: Path, workspace: Path, tmp_path: Path
+    ) -> None:
+        desktop = home / "Desktop"
+        desktop.mkdir()
+        (desktop / ".env").write_text("SECRET=not-a-real-secret", encoding="utf-8")
+        grants_path = tmp_path / "grants.json"
+        add_path_grant(
+            grants_path,
+            folder=str(desktop.resolve()),
+            mode="read",
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+        insp = PathGrantInspector(workspace_root=workspace, grants_path=grants_path)
+
+        d = await insp.check(
+            InspectorToolCall("1", "read_file", {"path": str(desktop / ".env")}), _ctx()
+        )
+        assert d.kind == "deny"
+        assert d.error_code == "credential_denied"
+        assert "not-a-real-secret" not in (d.message or "")
+
+    @pytest.mark.asyncio
     async def test_grant_key_is_the_folder_not_the_file(self, home: Path, workspace: Path) -> None:
         """A durable grant for the *folder* must cover any file within it,
         not just the one that triggered the original ask."""

@@ -1,0 +1,36 @@
+id: regression/t2/loop/scenarios/file/read_paging_no_gap
+case: T2-FILE-02
+description: Two read_file pages via next_offset concatenate to AGENTS.md.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Page through AGENTS.md.
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: AGENTS.md
+      limit: 2
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: AGENTS.md
+      offset: 3
+  - type: done
+- - type: text
+    text: Both pages are in.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    result:
+      regex: 'Hostile workspace[\s\S]*"next_offset": 3'
+  - type: ToolCallResult
+    result:
+      regex: 'Edit files under src[\s\S]*Runtime notes'
+  turn_completed: true

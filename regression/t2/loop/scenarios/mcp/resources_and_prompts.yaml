@@ -1,0 +1,76 @@
+id: regression/t2/loop/scenarios/mcp/resources_and_prompts
+case: T2-MCP-04
+description: List and read the fixture resource, then list and get the greet prompt.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Read the fixture resource and the greet prompt.
+config:
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.autoconnect.json
+script:
+- - type: tool_call
+    call_id: c1
+    name: list_mcp_resources
+    args:
+      server: fixture
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: read_mcp_resource
+    args:
+      server: fixture
+      uri: fixture://readme
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: list_mcp_prompts
+    args:
+      server: fixture
+  - type: done
+- - type: tool_call
+    call_id: c4
+    name: get_mcp_prompt
+    args:
+      server: fixture
+      prompt: greet
+      arguments:
+        name: Ada
+  - type: done
+- - type: text
+    text: Read the resource and the prompt.
+  - type: done
+assertions:
+  provider_calls: 5
+  provider_request:
+  - n: 1
+    tools_include:
+    - list_mcp_resources
+    - read_mcp_resource
+    - list_mcp_prompts
+    - get_mcp_prompt
+  events_sequence:
+  - type: ToolCallResult
+    tool: list_mcp_resources
+    result:
+      regex: "fixture://readme"
+  - type: ToolCallResult
+    tool: read_mcp_resource
+    result:
+      regex: "This is a fixture MCP resource"
+  - type: ToolCallResult
+    tool: list_mcp_prompts
+    result:
+      regex: '"name": "greet"'
+  - type: ToolCallResult
+    tool: get_mcp_prompt
+    result:
+      regex: "Say hello to Ada"
+  required_tools:
+  - list_mcp_resources
+  - read_mcp_resource
+  - list_mcp_prompts
+  - get_mcp_prompt
+  turn_completed: true
+  no_errors: true

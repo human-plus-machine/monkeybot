@@ -1,0 +1,65 @@
+id: regression/t2/loop/scenarios/policy/start_loop_always_confirms
+case: T2-POL-11
+description: start_loop asks again after an always approval of the same call.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Start the same loop twice.
+policy:
+  command_allowlist: default
+script:
+- - type: tool_call
+    call_id: c1
+    name: start_loop
+    args:
+      prompt: "BUSINESS: check the deploy\nRULES: report status only"
+      interval: 5m
+      max_ticks: 3
+      loop_id: loop-always
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: start_loop
+    args:
+      prompt: "BUSINESS: check the deploy\nRULES: report status only"
+      interval: 5m
+      max_ticks: 3
+      loop_id: loop-always
+  - type: done
+- - type: text
+    text: The second start still asked.
+  - type: done
+steps:
+- action: confirm_tool
+  decision: always
+  call_id: c1
+  when:
+    event: tool_confirmation
+    call_id: c1
+- action: confirm_tool
+  decision: deny
+  call_id: c2
+  when:
+    event: tool_confirmation
+    call_id: c2
+assertions:
+  events_sequence:
+  - type: ToolConfirmationRequest
+    tool_name: start_loop
+    tool_call_id: c1
+  - type: ToolCallResult
+    call_id: c1
+    result:
+      regex: '"ok": true'
+  - type: ToolConfirmationRequest
+    tool_name: start_loop
+    tool_call_id: c2
+  - type: ToolCallResult
+    call_id: c2
+    error:
+      regex: denied by user
+  store:
+    loops: 1
+  turn_completed: true
+  no_errors: true

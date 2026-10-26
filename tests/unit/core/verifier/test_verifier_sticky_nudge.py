@@ -207,6 +207,15 @@ def test_replan_survives_later_none_in_same_drain() -> None:
     assert SIGNAL_INSTRUCTIONS["error_streak"] in note
 
 
+def test_replan_arms_once_per_verdict() -> None:
+    mailbox = _mailbox()
+    verdict = replace(_nudge("r1", "error_streak", verdict_id="v1"), severity="replan")
+    assert mailbox.arm_escalation("t1", verdict, max_severity="replan") is True
+    assert mailbox.take_replan("t1", "r1") is not None
+    assert mailbox.arm_escalation("t1", verdict, max_severity="replan") is False
+    assert mailbox.take_replan("t1", "r1") is None
+
+
 def test_rewrite_churn_resets_counts_on_recovery() -> None:
     mailbox = _mailbox()
     tracker = ProgressTracker(

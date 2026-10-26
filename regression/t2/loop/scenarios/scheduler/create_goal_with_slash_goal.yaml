@@ -1,0 +1,31 @@
+id: regression/t2/loop/scenarios/scheduler/create_goal_with_slash_goal
+case: T2-SCHED-09
+description: create_goal on a /goal message writes one goal row.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- /goal Watch the deploy until it is green.
+script:
+- - type: tool_call
+    call_id: c-slash
+    name: create_goal
+    args:
+      objective: Watch the deploy until it is green.
+  - type: done
+- - type: text
+    text: The goal is armed.
+  - type: done
+assertions:
+  turn_completed: true
+  provider_calls: 2
+  required_tools:
+  - create_goal
+  store:
+    goals: 1
+  events_sequence:
+  - type: ToolCallResult
+    tool: create_goal
+    call_id: c-slash
+    result:
+      regex: '"created": true'

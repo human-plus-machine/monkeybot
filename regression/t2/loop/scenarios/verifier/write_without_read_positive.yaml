@@ -1,0 +1,65 @@
+id: regression/t2/loop/scenarios/verifier/write_without_read_positive
+case: T2-VER-01
+description: Unread write emits write_without_read once the tracker is warm and past min_turn.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: drift_ws
+hooks:
+- verifier
+messages:
+- Add notes in two new files without reading them.
+config:
+  verifier:
+    enabled: true
+    ledger:
+      enabled: false
+    tracker:
+      enabled: true
+    judge:
+      enabled: false
+    escalation:
+      max_severity: nudge
+  env:
+    MONKEYBOT_CLASSIFIER_ROWS: '[{"intent":"new_goal","relates_to":null,"constraints":[]}]'
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: src/models.py
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: write_file
+    args:
+      path: src/unread_a.py
+      content: a
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: write_file
+    args:
+      path: src/unread_b.py
+      content: b
+  - type: done
+- - type: text
+    text: Done.
+  - type: done
+assertions:
+  turn_completed: true
+  verdicts:
+    min: 1
+    status_in:
+    - drifting
+    severity_max: none
+    signals_include:
+    - write_without_read
+    signals_exclude:
+    - error_streak
+    - rewrite_churn
+    - constraint_touch
+    - repeat_correction
+    - done_unmet
+    - no_progress
+    - budget_burn

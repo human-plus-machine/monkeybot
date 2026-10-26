@@ -1,0 +1,23 @@
+id: regression/t2/loop/scenarios/memory/ephemeral_palace_shared_outbox_rejected
+case: T2-MEM-09
+description: Postgres or Firestore shared outbox plus an ephemeral palace fails at boot.
+mode: scripted
+driver: loop
+hooks:
+- memory
+script_partial: true
+config:
+  env:
+    DB_URL: postgresql://localhost/monkeybot
+messages:
+- This turn must not run.
+script:
+- - type: text
+    text: should not run
+  - type: done
+assertions:
+  error_contains:
+  - MemoryConfigurationError
+  - temp directory
+  - Postgres/Firestore
+  turn_completed: true

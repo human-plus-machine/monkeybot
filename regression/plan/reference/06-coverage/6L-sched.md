@@ -19,7 +19,7 @@ Existing: T1 `test_scheduled_loops.py`, `test_firestore_scheduled_loops.py`, `te
 | T2-SCHED-07 | `loop_error_fails_goal_retries` | Loop tick error fails the loop; goal tick error stays active until 3 consecutive failures. |
 | T2-SCHED-08 | `stale_claim_reclaimed` | Fake clock past `STALE_CLAIM_MS`: reclaimed; heartbeat prevents reclaim during a slow tick. |
 | T2-SCHED-09 | `create_goal_requires_slash_goal` | `create_goal` without `/goal`: error; with it: one row. |
-| T2-SCHED-10 | `one_open_goal_per_session` | Second `create_goal`: `OpenGoalExistsError`. |
+| T2-SCHED-10 | `one_open_goal_per_session` | Second `create_goal` with a different objective: "a goal is already active in this session". |
 | T2-SCHED-11 | `tool_loops` (migrate, recording) | As today. |
 | T2-SCHED-G1 | `invoke_tick_busy_409` (gateway) | `POST /scheduler/invoke-tick` during a turn: 409 `SESSION_BUSY`; loop not failed. |
 | T2-SCHED-G2 | `routes_lifecycle` (gateway) | `/scheduler/loops` CRUD and `/goals` lifecycle; reserved session ids rejected; `confirmed=true` required. |

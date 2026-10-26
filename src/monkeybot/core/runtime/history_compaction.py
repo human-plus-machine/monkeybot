@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
 from typing import Any, cast
 
+from monkeybot.core.attachments.text import parse_attachment_descriptor_text
 from monkeybot.core.coding.verification_gate import last_proven_verification
 from monkeybot.core.config.snapshot import current_env, env_value
 from monkeybot.core.context import TurnContext
@@ -17,6 +18,7 @@ from monkeybot.core.hooks import HookEvent, HookManager
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.messages.tool_integrity import interrupted_tool_result_text
 from monkeybot.core.messages.transform_context import is_provider_visible, provider_visible_blocks
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.thread_summary import CONTEXT_SUMMARY_PREFIX
@@ -262,16 +264,82 @@ def _estimate_message_tokens(message: Message) -> int:
 _PINNED_NOTIFICATION_TYPES = frozenset({"verifierVerdict"})
 
 
-def _is_pinned_history_row(msg: Message) -> bool:
-    """True for verifierVerdict rows that must survive compaction.
+def _is_pinned_block(block: ContentBlock) -> bool:
+    """True for a block compaction must keep even when it sits in the summarized middle."""
+    if isinstance(block, SystemNotification):
+        return block.notification_type in _PINNED_NOTIFICATION_TYPES
+    return isinstance(block, Text) and parse_attachment_descriptor_text(block.text) is not None
 
+
+def _is_pinned_history_row(msg: Message) -> bool:
+    """True when every block on the row must survive compaction.
+
+    Pinned rows are verifier verdicts and frozen attachment-descriptor lines.
     Other ``SystemNotification`` kinds (thinking / inline / credits) stay compactable.
+    A descriptor mixed into a normal text row is not pinned; the product stores
+    each descriptor as its own line.
     """
-    return bool(msg.content) and all(
-        isinstance(block, SystemNotification)
-        and block.notification_type in _PINNED_NOTIFICATION_TYPES
-        for block in msg.content
+    return bool(msg.content) and all(_is_pinned_block(block) for block in msg.content)
+
+
+def _message_tool_ids(message: Message) -> tuple[set[str], set[str]]:
+    requests: set[str] = set()
+    responses: set[str] = set()
+    for block in message.content:
+        if isinstance(block, ToolRequest) and block.id:
+            requests.add(block.id)
+        elif isinstance(block, ToolResponse) and block.id and not _is_unpersisted_repair(block):
+            responses.add(block.id)
+    return requests, responses
+
+
+def _is_unpersisted_repair(block: ToolResponse) -> bool:
+    """True for the in-memory placeholder ``repair_tool_turn_integrity`` inserts.
+
+    That row is not stored. Treating it as a tail response pulls its request out
+    of the middle and makes a repaired view look unsplittable.
+    """
+    expected = interrupted_tool_result_text(block.tool_name)
+    return block.is_error and any(
+        isinstance(part, Text) and part.text == expected for part in block.result
     )
+
+
+def _extend_tail_to_keep_tool_pairs(
+    messages: Sequence[Message], tail: list[Message]
+) -> list[Message]:
+    """Include the tool request when the budget already kept its response.
+
+    The minimum tail can fill up on a huge response plus a newer row, then stop
+    before the request. That stores a response with no request. The request is
+    small; the pair stays together in the tail.
+    """
+    if not tail:
+        return tail
+    start = len(messages) - len(tail)
+    if start <= 0:
+        return tail
+    request_ids: set[str] = set()
+    response_ids: set[str] = set()
+    for message in tail:
+        requests, responses = _message_tool_ids(message)
+        request_ids |= requests
+        response_ids |= responses
+    missing = response_ids - request_ids
+    if not missing:
+        return tail
+    found_at: int | None = None
+    for index in range(start - 1, -1, -1):
+        requests, _responses = _message_tool_ids(messages[index])
+        if not requests & missing:
+            continue
+        missing -= requests
+        found_at = index
+        if not missing:
+            break
+    if found_at is None or missing:
+        return tail
+    return list(messages[found_at:])
 
 
 def _split_accountable(
@@ -320,8 +388,13 @@ def _split_accountable(
             visible_in_tail += 1
         tail_rev.append(msg)
 
-    tail = list(reversed(tail_rev))
-    middle = list(messages[head_end : n - len(tail)])
+    tail = _extend_tail_to_keep_tool_pairs(messages, list(reversed(tail_rev)))
+    tail_start = n - len(tail)
+    if tail_start < head_end:
+        head = list(messages[:tail_start])
+        middle = []
+    else:
+        middle = list(messages[head_end:tail_start])
     return head, middle, tail
 
 

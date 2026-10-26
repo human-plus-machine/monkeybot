@@ -13,7 +13,7 @@ Existing: T1 `test_attachment_*.py`, `test_image_preview.py`, gateway `test_atta
 | T2-ATT-02 | `load_pdf` | PDF via `attachment_id`: file block in request. |
 | T2-ATT-03 | `load_text_rejected` | `.py` path: error telling the model to use `read_file`. |
 | T2-ATT-04 | `load_both_args` | `path` + `attachment_id`: error. |
-| T2-ATT-05 | `load_per_reply_cap` | 6th image in one reply: cap error. |
+| T2-ATT-05 | `load_per_reply_cap` | Six `load_file` calls in one turn all succeed. The five-attachment cap applies to a user's reply, not to the agent. |
 | T2-ATT-06 | `freeze_descriptors_in_history` | After the turn, history holds descriptors, not media bytes. |
 | T2-ATT-07 | `attachment_symlink_leaf_rejected` | Symlinked store leaf: rejected. |
 | T2-ATT-G1 | `upload_then_reply_ref` (gateway) | `POST /attachments` then `/reply` with `attachmentRef`: `AttachmentDescriptor` at turn end. |

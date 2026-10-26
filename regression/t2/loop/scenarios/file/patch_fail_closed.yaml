@@ -1,0 +1,47 @@
+id: regression/t2/loop/scenarios/file/patch_fail_closed
+case: T2-FILE-18
+description: One bad hunk is hunk_not_found and no file changes.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Apply a patch with one bad hunk.
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: notes.txt
+  - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: src/app.py
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: apply_patch
+    args:
+      patch_text: |
+        *** Begin Patch
+        *** Update File: notes.txt
+        @@
+        -A note inside the hostile workspace.
+        +A note inside the hostile workspace changed.
+        *** Update File: src/app.py
+        @@
+        -    print("not-the-real-line")
+        +    print("nope")
+        *** End Patch
+  - type: done
+- - type: text
+    text: The patch was rejected.
+  - type: done
+assertions:
+  tool_error_codes:
+  - hunk_not_found
+  workspace_unchanged:
+  - notes.txt
+  - src/app.py
+  turn_completed: true

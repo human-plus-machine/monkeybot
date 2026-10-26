@@ -100,6 +100,7 @@ class PathGrantInspector:
                     "keychains, browser profiles, or app-internal state) and "
                     "is always denied, regardless of approval."
                 ),
+                error_code="credential_denied",
             )
 
         folder = resolved if resolved.is_dir() else resolved.parent

@@ -1,0 +1,44 @@
+id: regression/t2/loop/scenarios/loop/doom_path_retry_spelling
+case: T2-LOOP-08
+description: Three failing replaces of the same file under different spellings trip the path doom loop.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- retry the same missing file
+script:
+- - type: tool_call
+    call_id: p1
+    name: replace_in_file
+    args:
+      path: ./a
+      old_string: one
+      new_string: two
+  - type: tool_call
+    call_id: p2
+    name: replace_in_file
+    args:
+      path: a
+      old_string: three
+      new_string: four
+  - type: tool_call
+    call_id: p3
+    name: replace_in_file
+    args:
+      path: a/./b/..
+      old_string: five
+      new_string: six
+  - type: done
+- - type: text
+    text: stopped
+  - type: done
+assertions:
+  turn_completed: true
+  provider_calls: 2
+  interventions:
+  - intervention: doom_loop
+  error_contains: 'Doom loop detected: tool ''replace_in_file'' failed 3 times in a row on ''a'''
+  provider_request:
+  - n: 2
+    tools_empty: true
+    system_contains: '[Harness] Doom loop detected'

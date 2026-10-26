@@ -11,7 +11,7 @@ Gaps: evidence guard never runs through `run`; scenarios cannot register hooks e
 
 | ID | Case | Asserts |
 |---|---|---|
-| T2-HOOK-01 | `hook_lifecycle_order` | Recording hook sees `USER_MESSAGE, PRE_TURN, TOOL_DEFINITION, BEFORE_PROVIDER_REQUEST, AFTER_PROVIDER_RESPONSE, PRE_TOOL, POST_TOOL, …, PRE_FINAL_ANSWER, POST_TURN` in that order for a one-tool turn. |
+| T2-HOOK-01 | `hook_lifecycle_order` | Recording hook sees `USER_MESSAGE, PRE_TURN, TOOL_DEFINITION, BEFORE_PROVIDER_REQUEST, PRE_TOOL, AFTER_PROVIDER_RESPONSE, POST_TOOL, …, PRE_FINAL_ANSWER, POST_TURN` in that order for a one-tool turn. |
 | T2-HOOK-02 | `pre_turn_once` | `PRE_TURN` fires on inner turn 1 only. |
 | T2-HOOK-03 | `hook_exception_is_logged` | Raising hook does not abort the turn. |
 | T2-HOOK-04 | `hook_timeout_continues` | Hook exceeding its timeout is abandoned; turn continues. |

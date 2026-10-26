@@ -1,0 +1,35 @@
+id: regression/t2/loop/scenarios/subagents/nested_task_refused
+case: T2-SUB-02
+description: Child tape tries task and the parent records the unknown-tool error
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Delegate a nested task
+config:
+  env:
+    MONKEYBOT_SUBAGENT_SCRIPT: testkit/subagent_worker.py
+    AGENT_MD: evals/smoke_agent/monkeybot_config/AGENT.md
+script:
+- - type: tool_call
+    call_id: c1
+    name: task
+    args:
+      task: nested_task
+  - type: done
+- - type: text
+    text: Nested call refused.
+  - type: done
+assertions:
+  required_tools:
+  - task
+  tool_calls:
+    task: 1
+  turn_completed: true
+  events_sequence:
+  - type: SubagentCompleted
+    ok: true
+  event_fields:
+    ToolCallResult:
+      result:
+        regex: '"ok": true.*"tool_call_count": 1.*"unknown tool: task'

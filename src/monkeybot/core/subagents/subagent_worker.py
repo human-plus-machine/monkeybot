@@ -438,6 +438,7 @@ async def _async_main() -> None:
             agent_md_path=agent_md_path,
             memory=memory,
             skills_path=skills,
+            skill_names=envelope.skills or None,
             mcp_client=mcp,
             parent_run_id=envelope.parent_run_id,
             model=envelope.model,

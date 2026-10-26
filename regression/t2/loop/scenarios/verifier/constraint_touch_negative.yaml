@@ -1,0 +1,49 @@
+id: regression/t2/loop/scenarios/verifier/constraint_touch_negative
+case: T2-VER-04
+description: Writing src/models.py does not emit constraint_touch.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: drift_ws
+hooks:
+- verifier
+messages:
+- Do not touch migrations. Edit the model instead.
+config:
+  verifier:
+    enabled: true
+    ledger:
+      enabled: true
+      model: fake
+    tracker:
+      enabled: true
+    judge:
+      enabled: false
+    escalation:
+      max_severity: nudge
+  env:
+    MONKEYBOT_CLASSIFIER_ROWS: '[{"intent":"new_goal","relates_to":null,"constraints":[{"kind":"path_glob","pattern":"db/migrations/**","verbatim":"do
+      not touch migrations"}]}]'
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: src/models.py
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: write_file
+    args:
+      path: src/models.py
+      content: "class User:\n    id: int\n"
+  - type: done
+- - type: text
+    text: Done.
+  - type: done
+assertions:
+  turn_completed: true
+  verdicts:
+    max: 0
+    signals_exclude:
+    - constraint_touch

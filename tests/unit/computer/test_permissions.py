@@ -6,6 +6,7 @@ permissions.yaml (highest authority)
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,7 @@ from monkeybot.computer.permissions import (
     build_persist_hook,
 )
 from monkeybot.core.context import TurnContext
-from monkeybot.core.tools.inspector import InspectorToolCall
+from monkeybot.core.tools.inspector import InspectorToolCall, format_denial
 from monkeybot.core.tools.permission import SessionApprovals
 
 
@@ -221,6 +222,11 @@ class TestPrecheckPolicy:
             InspectorToolCall("1", "computer_open", {"path": str(ssh_key)}), _ctx()
         )
         assert d.kind == "deny"
+        assert d.error_kind == "policy"
+        assert d.message
+        body = json.loads(format_denial(d.message, code=d.error_code, error_kind=d.error_kind))
+        assert body["error_kind"] == "policy"
+        assert body["message"] == d.message
 
     @pytest.mark.asyncio
     async def test_denied_path_wins_over_a_durable_always_allow(

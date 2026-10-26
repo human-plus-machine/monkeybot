@@ -1,0 +1,40 @@
+id: regression/t2/loop/scenarios/loop/doom_identical_read
+case: T2-LOOP-07
+description: Three identical read_file calls trip the doom loop and the next request has no tools.
+mode: scripted
+driver: loop
+messages:
+- read the same file
+script:
+- - type: tool_call
+    call_id: r1
+    name: read_file
+    args:
+      path: notes.txt
+  - type: tool_call
+    call_id: r2
+    name: read_file
+    args:
+      path: notes.txt
+  - type: tool_call
+    call_id: r3
+    name: read_file
+    args:
+      path: notes.txt
+  - type: done
+- - type: text
+    text: stopped
+  - type: done
+assertions:
+  turn_completed: true
+  provider_calls: 2
+  tool_calls:
+    read_file: 3
+  interventions:
+  - intervention: doom_loop
+    detail: 'Doom loop detected: tool ''read_file'' called identically 3 times'
+  error_contains: 'Doom loop detected: tool ''read_file'' called identically 3 times'
+  provider_request:
+  - n: 2
+    tools_empty: true
+    system_contains: '[Harness] Doom loop detected'

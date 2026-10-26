@@ -1,0 +1,49 @@
+id: regression/t2/loop/scenarios/loop/promote_follow_up_provenance
+case: T2-LOOP-20
+description: Promoting a queued follow-up steers it once and keeps its request id.
+mode: scripted
+driver: loop
+messages:
+- read a file
+script:
+- - type: tool_call
+    call_id: r1
+    name: read_file
+    args:
+      path: a.txt
+  - type: done
+- - type: text
+    text: after promote
+  - type: done
+steps:
+- action: queue_follow_up
+  request_id: req-follow
+  text: follow-up body
+  when:
+    event: tool_result
+    nth: 1
+- action: promote_follow_up
+  request_id: req-follow
+  when:
+    event: tool_result
+    nth: 1
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  events_sequence:
+  - type: ToolCallResult
+    call_id: r1
+  - type: UserSteered
+    text: follow-up body
+    queued_request_id: req-follow
+  history:
+    roles:
+    - user
+    - assistant
+    - user
+    - user
+    - assistant
+  provider_request:
+  - n: 2
+    messages_contain: follow-up body

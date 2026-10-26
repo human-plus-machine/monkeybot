@@ -1,0 +1,61 @@
+id: regression/t2/loop/scenarios/verifier/error_streak_positive
+case: T2-VER-02
+description: Three tool failures emit error_streak with status stuck.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: drift_ws
+hooks:
+- verifier
+messages:
+- Read three missing files.
+config:
+  verifier:
+    enabled: true
+    ledger:
+      enabled: false
+    tracker:
+      enabled: true
+    judge:
+      enabled: false
+    escalation:
+      max_severity: nudge
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: missing_a.txt
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: missing_b.txt
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: read_file
+    args:
+      path: missing_c.txt
+  - type: done
+- - type: text
+    text: Done.
+  - type: done
+assertions:
+  turn_completed: true
+  verdicts:
+    min: 1
+    status_in:
+    - stuck
+    severity_max: none
+    signals_include:
+    - error_streak
+    signals_exclude:
+    - write_without_read
+    - rewrite_churn
+    - constraint_touch
+    - repeat_correction
+    - done_unmet
+    - no_progress
+    - budget_burn

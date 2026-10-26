@@ -1,0 +1,26 @@
+id: regression/t2/loop/scenarios/file/skills_read_only
+case: T2-FILE-12
+description: Writing skills/x/SKILL.md is skills_read_only.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Write a skill file.
+script:
+- - type: tool_call
+    call_id: c1
+    name: write_file
+    args:
+      path: skills/x/SKILL.md
+      content: nope
+  - type: done
+- - type: text
+    text: Skills are read-only.
+  - type: done
+assertions:
+  tool_error_codes:
+  - skills_read_only
+  workspace_file_absent:
+  - skills/x/SKILL.md
+  turn_completed: true

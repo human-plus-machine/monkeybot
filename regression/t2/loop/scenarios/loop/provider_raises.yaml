@@ -1,0 +1,25 @@
+id: regression/t2/loop/scenarios/loop/provider_raises
+case: T2-LOOP-37
+description: A provider exception becomes one Error after the partial text, then TurnComplete.
+mode: scripted
+driver: loop
+messages:
+- start then fail
+script:
+- - type: text
+    text: partial
+  - type: raise
+    error: RuntimeError
+    message: boom
+assertions:
+  turn_completed: true
+  error_contains: boom
+  response_contains: partial
+  history:
+    roles:
+    - user
+    - assistant
+  events_sequence:
+  - type: Error
+    error: boom
+  - type: TurnComplete

@@ -11,8 +11,14 @@ from pydantic import ValidationError
 
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.messages.tool_integrity import interrupted_tool_result_text
-from monkeybot.core.runtime.events import TurnComplete
-from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
+from monkeybot.core.runtime.events import TurnComplete, UsageTotals
+from monkeybot.core.types.content_blocks import (
+    SystemNotification,
+    Text,
+    Thinking,
+    ToolRequest,
+    ToolResponse,
+)
 from regression.schema.assertions import (
     WORKSPACE_COMMAND_TIMEOUT_SEC,
     ProviderRequest,
@@ -124,6 +130,53 @@ def test_event_fields_value_or_regex() -> None:
     _bad({"event_fields": {"ToolCallStarted": {"tool": "write_file"}}}, run, "event_fields")
 
 
+def test_event_fields_descends_into_usage_totals() -> None:
+    usage = UsageTotals(input_tokens=4, output_tokens=6)
+    run = _run({"type": "TurnComplete", "usage": usage})
+    _ok(
+        {
+            "event_fields": {
+                "TurnComplete": {
+                    "usage": {
+                        "input_tokens": 4,
+                        "output_tokens": 6,
+                        "cached_tokens": 0,
+                    }
+                }
+            }
+        },
+        run,
+    )
+    _bad(
+        {"event_fields": {"TurnComplete": {"usage": {"input_tokens": 9}}}},
+        run,
+        "event_fields",
+    )
+
+
+def test_provider_request_thinking_budget() -> None:
+    run = RunView(
+        provider_requests=[
+            ProviderRequest(thinking_budget=None),
+            ProviderRequest(thinking_budget=64),
+        ]
+    )
+    _ok(
+        {
+            "provider_request": [
+                {"n": 1, "thinking_budget": None},
+                {"n": 2, "thinking_budget": 64},
+            ]
+        },
+        run,
+    )
+    _bad(
+        {"provider_request": [{"n": 2, "thinking_budget": 0}]},
+        run,
+        "thinking_budget",
+    )
+
+
 def test_interventions_are_exact_and_ordered() -> None:
     run = _run(
         {"type": "HarnessIntervention", "intervention": "final_answer_gate", "detail": "once"},
@@ -184,7 +237,9 @@ def test_provider_request_matchers() -> None:
                     "system_contains": "agent",
                     "system_not_contains": "secret",
                     "messages_contain": "hello",
+                    "messages_not_contain": "secret-body",
                     "no_vertex_google_search": True,
+                    "model": "",
                 }
             ]
         },
@@ -374,6 +429,40 @@ def test_history_matchers() -> None:
     )
     orphan = RunView(history=[Message(role="assistant", content=[request], row_id="r3")])
     _bad({"history": {"tool_pairs_intact": True}}, orphan, "history")
+    pinned = RunView(
+        history=[
+            Message(
+                role="user",
+                content=[
+                    SystemNotification(notification_type="verifierVerdict", msg="verdict-kept")
+                ],
+            ),
+            Message(
+                role="assistant",
+                content=[Thinking(thinking="tail-thought-pin"), Text(text="tail-ok")],
+            ),
+        ]
+    )
+    _ok(
+        {
+            "history": {
+                "blocks_include": [
+                    {
+                        "type": "systemNotification",
+                        "notification_type": "verifierVerdict",
+                        "text_contains": "verdict-kept",
+                    },
+                    {"type": "thinking", "text_contains": "tail-thought-pin"},
+                ]
+            }
+        },
+        pinned,
+    )
+    _bad(
+        {"history": {"blocks_include": [{"type": "thinking", "text_contains": "missing"}]}},
+        pinned,
+        "history",
+    )
     repaired = ToolResponse(
         id="c1",
         tool_name="read_file",

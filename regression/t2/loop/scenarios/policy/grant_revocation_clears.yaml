@@ -1,0 +1,52 @@
+id: regression/t2/loop/scenarios/policy/grant_revocation_clears
+case: T2-POL-08
+description: Removing a path grant between turns removes read access.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Read the granted notes, then read them again.
+policy:
+  command_allowlist: default
+  grants: default
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: "{grant_root}/notes.md"
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: "{grant_root}/notes.md"
+  - type: done
+- - type: text
+    text: The grant is gone.
+  - type: done
+steps:
+- action: touch_file
+  path: grants.json
+  size: 0
+  when:
+    event: tool_result
+    call_id: c1
+- action: confirm_tool
+  decision: deny
+  call_id: c2
+  when:
+    event: tool_confirmation
+    call_id: c2
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    result:
+      regex: Notes the folder grant may read
+  - type: ToolCallResult
+    call_id: c2
+    error:
+      regex: '\A(?![\s\S]*Notes the folder grant)[\s\S]*denied by user'
+  turn_completed: true
+  no_errors: true

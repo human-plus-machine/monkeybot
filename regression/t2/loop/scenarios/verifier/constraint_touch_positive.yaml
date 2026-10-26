@@ -1,0 +1,54 @@
+id: regression/t2/loop/scenarios/verifier/constraint_touch_positive
+case: T2-VER-04
+description: Writing under db/migrations/** emits constraint_touch before turn 3.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: drift_ws
+hooks:
+- verifier
+messages:
+- Do not touch migrations. Add a migration anyway.
+config:
+  verifier:
+    enabled: true
+    ledger:
+      enabled: true
+      model: fake
+    tracker:
+      enabled: true
+    judge:
+      enabled: false
+    escalation:
+      max_severity: nudge
+  env:
+    MONKEYBOT_CLASSIFIER_ROWS: '[{"intent":"new_goal","relates_to":null,"constraints":[{"kind":"path_glob","pattern":"db/migrations/**","verbatim":"do
+      not touch migrations"}]}]'
+script:
+- - type: tool_call
+    call_id: c1
+    name: write_file
+    args:
+      path: db/migrations/002_add.sql
+      content: select 1;
+  - type: done
+- - type: text
+    text: Done.
+  - type: done
+assertions:
+  turn_completed: true
+  verdicts:
+    min: 1
+    status_in:
+    - drifting
+    severity_max: none
+    signals_include:
+    - constraint_touch
+    signals_exclude:
+    - write_without_read
+    - error_streak
+    - rewrite_churn
+    - repeat_correction
+    - done_unmet
+    - no_progress
+    - budget_burn

@@ -5,6 +5,8 @@ internal/
 .env
 .env.*
 !.env.example
+# The grants fixture's .env is fixture data, not a local secret.
+!regression/fixtures/workspaces/grants_ws/granted/.env
 
 # Local scaffolded harness config (defaults ship in monkeybot-cli scaffold_defaults/)
 /monkeybot_config/
@@ -30,8 +32,14 @@ build/
 
 # Data (SQLite DB + memory files — never commit)
 data/
+# Shared attachment fixtures live here (§5.4); they are not a local data dir.
+!testkit/data/
+!testkit/data/**
 /memory/
 .monkeybot/
+# Store layout for the attachment loop fixture. The directory name is ignored above.
+!regression/fixtures/workspaces/att_ws/.monkeybot/
+!regression/fixtures/workspaces/att_ws/.monkeybot/**
 *.sqlite3
 workspace/.monkeybot/
 *.sqlite

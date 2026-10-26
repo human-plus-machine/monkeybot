@@ -196,6 +196,7 @@ class JudgeWorker:
         task = asyncio.create_task(self._run_one(job, queued_at), name="verifier-judge")
         self._jobs[task] = job
         task.add_done_callback(self._forget_job)
+        self._supersede_older(key, evidence.inner_turn, task)
         logger.info(
             "judge enqueue %s",
             kv(
@@ -208,6 +209,21 @@ class JudgeWorker:
 
     def _forget_job(self, task: asyncio.Task[None]) -> None:
         self._jobs.pop(task, None)
+
+    def _supersede_older(self, key: ScopeKey, inner_turn: int, current: asyncio.Task[None]) -> None:
+        """Drop an older in-flight checkpoint so a newer one can land first.
+
+        The scope lock otherwise holds the newer call behind the older provider
+        latency. By the time the older call returned, the turn had closed and
+        both verdicts were discarded. Cancelling the older call lets the newer
+        checkpoint deposit; a late older result is then a stale mailbox drop.
+        """
+        for task, job in list(self._jobs.items()):
+            if task is current or task.done():
+                continue
+            if job.key != key or job.evidence.inner_turn >= inner_turn:
+                continue
+            task.cancel()
 
     def _semaphore(self) -> asyncio.Semaphore:
         if self._sema is None:

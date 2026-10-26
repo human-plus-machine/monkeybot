@@ -90,6 +90,8 @@ class ScenarioFile(pytest.File):
         scenario = load_scenario(self.path)
         item = ScenarioItem.from_parent(self, name=self.path.stem)
         item.user_properties.append(("case", scenario.case))
+        if "darwin-only" in scenario.tags:
+            item.add_marker(pytest.mark.darwin_only)
         yield item
 
 

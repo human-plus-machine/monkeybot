@@ -1,0 +1,225 @@
+id: regression/t2/loop/scenarios/computer/denied_dirs_and_globs
+case: T2-COMP-02
+description: ~/.ssh, ~/.aws, *.pem, and .env are policy denials for list, find, move, and trash.
+mode: scripted
+driver: loop
+executor: real
+tags:
+- darwin-only
+messages:
+- Touch the denied paths with list, find, move, and trash.
+config:
+  computer:
+    enabled: true
+  env:
+    MONKEYBOT_COMPUTER_TOOLS: "1"
+script:
+-
+  - type: tool_call
+    call_id: list-ssh
+    name: computer_list_dir
+    args:
+      path: "~/.ssh"
+
+  - type: tool_call
+    call_id: list-aws
+    name: computer_list_dir
+    args:
+      path: "~/.aws"
+
+  - type: tool_call
+    call_id: list-pem
+    name: computer_list_dir
+    args:
+      path: "~/example.pem"
+
+  - type: tool_call
+    call_id: list-env
+    name: computer_list_dir
+    args:
+      path: "~/.env"
+
+  - type: tool_call
+    call_id: find-ssh
+    name: computer_find
+    args:
+      path: "~/.ssh"
+      query: "x"
+
+  - type: tool_call
+    call_id: find-aws
+    name: computer_find
+    args:
+      path: "~/.aws"
+      query: "x"
+
+  - type: tool_call
+    call_id: find-pem
+    name: computer_find
+    args:
+      path: "~/example.pem"
+      query: "x"
+
+  - type: tool_call
+    call_id: find-env
+    name: computer_find
+    args:
+      path: "~/.env"
+      query: "x"
+
+  - type: tool_call
+    call_id: move-ssh
+    name: computer_move
+    args:
+      path: "~/.ssh"
+      destination: "~/Desktop/mb-p1-17-unused"
+
+  - type: tool_call
+    call_id: move-aws
+    name: computer_move
+    args:
+      path: "~/.aws"
+      destination: "~/Desktop/mb-p1-17-unused"
+
+  - type: tool_call
+    call_id: move-pem
+    name: computer_move
+    args:
+      path: "~/example.pem"
+      destination: "~/Desktop/mb-p1-17-unused"
+
+  - type: tool_call
+    call_id: move-env
+    name: computer_move
+    args:
+      path: "~/.env"
+      destination: "~/Desktop/mb-p1-17-unused"
+
+  - type: tool_call
+    call_id: trash-ssh
+    name: computer_trash
+    args:
+      path: "~/.ssh"
+
+  - type: tool_call
+    call_id: trash-aws
+    name: computer_trash
+    args:
+      path: "~/.aws"
+
+  - type: tool_call
+    call_id: trash-pem
+    name: computer_trash
+    args:
+      path: "~/example.pem"
+
+  - type: tool_call
+    call_id: trash-env
+    name: computer_trash
+    args:
+      path: "~/.env"
+
+  - type: done
+- - type: text
+    text: All denied.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: list-ssh
+    tool: computer_list_dir
+    error_kind: policy
+    error:
+      regex: "protected directory"
+  - type: ToolCallResult
+    call_id: list-aws
+    tool: computer_list_dir
+    error_kind: policy
+    error:
+      regex: "protected directory"
+  - type: ToolCallResult
+    call_id: list-pem
+    tool: computer_list_dir
+    error_kind: policy
+    error:
+      regex: "credential-shaped"
+  - type: ToolCallResult
+    call_id: list-env
+    tool: computer_list_dir
+    error_kind: policy
+    error:
+      regex: "credential-shaped"
+  - type: ToolCallResult
+    call_id: find-ssh
+    tool: computer_find
+    error_kind: policy
+    error:
+      regex: "protected directory"
+  - type: ToolCallResult
+    call_id: find-aws
+    tool: computer_find
+    error_kind: policy
+    error:
+      regex: "protected directory"
+  - type: ToolCallResult
+    call_id: find-pem
+    tool: computer_find
+    error_kind: policy
+    error:
+      regex: "credential-shaped"
+  - type: ToolCallResult
+    call_id: find-env
+    tool: computer_find
+    error_kind: policy
+    error:
+      regex: "credential-shaped"
+  - type: ToolCallResult
+    call_id: move-ssh
+    tool: computer_move
+    error_kind: policy
+    error:
+      regex: "protected directory"
+  - type: ToolCallResult
+    call_id: move-aws
+    tool: computer_move
+    error_kind: policy
+    error:
+      regex: "protected directory"
+  - type: ToolCallResult
+    call_id: move-pem
+    tool: computer_move
+    error_kind: policy
+    error:
+      regex: "credential-shaped"
+  - type: ToolCallResult
+    call_id: move-env
+    tool: computer_move
+    error_kind: policy
+    error:
+      regex: "credential-shaped"
+  - type: ToolCallResult
+    call_id: trash-ssh
+    tool: computer_trash
+    error_kind: policy
+    error:
+      regex: "protected directory"
+  - type: ToolCallResult
+    call_id: trash-aws
+    tool: computer_trash
+    error_kind: policy
+    error:
+      regex: "protected directory"
+  - type: ToolCallResult
+    call_id: trash-pem
+    tool: computer_trash
+    error_kind: policy
+    error:
+      regex: "credential-shaped"
+  - type: ToolCallResult
+    call_id: trash-env
+    tool: computer_trash
+    error_kind: policy
+    error:
+      regex: "credential-shaped"
+  turn_completed: true
+  no_errors: true

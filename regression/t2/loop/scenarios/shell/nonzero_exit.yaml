@@ -1,0 +1,29 @@
+id: regression/t2/loop/scenarios/shell/nonzero_exit
+case: T2-SHELL-08
+description: A nonzero python exit returns ok false, the exit code, and both streams
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Run a command that exits 3.
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      argv:
+      - python
+      - -c
+      - raise SystemExit(3)
+  - type: done
+- - type: text
+    text: It exited 3.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    result:
+      regex: '"ok": false.*"stdout":.*"stderr":.*"exit_code": 3'
+  turn_completed: true
+  no_errors: true

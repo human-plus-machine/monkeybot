@@ -887,10 +887,21 @@ def _workspace_error_envelope(exc: WorkspaceError) -> str:
             "the user for access to that folder; retrying with a rewritten path "
             "will not help."
         )
+    elif code == "credential_denied":
+        error_kind = "policy"
+        hint = (
+            "A folder grant does not unlock a credential file. Do not copy, move, "
+            "or symlink it into the workspace to get around this."
+        )
     elif code == "path_escape":
         hint = (
             "Use a path relative to the workspace root with no `..` or `~` "
             '(e.g. {"path": "README.md"}).'
+        )
+    elif code == "invalid_cwd":
+        hint = (
+            "cwd must be a directory inside the workspace. Omit cwd to run at the "
+            "workspace root, or pass a relative path that does not climb out with `..`."
         )
     elif code == "invalid_path":
         hint = "Remove `..`, `~`, and leading `/`; use a repo-relative path."
@@ -1958,6 +1969,11 @@ class CoreToolExecutor(ToolExecutorPort):
             subagent_type=subagent_type,
             parent_session_id=ctx.session_id,
             child_thread_id=child_thread_id,
+            skills=tuple(
+                skill.strip()
+                for skill in (persona.skills if persona is not None else ())
+                if isinstance(skill, str) and skill.strip()
+            ),
         )
 
         scratch = self._workspace.repo_root / ".monkeybot" / "subagent-runs" / uuid.uuid4().hex
@@ -2051,7 +2067,13 @@ class CoreToolExecutor(ToolExecutorPort):
             return self._workspace.repo_root
         if not isinstance(raw, str):
             raise WorkspaceError("cwd must be a string", code="invalid_cwd")
-        cwd = self._workspace._resolve_root_dir(raw)
+        try:
+            cwd = self._workspace._resolve_root_dir(raw)
+        except WorkspaceError as exc:
+            raise WorkspaceError(
+                f"Invalid cwd: {raw.strip()} is outside the workspace",
+                code="invalid_cwd",
+            ) from exc
         if not cwd.is_dir():
             raise WorkspaceError(
                 f"cwd is not an existing directory: {raw.strip()}",

@@ -1,0 +1,31 @@
+id: regression/t2/loop/scenarios/loop/max_turns_cap
+case: T2-LOOP-02
+description: Tool-using turns that never finish stop at max_turns with one intervention and the cap error.
+mode: scripted
+driver: loop
+config:
+  model.max_turns: 2
+messages:
+- keep calling the tool
+script:
+- - type: tool_call
+    call_id: t1
+    name: read_file
+    args:
+      path: a.txt
+  - type: done
+- - type: tool_call
+    call_id: t2
+    name: read_file
+    args:
+      path: b.txt
+  - type: done
+assertions:
+  turn_completed: true
+  provider_calls: 2
+  tool_calls:
+    read_file: 2
+  interventions:
+  - intervention: max_turns
+    detail: Max turns exceeded
+  error_contains: Max turns exceeded

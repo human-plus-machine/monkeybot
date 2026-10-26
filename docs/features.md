@@ -437,20 +437,20 @@ pricing:
 
 **Storage URI:** `local://` only (object-store palaces are not supported in this release).
 
-**Wake-up:** `load_index()` calls MemPalace `wake_up` and stores lines on `TurnContext.memory_index`; prompt composition injects them under `## Memory wake-up`. There is no sliding window or LLM curator. Leftover `context_curation:` YAML is ignored (one warning per process). Wake-up size is whatever MemPalace L0+L1 returns; `model.context_window` still only bounds history summarization. Subagents include the same wake-up block as the parent.
+**Wake-up:** `load_index()` calls MemPalace `wake_up` and stores lines on `TurnContext.memory_index`; prompt composition injects them under `## Memory wake-up`. There is no sliding window or LLM curator. Leftover `context_curation:` YAML is ignored (one warning per process). Wake-up size is whatever MemPalace L0+L1 returns; `model.context_window` still only bounds history summarization. Chats in the same project share that briefing by default. `MONKEYBOT_MEMORY_SHARE_THREADS=0` limits it to the current chat. Subagents include the same wake-up block as the parent when sharing is on.
 
 **Hook lifecycle:**
 
 | Event | Behavior |
 |-------|----------|
 | History append | Enqueue user / final assistant text on the outbox (same transaction when the backend supports it) |
-| `PRE_TURN` | Inject thread-scoped L2 recall into `inject_memory_lines` |
+| `PRE_TURN` | Inject L2 recall into `inject_memory_lines`. Shared across chats unless `MONKEYBOT_MEMORY_SHARE_THREADS` is off |
 | `POST_TURN` | Wake the per-agent writer |
 | `SESSION_END` | Bounded outbox drain |
 
 **Invariants:**
 - Chat history is canonical; MemPalace drawers are an idempotent projection.
-- Recall is scoped to the current `thread_id` by default.
+- Saved lines are shared across chats in the same project by default. `MONKEYBOT_MEMORY_SHARE_THREADS=0` (also `false`, `no`, `off`) keeps each chat's lines, including the wake-up briefing, in that chat. Unset shares.
 - `memory.enabled: false` (or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`) skips capture, wake-up, and prompt teaching. Host `run_command` children then cannot see palace files: Linux user+mount namespaces or macOS `sandbox-exec` hide those directories. If isolation cannot be established and at least one hidden palace path exists, the command is refused rather than run with palace files visible. If none of the hidden paths exist on disk, the command runs unwrapped (memory was never configured; nothing to hide). OpenSandbox does not mount the palace. The kill switch is not an argv denylist; `bash` remains allowed, and the OS hides the files.
 - Postgres/Firestore persist the memory outbox with replica `palace_id` claim partitioning. Replicated deployments must share a lock-capable palace volume.
 - MemPalace (chromadb / onnxruntime) is the optional `monkeybot[memory]` extra. Missing the extra disables memory instead of failing startup.

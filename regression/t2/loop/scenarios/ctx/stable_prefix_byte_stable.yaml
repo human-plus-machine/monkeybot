@@ -1,0 +1,61 @@
+id: regression/t2/loop/scenarios/ctx/stable_prefix_byte_stable
+case: T2-CTX-13
+description: Four inner tool turns share the stable system prefix.
+mode: scripted
+driver: loop
+messages:
+- read four
+script:
+- - type: tool_call
+    call_id: c0
+    name: read_file
+    args:
+      path: f0.txt
+  - type: done
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: f1.txt
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: f2.txt
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: read_file
+    args:
+      path: f3.txt
+  - type: done
+- - type: text
+    text: done-13
+  - type: done
+tool_results:
+  c0:
+    text: body-0
+  c1:
+    text: body-1
+  c2:
+    text: body-2
+  c3:
+    text: body-3
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 5
+  provider_request:
+  - n: 1
+    system_contains: This block is injected by the host every turn. Prefer the **active
+      JSON tool list** for names, parameters, and when-to-use guidance.
+  - n: 2
+    system_contains: This block is injected by the host every turn. Prefer the **active
+      JSON tool list** for names, parameters, and when-to-use guidance.
+  - n: 3
+    system_contains: This block is injected by the host every turn. Prefer the **active
+      JSON tool list** for names, parameters, and when-to-use guidance.
+  - n: 4
+    system_contains: This block is injected by the host every turn. Prefer the **active
+      JSON tool list** for names, parameters, and when-to-use guidance.

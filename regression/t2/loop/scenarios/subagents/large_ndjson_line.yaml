@@ -1,0 +1,39 @@
+id: regression/t2/loop/scenarios/subagents/large_ndjson_line
+case: T2-SUB-09
+description: A 1 MiB NDJSON line parses under the 16 MiB pipe limit
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Read a large child event
+config:
+  env:
+    MONKEYBOT_SUBAGENT_SCRIPT: testkit/subagent_worker.py
+    AGENT_MD: evals/smoke_agent/monkeybot_config/AGENT.md
+script:
+- - type: tool_call
+    call_id: c1
+    name: task
+    args:
+      task: large_line
+  - type: done
+- - type: text
+    text: The large line parsed.
+  - type: done
+assertions:
+  required_tools:
+  - task
+  turn_completed: true
+  event_fields:
+    ToolCallResult:
+      result:
+        regex: '"ok": true'
+  workspace_command_passes:
+  - |
+    python -c "from pathlib import Path
+    lines = []
+    for path in Path('.monkeybot/subagent-runs').glob('*/progress.jsonl'):
+        lines.extend(path.read_text().splitlines())
+    big = any(len(line.encode()) >= 1048576 for line in lines)
+    stream_err = any('StreamReader' in line or 'exceeded' in line for line in lines)
+    raise SystemExit(0 if big and not stream_err else 1)"

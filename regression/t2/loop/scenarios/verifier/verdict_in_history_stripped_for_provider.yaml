@@ -1,0 +1,62 @@
+id: regression/t2/loop/scenarios/verifier/verdict_in_history_stripped_for_provider
+case: T2-VER-16
+description: The verdict is a SystemNotification in history and its rationale is absent from provider
+  messages.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: drift_ws
+hooks:
+- verifier
+messages:
+- Write two new files.
+config:
+  verifier:
+    enabled: true
+    ledger:
+      enabled: false
+    tracker:
+      enabled: true
+    judge:
+      enabled: true
+      model: fake
+    escalation:
+      max_severity: nudge
+  env:
+    MONKEYBOT_JUDGE_SCRIPT: '{"completions":[{"mode":"valid","body":"{\"status\":\"drifting\",\"severity\":\"nudge\",\"confidence\":0.8,\"rationale\":\"RATIONALE_TOKEN_VER16\",\"correction\":\"FREEFORM_DROP_ME\"}"}]}'
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: src/models.py
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: write_file
+    args:
+      path: src/unread_a.py
+      content: a
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: write_file
+    args:
+      path: src/unread_b.py
+      content: b
+  - type: done
+- - type: text
+    text: next
+  - type: done
+assertions:
+  turn_completed: true
+  history:
+    tool_pairs_intact: true
+  events_sequence:
+  - type: VerifierVerdict
+    rationale: RATIONALE_TOKEN_VER16
+  provider_request:
+  - n: 4
+    system_not_contains: RATIONALE_TOKEN_VER16
+  - n: 4
+    system_not_contains: FREEFORM_DROP_ME

@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "fix": {
+      "enabled": true,
+      "autoConnect": true,
+      "command": "python",
+      "args": ["{repo_root}/evals/smoke_agent/fixture_mcp_server.py"]
+    },
+    "fix__extra": {
+      "enabled": true,
+      "autoConnect": true,
+      "command": "python",
+      "args": ["{repo_root}/evals/smoke_agent/fixture_mcp_server.py"]
+    }
+  }
+}

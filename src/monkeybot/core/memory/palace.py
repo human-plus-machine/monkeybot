@@ -55,7 +55,7 @@ class PalacePort(Protocol):
 
     def get_drawer(self, drawer_id: str) -> DrawerRecord | None: ...
 
-    def wake_up(self, wing: str | None = None) -> str: ...
+    def wake_up(self, wing: str | None = None, thread_id: str | None = None) -> str: ...
 
     def recall(
         self,
@@ -292,7 +292,15 @@ class MemPalaceAdapter:
             metadata=meta,
         )
 
-    def wake_up(self, wing: str | None = None) -> str:
+    def wake_up(self, wing: str | None = None, thread_id: str | None = None) -> str:
+        if thread_id:
+            identity = (self.palace_path / "identity.txt").read_text(encoding="utf-8").strip()
+            return format_thread_wake_up(
+                identity,
+                self.list_drawers(),
+                wing=wing,
+                thread_id=thread_id,
+            )
         from mempalace.layers import MemoryStack
 
         stack = MemoryStack(
@@ -405,6 +413,41 @@ class MemPalaceAdapter:
         payload["backend"] = self.backend
         payload["embedding_model"] = self.embedding_model
         return payload
+
+
+def drawer_visible_to_thread(metadata: dict[str, str], thread_id: str | None) -> bool:
+    """A drawer with no chat id stays. A different chat's drawer drops when scoped."""
+    if not thread_id:
+        return True
+    owner = (metadata.get("thread_id") or "").strip()
+    return not owner or owner == thread_id
+
+
+def format_thread_wake_up(
+    identity: str,
+    drawers: list[DrawerRecord],
+    *,
+    wing: str | None,
+    thread_id: str,
+) -> str:
+    """Identity plus this chat's drawers. Other chats' lines are omitted."""
+    selected = [
+        drawer
+        for drawer in drawers
+        if (wing is None or drawer.wing == wing)
+        and drawer_visible_to_thread(drawer.metadata, thread_id)
+    ]
+    selected.sort(key=lambda drawer: drawer.filed_at, reverse=True)
+    lines = [identity.strip(), "", "## L1 — ESSENTIAL STORY"]
+    if not selected:
+        lines.append("No memories yet.")
+        return "\n".join(lines)
+    for drawer in selected[:15]:
+        snippet = " ".join(drawer.content.split())
+        if len(snippet) > 200:
+            snippet = snippet[:197] + "..."
+        lines.append(f"- [{drawer.room}] {snippet}")
+    return "\n".join(lines)
 
 
 def format_recall_lines(drawers: list[DrawerRecord], *, max_chars: int = L2_MAX_CHARS) -> list[str]:

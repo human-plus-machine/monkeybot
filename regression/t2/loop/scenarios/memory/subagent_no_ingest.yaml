@@ -1,0 +1,31 @@
+id: regression/t2/loop/scenarios/memory/subagent_no_ingest
+case: T2-MEM-07
+description: A child turn writes no outbox rows.
+mode: scripted
+driver: loop
+executor: real
+hooks:
+- memory
+config:
+  env:
+    MONKEYBOT_SUBAGENT_SCRIPT: testkit/subagent_worker.py
+    AGENT_MD: evals/smoke_agent/monkeybot_config/AGENT.md
+messages:
+- Ask the child to echo.
+script:
+- - type: tool_call
+    call_id: c1
+    name: task
+    args:
+      task: echo
+  - type: done
+- - type: text
+    text: The child finished.
+  - type: done
+assertions:
+  required_tools:
+  - task
+  store:
+    outbox: 2
+  turn_completed: true
+  no_errors: true

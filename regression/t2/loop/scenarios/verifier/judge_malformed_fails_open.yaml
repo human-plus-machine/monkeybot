@@ -1,0 +1,64 @@
+id: regression/t2/loop/scenarios/verifier/judge_malformed_fails_open
+case: T2-VER-18
+description: 'Malformed JSON and a judge timeout both fail open: no nudge.'
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: drift_ws
+hooks:
+- verifier
+messages:
+- Fail several reads.
+config:
+  verifier:
+    enabled: true
+    ledger:
+      enabled: false
+    tracker:
+      enabled: true
+    judge:
+      enabled: true
+      model: fake
+      min_turns_between_verdicts: 0
+      max_verdicts_per_message: 10
+    escalation:
+      max_severity: nudge
+  env:
+    MONKEYBOT_JUDGE_SCRIPT: '{"completions":[{"mode":"malformed","body":"this is not json"},{"mode":"timeout"}]}'
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: missing_a.txt
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: missing_b.txt
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: read_file
+    args:
+      path: missing_c.txt
+  - type: done
+- - type: tool_call
+    call_id: c4
+    name: read_file
+    args:
+      path: missing_d.txt
+  - type: done
+- - type: text
+    text: Done.
+  - type: done
+assertions:
+  turn_completed: true
+  verdicts:
+    max: 0
+  provider_request:
+  - n: 4
+    system_not_contains: '[Verifier]'
+  - n: 5
+    system_not_contains: '[Verifier]'

@@ -1,0 +1,35 @@
+id: regression/t2/loop/scenarios/file/replace_fuzzy_unicode
+case: T2-FILE-16
+description: Smart quotes in old_string match ASCII in the file and match_mode is reported.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Replace the print in src/app.py using smart quotes.
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: src/app.py
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: replace_in_file
+    args:
+      path: src/app.py
+      old_string: print(“hostile”)
+      new_string: print("friendly")
+  - type: done
+- - type: text
+    text: Replaced with unicode_normalized.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    result:
+      regex: '"match_mode": "unicode_normalized"'
+  workspace_file_contains:
+    src/app.py: print("friendly")
+  turn_completed: true

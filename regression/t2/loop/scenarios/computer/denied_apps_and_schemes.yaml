@@ -1,0 +1,59 @@
+id: regression/t2/loop/scenarios/computer/denied_apps_and_schemes
+case: T2-COMP-03
+description: Terminal, Cursor, and a file URL are policy denials.
+mode: scripted
+driver: loop
+executor: real
+tags:
+- darwin-only
+messages:
+- Open Terminal, Cursor, and a file URL.
+config:
+  computer:
+    enabled: true
+  env:
+    MONKEYBOT_COMPUTER_TOOLS: "1"
+script:
+- - type: tool_call
+    call_id: app-terminal
+    name: computer_open_app
+    args:
+      app: Terminal
+  - type: done
+- - type: tool_call
+    call_id: app-cursor
+    name: computer_open_app
+    args:
+      app: Cursor
+  - type: done
+- - type: tool_call
+    call_id: url-file
+    name: computer_open_url
+    args:
+      url: "file:///etc/hosts"
+  - type: done
+- - type: text
+    text: All three refused.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: app-terminal
+    tool: computer_open_app
+    error_kind: policy
+    error:
+      regex: "Refusing to launch 'Terminal'"
+  - type: ToolCallResult
+    call_id: app-cursor
+    tool: computer_open_app
+    error_kind: policy
+    error:
+      regex: "Refusing to launch 'Cursor'"
+  - type: ToolCallResult
+    call_id: url-file
+    tool: computer_open_url
+    error_kind: policy
+    error:
+      regex: "URL scheme not allowed: 'file'"
+  turn_completed: true
+  no_errors: true

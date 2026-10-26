@@ -16,6 +16,8 @@ from monkeybot.core.hooks.evidence_guard import (
     format_verification_notice,
     missing_evidence_paths,
 )
+from monkeybot.core.llm.provider import Message
+from monkeybot.core.types.content_blocks import Text
 
 
 def _ctx(workspace_root: Path | None) -> TurnContext:
@@ -383,6 +385,45 @@ def test_format_evidence_correction_lists_paths() -> None:
     assert "`a/b.ts`" in notice
     assert "`c.md`" in notice
     assert "Evidence: unknown" in notice
+
+
+@pytest.mark.asyncio
+async def test_guard_puts_notice_on_the_next_provider_request(tmp_path: Path) -> None:
+    """The scan finishes before the next request, which is where the notice belongs."""
+    guard = EvidencePathGuard()
+    await guard.on_after_provider(
+        _payload(
+            HookEvent.AFTER_PROVIDER_RESPONSE,
+            tmp_path,
+            assistant_text="Evidence: missing.py\n",
+        )
+    )
+    first = _payload(
+        HookEvent.BEFORE_PROVIDER_REQUEST,
+        tmp_path,
+        provider_messages=[Message(role="system", content=[Text(text="base")])],
+    )
+    await guard.on_before_provider(first)
+    assert first.provider_messages is not None
+    system = first.provider_messages[0]
+    assert system.role == "system"
+    assert any(
+        isinstance(block, Text)
+        and "Evidence path correction" in block.text
+        and "missing.py" in block.text
+        for block in system.content
+    )
+    second = _payload(
+        HookEvent.BEFORE_PROVIDER_REQUEST,
+        tmp_path,
+        provider_messages=[Message(role="system", content=[Text(text="base")])],
+    )
+    await guard.on_before_provider(second)
+    assert second.provider_messages is not None
+    assert all(
+        not (isinstance(block, Text) and "Evidence path correction" in block.text)
+        for block in second.provider_messages[0].content
+    )
 
 
 def test_format_verification_notice_lists_paths() -> None:

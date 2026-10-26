@@ -1,0 +1,38 @@
+id: regression/t2/loop/scenarios/mcp/autoconnect_failure_is_status
+case: T2-MCP-05
+description: A broken autoConnect sibling fails as status; the good server stays connected and the load returns.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Check the broken MCP server.
+config:
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.broken.json
+script:
+- - type: tool_call
+    call_id: c1
+    name: enable_mcp
+    args:
+      name: broken
+  - type: done
+- - type: text
+    text: The broken server failed and fixture stayed connected.
+  - type: done
+assertions:
+  provider_calls: 2
+  provider_request:
+  - n: 1
+    tools_include:
+    - fixture__echo
+    tools_exclude:
+    - broken__echo
+  - n: 2
+    tools_include:
+    - fixture__echo
+  event_fields:
+    ToolCallResult:
+      tool: enable_mcp
+      error: "MCP server 'broken' is missing command or url"
+  turn_completed: true
+  no_errors: true

@@ -495,7 +495,7 @@ class GoalLedger:
             status=status,
             relates_to=relates_to,
             constraints=constraints,
-            done_when=(),
+            done_when=result.done_when,
             created_at_ms=now_ms(),
             source_row_id=job.source_row_id,
         )
