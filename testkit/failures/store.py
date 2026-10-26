@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import hashlib
 import json
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 _RUN_FILE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-fA-F]{7,}-\d+\.jsonl$")
+_RUN_DIR = re.compile(r"^\d{8}T\d{6}Z$")
 _TEMP_PATH = re.compile(r"(?:/private)?/(?:var/folders|tmp)/\S+")
 _UUID = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
@@ -82,15 +84,49 @@ def write_json(path: Path, record: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def run_stamp_of(run_id: str) -> str:
+    """UTC start prefix of a run id, used as the folder name."""
+    return run_id.split("-", 1)[0]
+
+
+def run_folder(directory: Path, run_id: str) -> Path:
+    return directory / run_stamp_of(run_id)
+
+
+def resolve_run_file(directory: Path, run_id: str) -> Path:
+    """Path of a run file. New runs live in ``<stamp>/<run id>.jsonl``.
+
+    A file written by an older ledger, directly under ``directory``, is
+    returned when it is the one that exists.
+    """
+    nested = run_folder(directory, run_id) / f"{run_id}.jsonl"
+    if nested.is_file():
+        return nested
+    flat = directory / f"{run_id}.jsonl"
+    if flat.is_file():
+        return flat
+    return nested
+
+
 def list_run_files(directory: Path) -> list[Path]:
-    """Top-level run files, oldest first. Skips index.jsonl and subfolders."""
+    """Run files, oldest first.
+
+    A run's jsonl and outcomes gzip live in ``<stamp>/``. Files left at the
+    top level by older ledgers are included. ``index.jsonl``, ``LATEST.json``,
+    ``triage.json``, and other folders (such as ``phase0a/``) are not runs.
+    """
     if not directory.is_dir():
         return []
-    files = [
-        path
-        for path in directory.iterdir()
-        if path.is_file() and path.name != "index.jsonl" and _RUN_FILE.match(path.name)
-    ]
+    files: list[Path] = []
+    for path in directory.iterdir():
+        if path.is_file() and _RUN_FILE.match(path.name):
+            files.append(path)
+            continue
+        if not path.is_dir() or not _RUN_DIR.match(path.name):
+            continue
+        for child in path.iterdir():
+            if child.is_file() and _RUN_FILE.match(child.name):
+                files.append(child)
     files.sort(key=lambda path: path.name)
     return files
 
@@ -175,6 +211,10 @@ def prune(directory: Path, *, keep: int | None = None, days: int | None = None) 
             continue
         path.unlink(missing_ok=True)
         outcomes_path(path).unlink(missing_ok=True)
+        parent = path.parent
+        if parent != directory and _RUN_DIR.match(parent.name):
+            with contextlib.suppress(OSError):
+                parent.rmdir()
         removed.append(path.name)
     return removed
 
@@ -278,7 +318,7 @@ def newest_run_file(directory: Path) -> Path | None:
     if latest is not None:
         run_id = latest.get("run_id")
         if isinstance(run_id, str):
-            candidate = directory / f"{run_id}.jsonl"
+            candidate = resolve_run_file(directory, run_id)
             if candidate.is_file():
                 return candidate
     return files[-1]
@@ -337,7 +377,7 @@ def find_failure(directory: Path, key: str) -> dict[str, Any] | None:
             seq = int(seq_text)
         except ValueError:
             return None
-        path = directory / f"{run_id}.jsonl"
+        path = resolve_run_file(directory, run_id)
         for record in read_jsonl(path):
             if record.get("kind") == "failure" and record.get("seq") == seq:
                 return record

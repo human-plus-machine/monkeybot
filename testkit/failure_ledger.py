@@ -25,6 +25,7 @@ from testkit.failures.store import (
     outcomes_path,
     prune,
     repo_root,
+    run_folder,
     run_stamp,
     tier_from_nodeid,
     top_in_repo_frame,
@@ -97,8 +98,9 @@ class LedgerWriter:
         while True:
             suffix = str(pid) if nonce == 0 else f"{pid}{nonce}"
             self.run_id = f"{run_stamp(started)}-{sha7}-{suffix}"
-            candidate = self.directory / f"{self.run_id}.jsonl"
-            if not candidate.exists():
+            candidate = run_folder(self.directory, self.run_id) / f"{self.run_id}.jsonl"
+            flat = self.directory / f"{self.run_id}.jsonl"
+            if not candidate.exists() and not flat.exists():
                 self.path = candidate
                 break
             nonce += 1
