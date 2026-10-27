@@ -1,0 +1,15 @@
+# Class list, not a runnable T4 suite. These scenarios are pass^N (§5.8).
+cases:
+  -
+    case: T5-SKILL-01
+    scenarios:
+      - skills/skill_invocation
+  -
+    case: T5-TODO-01
+    scenarios:
+      - multi_turn/task_tracking
+  -
+    case: T5-SUB-01
+    scenarios:
+      - subagents/dispatch_complete
+      - subagents/persona_dispatch

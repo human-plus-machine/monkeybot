@@ -14,7 +14,7 @@ config:
     MONKEYBOT_SUBAGENT_SCRIPT: "{repo_root}/src/monkeybot/core/subagents/subagent_worker.py"
     MONKEYBOT_CONFIG: "{repo_root}/regression/fixtures/configs/agent.base.yaml"
     MONKEYBOT_FAKE_PROVIDER_SCRIPT: "{repo_root}/regression/t2/loop/scenarios/coding/subagent_ledger_child.yml"
-    AGENT_MD: "{repo_root}/evals/smoke_agent/monkeybot_config/AGENT.md"
+    AGENT_MD: "{repo_root}/regression/t4/agent/monkeybot_config/AGENT.md"
     DB_URL: "sqlite:///{workspace}/child.db"
 messages:
   - Ask the child to edit notes and add a file.

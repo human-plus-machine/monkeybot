@@ -62,7 +62,7 @@ Put each moment in one category. The category decides where the fix goes.
 | Bloated `AGENT.md` or harness prompt (`src/monkeybot/core/prompts/harness_prompt.py`) | Move the steering into an on-demand skill, or delete the no-op lines |
 | An expensive tool call | Trim tool output, spill it to a file, or load tools progressively |
 | Missing information or access | An MCP server, a tool, or wider permissions |
-| The agent behaved reasonably and the harness misbehaved | A code fix plus a regression test in `tests/`, or an eval scenario in `evals/scenarios/` |
+| The agent behaved reasonably and the harness misbehaved | A code fix plus a regression test in `tests/`, or a live scenario under `regression/t4/scenarios/` |
 
 ## Rules
 

@@ -1,0 +1,18 @@
+# HTTP create + one invoke-tick. The history user row must equal the tick prompt
+# the runner posted (the scheduler's format_tick_prompt text), and a reply follows.
+case: T4-SCHED-01
+mode: live
+description: "Creating a loop over HTTP and invoking one tick records that prompt and a reply"
+tags: [scheduler]
+steps:
+  - action: create_loop
+    prompt: Reply with the single word pong.
+    interval: 1h
+    max_ticks: 1
+  - action: invoke_tick
+  - action: read_history
+assertions:
+  chat_history:
+    one_user_message: true
+    user_equals_turn_input: true
+    assistant_nonempty: true

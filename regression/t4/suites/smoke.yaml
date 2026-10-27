@@ -1,0 +1,26 @@
+# Explicit smoke suite membership — not implicitly "every scenario in the tree". Add a scenario
+# here only once it's stable enough to gate merges. See docs/live-evals.md.
+id: smoke
+scenarios:
+  - file/core_read
+  - file/core_read_error
+  - file/core_write
+  - shell/core_run_command
+  - skills/skill_invocation
+  - subagents/dispatch_complete
+  - memory/recall_single_session
+  - memory/recall_cross_session
+  - multi_turn/task_tracking
+  - mcp/tool_invoke
+  - mcp/list_resources
+  - mcp/get_prompt
+  # - context/summarization_trigger   # excluded: known-failing on thinkingmachines/inkling
+  #   (min_summarizations: 0 < 1) — inkling's terser replies likely never push the estimated
+  #   prompt past the trigger cap in this scenario's turn count. Re-add once retuned
+  #   (more turns / smaller window) or root-caused.
+# pytest --suite smoke runs the regression/t4/python files named in `python`
+# and no others. With no --suite, every file in that directory runs, including
+# test_docker_image_health.py (T4-OPS-01). test_provider_live_matrix.py is named
+# so T4-PROV-01 runs with this suite. MONKEYBOT_LIVE_MATRIX_MODEL_<ID> is unchanged.
+python:
+  - test_provider_live_matrix.py

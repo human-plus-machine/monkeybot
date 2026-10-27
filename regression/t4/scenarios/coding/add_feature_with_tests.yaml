@@ -1,0 +1,21 @@
+case: T4-CODE-02
+mode: live
+description: >
+  Agent adds a small feature plus tests following the repository's own
+  conventions (AGENTS.md), then runs the suite before answering.
+tags: [coding, feature]
+workspace_fixture: calc_repo_green
+messages:
+  - >
+    In the repository at `{workspace_subdir}/`, add a `power(base, exponent)`
+    function to the calculator module and a test for it. Follow the repository's
+    conventions, and run the tests when you are done. Tell me what you ran and
+    the result.
+assertions:
+  required_tools: [run_command]
+  max_tool_errors: 1
+  workspace_file_contains:
+    calc/ops.py: "def power("
+    tests/test_ops.py: "power"
+  workspace_command_passes: python -m pytest -q
+  verified_before_final: true

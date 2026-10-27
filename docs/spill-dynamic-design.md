@@ -146,7 +146,7 @@ This one cannot be quietly converted, and the plan should not pretend otherwise.
 It is the **input** to every budget here, but:
 
 - `.github/workflows/live-eval-smoke.yml` sets `MODEL_CONTEXT_WINDOW: "8000"` as a workflow env var.
-- `evals/scenarios/context/summarization_trigger.yaml` instructs the operator to set the same env var to force summarization.
+- The summarization scenario instructed the operator to set the same env var to force summarization.
 - It is read in five places (`bootstrap.py`, `subagents/subagent_worker.py`, `gateway/sse/app.py`, `gateway/sse/routes.py`, `gateway/realtime/routes.py`), four of which are gateway/UI meters unrelated to spill.
 
 Making it YAML-only breaks CI and the eval harness and touches a pre-existing,

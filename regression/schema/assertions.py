@@ -3,7 +3,7 @@
 One implementation for every mode. :func:`validate_assertions` rejects a key
 used in the wrong mode, and ``verifier_on`` / ``verifier_off`` while
 ``EVAL_VERIFIER_MODE`` is unset. :func:`evaluate` checks a finished
-:class:`RunView`. It does not import ``evals/``.
+:class:`RunView`. It does not import the live runner.
 """
 
 from __future__ import annotations
@@ -18,11 +18,12 @@ import shlex
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from monkeybot.core.config.settings import VERIFIER_SEVERITY_RANK
+from monkeybot.core.hooks.evidence_guard import extract_evidence_paths
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.messages.tool_integrity import (
     cancelled_tool_result_text,
@@ -89,13 +90,24 @@ _ASSERTION_MODES: dict[str, frozenset[str] | None] = {
     "final_text_regex": _MODES_ALL,
     "metrics": frozenset({"live"}),
     "min_score": frozenset({"live"}),
+    "min_summarizations": frozenset({"live"}),
     "max_latency_ms": frozenset({"live"}),
     "max_input_tokens": frozenset({"live"}),
     "max_output_tokens": frozenset({"live"}),
     "max_cost_usd": frozenset({"live"}),
     "verifier_on": frozenset({"live"}),
     "verifier_off": frozenset({"live"}),
+    "tool_args": frozenset({"live"}),
+    "per_session": frozenset({"live"}),
+    "evidence_paths": frozenset({"live"}),
+    "subagent_manifest": frozenset({"live"}),
+    "system_prompt": frozenset({"live"}),
+    "chat_history": frozenset({"live"}),
 }
+# Keys a ``per_session`` block cannot hold: the judge scores the whole run, not one session.
+_PER_SESSION_BANNED = frozenset(
+    {"per_session", "verifier_on", "verifier_off", "metrics", "min_score"}
+)
 
 _HISTORY_KEYS = frozenset(
     {
@@ -116,6 +128,7 @@ _SSE_KEYS = frozenset(
         "one_turn_complete_per_request",
         "replay_from",
         "golden",
+        "deltas_equal_final",
     }
 )
 _VERDICT_KEYS = frozenset(
@@ -194,6 +207,12 @@ class RunView:
     driver: str | None = None
     second_reply_status: int | None = None
     sse_wire: str = ""
+    # Filled by the live runner. Empty means that check was not recorded.
+    chat_history: list[list[dict[str, Any]]] = field(default_factory=list)
+    system_prompts: list[str] = field(default_factory=list)
+    manifests: list[dict[str, Any]] = field(default_factory=list)
+    turn_inputs: list[str] = field(default_factory=list)
+    session_events: dict[int, list[Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -298,6 +317,9 @@ def validate_assertions(
     verifier_present = False
     for key, value in assertions.items():
         problems.extend(_key_problems(key, mode=mode, driver=driver, where=""))
+        if key == "per_session" and _key_allowed(key, mode=mode, driver=driver):
+            problems.extend(_per_session_problems(value, mode=mode, driver=driver))
+            continue
         if key not in _VERIFIER_KEYS:
             if (
                 key == "memory_injected"
@@ -372,6 +394,13 @@ def evaluate(assertions: dict[str, Any] | list[Any] | None, run: RunView) -> lis
         _check_final_text_regex,
         _check_metrics,
         _check_min_score,
+        _check_min_summarizations,
+        _check_tool_args,
+        _check_per_session,
+        _check_evidence_paths,
+        _check_subagent_manifest,
+        _check_system_prompt,
+        _check_chat_history,
         _check_budgets,
     )
     for check in checks:
@@ -423,6 +452,27 @@ def _key_problems(key: str, *, mode: str, driver: str | None, where: str) -> lis
         shown = driver if driver is not None else "unset"
         return [f"assertion key {label!r} is not legal for mode {mode!r} with driver {shown!r}"]
     return [f"assertion key {label!r} is not legal for mode {mode!r}"]
+
+
+def _per_session_problems(value: object, *, mode: str, driver: str | None) -> list[str]:
+    """``per_session`` maps a 1-based session number to that session's assertion keys."""
+    if not isinstance(value, dict) or not value:
+        return ["per_session must map session numbers to assertion mappings"]
+    problems: list[str] = []
+    for number, block in value.items():
+        if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+            problems.append(f"per_session key {number!r} must be a session number from 1")
+            continue
+        where = f"per_session.{number}"
+        if not isinstance(block, dict) or not block:
+            problems.append(f"{where} must be a non-empty mapping")
+            continue
+        for inner_key in block:
+            if inner_key in _PER_SESSION_BANNED:
+                problems.append(f"{inner_key} cannot be nested in {where}")
+                continue
+            problems.extend(_key_problems(inner_key, mode=mode, driver=driver, where=where))
+    return problems
 
 
 def _memory_shape(value: object) -> bool:
@@ -1673,7 +1723,42 @@ def _check_sse(active: Mapping[str, Any], run: RunView) -> list[str]:
                     )
     if "golden" in spec:
         failures.extend(_check_sse_golden(spec["golden"], run))
+    if spec.get("deltas_equal_final") is True:
+        failures.extend(_deltas_equal_final(frames))
     return failures
+
+
+def _deltas_equal_final(frames: Sequence[Any]) -> list[str]:
+    """Per request, the received ``AssistantDelta`` text in order equals the settled text.
+
+    Frames are taken as received, so a frame lost or replayed twice across a reconnect
+    shows up as a mismatch.
+    """
+    deltas: dict[str, list[str]] = {}
+    settled: dict[str, list[str]] = {}
+    for frame in frames:
+        request_id = event_field(frame, "request_id")
+        if not isinstance(request_id, str) or not request_id:
+            continue
+        kind = event_type(frame)
+        if kind == "AssistantDelta":
+            delta = event_field(frame, "delta")
+            if isinstance(delta, str):
+                deltas.setdefault(request_id, []).append(delta)
+        elif kind == "AssistantTextEnded":
+            text = event_field(frame, "text")
+            if isinstance(text, str) and text:
+                settled.setdefault(request_id, []).append(text)
+    if not settled:
+        return ["sse: deltas_equal_final saw no AssistantTextEnded with text"]
+    bad = sorted(
+        request_id
+        for request_id, texts in settled.items()
+        if "".join(deltas.get(request_id, [])) != "".join(texts)
+    )
+    if bad:
+        return [f"sse: concatenated AssistantDelta text differs from the final text for {bad}"]
+    return []
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -1824,6 +1909,295 @@ def _check_min_score(active: Mapping[str, Any], run: RunView) -> list[str]:
     return []
 
 
+def _check_min_summarizations(active: Mapping[str, Any], run: RunView) -> list[str]:
+    if "min_summarizations" not in active:
+        return []
+    minimum = active["min_summarizations"]
+    if isinstance(minimum, bool) or not isinstance(minimum, int):
+        return ["min_summarizations: expected an integer"]
+    count = sum(1 for event in _events(run) if event_type(event) == "ContextSummarized")
+    if count < minimum:
+        return [f"min_summarizations: {count} < {minimum}"]
+    return []
+
+
+def evaluate_live_extensions(assertions: Mapping[str, Any], run: RunView) -> list[str]:
+    """Checks for keys the live runner records. Other keys stay with that runner."""
+    failures: list[str] = []
+    for check in (
+        _check_tool_args,
+        _check_per_session,
+        _check_evidence_paths,
+        _check_subagent_manifest,
+        _check_system_prompt,
+        _check_chat_history,
+        _check_sse,
+    ):
+        failures.extend(check(assertions, run))
+    return failures
+
+
+def _tool_arg_maps(run: RunView) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for event in _events(run):
+        if event_type(event) != "ToolCallStarted":
+            continue
+        tool = event_field(event, "tool")
+        args = event_field(event, "args")
+        if not isinstance(tool, str) or not tool or not isinstance(args, dict):
+            continue
+        grouped.setdefault(tool, []).append(dict(args))
+    return grouped
+
+
+def _has_stop_guard(args: Mapping[str, Any]) -> bool:
+    """A loop stop guard is max_ticks, a max runtime, or unbounded=true."""
+    max_ticks = args.get("max_ticks")
+    if isinstance(max_ticks, int) and not isinstance(max_ticks, bool) and max_ticks >= 1:
+        return True
+    max_runtime = args.get("max_runtime")
+    if isinstance(max_runtime, str) and max_runtime.strip():
+        return True
+    if (
+        isinstance(max_runtime, (int, float))
+        and not isinstance(max_runtime, bool)
+        and max_runtime > 0
+    ):
+        return True
+    return args.get("unbounded") is True
+
+
+def _command_blob(args: Mapping[str, Any]) -> str:
+    parts: list[str] = []
+    for key in ("command", "cmd", "shell", "script"):
+        raw = args.get(key)
+        if isinstance(raw, str) and raw.strip():
+            parts.append(raw)
+    for key in ("argv", "args", "arguments"):
+        raw = args.get(key)
+        if isinstance(raw, list):
+            parts.extend(str(item) for item in raw if item is not None)
+    return " ".join(parts)
+
+
+def _check_tool_args(active: Mapping[str, Any], run: RunView) -> list[str]:
+    spec = active.get("tool_args")
+    if spec is None:
+        return []
+    if not isinstance(spec, dict):
+        return ["tool_args: expected a mapping of tool name to matchers"]
+    calls = _tool_arg_maps(run)
+    failures: list[str] = []
+    for tool, matchers in spec.items():
+        label = f"tool_args.{tool}"
+        if not isinstance(matchers, dict):
+            failures.append(f"{label}: expected a mapping of matchers")
+            continue
+        found = calls.get(str(tool), [])
+        if not found:
+            failures.append(f"{label}: tool was not called")
+            continue
+        if matchers.get("stop_guard") is True and not any(_has_stop_guard(args) for args in found):
+            failures.append(
+                f"{label}: no call had a stop guard (max_ticks, max_runtime, or unbounded)"
+            )
+        needles = matchers.get("command_contains")
+        if needles is None:
+            continue
+        if isinstance(needles, str):
+            needles = [needles]
+        if not isinstance(needles, list) or not all(isinstance(item, str) for item in needles):
+            failures.append(f"{label}: command_contains expected a string or list of strings")
+            continue
+        if not any(
+            all(needle.lower() in _command_blob(args).lower() for needle in needles)
+            for args in found
+        ):
+            failures.append(f"{label}: no call contained {needles}")
+    return failures
+
+
+def _check_per_session(active: Mapping[str, Any], run: RunView) -> list[str]:
+    spec = active.get("per_session")
+    if spec is None:
+        return []
+    if not isinstance(spec, dict):
+        return ["per_session: expected a mapping of session number to assertions"]
+    nested = (
+        _check_tool_args,
+        _check_required_tools,
+        _check_response_contains,
+        _check_response_contains_all,
+        _check_response_not_contains,
+        _check_response_regex,
+    )
+    failures: list[str] = []
+    for number, block in spec.items():
+        where = f"per_session.{number}"
+        if not isinstance(block, dict):
+            failures.append(f"{where}: expected a mapping")
+            continue
+        try:
+            session = int(number)
+        except (TypeError, ValueError):
+            failures.append(f"{where}: session was not recorded")
+            continue
+        events = run.session_events.get(session)
+        if events is None:
+            failures.append(f"{where}: session was not recorded")
+            continue
+        scoped = replace(run, events=list(events))
+        for check in nested:
+            for failure in check(block, scoped):
+                failures.append(f"{where}: {failure}")
+    return failures
+
+
+def _read_paths(run: RunView) -> set[str]:
+    found: set[str] = set()
+    for event in _events(run):
+        if event_type(event) != "ToolCallStarted" or event_field(event, "tool") != "read_file":
+            continue
+        args = event_field(event, "args")
+        if not isinstance(args, dict):
+            continue
+        for key in ("path", "file_path", "file"):
+            raw = args.get(key)
+            if isinstance(raw, str) and raw.strip():
+                found.add(_norm_path(raw))
+    return found
+
+
+def _cited_was_read(cited: str, read_paths: set[str]) -> bool:
+    norm = _norm_path(cited)
+    if not norm:
+        return False
+    if norm in read_paths:
+        return True
+    return any(
+        read == norm or read.endswith("/" + norm) or norm.endswith("/" + read)
+        for read in read_paths
+    )
+
+
+def _cited_exists(cited: str, workspace: Path) -> bool:
+    norm = _norm_path(cited)
+    if not norm:
+        return False
+    root = workspace.resolve()
+    candidate = (root / norm).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return False
+    return candidate.is_file()
+
+
+def _check_evidence_paths(active: Mapping[str, Any], run: RunView) -> list[str]:
+    spec = active.get("evidence_paths")
+    if spec is None:
+        return []
+    cited = exist = was_read = True
+    if spec is True:
+        pass
+    elif isinstance(spec, dict):
+        cited = bool(spec.get("cited", True))
+        exist = bool(spec.get("exist", True))
+        was_read = bool(spec.get("read", True))
+    else:
+        return ["evidence_paths: expected true or a mapping"]
+    paths = extract_evidence_paths(_response_text(run))
+    failures: list[str] = []
+    if cited and not paths:
+        failures.append("evidence_paths: no Evidence paths were cited")
+    if not paths:
+        return failures
+    read_paths = _read_paths(run)
+    for path in paths:
+        if exist:
+            if run.workspace is None:
+                failures.append(f"evidence_paths: {path} was cited but no workspace was recorded")
+            elif not _cited_exists(path, run.workspace):
+                failures.append(f"evidence_paths: {path} was cited but does not exist")
+        if was_read and not _cited_was_read(path, read_paths):
+            failures.append(f"evidence_paths: {path} was cited but was not read")
+    return failures
+
+
+def _check_subagent_manifest(active: Mapping[str, Any], run: RunView) -> list[str]:
+    spec = active.get("subagent_manifest")
+    if spec is None:
+        return []
+    if not isinstance(spec, dict) or not isinstance(spec.get("subagent_type"), str):
+        return ["subagent_manifest: expected subagent_type"]
+    wanted = spec["subagent_type"]
+    found = [
+        value
+        for manifest in run.manifests
+        if isinstance(value := manifest.get("subagent_type"), str) and value
+    ]
+    if wanted not in found:
+        shown = found or "no child manifests"
+        return [f"subagent_manifest: subagent_type {wanted!r} not in {shown}"]
+    return []
+
+
+def _check_system_prompt(active: Mapping[str, Any], run: RunView) -> list[str]:
+    spec = active.get("system_prompt")
+    if spec is None:
+        return []
+    if not isinstance(spec, dict):
+        return ["system_prompt: expected a mapping"]
+    phrases = spec.get("last_not_contains") or []
+    if isinstance(phrases, str):
+        phrases = [phrases]
+    if not isinstance(phrases, list) or not all(isinstance(item, str) for item in phrases):
+        return ["system_prompt: last_not_contains expected a string or list of strings"]
+    if not run.system_prompts or not str(run.system_prompts[-1]).strip():
+        return ["system_prompt: no system prompt was recorded for the last turn"]
+    last = run.system_prompts[-1]
+    hits = [phrase for phrase in phrases if phrase in last]
+    if hits:
+        return [f"system_prompt: last turn contains {hits}"]
+    return []
+
+
+def _history_text(row: Mapping[str, Any]) -> str:
+    text = row.get("text")
+    if isinstance(text, str):
+        return text
+    content = row.get("content")
+    return content if isinstance(content, str) else ""
+
+
+def _check_chat_history(active: Mapping[str, Any], run: RunView) -> list[str]:
+    spec = active.get("chat_history")
+    if spec is None:
+        return []
+    if not isinstance(spec, dict):
+        return ["chat_history: expected a mapping"]
+    if not run.chat_history:
+        return ["chat_history: no history snapshot was recorded"]
+    snapshot = run.chat_history[-1]
+    users = [row for row in snapshot if isinstance(row, dict) and row.get("role") == "user"]
+    assistants = [
+        row
+        for row in snapshot
+        if isinstance(row, dict) and row.get("role") == "assistant" and _history_text(row).strip()
+    ]
+    failures: list[str] = []
+    if spec.get("one_user_message") is True and len(users) != 1:
+        failures.append(f"chat_history: expected one user message, saw {len(users)}")
+    if spec.get("user_equals_turn_input") is True:
+        expected = run.turn_inputs[-1] if run.turn_inputs else ""
+        actual = _history_text(users[-1]) if users else ""
+        if actual != expected:
+            failures.append("chat_history: user message does not equal the tick prompt")
+    if spec.get("assistant_nonempty") is True and not assistants:
+        failures.append("chat_history: no assistant reply")
+    return failures
+
+
 def _check_budgets(active: Mapping[str, Any], run: RunView) -> list[str]:
     totals = _usage_totals(run)
     checks = (
@@ -1855,6 +2229,7 @@ __all__ = [
     "StoreView",
     "canonical_target",
     "evaluate",
+    "evaluate_live_extensions",
     "event_field",
     "event_type",
     "history_orphan_ids",

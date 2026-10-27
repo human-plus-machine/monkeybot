@@ -4,7 +4,7 @@ description: An edit followed by a bare 'done' is refused once; the retry verifi
 mode: scripted
 driver: loop
 executor: real
-workspace_fixture: fixtures/coding/calc_repo
+workspace_fixture: calc_repo
 hooks:
 - verification_gate
 messages:

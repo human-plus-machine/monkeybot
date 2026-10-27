@@ -1,0 +1,15 @@
+# Every path on an Evidence line must exist in the agent workspace and have been
+# opened with read_file. The fixture copy is `{workspace_subdir}` under that workspace.
+case: T4-HOOK-01
+mode: live
+description: "An answer that cites Evidence paths only names files the agent read"
+tags: [hooks, evidence]
+workspace_fixture: calc_repo_green
+messages:
+  - >
+    Read `{workspace_subdir}/calc/ops.py` with the read_file tool. Then answer, in
+    one sentence, what the file defines. End with a single Evidence line whose
+    path is exactly `{workspace_subdir}/calc/ops.py`.
+assertions:
+  required_tools: [read_file]
+  evidence_paths: true

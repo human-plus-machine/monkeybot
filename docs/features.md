@@ -713,7 +713,7 @@ Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.
 - The gate is policy in a hook; the loop only offers the generic hold/refuse seam (§16) and is bounded (hook errors and timeouts are pass-through, refusals are capped, never raises, still ends in `TurnComplete`).
 - Realtime loop does not implement `PRE_FINAL_ANSWER`/`HISTORY_COMPACTED` yet.
 
-**Evals:** `evals/suites/coding.yaml` (live; workspace-checked assertions — see [live-evals.md](live-evals.md#coding-suite-workspace-checked)) and `tests/evals/scenarios/coding_*.yaml` (deterministic, `executor: real`).
+**Evals:** [`regression/t4/suites/coding.yaml`](../regression/t4/suites/coding.yaml) (live; workspace-checked assertions — see [live-evals.md](live-evals.md#coding-suite)) and the scripted scenarios under `regression/t2/`.
 
 ---
 
@@ -820,39 +820,20 @@ Use this when reviewing PRs or designing new features.
 
 ## Testing guide
 
-### Unit / integration (`tests/`)
+Tiers, commands, and the failure policy are in [testing.md](testing.md).
 
 | Area | Location |
 |------|----------|
-| Loop semantics | `tests/core/test_loop.py` |
-| Prompt composition | `tests/core/test_prompt.py`, `tests/core/test_harness_prompt.py` |
-| Tools | `tests/core/test_core_tool_executor.py` |
-| Memory | `tests/core/memory/` |
-| Providers | `tests/providers/` |
-| Gateway | `tests/gateway/` |
-| Integration | `tests/integration/` |
+| Loop semantics | `tests/unit/core/runtime/test_loop.py` |
+| Prompt composition | `tests/unit/core/prompts/test_prompt.py`, `tests/unit/core/prompts/test_harness_prompt.py` |
+| Tools | `tests/unit/core/tools/test_core_tool_executor.py` |
+| Memory | `tests/unit/core/memory/` |
+| Providers | `tests/unit/providers/` |
+| Gateway | `tests/unit/gateway/` |
+| Scripted trajectories | `regression/t2/` |
+| Live suites | `regression/t4/` (`uv run python -m regression.t4 --suite smoke`) |
 
-**Key test doubles:**
-- `core/testing/mocks_provider.py` — `ScriptedFakeProvider`
-- `tests/core/test_loop.py` — `FakeHistory`, `FakeProvider`, `RecordingExecutor`, `AllowInspector`
-
-**Global fixture:** `tests/conftest.py` forces `SANDBOX_ENABLED=false`.
-
-### Behavioral evals (`tests/evals/`)
-
-YAML-driven scenarios asserting harness behavior without live LLM.
-
-- `tests/evals/scenario_runner.py`
-- `tests/evals/eval_hook.py`
-- `tests/evals/scenarios/*.yaml`
-
-**Note:** Assert tools via `RecordingExecutor`; `POST_TOOL` hook may not complete before `run()` returns.
-
-### Judge-based evals (`evals/`)
-
-Separate harness at repo root for higher-level agent evaluation, run as a CLI against a
-live gateway: `uv run python -m evals.report --suite smoke` (see `evals/report.py`; diff
-two runs with `python -m evals.diff`).
+Doubles live in `testkit/` (`FakeHistory`, `ScriptedProvider`, `RecordingExecutor`). `tests/conftest.py` forces `SANDBOX_ENABLED=false`.
 
 ---
 

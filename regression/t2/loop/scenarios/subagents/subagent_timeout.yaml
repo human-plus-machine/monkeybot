@@ -11,7 +11,7 @@ config:
     timeout_sec: 2
   env:
     MONKEYBOT_SUBAGENT_SCRIPT: testkit/subagent_worker.py
-    AGENT_MD: evals/smoke_agent/monkeybot_config/AGENT.md
+    AGENT_MD: regression/t4/agent/monkeybot_config/AGENT.md
 script:
 - - type: tool_call
     call_id: c1

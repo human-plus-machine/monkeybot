@@ -1,0 +1,12 @@
+# Scheduler suite. http_one_tick_live drives the HTTP API; model_starts_loop asks
+# the model to call start_loop with a stop guard.
+# pytest --suite scheduler runs the regression/t4/python files named in `python`
+# and no others. With no --suite, every file in that directory runs, including
+# test_docker_image_health.py (T4-OPS-01). test_provider_live_matrix.py is named
+# so T4-PROV-01 runs with this suite. MONKEYBOT_LIVE_MATRIX_MODEL_<ID> is unchanged.
+id: scheduler
+scenarios:
+  - scheduler/http_one_tick_live
+  - scheduler/model_starts_loop
+python:
+  - test_provider_live_matrix.py

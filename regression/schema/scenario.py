@@ -15,7 +15,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validat
 from monkeybot.core.llm.provider import Message
 from regression.schema.assertions import validate_assertions
 from regression.schema.events import ScriptEvent
-from regression.schema.steps import Step
+from regression.schema.steps import (
+    LAST_SEEN_EVENT_ID,
+    LIVE_ACTIONS,
+    LIVE_ONLY_ACTIONS,
+    DisconnectSseStep,
+    ReconnectSseStep,
+    Step,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCENARIO_SUFFIXES = {".yaml", ".yml"}
@@ -68,7 +75,7 @@ _SCRIPTED_AND_REPLAY: frozenset[str] = frozenset(
 _LEGAL_KEYS: dict[Mode, frozenset[str]] = {
     "scripted": _COMMON | _SCRIPTED_AND_REPLAY | {"script_partial", "script", "tool_results"},
     "replay": _COMMON | _SCRIPTED_AND_REPLAY | {"cassette"},
-    "live": _COMMON | {"trials"},
+    "live": _COMMON | {"trials", "steps"},
 }
 
 
@@ -245,6 +252,8 @@ class Scenario(BaseModel):
                 self.executor = "recording"
             elif self.executor is None:
                 raise ValueError("executor must be recording or real")
+        if self.mode == "live":
+            _live_step_rules(self.steps)
         if self.mode == "scripted":
             if "script_partial" not in self.model_fields_set:
                 self.script_partial = False
@@ -252,6 +261,30 @@ class Scenario(BaseModel):
                 raise ValueError("script_partial must be a boolean")
         validate_assertions(self.assertions, mode=self.mode, driver=self.driver)
         return self
+
+
+def _live_step_rules(steps: list[Step]) -> None:
+    """Live steps: only actions the live runner runs; a drop is always paired with a resume."""
+    for step in steps:
+        if step.action not in LIVE_ACTIONS:
+            allowed = ", ".join(sorted(LIVE_ACTIONS))
+            raise ValueError(f"live runner does not run step {step.action}; live steps: {allowed}")
+    drops = [step.when for step in steps if isinstance(step, DisconnectSseStep)]
+    resumes = [step.when for step in steps if isinstance(step, ReconnectSseStep)]
+    if drops != resumes:
+        raise ValueError(
+            "live disconnect_sse and reconnect_sse come in pairs with the same when; "
+            "the live runner drops the stream and resumes it on the same event"
+        )
+    for step in steps:
+        if step.action in LIVE_ONLY_ACTIONS and step.when is not None:
+            raise ValueError(f"{step.action} runs before the first message and does not take when")
+    for step in steps:
+        if isinstance(step, ReconnectSseStep) and step.last_event_id != LAST_SEEN_EVENT_ID:
+            raise ValueError(
+                f"live reconnect_sse takes last_event_id: {LAST_SEEN_EVENT_ID} "
+                "(the id of the last frame read before the drop)"
+            )
 
 
 def scenario_id_from_path(path: Path, *, root: Path | None = None) -> str:

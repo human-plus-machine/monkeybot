@@ -1510,7 +1510,11 @@ async def test_disconnect_from_another_task_reaps_stdio_child(
 ) -> None:
     """The session stack closes in its owner task, so a different task can disconnect it."""
     fixture = (
-        Path(__file__).resolve().parents[4] / "evals" / "smoke_agent" / "fixture_mcp_server.py"
+        Path(__file__).resolve().parents[4]
+        / "regression"
+        / "fixtures"
+        / "mcp"
+        / "fixture_mcp_server.py"
     )
     client = MCPClient()
     before = _child_pids(os.getpid())

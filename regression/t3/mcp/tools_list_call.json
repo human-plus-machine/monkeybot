@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "kind": "mcp",
+  "server": "fixture",
+  "sdk": {
+    "mcp": "1.30.0"
+  },
+  "tools_list": {
+    "request": {
+      "method": "tools/list"
+    },
+    "response": {
+      "tools": [
+        {
+          "name": "echo",
+          "description": "Echo the given text back, prefixed with 'echo: '.",
+          "inputSchema": {
+            "properties": {
+              "text": {
+                "title": "Text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "title": "echoArguments",
+            "type": "object"
+          },
+          "outputSchema": {
+            "properties": {
+              "result": {
+                "title": "Result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "result"
+            ],
+            "title": "echoOutput",
+            "type": "object"
+          }
+        }
+      ]
+    }
+  },
+  "server_capabilities": {
+    "experimental": {},
+    "prompts": {
+      "listChanged": false
+    },
+    "resources": {
+      "subscribe": false,
+      "listChanged": false
+    },
+    "tools": {
+      "listChanged": false
+    }
+  },
+  "tools_call": {
+    "request": {
+      "method": "tools/call",
+      "params": {
+        "name": "echo",
+        "arguments": {
+          "text": "ping"
+        }
+      }
+    },
+    "response": {
+      "content": [
+        {
+          "type": "text",
+          "text": "echo: ping"
+        }
+      ],
+      "structuredContent": {
+        "result": "echo: ping"
+      },
+      "isError": false
+    }
+  },
+  "expected": {
+    "tools": [
+      {
+        "name": "fixture__echo",
+        "description": "Echo the given text back, prefixed with 'echo: '.",
+        "input_schema": {
+          "properties": {
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "title": "echoArguments",
+          "type": "object"
+        }
+      }
+    ],
+    "capabilities": {
+      "tools": true,
+      "resources": true,
+      "prompts": true
+    },
+    "result_text": "echo: ping"
+  }
+}

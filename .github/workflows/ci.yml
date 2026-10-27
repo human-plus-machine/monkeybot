@@ -28,6 +28,12 @@ jobs:
       - name: Mypy
         run: uv run mypy src/monkeybot testkit
 
+      # §9 cassette-staleness: the reminder is a PR that touches any uv.lock.
+      # This workflow stays workflow_dispatch (D2), so the step runs on every
+      # dispatch. No provider key. scripts/ci-local.sh runs the same command.
+      - name: cassette-staleness
+        run: uv run python -m regression.t3.tools.check_staleness
+
       - name: Pytest
         run: uv run pytest tests regression -m "t1 or t2 or t3" -q -n auto
 
@@ -41,12 +47,5 @@ jobs:
         working-directory: integrations/browser-mcp
         run: |
           uv sync --dev
-          uv run pytest -q
-
-      - name: Evals self-checks (no live agent, no model calls)
-        run: |
-          uv sync --extra evals
-          uv run python evals/test_assertions.py
-          uv run python evals/test_report.py
-          uv run python evals/test_runner_sse.py
-          uv run python evals/test_coding_hard_oracle.py
+          # Root pytest.ini addopts load regression.plugin, which imports monkeybot.
+          uv run pytest -q -o addopts= -p testkit.failure_ledger

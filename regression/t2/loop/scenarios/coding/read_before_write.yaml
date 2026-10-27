@@ -5,7 +5,7 @@ description: A blind edit is refused (read_before_write); after read_file the sa
 mode: scripted
 driver: loop
 executor: real
-workspace_fixture: fixtures/coding/calc_repo
+workspace_fixture: calc_repo
 messages:
 - Make divide() raise ValueError on zero.
 script:

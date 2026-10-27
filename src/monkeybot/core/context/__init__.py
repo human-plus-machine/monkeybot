@@ -580,6 +580,13 @@ def _core_tool_defs(
                     "(default workspace root). A file path searches just that file."
                 ),
             },
+            "path": {
+                "type": "string",
+                "description": (
+                    "Alias of root: a repo-relative directory or file to search. "
+                    "root wins when both are set."
+                ),
+            },
             "ignore_case": {
                 "type": "boolean",
                 "description": "Case-insensitive search (default false).",

@@ -170,7 +170,7 @@ cd cli && uv sync
 uv tool install --editable . --overrides src/monkeybot_cli/overrides.txt
 ```
 
-For live eval smoke against this checkout, see [`evals/smoke_agent/`](../evals/smoke_agent/).
+For live eval smoke against this checkout, see [`regression/t4/agent/`](../regression/t4/agent/) and [live-evals.md](live-evals.md).
 
 ---
 

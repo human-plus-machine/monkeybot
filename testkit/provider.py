@@ -3,17 +3,52 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
-from typing import cast
+from typing import Any, Protocol, cast
 
 from monkeybot.core.llm.provider import Message, ProviderEvent
 from monkeybot.core.testing.mocks_provider import (
-    ScriptedProvider as ScriptedProvider,
+    RaiseStep,
+    _event_from_mapping,
+    fake_provider_prompt_tokens,
 )
 from monkeybot.core.testing.mocks_provider import (
-    fake_provider_prompt_tokens,
+    ScriptedProvider as ScriptedProvider,
 )
 from monkeybot.core.types.content_blocks import Text
 from monkeybot.core.types.types_tools import ToolDef
+
+
+class _CassetteEvent(Protocol):
+    def model_dump(self, *, exclude_none: bool = ...) -> dict[str, Any]: ...
+
+
+class _CassetteCall(Protocol):
+    @property
+    def events(self) -> Sequence[_CassetteEvent]: ...
+
+
+class _Cassette(Protocol):
+    """The part of a T3a cassette this module reads. The model lives in ``regression``."""
+
+    @property
+    def calls(self) -> Sequence[_CassetteCall]: ...
+
+
+def scripted_from_cassette(cassette: _Cassette, *, name: str = "fake") -> ScriptedProvider:
+    """Strict multi-turn provider that answers each ``stream()`` call from ``cassette``.
+
+    One cassette call is one turn. A call past the last recorded one raises
+    ``ScriptedProviderExhaustedError``, so a replay that diverges from the recording
+    fails instead of getting an empty reply.
+    """
+    turns: list[list[ProviderEvent | RaiseStep]] = []
+    for position, call in enumerate(cassette.calls):
+        events: list[ProviderEvent | RaiseStep] = []
+        for index, event in enumerate(call.events):
+            where = f"cassette call {position} event {index}"
+            events.append(_event_from_mapping(event.model_dump(exclude_none=True), where=where))
+        turns.append(events)
+    return ScriptedProvider(turns, name=name)
 
 
 class FakeProvider:

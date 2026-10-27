@@ -2,7 +2,13 @@
 
 Models and loop-driver execution. ``disconnect_sse`` and ``reconnect_sse``
 belong to the gateway driver (P2-01). ``client_text`` and ``interrupt`` belong
-to the realtime driver (P2-05). The loop driver rejects those four.
+to the realtime driver (P2-05). ``create_loop``, ``invoke_tick`` and
+``read_history`` belong to the live runner (``regression/t4/runner.py``), which
+also runs ``reload_config``, ``confirm_tool``, ``disconnect_sse`` and
+``reconnect_sse``. The loop driver rejects every step it does not run.
+
+A live step's ``when`` is optional: steps without one run in order before the
+first message.
 """
 
 from __future__ import annotations
@@ -146,6 +152,34 @@ class InterruptStep(_Step):
     action: Literal["interrupt"]
 
 
+class _LiveStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    when: EventPredicate | None = None
+
+
+class CreateLoopStep(_LiveStep):
+    """``POST /scheduler/loops`` on a fresh session. The runner stops the loop afterwards."""
+
+    action: Literal["create_loop"]
+    prompt: str = Field(min_length=1)
+    interval: str = Field(default="1h", min_length=1)
+    max_ticks: int | None = Field(default=1, ge=1)
+    max_runtime: str | None = None
+
+
+class InvokeTickStep(_LiveStep):
+    """``POST /scheduler/invoke-tick`` with the loop's prompt; the tick is one recorded turn."""
+
+    action: Literal["invoke_tick"]
+
+
+class ReadHistoryStep(_LiveStep):
+    """``GET /api/chat-history/{session}`` for the loop's session, else the current one."""
+
+    action: Literal["read_history"]
+
+
 Step: TypeAlias = Annotated[
     CancelStep
     | SteerStep
@@ -161,7 +195,10 @@ Step: TypeAlias = Annotated[
     | DisconnectSseStep
     | ReconnectSseStep
     | ClientTextStep
-    | InterruptStep,
+    | InterruptStep
+    | CreateLoopStep
+    | InvokeTickStep
+    | ReadHistoryStep,
     Field(discriminator="action"),
 ]
 
@@ -181,6 +218,16 @@ _PREDICATE_KINDS: dict[str, frozenset[str]] = {
 
 _GATEWAY_ONLY = frozenset({"disconnect_sse", "reconnect_sse"})
 _REALTIME_ONLY = frozenset({"client_text", "interrupt"})
+LIVE_ONLY_ACTIONS = frozenset({"create_loop", "invoke_tick", "read_history"})
+# Live ids are assigned by the running gateway, so a live resume names "the last frame read".
+LAST_SEEN_EVENT_ID = "last_seen"
+# Every step the live runner runs. The rest drive in-process fakes it does not have.
+LIVE_ACTIONS = LIVE_ONLY_ACTIONS | {
+    "reload_config",
+    "confirm_tool",
+    "disconnect_sse",
+    "reconnect_sse",
+}
 
 
 class StepExecutionError(RuntimeError):
@@ -234,42 +281,64 @@ def loop_driver_rejection(action: str) -> str | None:
             f"loop driver does not run {action}; "
             "client_text and interrupt belong to the realtime driver (P2-05)"
         )
+    if action in LIVE_ONLY_ACTIONS:
+        return (
+            f"loop driver does not run {action}; "
+            "create_loop, invoke_tick and read_history belong to the live runner (mode live)"
+        )
     return None
 
 
-class StepSchedule:
-    """Fire each step once, on the nth matching event."""
+class DueSteps:
+    """Hand back each step once, on the nth event its ``when`` matches.
 
-    def __init__(self, steps: list[Step], bindings: StepBindings) -> None:
-        self._pending = list(steps)
-        self._bindings = bindings
+    Steps without ``when`` (live setup steps) are never due here.
+    """
+
+    def __init__(self, steps: list[Step]) -> None:
+        self._pending = [step for step in steps if step.when is not None]
         self._counts: dict[tuple[str, str, str], int] = {}
 
     def pending(self) -> list[Step]:
         return list(self._pending)
 
-    def observe(self, event: object) -> list[object]:
-        """Run steps whose predicate matches ``event``. Records come back first."""
+    def take(self, event: object) -> list[Step]:
         if not self._pending:
             return []
         fired: list[Step] = []
         still: list[Step] = []
         seen: set[tuple[str, str, str]] = set()
         for step in self._pending:
-            if not _predicate_matches(step.when, event):
+            when = step.when
+            if when is None or not _predicate_matches(when, event):
                 still.append(step)
                 continue
-            key = (step.when.event, step.when.name or "", step.when.call_id or "")
+            key = (when.event, when.name or "", when.call_id or "")
             if key not in seen:
                 self._counts[key] = self._counts.get(key, 0) + 1
                 seen.add(key)
-            if self._counts[key] == step.when.nth:
+            if self._counts[key] == when.nth:
                 fired.append(step)
             else:
                 still.append(step)
         self._pending = still
+        return fired
+
+
+class StepSchedule:
+    """Fire each step once, on the nth matching event."""
+
+    def __init__(self, steps: list[Step], bindings: StepBindings) -> None:
+        self._due = DueSteps(steps)
+        self._bindings = bindings
+
+    def pending(self) -> list[Step]:
+        return self._due.pending()
+
+    def observe(self, event: object) -> list[object]:
+        """Run steps whose predicate matches ``event``. Records come back first."""
         produced: list[object] = []
-        for step in fired:
+        for step in self._due.take(event):
             produced.extend(execute_step(step, event, self._bindings))
         return produced
 
@@ -516,16 +585,23 @@ def _workspace_file(workspace: Path, raw: str) -> Path:
 
 
 __all__ = [
+    "LAST_SEEN_EVENT_ID",
+    "LIVE_ACTIONS",
+    "LIVE_ONLY_ACTIONS",
     "AdvanceClockStep",
     "AnswerAskUserStep",
     "CancelStep",
     "ClientTextStep",
     "ConfirmToolStep",
+    "CreateLoopStep",
     "DisconnectSseStep",
+    "DueSteps",
     "EventPredicate",
     "InterruptStep",
+    "InvokeTickStep",
     "PromoteFollowUpStep",
     "QueueFollowUpStep",
+    "ReadHistoryStep",
     "ReconnectSseStep",
     "ReloadedConfig",
     "ReloadConfigStep",

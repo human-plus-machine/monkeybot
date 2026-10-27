@@ -690,6 +690,7 @@ class TranscriptWriter:
         thinking_budget: int | None,
         tools_include_reason: str | None = None,
         tools_dirty_reason: str | None = None,
+        exchange_id: str | None = None,
     ) -> None:
         stubbed, owned = self._stub_messages(messages)
         record: dict[str, Any] = {
@@ -704,6 +705,8 @@ class TranscriptWriter:
         }
         if messages_reset:
             record["messages_reset"] = True
+        if exchange_id:
+            record["exchange_id"] = exchange_id
         payload: list[dict[str, object]] | dict[str, object] | None = None
         digest = ""
         schema_seq = 0
@@ -733,6 +736,7 @@ class TranscriptWriter:
         thinking: str,
         tool_requests: list[dict[str, object]],
         usage: dict[str, object],
+        exchange_id: str | None = None,
     ) -> None:
         record: dict[str, Any] = {
             "ts": now_iso(),
@@ -749,6 +753,8 @@ class TranscriptWriter:
         # tool calls is the pathology worth flagging.
         if not (text or "").strip() and not tool_requests:
             record["assistant_text_empty"] = True
+        if exchange_id:
+            record["exchange_id"] = exchange_id
         await self._append_line(record)
 
 

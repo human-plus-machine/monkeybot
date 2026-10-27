@@ -1,0 +1,35 @@
+id: regression/t2/loop/scenarios/store/transcript_convertible
+case: T2-STORE-03
+description: A transcript from runtime.transcript_enabled converts into a cassette that replays green.
+mode: scripted
+driver: gateway
+messages:
+- list the workspace
+config:
+  runtime:
+    transcript_enabled: true
+script:
+- - type: thinking
+    text: Look at the workspace first.
+    signature: sig-transcript-convertible
+  - type: tool_call
+    call_id: c1
+    name: list_dir
+    args:
+      path: .
+  - type: usage
+    input_tokens: 11
+    output_tokens: 7
+  - type: done
+- - type: text
+    text: The workspace is listed.
+  - type: usage
+    input_tokens: 13
+    output_tokens: 5
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  required_tools:
+  - list_dir
+  response_contains: The workspace is listed.

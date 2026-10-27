@@ -1,0 +1,14 @@
+# Optional: needs a vision-capable agent model. The fixture PNGs in
+# regression/fixtures/workspaces/att_ws are 1x1 pure red (ff0000).
+case: T4-ATT-01
+mode: live
+description: "Agent loads a fixture image and names its dominant color"
+tags: [attachments, vision, optional]
+workspace_fixture: att_ws
+messages:
+  - >
+    Load the image `{workspace_subdir}/tiny.png` with load_file and tell me its dominant
+    color in one word.
+assertions:
+  required_tools: [load_file]
+  final_text_regex: '(?i)\bred\b'

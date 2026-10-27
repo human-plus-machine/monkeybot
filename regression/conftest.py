@@ -1,6 +1,6 @@
 """Mark regression items by the tier directory they live in.
 
-T4 and T5 stay out of a default run. ``--live`` (registered in
+T4, T5, and any test marked ``live`` stay out of a default run. ``--live`` (registered in
 ``regression.plugin``) collects them. The other regression options are
 registered there and do nothing in this file.
 """
@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 _TIERS = ("t1", "t2", "t3", "t4", "t5")
-_LIVE_TIERS = ("t4", "t5")
+_LIVE_TIERS = ("t4", "t5", "live")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

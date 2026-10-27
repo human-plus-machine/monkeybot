@@ -1,0 +1,18 @@
+# After the first turn, rewrite memory.enabled to false and reload. The next
+# turn's system prompt must not contain the memory wake-up heading.
+case: T4-CFG-01
+mode: live
+description: "Reloading memory off removes the wake-up block from the next turn"
+tags: [config, reload]
+messages:
+  - Reply with the single word ready.
+  - Reply with the single word ready again.
+steps:
+  - action: reload_config
+    config:
+      memory.enabled: false
+    when: {event: TurnComplete}
+assertions:
+  system_prompt:
+    last_not_contains:
+      - "## Memory wake-up"

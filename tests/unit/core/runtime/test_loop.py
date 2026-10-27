@@ -30,6 +30,8 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.messages.transform_context import transform_context
+from monkeybot.core.persistence.thread_summary import CONTEXT_SUMMARY_PREFIX
+from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.context_budget import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.events import (
     AgentEvent,
@@ -73,6 +75,7 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.content_blocks import Thinking as ThinkingBlock
 from monkeybot.core.types.types_tools import ToolDef
+from regression.t3.tools.from_transcript import from_transcript
 from testkit.context import _ctx, _ctx_with_task
 from testkit.executors import RecordingExecutor
 from testkit.history import FakeHistory
@@ -1656,6 +1659,60 @@ async def _run_over_cap(tmp_path: Path, preload: list[Message]) -> FakeHistory:
         pass
     assert len(hist.reset_calls) == 1
     return hist
+
+
+@pytest.mark.asyncio
+async def test_compaction_records_the_raw_summary_call_on_the_transcript(tmp_path: Path) -> None:
+    """The summary model call is a transcript exchange, before the stored row is rewritten."""
+    hist = FakeHistory(_padded(8))
+    prov = FakeProvider(
+        [
+            [
+                TextDelta(text=" compressed summary "),
+                UsageEvent(input_tokens=3, output_tokens=2),
+                Done(),
+            ],
+            [TextDelta(text="final"), Done()],
+        ]
+    )
+    writer = TranscriptWriter("sess-compact", workspace_root=tmp_path)
+    async for _ in run(
+        "hello",
+        _ctx(workspace_root=tmp_path, context_window_tokens=800),
+        provider=prov,
+        history=hist,
+        inspectors=[],
+        tool_executor=RecordingExecutor(),
+        max_turns=4,
+        transcript_writer=writer,
+    ):
+        pass
+
+    lines = [
+        json.loads(line)
+        for line in writer.path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    summary_requests = [
+        line for line in lines if line.get("type") == "ProviderRequest" and line.get("exchange_id")
+    ]
+    summary_responses = [
+        line for line in lines if line.get("type") == "ProviderResponse" and line.get("exchange_id")
+    ]
+    assert len(summary_requests) == 1
+    assert summary_requests[0]["tools"] == []
+    assert summary_responses[0]["exchange_id"] == summary_requests[0]["exchange_id"]
+    assert summary_responses[0]["text"] == " compressed summary "
+    assert summary_responses[0]["tool_requests"] == []
+    assert CONTEXT_SUMMARY_PREFIX not in summary_responses[0]["text"]
+    stored = " ".join(_flatten_text_from_message(row) for row in hist.rows)
+    assert CONTEXT_SUMMARY_PREFIX in stored
+
+    cassette = from_transcript(writer.session_dir, scenario="demo/compact", harness_commit="abc")
+    assert cassette.calls[0].request.tool_names == []
+    assert cassette.calls[0].model_dump()["events"][0]["text"] == " compressed summary "
+    assert cassette.calls[1].request.tool_names
+    assert cassette.calls[1].model_dump()["events"][0]["text"] == "final"
 
 
 def _padded(n: int) -> list[Message]:

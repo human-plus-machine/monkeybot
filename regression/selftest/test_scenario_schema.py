@@ -478,16 +478,75 @@ def test_hooks_policy_memory_and_history(tmp_path: Path, mode: str) -> None:
     }
 
 
-@pytest.mark.parametrize("key", ["hooks", "policy", "memory", "history", "steps"])
+@pytest.mark.parametrize("key", ["hooks", "policy", "memory", "history"])
 def test_shared_scripted_replay_keys_illegal_for_live(tmp_path: Path, key: str) -> None:
     snippets = {
         "hooks": "hooks: [memory]\n",
         "policy": "policy:\n  grants: default\n",
         "memory": "memory:\n  index: []\n",
         "history": "history: []\n",
-        "steps": "steps: []\n",
     }
     _reject(tmp_path, _scenario("live", snippets[key]), key)
+
+
+def test_live_setup_steps_load(tmp_path: Path) -> None:
+    scenario = _load(
+        tmp_path,
+        _scenario(
+            "live",
+            """
+            steps:
+              - action: create_loop
+                prompt: Reply with the single word pong.
+              - action: invoke_tick
+              - action: read_history
+            """,
+        ),
+    )
+    assert [step.action for step in scenario.steps] == [
+        "create_loop",
+        "invoke_tick",
+        "read_history",
+    ]
+
+
+def test_live_rejects_a_step_the_runner_does_not_run(tmp_path: Path) -> None:
+    _reject(
+        tmp_path,
+        _scenario("live", "steps:\n  - action: cancel\n    when: {event: text}\n"),
+        "live runner does not run",
+    )
+
+
+def test_live_setup_steps_do_not_take_when(tmp_path: Path) -> None:
+    _reject(
+        tmp_path,
+        _scenario(
+            "live",
+            "steps:\n  - action: create_loop\n    prompt: ping\n    when: {event: text}\n",
+        ),
+        "does not take when",
+    )
+
+
+def test_live_disconnect_must_be_paired(tmp_path: Path) -> None:
+    _reject(
+        tmp_path,
+        _scenario("live", "steps:\n  - action: disconnect_sse\n    when: {event: text}\n"),
+        "pairs",
+    )
+
+
+def test_live_reconnect_id_is_last_seen(tmp_path: Path) -> None:
+    body = """
+    steps:
+      - action: disconnect_sse
+        when: {event: text}
+      - action: reconnect_sse
+        last_event_id: "17"
+        when: {event: text}
+    """
+    _reject(tmp_path, _scenario("live", body), "last_seen")
 
 
 def test_unknown_hook_bundle(tmp_path: Path) -> None:

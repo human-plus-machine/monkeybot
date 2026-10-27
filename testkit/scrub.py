@@ -67,7 +67,7 @@ def _literal_secrets() -> list[str]:
         if len(value) >= _MIN_PROJECT_LEN:
             found.append(value)
     for name, value in os.environ.items():
-        if name.endswith(_SECRET_SUFFIXES) and len(value) >= _MIN_SECRET_LEN:
+        if name.upper().endswith(_SECRET_SUFFIXES) and len(value) >= _MIN_SECRET_LEN:
             found.append(value)
     # Longer values first so a short secret that is a prefix does not leave a tail.
     found.sort(key=len, reverse=True)

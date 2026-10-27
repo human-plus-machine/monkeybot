@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "kind": "wake_up",
+  "sdk": {
+    "mempalace": "3.11.0"
+  },
+  "wing": "main",
+  "identity": "## L0 — IDENTITY\nI am agent-a, a MonkeyBot agent.\nI remember verbatim conversation turns in this palace.\n",
+  "drawers": [
+    {
+      "drawer_id": "d1",
+      "content": "Deploys go out on Tuesdays after the freeze check.",
+      "metadata": {
+        "wing": "main",
+        "room": "conversation",
+        "filed_at": "2026-01-01T09:00:00",
+        "chunk_index": "0",
+        "source_file": "",
+        "added_by": "monkeybot",
+        "thread_id": "t1"
+      }
+    },
+    {
+      "drawer_id": "d2",
+      "content": "User prefers short answers\nwith no emoji.",
+      "metadata": {
+        "wing": "main",
+        "room": "conversation",
+        "filed_at": "2026-01-02T09:00:00",
+        "chunk_index": "0",
+        "source_file": "",
+        "added_by": "monkeybot",
+        "thread_id": "t2"
+      }
+    },
+    {
+      "drawer_id": "d3",
+      "content": "Project codename is Falcon.",
+      "metadata": {
+        "wing": "main",
+        "room": "conversation",
+        "filed_at": "2026-01-03T09:00:00",
+        "chunk_index": "0",
+        "source_file": "",
+        "added_by": "monkeybot"
+      }
+    },
+    {
+      "drawer_id": "d4",
+      "content": "Loooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooong drawer, cut at two hundred characters.",
+      "metadata": {
+        "wing": "main",
+        "room": "conversation",
+        "filed_at": "2026-01-04T09:00:00",
+        "chunk_index": "0",
+        "source_file": "",
+        "added_by": "monkeybot",
+        "thread_id": "t2"
+      }
+    },
+    {
+      "drawer_id": "d5",
+      "content": "A note filed in a different wing.",
+      "metadata": {
+        "wing": "side",
+        "room": "conversation",
+        "filed_at": "2026-01-05T09:00:00",
+        "chunk_index": "0",
+        "source_file": "",
+        "added_by": "monkeybot",
+        "thread_id": "t2"
+      }
+    }
+  ],
+  "cases": [
+    {
+      "name": "sharing_on",
+      "share_threads": true,
+      "thread_id": "t2",
+      "lines": [
+        "## L0 — IDENTITY",
+        "I am agent-a, a MonkeyBot agent.",
+        "I remember verbatim conversation turns in this palace.",
+        "## L1 — ESSENTIAL STORY",
+        "[conversation]",
+        "  - Loooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo...",
+        "  - Project codename is Falcon.",
+        "  - User prefers short answers with no emoji.",
+        "  - Deploys go out on Tuesdays after the freeze check."
+      ]
+    },
+    {
+      "name": "sharing_off",
+      "share_threads": false,
+      "thread_id": "t2",
+      "lines": [
+        "## L0 — IDENTITY",
+        "I am agent-a, a MonkeyBot agent.",
+        "I remember verbatim conversation turns in this palace.",
+        "## L1 — ESSENTIAL STORY",
+        "- [conversation] Loooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo...",
+        "- [conversation] Project codename is Falcon.",
+        "- [conversation] User prefers short answers with no emoji."
+      ]
+    }
+  ]
+}

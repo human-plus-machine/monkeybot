@@ -1,0 +1,17 @@
+# Class list, not a runnable T4 suite. T5-VER-01 is scored as capability:
+# recall of done_unmet and constraint_touch, and zero verdicts for preempt /
+# supersession, in at least k of N. Baselines are per verifier config:
+# drift@verifier-tracker__… and drift@verifier-judge__….
+configs:
+  - verifier-tracker
+  - verifier-judge
+cases:
+  -
+    case: T5-VER-01
+    class: capability
+    scenarios:
+      - drift/path_constraint
+      - drift/supersession
+      - drift/preempt
+      - drift/declares_done
+      - drift/repeat_correction

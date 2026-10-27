@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from collections.abc import AsyncIterator, Sequence
-from contextlib import aclosing
+from contextvars import ContextVar, Token
+from dataclasses import dataclass
 from typing import Any, cast
 
 from monkeybot.core.attachments.text import parse_attachment_descriptor_text
@@ -15,13 +17,21 @@ from monkeybot.core.config.snapshot import current_env, env_value
 from monkeybot.core.context import TurnContext
 from monkeybot.core.context.epoch import ContextEpochTracker
 from monkeybot.core.hooks import HookEvent, HookManager
-from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta
+from monkeybot.core.llm.provider import (
+    Done,
+    Message,
+    Provider,
+    TextDelta,
+    ThinkingDelta,
+    UsageEvent,
+)
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.messages.tool_integrity import interrupted_tool_result_text
 from monkeybot.core.messages.transform_context import is_provider_visible, provider_visible_blocks
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.thread_summary import CONTEXT_SUMMARY_PREFIX
+from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.context_budget import (
     ContextBudgeter,
     estimate_tokens_from_char_count,
@@ -45,6 +55,34 @@ from .loop_messages import _load_agent_chat_history, _summary_line_for_message
 from .loop_usage import _prompt_input_tokens_for_history
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.history_compaction")
+
+
+@dataclass(frozen=True, slots=True)
+class _SummaryTranscript:
+    """The turn whose transcript should record the next summary model call."""
+
+    writer: TranscriptWriter
+    request_id: str
+    inner_turn: int
+
+
+_summary_transcript: ContextVar[_SummaryTranscript | None] = ContextVar(
+    "monkeybot_summary_transcript",
+    default=None,
+)
+
+
+def bind_summary_transcript(
+    writer: TranscriptWriter, *, request_id: str, inner_turn: int
+) -> Token[_SummaryTranscript | None]:
+    """Record summary model calls on ``writer`` until the token is reset."""
+    return _summary_transcript.set(
+        _SummaryTranscript(writer=writer, request_id=request_id, inner_turn=inner_turn)
+    )
+
+
+def reset_summary_transcript(token: Token[_SummaryTranscript | None]) -> None:
+    _summary_transcript.reset(token)
 
 
 def _intent_facts_from_ctx(ctx: TurnContext) -> str | None:
@@ -671,14 +709,95 @@ async def _generate_summary_text(
             content=[Text(text=user_text)],
         ),
     ]
+    binding = _summary_transcript.get()
+    exchange_id = uuid.uuid4().hex if binding is not None else None
     summary_text = ""
-    async with aclosing(cast(Any, provider.stream(summarize_messages, [], model=model))) as stream:
+    thinking_text = ""
+    usage: dict[str, object] = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+    }
+    recorded = False
+    try:
+        if binding is not None and exchange_id is not None:
+            # Written before stream() is entered. The write's await is the last
+            # yield before iteration starts, so this record sits at the index
+            # replay consumes for this call.
+            await binding.writer.write_provider_request(
+                request_id=binding.request_id,
+                inner_turn=binding.inner_turn,
+                model=model,
+                messages=[message.to_dict() for message in summarize_messages],
+                tools=[],
+                thinking_budget=None,
+                exchange_id=exchange_id,
+            )
+            recorded = True
+        summary_text, thinking_text, usage = await _stream_summary(
+            provider, summarize_messages, model=model
+        )
+        return summary_text.strip() or "(empty summary)"
+    finally:
+        if recorded and binding is not None and exchange_id is not None:
+            await binding.writer.write_provider_response(
+                request_id=binding.request_id,
+                inner_turn=binding.inner_turn,
+                model=model,
+                text=summary_text,
+                thinking=thinking_text,
+                tool_requests=[],
+                usage=usage,
+                exchange_id=exchange_id,
+            )
+
+
+async def _stream_summary(
+    provider: Provider,
+    messages: Sequence[Message],
+    *,
+    model: str,
+) -> tuple[str, str, dict[str, object]]:
+    """Read one summary stream. The raw text is returned before any stored-row rewrite."""
+    summary_text = ""
+    thinking_text = ""
+    input_tokens = 0
+    output_tokens = 0
+    cached_tokens = 0
+    cache_read_tokens = 0
+    cache_creation_tokens = 0
+    stream = cast(Any, provider.stream(messages, [], model=model))
+    try:
         async for ev in stream:
             if isinstance(ev, TextDelta):
                 summary_text += ev.text
+            elif isinstance(ev, ThinkingDelta):
+                thinking_text += ev.text
+            elif isinstance(ev, UsageEvent):
+                input_tokens += ev.input_tokens
+                output_tokens += ev.output_tokens
+                cached_tokens += ev.cached_tokens
+                cache_read_tokens += ev.cache_read_tokens
+                cache_creation_tokens += ev.cache_creation_tokens
             elif isinstance(ev, Done):
                 break
-    return summary_text.strip() or "(empty summary)"
+    finally:
+        aclose = getattr(stream, "aclose", None)
+        if aclose is not None:
+            await aclose()
+    return (
+        summary_text,
+        thinking_text,
+        {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cached_tokens": cached_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_creation_tokens": cache_creation_tokens,
+        },
+    )
 
 
 def _finalize_summary_row(text: str, workspace_trailer: str | None) -> Message:

@@ -17,8 +17,9 @@ Status values (same for tasks and phases): `todo`, `in-progress`, `blocked`, `do
 ## Current
 
 - **In progress:** none
-- **Last update:** 2026-10-26, P2-04 done. A database path edit on reload keeps the open database and reports that a restart is required.
-- **Next task:** P3-01
+- **Last update:** 2026-10-27, P6-01 done. Phase 5 is deferred. The local gate passed. Live smoke was not run.
+- **Next task:** none. Phase 5 stays deferred until the user resumes it.
+- **Deferred cases:** Phase 5 (P5-02, P5-03). T4-RT-01 stays an empty live cell (GCP credentials). T3-PROV-01..05 and the non-Ollama families of T3-PROV-06 stay empty (D13).
 
 ## Phases
 
@@ -28,10 +29,10 @@ Status values (same for tasks and phases): `todo`, `in-progress`, `blocked`, `do
 | [0b](phases/phase-0b-foundations.md) | Foundations and docs/testing.md | 7 | 7 | done | P0B-07 | 2026-10-25 |
 | [1](phases/phase-1-t2-harness-logic.md) | T2 harness logic | 18 | 18 | done | P1-18 | 2026-10-26 |
 | [2](phases/phase-2-contracts-and-gateway.md) | Contracts and gateway | 10 | 10 | done | all P2 tasks done | 2026-10-26 |
-| [3](phases/phase-3-record-replay.md) | Record / replay | 4 | 0 | todo | all P3 tasks done | |
-| [4](phases/phase-4-live.md) | Live tier | 6 | 0 | todo | P4-06 | |
-| [5](phases/phase-5-trials.md) | Trials and baselines | 3 | 0 | todo | P5-03 | |
-| [6](phases/phase-6-cutover.md) | Cutover | 1 | 0 | todo | P6-01 | |
+| [3](phases/phase-3-record-replay.md) | Record / replay | 4 | 4 | done | all P3 tasks done | 2026-10-27 |
+| [4](phases/phase-4-live.md) | Live tier | 6 | 6 | done | P4-06 | 2026-10-26 |
+| [5](phases/phase-5-trials.md) | Trials and baselines | 3 | 1 | deferred | P5-03 | |
+| [6](phases/phase-6-cutover.md) | Cutover | 1 | 1 | done | P6-01 | 2026-10-27 |
 
 ## Tasks
 
@@ -74,24 +75,24 @@ Status values (same for tasks and phases): `todo`, `in-progress`, `blocked`, `do
 | P2-04 | done | cursor | 2026-10-26 | uncommitted | a database path edit stays on the open database and reports restart |
 | P2-05 | done | cursor | 2026-10-26 | uncommitted | interrupt commits the partial assistant reply |
 | P2-06 | done | cursor | 2026-10-26 | uncommitted | Gemini pairs tool results, joins argument fragments, and emits usage after tools |
-| P2-07 | done | cursor | 2026-10-26 | uncommitted | second embedding migrator skips while the lock is held; T1-STORE-21 stays xfail |
+| P2-07 | done | cursor | 2026-10-26 | uncommitted | second embedding migrator skips while the lock is held |
 | P2-08 | done | cursor | 2026-10-26 | uncommitted | s3 memory rejected; tool errors use the envelope; corrupt grants stay on disk; setup-script export removed |
 | P2-09 | done | cursor | 2026-10-26 | uncommitted | hung embedder drain returns and leaves the row pending |
 | P2-10 | done | cursor | 2026-10-26 | uncommitted | T3-GW-02 fails on stand-in drift; T3-GW-03 passes |
-| P3-01 | todo | | | | |
-| P3-02 | todo | | | | |
-| P3-03 | todo | | | | |
-| P3-04 | todo | | | | |
-| P4-01 | todo | | | | |
-| P4-02 | todo | | | | |
-| P4-03 | todo | | | | |
-| P4-04 | todo | | | | |
-| P4-05 | todo | | | | |
-| P4-06 | todo | | | | |
-| P5-01 | todo | | | | |
-| P5-02 | todo | | | | |
-| P5-03 | todo | | | | |
-| P6-01 | todo | | | | |
+| P3-01 | done | cursor | 2026-10-26 | uncommitted | cassette model, from_transcript, loop-driver replay, T2-STORE-03 |
+| P3-02 | done | cursor | 2026-10-27 | uncommitted | five cassettes replay; T3-LOOP-02 recorded on gemma4:31b |
+| P3-03 | done | cursor | 2026-10-27 | uncommitted | Ollama wire cassettes replay; staleness check in ci-local.sh and ci.yml |
+| P3-04 | done | cursor | 2026-10-26 | uncommitted | gateway replay, cassette_turn.sse, MCP, child-tape and wake-up recordings; T3-GW-01, T3-MCP-01, T3-SUB-01, T3-MEM-01 |
+| P4-01 | done | cursor | 2026-10-26 | uncommitted | evals code in regression/t4 and t5; fixtures in workspaces/; six selftests plus a `live` test_judge |
+| P4-02 | done | cursor | 2026-10-26 | uncommitted | key from env or repo-root .env (user decision); missing key exits 2 with a run_error; live preflight passed 2026-10-26 (user confirmed) |
+| P4-03 | done | cursor | 2026-10-26 | uncommitted | 29 scenarios with case IDs under file/ and shell/; plugin collects t4 items; 15 Test cells filled |
+| P4-04 | done | cursor | 2026-10-26 | uncommitted | seven live cases and scheduler.yaml; runner groups by config; `--suite` filters python tests |
+| P4-05 | done | cursor | 2026-10-26 | uncommitted | secret gate and provider-key envs removed; paths point at regression/t4; NVIDIA judge pin dropped, so the judge comes from eval_config.yaml |
+| P4-06 | done | cursor | 2026-10-26 | uncommitted | smoke 12/12 passed; baseline drift recorded, not fixed |
+| P5-01 | done | cursor | 2026-10-27 | uncommitted | pass^N and Wilson compare to keyed baselines; T5 Test cells except GW |
+| P5-02 | deferred | cursor | 2026-10-27 | uncommitted | user deferred Phase 5; live baseline processes stopped. subagents baseline file exists |
+| P5-03 | deferred | cursor | 2026-10-27 | uncommitted | user deferred Phase 5. Storm tests exist and failed; compare not run |
+| P6-01 | done | cursor | 2026-10-27 | uncommitted | cutover gate passed; live smoke not run; Phase 5 deferred |
 
 ## Decisions
 
@@ -875,3 +876,295 @@ Recorded failures not fixed: none from this change. Prior T2-CFG-G2 empty restar
 Open questions: none
 Next:      P3-01
 
+### 2026-10-26 P3-01 cursor
+Task:      P3-01 Cassette model, from_transcript, replay driver (T2-STORE-03)
+Status:    done
+Changed:   regression/t3/tools/cassette.py (model, digests, staleness), regression/t3/tools/from_transcript.py (transcript to cassette, scrubbed, CLI), regression/drivers/replay.py (loop-driver replay, transcript roundtrip), testkit/provider.py scripted_from_cassette, regression/plugin.py (collects regression/t3/trajectories/**/*.yaml, dispatches mode: replay, --record sets and restores MONKEYBOT_RECORD_CASSETTES), regression/t2/loop/scenarios/store/transcript_convertible.yaml, regression/t3/test_replay_trajectories.py, regression/selftest/test_from_transcript.py. Also regression/t3/__init__.py and regression/t3/tools/__init__.py (package markers) and the seed counts in tests/contracts/test_catalog_pairing.py (361/370 to 362/371). No src change.
+Verify:    uv run pytest regression/selftest/test_from_transcript.py regression/t3/test_replay_trajectories.py -q → 31 passed. uv run pytest tests regression -m "t1 or t2 or t3" -q -n auto → 4063 passed, 54 skipped, 1 xfailed. uv run pytest tests/contracts/test_catalog_pairing.py -q → 1 passed. uv run mypy src/monkeybot testkit → no issues. uv run ruff format --check . → clean.
+Catalog:   T2-STORE-03 Test cell filled with regression/t2/loop/scenarios/store/transcript_convertible.yaml. No T3 rows filled here.
+Recorded failures not fixed: none from this change. uv run ruff check testkit tests regression reports 33 existing findings in 13 files this task did not touch (regression/t2/python/test_ops_observability.py and 12 files under tests/unit).
+Open questions: done.truncated is recoverable from a transcript only for a truncated tool batch; a text-only truncation is not stored (matters for T3-LOOP-02 in P3-02). Gateway replay raises a pointer to P3-04.
+Next:      P3-04
+
+### 2026-10-26 P3-04 cursor
+Task:      P3-04 Golden SSE from a cassette; MCP, subagent and wake-up replays (T3-GW-01, T3-MCP-01, T3-SUB-01, T3-MEM-01)
+Status:    done
+Changed:   regression/drivers/replay.py: `driver: gateway` replay runs the cassette through the in-process SSE gateway; the staleness check and digest warning also sit on the gateway's scripted provider; the P3-04 stub error is gone. regression/t3/test_golden_sse.py with regression/t3/sse/cassette_turn.sse. regression/t3/test_replay_mcp.py with regression/t3/mcp/tools_list_call.json. regression/t3/test_replay_subagent_tape.py with regression/t3/subagents/child_tape.ndjson. regression/t3/test_replay_wake_up.py with regression/t3/memory/wake_up_snapshot.json. regression/t3/test_replay_trajectories.py: test_gateway_replay_waits_for_p3_04 became test_the_realtime_driver_does_not_replay (the stub it checked is replaced). docs/testing.md Test cells for the four rows. tests/contracts/test_catalog_pairing.py seed counts 362/371 to 366/375. No src change.
+Verify:    uv run pytest regression/t3 -q → 30 passed. uv run pytest tests regression -m "t1 or t2 or t3" -q -n auto → 4078 passed, 54 skipped, 1 xfailed. uv run pytest tests/contracts/test_catalog_pairing.py -q → 1 passed. uv run mypy src/monkeybot testkit → no issues. uv run ruff format --check . → clean. uv run ruff check testkit tests regression → 33 findings, all in files this task did not touch (same count as P3-01). uv run python -m testkit.failures latest → failures=0.
+Catalog:   T3-GW-01 → regression/t3/test_golden_sse.py. T3-MCP-01 → regression/t3/test_replay_mcp.py. T3-SUB-01 → regression/t3/test_replay_subagent_tape.py. T3-MEM-01 → regression/t3/test_replay_wake_up.py.
+Recorded failures not fixed: none from this change. A run of the same suite inside the Cursor sandbox failed 24 tests (macOS jail bootstrap, git env isolation, trash, clipboard, background MCP reaping) and none under regression/t3; the unsandboxed run is clean. Run file test-runs/20261026T212531Z/20261026T212531Z-8248de8-55327.jsonl.
+Open questions: (1) No T3a cassette is recorded yet (P3-02 is blocked), so T3-GW-01 builds its cassette inline in the test and writes it to a temp file. When P3-02 lands, a recorded cassette can be added as a second input to the same golden test. (2) The sharing-on half of T3-MEM-01 rebuilds a Chroma palace and needs the optional `memory` extra (`pytest.importorskip("mempalace")`). scripts/ci-local.sh and ci.yml sync without `--extra memory`, so on a clean sync that test skips and only the sharing-off half runs. Options: add `--extra memory` to the gate syncs, or accept the skip. (3) The MCP recording was made against evals/smoke_agent/fixture_mcp_server.py; the test also looks for regression/fixtures/mcp/fixture_mcp_server.py, where P4-02 moves it. (4) "Recording matches a fresh local run" tests fail when the mcp SDK or mempalace version changes (the version is in the file) or a serializer changes; that is the intended re-record signal. (5) mempalace keeps write locks under the home directory; the wake-up tests point HOME at a temp directory. Two probe runs before that fix may have added lock files under `~/.mempalace/locks` on this machine; the directory already held many.
+Next:      P4-01. P3-02 and P3-03 stay blocked (P4-03 / P4-02 and the user's live confirmation); phase 3 is not done.
+
+### 2026-10-26 P4-01 cursor
+Task:      P4-01 Move the `evals/` code into `regression/t4/` and the selftests into `regression/selftest/`
+Status:    done
+Changed:   Moved with git mv: evals runner, scenario_loader, models, persistence, diff, report, eval_config.yaml to regression/t4/; scorer.py to regression/t4/score.py; trials.py to regression/t5/trials.py; scenarios/ and suites/ to regression/t4/ (unconverted); baselines/smoke.json and smoke.md to regression/t4/baselines/; fixtures/coding/{calc_repo,calc_repo_green,shop_repo,overlays} to regression/fixtures/workspaces/; six evals/test_*.py to regression/selftest/. evals/test_assertions.py was merged into regression/selftest/test_assertions.py (all 36 old cases kept (41 existing + 36 = 77); the old helpers are `_eval_run`, `_eval_scenario`) and removed; evals/conftest.py removed. New: regression/t4/__init__.py, regression/t4/__main__.py (calls report.main), regression/t5/__init__.py, regression/fixtures/conftest.py (`collect_ignore_glob = ["workspaces/*"]`). Imports rewritten to `regression.t4.*`, `sys.path` hacks and `__main__` runners removed. `EVAL_ROOT` is regression/t4; new `FIXTURES_ROOT` is regression/fixtures/workspaces, so `workspace_fixture` is now `calc_repo` and overlays are `overlays/bug_discount` (T2 and T4 YAML, test_report.py, test_coding_hard_oracle.py, test_assertions.py). regression/drivers/support/paths.py and bundles/workspace.py no longer search evals/. scripts/ci-local.sh and .github/workflows/ci.yml lose the four `evals/test_*.py` lines (the ci.yml "Evals self-checks" step is gone). test_judge.py is `@pytest.mark.live`. Outside the Creates list, each needed by the move: regression/conftest.py (`live`-marked items are deselected without `--live`, like t4/t5), pyproject.toml (ruff per-file-ignores `regression/fixtures/workspaces/**` = ALL, because the fixture repos now sit under the lint path and carry 6 deliberate findings; one comment path), .gitignore (build/ negations point at the new fixture paths; `/regression/t4/runs/` ignored), regression/t4/assertions.py (see Open questions). No src change.
+Verify:    uv run pytest regression/selftest -q → 286 passed, 1 deselected (test_judge; it collects only with --live). uv run python -m regression.t4 --help → usage printed. uv run pytest tests regression -m "t1 or t2 or t3" --co -qq | rg -c 'workspaces/' → no matches (rg prints nothing, exit 1). bash scripts/ci-local.sh → exit 0 (4152 passed, 54 skipped, 1 xfailed; cli 357 passed; browser-mcp 320 passed, 18 skipped). uv run ruff format --check . → 821 files already formatted. uv run ruff check testkit tests regression → 33 findings, the same known ones. uv run mypy src/monkeybot testkit → no issues in 287 files. uv run pytest tests regression -m "t1 or t2 or t3" -q -n auto → 4152 passed, 54 skipped, 1 xfailed. uv run pytest tests/contracts/test_catalog_pairing.py -q → 1 passed. uv run python -m testkit.failures latest → failures=0. rg -n 'fixtures/coding' regression evals tests → matches only in regression/plan/ (plan text, left as is); none in code, YAML or tests.
+Catalog:   none filled. No T4 row has a case ID or Test cell until P4-03.
+Recorded failures not fixed: none.
+Open questions: (1) evals/assertions.py was moved to regression/t4/assertions.py, not deleted. The live runner (report.py) and the moved selftests call `evaluate_assertions(Scenario, EvalRun)`, which is a different API from regression/schema/assertions.py (`evaluate(dict, RunView)`). Merging them is not in P4-01's list; P4-03 (unified schema, `scenario_loader` as a wrapper) is the natural place. (2) docs/live-evals.md, docs/features.md and docs/verifier-agent-design.md still name `python -m evals.report`, `evals/suites/...` and `fixtures/coding/`. Not in P4-01's list. (3) `scenario_loader.agent_workspace_root()` still defaults to evals/smoke_agent/workspace, which P4-02 moves. (4) The T4 scenario YAML comments still name evals/smoke_agent paths and the evals/ copy of the baseline notes (smoke.md); P4-02 and P4-03 update them. (5) `ci-local.sh` still syncs `--extra evals`; only the live test_judge needs it now. (6) `evals/runs/` keeps its old run JSONs; new runs write to regression/t4/runs/.
+Next:      P4-02
+
+### 2026-10-26 P4-02 cursor
+Task:      P4-02 Agent project, config split, judge config, preflight, ledger records
+Status:    done. Plan deviation, user decision 2026-10-26: live secrets come from the repo-root .env, not regression/t4/agent/.env. The key name is matched case-insensitively (the root .env holds `ollama_api_key`); a process `OLLAMA_API_KEY` wins over the file. The missing-key message is `OLLAMA_API_KEY is not set (set it in the environment or in the repo-root .env)` instead of the §5.11 text. tasks.md, phase and reference files not edited.
+Changed:   Moves (on disk, unstaged like P4-01's): evals/smoke_agent to regression/t4/agent; fixture_mcp_server.py to regression/fixtures/mcp/. monkeybot.verifier-on.yaml split into monkeybot.verifier-tracker.yaml (judge off, max_severity none) and monkeybot.verifier-judge.yaml (judge on, glm-5.3-flash, max_severity nudge); new mcp.progressive.json; mcp.json points at `${MONKEYBOT_AGENT_ROOT}/../../fixtures/mcp/fixture_mcp_server.py`; agent .env.example removed (it named the agent project as the key source). The fixture path was updated in tests/unit/core/mcp/test_mcp_client.py, regression/fixtures/configs/mcp.{autoconnect,broken,progressive,two_prefix}.json, regression/t2/loop/scenarios/mcp/catalog_diff_reload.yaml, and regression/drivers/support/tokens.py (docstring). New regression/t4/preflight.py: reads the key from the environment, then the repo-root .env; exits 2 and writes one run_error ledger record when it is missing; makes one cheap `stream` call (60 s timeout) whose error text is scrubbed. regression/t4/eval_config.yaml: judge_provider ollama-cloud, judge_model glm-5.3-flash. regression/t4/report.py runs the preflight before a live suite, writes one LedgerWriter failure per failed or errored scenario (tier t4, case, live block, artifacts = run JSON path; the run JSON is saved after each scenario), and adds --ledger-dir/--no-ledger. T4-GW-01: runner.py counts TurnComplete per request (0.3 s grace for a duplicate); assertions.live_invariant_failures checks every live scenario; models/persistence/scenario_loader carry turn_completes and `case`; agent_workspace_root defaults to regression/t4/agent/workspace. New selftests regression/selftest/test_preflight.py, test_agent_project.py, test_live_ledger.py with recorded/t4_run_smoke_sample.json (a run JSON written in the run-file shape; no live run produced it). .gitignore adds /regression/t4/agent/{.env,data/,workspace/}. Comments in four T4 scenarios no longer name evals/smoke_agent. No src change.
+Verify:    Offline form of `env -u OLLAMA_API_KEY uv run python -m regression.t4 --suite smoke` (report.main with preflight.ENV_FILE pointed at a missing file, both key spellings unset, network sandboxed) → exit 2, the message above, run_error recorded to test-runs/20261026T221441Z/20261026T221441Z-8248de8-13135.jsonl (run_start, run_error reason missing_key, run_end errors=1). The literal command was not run: it now finds the key in the repo-root .env and would make a live stream call. uv run pytest tests/unit/core/mcp/test_mcp_client.py regression/selftest -q → 382 passed, 1 deselected. uv run python -m regression.t4 --help → usage. uv run ruff format --check . → 825 files already formatted. uv run ruff check testkit tests regression → 33 known findings in 13 files (the test_mcp_client.py five are the same at HEAD). uv run mypy src/monkeybot testkit → no issues in 287 files. uv run pytest tests regression -m "t1 or t2 or t3" -q -n auto → 4192 passed, 54 skipped, 1 xfailed. uv run pytest tests/contracts/test_catalog_pairing.py -q → 1 passed. uv run python -m testkit.failures latest → failures=0. ci-local.sh not run (no gate script changed in P4-02).
+Catalog:   none filled. T4-GW-01's Test cell must be a t4-tier path, and the selftest lives in regression/selftest; the cell waits for P4-03.
+Recorded failures not fixed: none. test-runs/20261026T221441Z/...-13135.jsonl is the intended run_error from the verify check above.
+Open questions: (1) The preflight-only live run in Done-when was not run (no live confirmation this session). It is the one unverified check. (2) The agent gateway itself reads only its process env and `<agent root>/.env` (core/layout.py), with the exact name OLLAMA_API_KEY. The launcher in P4-05 must start it with OLLAMA_API_KEY exported (preflight.ensure_key exports it into its own process, so a child started from there inherits it). (3) deepeval's pytest plugin (`deepeval.plugins.plugin` entry point) loads `<cwd>/.env` into os.environ at startup unless DEEPEVAL_DISABLE_DOTENV=1, so every pytest session run from the repo root carries the real `ollama_api_key`. test_preflight removes every spelling of the name before each test. testkit/scrub.py matches `_API_KEY` case-sensitively, so it would not redact a value held only under the lowercase name (a live run also exports the uppercase name, which is redacted). Options: set DEEPEVAL_DISABLE_DOTENV=1 for test runs (pytest config or gate scripts), and/or make the scrubber's suffix match case-insensitive. Both are outside P4-02's list. (4) The working tree's moves are unstaged (git status shows deletions plus untracked files, P4-01's too). When staging, regression/t4/agent/workspace/.gitkeep and workspace/skills/browser/playbooks/.gitkeep need `git add -f` (the workspace/ ignore entry covers them). (5) .github/workflows/live-eval-smoke.yml, docs/live-evals.md, getting-started.md, CONTRIBUTING.md and README.md still name evals/smoke_agent and its .env; P4-05 owns the workflow and docs.
+Next:      P4-03
+
+### 2026-10-26 P4-02 follow-up cursor
+Task:      P4-02 close-out: live preflight and open question (3)
+Status:    done
+Changed:   No src change. pytest.ini addopts adds `-p no:deepeval`. Root conftest.py sets DEEPEVAL_DISABLE_DOTENV=1 (setdefault), so a test session no longer gets the root .env key. testkit/scrub.py matches the *_API_KEY / *_TOKEN / *_SECRET suffixes case-insensitively, and tests/unit/testkit/test_scrub.py adds test_redacts_lowercase_secret_env_names. User decisions 2026-10-26.
+Verify:    With the user's confirmation, ran preflight.run_preflight(suite="smoke") against ollama-cloud/glm-5.3-flash: passed (one stream call, no T4 suite). uv run pytest tests/unit/testkit/test_scrub.py regression/selftest -q → 331 passed, 1 deselected. Probe test under pytest: neither ollama_api_key nor OLLAMA_API_KEY is in os.environ.
+Catalog:   n/a
+Recorded failures not fixed: none
+Open questions: none; P4-02 open questions (1) and (3) are resolved.
+Next:      P4-03
+
+### 2026-10-26 P4-03 cursor
+Task:      P4-03 Convert the 29 live scenarios and the suites
+Status:    done
+Changed:   Moves used plain `mv`, not `git mv`: regression/t4/ is untracked (P4-01/P4-02 left their moves unstaged). tools/core_read{,_error}.yaml and tools/core_write.yaml went to file/, and tools/core_run_command{,_sandbox}.yaml went to shell/. All 29 YAMLs now have `case:` (IDs in suite order) and `mode: live`. Legacy keys became their §5.3.1 forms: max/min_tool_calls → `tool_calls: {max|min}`, min_subagent_calls → `tool_calls: {task: {min}}`, max/min_verdicts and verdict_status_in → `verdicts: {...}`. T4-CTX-01 is retuned to `config: model.context_window: 6000` with `min_summarizations: 1`. T4-SKILL-01 has `required_tools: [list_skills, read_file]`. smoke.yaml uses the new paths and adds file/core_read_error. scenario_loader.py is a wrapper over regression.schema (`load_scenario_file`; `load_scenarios_by_id` loads only the named files). regression/plugin.py collects regression/t4/scenarios/**/*.yaml as t4 items: `--suite` filters by regression/t4/suites/<name>.yaml, and the item runs preflight once then report.run_scenario against `--agent-url`, then AGENT_URL, then http://127.0.0.1:8080. Collection reads only `case` and `tags`. Outside the Creates list: regression/schema/assertions.py registers `min_summarizations` (live only; the T4-CTX-01 row names it). regression/t4/assertions.py evaluates `tool_calls` and `verdicts` and fails on keys it does not evaluate. report.py renames `_run_scenario` to `run_scenario` and adds DEFAULT_AGENT_URL. New regression/t4/conftest.py ignores agent/*. regression/selftest/test_report.py adds `case`/`mode` to three inline snippets. New regression/selftest/test_live_scenarios.py. tests/contracts/test_catalog_pairing.py seed counts went from 366/375 to 381/405 (filled rows/tests). No src change.
+Verify:    uv run pytest regression/t4 --live --collect-only -qq | wc -l → 31: 29 node ids plus pytest's blank line and "29 tests collected" footer (`rg -c '::'` → 29). --suite smoke → 12 items; without --live → 29 deselected. Collection with socket connect, subprocess.Popen and preflight patched to raise → 29 collected, no calls, runner/report not imported. All 29 load with EVAL_VERIFIER_MODE=on and =off. uv run pytest regression/selftest -q → 334 passed, 1 deselected. uv run ruff format --check . → 827 files already formatted. uv run ruff check testkit tests regression → the known 33 findings; changed files clean. uv run mypy src/monkeybot testkit → no issues in 287 files. uv run pytest tests regression -m "t1 or t2 or t3" -q -n auto → 4201 passed, 54 skipped, 1 xfailed. uv run pytest tests/contracts/test_catalog_pairing.py -q → 1 passed. uv run python -m testkit.failures latest → failures=0. ci-local.sh not run (no gate script changed). No live run.
+Catalog:   15 rows filled: T4-FILE-01..03, T4-SHELL-01..02, T4-CODE-01..03, T4-CODE-04..10, T4-CTX-01, T4-VER-01..05, T4-SUB-01, T4-SKILL-01, T4-MCP-01..03, T4-MEM-01..02, T4-TODO-01 (scenario paths) and T4-GW-01 (regression/t4/assertions.py, home of live_invariant_failures).
+Recorded failures not fixed: test-runs/20261026T230311Z/20261026T230311Z-8248de8-16856.jsonl: tests/contracts/test_catalog_pairing.py::test_catalog_pairing, `assert 381 == 366`, the seed count these filled rows change; counts updated as allowed.
+Open questions: (1) The live runner does not apply a scenario's `config`, so T4-CTX-01 needs the gateway started with model.context_window 6000. The value is unvalidated until a live run. (2) Pytest t4 items write ledger records without the `live` block or artifacts and do not save the run JSON; report.py (`python -m regression.t4`) still does. (3) The "Plus" checks in the T4-FILE-01/03, SHELL-01, MEM-01..02 and TODO-01 rows, and `max_tool_errors: 0` in T4-FILE-02's row, were not added: they change expectations and are not in P4-03's list. (4) The two assertion engines remain separate. The live engine accepts the unified spellings plus legacy keys. (5) regression/selftest/recorded/t4_run_smoke_sample.json still names tools/core_read (recorded data, not changed).
+Next:      P4-04
+
+### 2026-10-26 P4-05 cursor
+Task:      P4-05 Live workflow and artifacts
+Status:    done
+Changed:   .github/workflows/live-eval-smoke.yml only. Triggers kept (pull_request, push to main, workflow_dispatch) and the gate job's decide logic kept. Removed the `secrets` job (the NVIDIA_API_KEY gate) and every provider-key env (NVIDIA_API_KEY on the gateway boot and report steps); `live-eval` now needs only `gate`. working-directory and the lockfile trigger path: evals/smoke_agent → regression/t4/agent. MONKEYBOT_AGENT_CONFIG: regression/t4/agent/monkeybot_config/monkeybot.yaml. The other old paths moved too, so the workflow names only new ones: `python -m evals.report` → `python -m regression.t4`, `--baseline evals/baselines/smoke.json` → regression/t4/baselines/smoke.json, artifact `evals/runs/` → regression/t4/runs/ (persistence.save_run creates it), `evals.diff` → `regression.t4.diff`. Also removed `JUDGE_PROVIDER: nvidia` / `JUDGE_MODEL: nvidia/nemotron-3-ultra-550b-a55b`: they override eval_config.yaml and would need an NVIDIA key, so the judge now comes from eval_config.yaml (ollama-cloud / glm-5.3-flash, D12). The header comment states D1 (no key in GitHub; the smoke suite runs locally), and the comments no longer name NVIDIA, inkling or smoke_agent (12 smoke scenarios, 11 delays). No key added, no live-suite step added, no src change, no live run.
+Verify:    uvx --from actionlint-py actionlint .github/workflows/live-eval-smoke.yml → exit 0, no findings (actionlint 1.7.12; shellcheck is not installed, so the shell in `run:` blocks was not linted; the PyPI name is actionlint-py, `uvx actionlint` does not resolve). rg -n 'evals/|OLLAMA_API_KEY|NVIDIA_API_KEY|secrets\.' .github/workflows/live-eval-smoke.yml → no matches (exit 1). Every referenced path exists in the working tree: uv.lock, cli/uv.lock, regression/t4/agent/{uv.lock,monkeybot_config/monkeybot.yaml}, regression/t4/{report.py,diff.py,eval_config.yaml,suites/smoke.yaml,baselines/smoke.json}, docs/live-evals.md, src/monkeybot/gateway/main.py; regression/t4/runs/ is created at run time. uv run ruff format --check . → 827 files already formatted.
+Catalog:   n/a (no case added)
+Recorded failures not fixed: none
+Open questions: (1) The kept triggers still start the job on develop→main PRs, lockfile PRs, pushes to main, and manual runs. With no key, the gateway boots and `python -m regression.t4` exits 2 at preflight. But the step pipes into `tee` under GitHub's default `bash -e` (no pipefail), so the step and job show green with an empty scorecard. This was already true of `--fail-on-regression` before P4-05. Options: add `shell: bash` (which runs `-eo pipefail`) or `set -o pipefail` to the report step so the missing key fails visibly; reduce the triggers to workflow_dispatch (09-ci lists no GitHub job for live-smoke); or leave it. Each is outside P4-05's listed changes. (2) docs/live-evals.md and the other docs that still name evals/smoke_agent were not touched (not in P4-05's list).
+Next:      P4-06 after P4-04 is done (needs the user's confirmation of the local live smoke run). P4-04 was in progress when P4-05 finished, so Next task is left for the P4-04 agent.
+
+### 2026-10-26 P4-04 cursor
+Task:      P4-04 New T4 cases and suites
+Status:    blocked (partial). Seven of the eleven `+` scenarios cannot be expressed with today's live schema, runner and assertion engine, and extending them is not in P4-04's list; they wait for the user's answer to open question (1). Live YAML allows no `steps:`, the runner only sends messages and reads tool names and args, assistant text, summarizations, verdicts and TurnComplete, it ignores `config:`, and the live engine has no argument, Evidence-path, subagent-manifest, prompt or SSE-reconnect matcher. The other six cases are written. Blocked: T4-HOOK-01 hooks/evidence_citation_live (needs a code grader: every `Evidence:` path exists and was read). T4-SUB-02 subagents/persona_dispatch (needs a child-manifest `subagent_type` check, and the agent project defines no persona to dispatch to). T4-SCHED-01 scheduler/http_one_tick_live (needs HTTP steps: POST /loops, POST /invoke-tick, then a history read). T4-SCHED-02 scheduler/model_starts_loop (the stop guard is `max_ticks`/`max_runtime` in the start_loop args; `unbounded: true` also passes validation, so required_tools plus max_tool_errors cannot tell). T4-MEM-03 memory/search_past_session (needs "session 2 ran `run_command mempalace search`"; the live tool_calls count names only). T4-CFG-01 config/reload_memory_off_live (needs POST /config/reload and a look at the next prompt's wake-up block). T4-GW-02 gateway/live_resume (needs a client that drops mid-delta and reconnects with Last-Event-ID). regression/t4/suites/scheduler.yaml is not created: both SCHED cases are blocked, and test_suites_name_existing_scenarios requires a non-empty suite naming existing files.
+Changed:   New scenarios: regression/t4/scenarios/file/grep_absence_honesty.yaml (T4-FILE-04; workspace att_ws, whose binary PNGs make grep return incomplete_scan; response_not_contains plus judge metrics; required_tools [grep] so the scan ran), context/post_compaction_continuity.yaml (T4-CTX-02; calc_repo_green, four turns, `config: model.context_window: 6000` as T4-CTX-01; min_summarizations 1 plus workspace grader: file contents, an import check and pytest), attachments/describe_image_live.yaml (T4-ATT-01, tag `optional`; att_ws/tiny.png is 1x1 pure red; required_tools [load_file], final_text_regex `\bred\b`), mcp/enable_then_echo_live.yaml (T4-MCP-04; `config.env.MCP_CONFIG: monkeybot_config/mcp.progressive.json`; required_tools [enable_mcp, fixture__echo], max_tool_errors 0). New suites: regression/t4/suites/{context,memory,mcp,subagents,nightly}.yaml (memory and subagents hold only the existing cases until MEM-03 and SUB-02 exist; nightly is the union of every other suite in suite order). New Python: regression/t4/python/__init__.py (empty, as regression/t2/python), test_provider_live_matrix.py (T4-PROV-01; module mark `live`, items also get `t4` from the folder; Ollama Cloud always and fails without the key; 10 other providers skip with the reason unless their key is set), test_docker_image_health.py (T4-OPS-01; `live`; builds docker/Dockerfile unless MONKEYBOT_DOCKER_IMAGE is set, runs it with the compose demo overlay (fake provider), polls /health on container port 8080, skips when the docker CLI is missing). Outside the Creates list: docs/testing.md (six Test cells), tests/contracts/test_catalog_pairing.py (seed counts 381/405 → 387/411, filled rows/tests), regression/selftest/test_live_scenarios.py (four EXPECTED_CASES entries; the docstring no longer says 29). No src change, no live run, no docker build.
+Verify:    uv run pytest regression/t4 --live --collect-only -qq → 45 tests collected (`rg -c '::'` → 45: 33 scenarios plus 12 Python items, 11 provider params and the docker test); without --live → 45 deselected. --suite context/memory/mcp/subagents/nightly/smoke → 14/14/16/13/42/24 (each is the suite's scenarios plus the 12 Python items; see open question (4)). Collection with socket.connect, socket.create_connection, subprocess.Popen and preflight.run_preflight{,_once} patched to raise → 45 items, no calls, runner/report not imported. uv run pytest tests/contracts/test_catalog_pairing.py -q → 1 passed. T4 rows without a Test cell (catalog parser) → T4-HOOK-01, T4-SUB-02, T4-SCHED-01, T4-SCHED-02, T4-MEM-03, T4-CFG-01, T4-GW-02, T4-RT-01, so the "only T4-RT-01" check does not hold yet. uv run pytest regression/selftest -q → 334 passed, 1 deselected. uv run ruff format --check . → 830 files already formatted. uv run ruff check testkit tests regression → 33 findings in the 13 known files; the changed files are clean. uv run mypy src/monkeybot testkit → no issues in 287 files. uv run pytest tests regression -m "t1 or t2 or t3" -q -n auto → 4201 passed, 54 skipped, 1 xfailed. uv run python -m testkit.failures latest → failures=0.
+Catalog:   6 rows filled: T4-FILE-04, T4-CTX-02, T4-ATT-01, T4-MCP-04 (scenario paths), T4-PROV-01, T4-OPS-01 (regression/t4/python paths). Left empty: the seven blocked rows and T4-RT-01 (deferred).
+Recorded failures not fixed: test-runs/20261027T002217Z/20261027T002217Z-8248de8-23115.jsonl: tests/contracts/test_catalog_pairing.py::test_catalog_pairing, `assert 387 == 381`, the seed count these six rows change; counts updated as allowed.
+Open questions: (1) How should the seven blocked cases be written? Options: (a) extend the live tier in a follow-up task: `steps:` for live mode (HTTP calls, reload, reconnect), live matchers for tool arguments per session, Evidence paths, the child manifest, plus `tool_error_codes`, then write the YAML files; (b) write them as `regression/t4/python/` tests that drive the gateway directly, which changes §4.4's file layout; (c) defer some (for example T4-CFG-01 and T4-GW-02). T4-SUB-02 also needs a persona in the agent project's monkeybot.yaml. (2) The live runner does not apply `config:` (P4-03 open question 1). The context suite needs a gateway with model.context_window 6000; mcp/enable_then_echo_live needs MCP_CONFIG=monkeybot_config/mcp.progressive.json while T4-MCP-01..03 need the autoConnect mcp.json, so no single gateway runs the whole mcp suite green; nightly inherits every suite's needs (drift needs EVAL_VERIFIER_MODE). Options: the runner applies `config.env` per scenario (a restart per config), or split suites by gateway config. (3) T4-FILE-04 and T4-ATT-01 are in no suite. Nightly is the literal union of the other suites, and FILE-04's row does not say to add it to smoke. Should they go into nightly? (4) `--suite` filters only scenario YAML, so `pytest regression/t4 --live --suite <name>` also runs the provider matrix and the docker build. That fits T4-PROV-01 ("runs first in every live suite") but not the docker test. `python -m regression.t4 --suite` runs only scenarios. (5) T4-PROV-01 needs `MONKEYBOT_LIVE_MATRIX_MODEL_<ID>` for any non-Ollama provider, because providers have no default model id; with the key set but no model, it skips with that reason. Vertex and Bedrock count GOOGLE_APPLICATION_CREDENTIALS / AWS_ACCESS_KEY_ID as their key. (6) Not checked live: whether glm-5.3-flash accepts images (ATT-01 is optional), whether the att_ws grep returns incomplete_scan on the live agent (expected from workspace_service, since its PNGs are binary), and whether 6000 tokens leaves room for the agent's base prompt.
+Next:      P4-04 again after the user answers (1). P4-06 waits on P4-04 being done and then on the user's live-run confirmation.
+
+### 2026-10-26 P4-04/P4-05 user decisions cursor
+Task:      Decisions on P4-04 open questions (1) and (2), P4-05 open question (1), and live runs
+Status:    recorded
+Changed:   .github/workflows/live-eval-smoke.yml triggers cut to workflow_dispatch only, header comment updated (user decision: live runs are local per D1). The gate job's PR logic and the PR-comment step are now unreachable but left in place.
+Verify:    uvx --from actionlint-py actionlint .github/workflows/live-eval-smoke.yml → exit 0; rg -n 'evals/|OLLAMA_API_KEY|NVIDIA_API_KEY|secrets\.' on it → no matches
+Catalog:   n/a
+Recorded failures not fixed: none
+Open questions: none. User decisions 2026-10-26: (a) the 7 blocked P4-04 cases (T4-HOOK-01, T4-SUB-02, T4-SCHED-01, T4-SCHED-02, T4-MEM-03, T4-CFG-01, T4-GW-02) are built by extending the live tier (live steps:, argument and per-session matchers, Evidence/manifest/SSE checks), in scope for P4-04; (b) the live runner applies a scenario's config: by starting or reconfiguring the gateway per scenario, in scope for P4-04; (c) live runs approved: P4-06 local smoke only. P3-02 and P3-03 are not yet approved.
+Next:      P4-04 (resumed), then P4-06
+
+### 2026-10-26 P4-04 cursor
+Task:      P4-04 New T4 cases and suites
+Status:    done
+Changed:   Seven scenarios: hooks/evidence_citation_live.yaml (T4-HOOK-01), subagents/persona_dispatch.yaml (T4-SUB-02), scheduler/http_one_tick_live.yaml (T4-SCHED-01), scheduler/model_starts_loop.yaml (T4-SCHED-02), memory/search_past_session.yaml (T4-MEM-03), config/reload_memory_off_live.yaml (T4-CFG-01), gateway/live_resume.yaml (T4-GW-02). Test-only persona: regression/t4/agent/monkeybot_config/AGENT.researcher.md, overlaid on the SUB-02 scenario config (default monkeybot.yaml unchanged). New suite regression/t4/suites/scheduler.yaml. Nightly adds T4-FILE-04, T4-ATT-01, and the seven. Every suite names test_provider_live_matrix.py; test_docker_image_health.py is unnamed, so T4-OPS-01 runs only with no `--suite`. Live engine: tool_args (stop_guard, command_contains), per_session, evidence_paths, subagent_manifest, system_prompt, chat_history, sse.deltas_equal_final, plus setup steps create_loop / invoke_tick / read_history and when-steps reload_config / confirm_tool / disconnect_sse / reconnect_sse. Runner stamps a missing request_id, reads history and transcripts, and run_scenario accepts a plain turn list. report.run_suite and the pytest plugin group by GatewaySpec and restart or reload between groups; collection does not start a gateway. No src/monkeybot change, no live run.
+Verify:    uv run pytest regression/t4 --live --collect-only -qq → 52 `::` node ids (11 provider params, docker, 40 scenarios). --suite context → 13 (provider + 2 scenarios, no docker). --suite nightly → 50 (provider + 39 scenarios, no docker). Collection with subprocess.Popen, socket.create_connection, and preflight patched to raise → 52 collected; the ledger's git call hits Popen via subprocess.run, and pytest-rerunfailures opens socket.socket. uv run pytest tests/contracts/test_catalog_pairing.py -q → 1 passed (seeds 394 filled / 418 tests). T4-RT-01 stays empty. uv run pytest regression/selftest -q → 364 passed, 1 deselected. uv run ruff format --check . → 832 files already formatted. uv run ruff check testkit tests regression → 33 findings in the 13 known files; none added. uv run mypy src/monkeybot testkit → no issues in 287 files. uv run pytest tests regression -m "t1 or t2 or t3" -q -n auto → 4231 passed, 54 skipped, 1 xfailed. uv run python -m testkit.failures latest → failures=0 (test-runs/20261027T013601Z/20261027T013601Z-8248de8-30657.jsonl).
+Catalog:   7 rows filled: T4-HOOK-01, T4-SUB-02, T4-SCHED-01, T4-SCHED-02, T4-MEM-03, T4-CFG-01, T4-GW-02. T4-RT-01 left empty (deferred). Pairing seeds 387/411 → 394/418.
+Recorded failures not fixed: none. Two earlier runs from this task were fixed before the green verify: test-runs/20261027T013136Z/20261027T013136Z-8248de8-30246.jsonl (pairing, Test cells had backticks so the paths did not exist) and test-runs/20261027T013258Z/20261027T013258Z-8248de8-30375.jsonl (test_live_ledger, run_scenario assumed ScenarioRun; a plain list is now wrapped).
+Open questions: none. The seven cases are not executed live here; P4-06 is the approved local smoke run.
+Next:      P4-06
+
+### 2026-10-26 P4-06 cursor
+Task:      P4-06 Live smoke; phase exit
+Status:    done
+Changed:   regression/plan/status.md only. No src/monkeybot change, no scenario or baseline edit, no cassette. Gateway started from regression/t4/agent on 127.0.0.1:8787 (PORT=8787, SANDBOX_ENABLED=false) and stopped afterwards. A temporary proof scenario and suite were created for one run and deleted.
+Verify:    EVAL_SCENARIO_DELAY_SEC=150 uv run python -m regression.t4 --suite smoke --agent-url http://127.0.0.1:8787 --baseline regression/t4/baselines/smoke.json. Judge stayed eval_config.yaml (ollama-cloud/glm-5.3-flash). Exit 0. 12/12 scenarios passed. Scorecard verdict FAIL is baseline comparison only: output tokens 14426 -> 17739 (> 20%), p95 latency 30131ms -> 311146ms (> 20%), tool errors 1 -> 4. Run JSON regression/t4/runs/e16c4a2f-6c65-4ac4-b43f-4b00e813cf0d.json. Smoke ledger test-runs/20261027T014504Z/20261027T014504Z-8248de8-32202.jsonl failures=0, live provider ollama-cloud model glm-5.3-flash. Proof (deleted afterwards): copy of file/core_read with response_contains of a token that cannot appear; ledger test-runs/20261027T024222Z/20261027T024222Z-8248de8-33892.jsonl case P4-06-LEDGER-PROOF, provider ollama-cloud, model glm-5.3-flash, artifacts regression/t4/runs/4c8b84ca-f650-45d9-952c-5863c1928c25.json. T4 catalog Test cells: every row filled except T4-RT-01.
+Catalog:   n/a (confirmed; only T4-RT-01 is empty)
+Recorded failures not fixed: none in the smoke suite. The proof failure is deliberate and the scenario was deleted: test-runs/20261027T024222Z/20261027T024222Z-8248de8-33892.jsonl P4-06-LEDGER-PROOF, response_contains token not in the reply.
+Open questions: none. P3-02 and P3-03 still need user confirmation.
+Next:      P3-02 and P3-03 still need the user's confirmation. Do not start them.
+
+### 2026-10-27 P3-03 cursor
+Task:      P3-03 Wire cassettes and the staleness check (T3-PROV-06 for Ollama, T3-PROV-07, T3-PROV-08)
+Status:    done
+Changed:   regression/t3/tools/record_wire.py and check_staleness.py; regression/t3/test_replay_wire.py; regression/t3/wire/ollama_cloud/glm_tool_turn.json (tool turn, add a=2 b=3) and thinking_only_completion.json (thinking then Done, no text; max_tokens 64 so the live stream stops during thinking, truncated true). scripts/ci-local.sh and .github/workflows/ci.yml cassette-staleness step (workflow stays workflow_dispatch; no provider key). Catalog Test cells for T3-PROV-06, T3-PROV-07, T3-PROV-08. Pairing seeds recounted to 397 filled rows and 421 test paths. No src/monkeybot change. No gateway.
+Verify:    uv run pytest regression/t3/test_replay_wire.py -q → 3 passed in 0.33s (socket.connect refused). uv run python -m regression.t3.tools.check_staleness → ok: 2 wire cassettes match. Same command after setting glm_tool_turn.json sdk openai to 0.0.0-stale → exit 1; file restored to 2.36.0. uv run ruff format --check . → 835 files already formatted. uv run ruff check testkit tests regression → 33 findings, none in the new files. uv run mypy src/monkeybot testkit → no issues in 287 files. uv run pytest tests/contracts/test_catalog_pairing.py -q → 1 passed. uv run python -m testkit.failures latest → failures=0 (test-runs/20261027T133822Z/20261027T133822Z-8248de8-39156.jsonl). Full bash scripts/ci-local.sh not run.
+Catalog:   T3-PROV-06, T3-PROV-07, T3-PROV-08 → regression/t3/test_replay_wire.py. T3-PROV-01..05 left empty. T3-PROV-06 is one row; only the Ollama family is recorded.
+Recorded failures not fixed: none
+Open questions: none
+Next:      P3-02 (in progress). Phase 3 stays in progress until P3-02 is done. P5-01 is also in progress.
+
+### 2026-10-27 P5-01 cursor
+Task:      P5-01 Statistics, comparison, and class lists
+Status:    done
+Changed:   Created regression/t5/__main__.py, regression/t5/stats.py, regression/t5/compare.py, regression/t5/suites/reliability.yaml, regression/t5/suites/capability.yaml, regression/t5/suites/drift.yaml, regression/selftest/test_trials_stats.py. Extended regression/t5/trials.py so a trial summary is scored and fail/warn verdicts go to the ledger; --update-baseline is the only writer of regression/t5/baselines/. Filled docs/testing.md §8 Test cells. Updated the pairing seed in tests/contracts/test_catalog_pairing.py (397 filled / 421 paths → 406 / 430) so the new cells match. No src/monkeybot change. No live trial. No baseline file written.
+Verify:    uv run pytest regression/selftest/test_trials_stats.py -q → 12 passed in 0.31s. uv run pytest tests/contracts/test_catalog_pairing.py -q → 1 passed in 10.26s. An earlier run of the new test was fixed before that: test-runs/20261027T134744Z/20261027T134744Z-8248de8-40067.jsonl, regression/selftest/test_trials_stats.py, TypeError cannot unpack Interval (the test now reads .low and .high).
+Catalog:   T5-SKILL-01, T5-TODO-01, T5-SUB-01 → regression/t5/suites/reliability.yaml. T5-CTX-01, T5-CODE-01, T5-SCHED-01, T5-MCP-01, T5-MEM-01 → regression/t5/suites/capability.yaml. T5-VER-01 → regression/t5/suites/drift.yaml. T5-GW-01 and T5-GW-02 left empty.
+Recorded failures not fixed: none
+Open questions: none
+Next:      P5-02 (needs the user's confirmation for the live baseline run). P3-02 is still in progress.
+
+### 2026-10-27 P3-02 cursor
+Task:      P3-02 Record the T3a cassettes (live)
+Status:    blocked (doom loop and truncation did not occur in three tries; compaction replay is cassette_stale; T3-VER-01 classifier and judge JSON are not cassette calls)
+Changed:   regression/t3/trajectories/ctx/replay_live_compaction.{cassette.json,yaml} from context/summarization_trigger (session 20261027T132946Z_2ffe49a6-7481-409a-aeb2-97e36e09155f). regression/t3/trajectories/shell/replay_live_pytest_run.{cassette.json,yaml} from coding/fix_failing_test (session 20261027T140236Z_73d3e59c-93f9-4da4-8a6b-16900597c912); tool path and cwd values that started with the runner directory eval-coding-fix_failing_test were made fixture-relative so the cassette replays against calc_repo, and model.max_turns is 25 to match the live agent. docs/testing.md Test cells for T3-CTX-01 and T3-SHELL-01. Pairing seeds recounted to 408 filled rows and 432 test paths. No doom, truncation, or verifier cassette. No src/monkeybot change. Gateway on 8787 started for this task and stopped afterwards.
+Verify:    uv run pytest regression/t3/trajectories/shell/replay_live_pytest_run.yaml -q three times → passed (digest warning only). uv run pytest regression/t3/test_replay_trajectories.py -q → 15 passed (socket.connect refused). uv run ruff format --check . → 839 files already formatted. uv run ruff check testkit tests regression → 33 findings in the same 13 files; none added. uv run mypy src/monkeybot testkit → no issues in 287 files. uv run pytest tests/contracts/test_catalog_pairing.py -q → 1 passed. uv run python -m testkit.failures latest → failures=0 (test-runs/20261027T142528Z/20261027T142528Z-8248de8-44533.jsonl).
+Catalog:   T3-SHELL-01 → regression/t3/trajectories/shell/replay_live_pytest_run.yaml. T3-CTX-01 → regression/t3/trajectories/ctx/replay_live_compaction.yaml (replay is not green). T3-LOOP-01, T3-LOOP-02, and T3-VER-01 left empty.
+Recorded failures not fixed: test-runs/20261027T141509Z/20261027T141509Z-8248de8-43284.jsonl T3-CTX-01 regression/t3/trajectories/ctx/replay_live_compaction.yaml cassette_stale: tool read_file changed. The same run's T3-SHELL-01 strict_script failure was the loop driver's default max_turns 10 against 13 recorded calls; the scenario now sets model.max_turns 25 and the later replays passed.
+Open questions: T3-VER-01. The live drift/declares_done run wrote a VerifierVerdict (status on_track, triggering_signals a one-item list, judge_tokens an integer) and six ordinary ProviderResponses. Classifier JSON and judge JSON are not provider calls, so they do not fit the §5.5.1 calls list. No verifier cassette was written. Compaction did occur (first successful summary after provider response index 4, turns_summarized 3) but the summarizer's provider.stream is not in the transcript; replay treats that stream as the next cassette call and the empty tool list fails staleness. Doom loop and finish=length did not occur. Please say whether to insert recorded summarizer calls, skip staleness on empty-tool streams, or leave T3-CTX-01 blocked.
+Next:      P5-02 stays next. Phase 3 is not done. P3-03 is already done, not in parallel.
+
+### 2026-10-27 P3-02 user decision cursor
+Task:      P3-02 Record the T3a cassettes (live)
+Status:    blocked
+Changed:   regression/plan/status.md only. No new live run, no src change, no cassette edit.
+Verify:    n/a
+Catalog:   unchanged. T3-SHELL-01 is filled and replays. T3-CTX-01 is filled but not green. T3-LOOP-01, T3-LOOP-02, and T3-VER-01 stay empty.
+Recorded failures not fixed: T3-CTX-01 cassette_stale: tool read_file changed (test-runs/20261027T141509Z/20261027T141509Z-8248de8-43284.jsonl)
+Open questions: none. User 2026-10-27: leave T3-CTX-01 blocked; do not retry the doom loop or truncation; leave T3-VER-01 blocked; do not start the P5-02 live baselines.
+Next:      P5-02 when the user confirms the live baselines. Phase 3 stays in progress.
+
+### 2026-10-27 P3-02 cursor
+Task:      P3-02 Record the T3a cassettes (live)
+Status:    in-progress (T3-LOOP-01 replays; T3-CTX-01, T3-LOOP-02, and T3-VER-01 stay blocked)
+Changed:   regression/t3/trajectories/loop/replay_live_doom_loop.{cassette.json,yaml} from a live turn that asked for three identical read_file calls on skills/browser/SKILL.md (session 20261027T144852Z_c83eeb0b-3417-4645-8b6a-ae5ef1806a25, gateway on 8808, temporary agent copy). docs/testing.md Test cell for T3-LOOP-01. Pairing seeds 409 filled rows and 433 test paths. No src/monkeybot change. Gateway on 8808 stopped afterwards. The 8797 smoke gateway was left running.
+Verify:    uv run pytest regression/t3/trajectories/loop/replay_live_doom_loop.yaml -q → 1 passed, digest warnings only (tool_schema_digest differs; advertised tools no longer present: disable_mcp, enable_mcp, load_file, todo_list, web_search). uv run pytest tests/contracts/test_catalog_pairing.py -q → 1 passed.
+Catalog:   T3-LOOP-01 → regression/t3/trajectories/loop/replay_live_doom_loop.yaml. T3-SHELL-01 still replays. T3-CTX-01 still not green. T3-LOOP-02 and T3-VER-01 stay empty.
+Recorded failures not fixed: none for T3-LOOP-01. The live runner raised RuntimeError on the doom-loop Error event; the transcript still held the three reads, the intervention, and the recovery reply, and the offline replay passed.
+Open questions: none
+Next:      P3-02 remains open for T3-CTX-01, T3-LOOP-02, and T3-VER-01.
+
+### 2026-10-27 P3-02 cursor
+Task:      P3-02 Record the T3a cassettes (live), T3-LOOP-02 only
+Status:    blocked (forced length cap never produced a truncated tool batch)
+Changed:   regression/plan/status.md only. No cassette, no src/monkeybot change. Temporary gateway on 8803 with model.max_tokens 160, 2000, 4500, and 900, thinking off, then stopped.
+Verify:    live turns against ollama-cloud/glm-5.3-flash. Each finish was length and output_tokens equaled the cap. Transcripts had tool_requests [] and no truncated_batch. A direct provider probe with think false and tool_choice write_file did the same: the cap landed in reasoning or plain text.
+Catalog:   T3-LOOP-02 stays empty. T3-LOOP-01 and T3-SHELL-01 unchanged.
+Recorded failures not fixed: none. No replay was run because there was no cassette.
+Open questions: none. The scripted rejection remains T2-LOOP-04.
+Next:      P3-02 stays open for T3-CTX-01 and T3-VER-01.
+
+### 2026-10-27 P3-02 cursor
+Task:      P3-02 Record the T3a cassettes (live), T3-LOOP-02 prompt retry
+Status:    blocked (no-think prompt still produced a text-only length stop)
+Changed:   no cassette and no src/monkeybot change. The live user message told the model not to think, plan, or explain, and to execute write_file only. Gateway on 8803, max_tokens 500, thinking off, then stopped.
+Verify:    session 20261027T150257Z_t3loop02aac1490a. finish length, output_tokens 500, tool_requests empty, no truncated_batch. The reply started "The user wants me to write..."
+Catalog:   T3-LOOP-02 stays empty.
+Recorded failures not fixed: none
+Open questions: none
+Next:      P3-02 stays open for T3-CTX-01 and T3-VER-01.
+
+### 2026-10-27 P3-02 cursor
+Task:      P3-02 Record the T3a cassettes (live), T3-LOOP-02 cap 10000
+Status:    blocked (10000-token cap still produced a text-only length stop)
+Changed:   no cassette and no src/monkeybot change. Same no-think write_file prompt. Gateway on 8803, max_tokens 10000, thinking off, then stopped.
+Verify:    session 20261027T150516Z_t3loop02de3c2c52. finish length, output_tokens 10000, tool_requests empty, no truncated_batch. The reply ended as the model was about to emit the tool call.
+Catalog:   T3-LOOP-02 stays empty.
+Recorded failures not fixed: none
+Open questions: none
+Next:      P3-02 stays open for T3-CTX-01 and T3-VER-01.
+
+### 2026-10-27 P3-02 cursor
+Task:      P3-02 Record the T3a cassettes (live), T3-VER-01
+Status:    in-progress (T3-VER-01 replays; T3-CTX-01 and T3-LOOP-02 stay blocked)
+Changed:   Cassette gains classifier and judge lists. from_transcript turns each VerifierVerdict into a judge completion and reads classifier rows from the session SQLite goal ledger. Replay feeds those lists to ScriptedClassifier and ScriptedJudge. regression/t3/trajectories/verifier/replay_drift_tape.{cassette.json,yaml} from drift/declares_done session 20261027T140423Z_a568bf19-b738-48e6-b1cd-5b92eb155736 and gateway db data/gateways/0be8640d2635/monkeybot.db. docs/testing.md Test cell. Pairing seeds 410 filled rows and 434 test paths. Cassette shape noted in regression/plan/reference/05.5-cassettes.md. No src/monkeybot change. No new live run.
+Verify:    uv run pytest regression/selftest/test_from_transcript.py regression/t3/test_replay_trajectories.py tests/contracts/test_catalog_pairing.py regression/t3/trajectories/verifier/replay_drift_tape.yaml -q --count=3 → 103 passed, 6 warnings in 41.04s. The drift tape asserts one on_track verdict with constraint_touch and no harness interventions.
+Catalog:   T3-VER-01 → regression/t3/trajectories/verifier/replay_drift_tape.yaml. T3-LOOP-01 and T3-SHELL-01 still replay. T3-CTX-01 still not green. T3-LOOP-02 stays empty.
+Recorded failures not fixed: T3-CTX-01 cassette_stale: tool read_file changed (test-runs/20261027T141509Z/20261027T141509Z-8248de8-43284.jsonl). T3-LOOP-02 has no cassette.
+Open questions: none
+Next:      P3-02 stays open for T3-CTX-01 and T3-LOOP-02. P5-02 live baselines still wait on the user.
+
+### 2026-10-27 P3-02 cursor
+Task:      P3-02 Record the T3a cassettes (live), T3-LOOP-02 no custom cap
+Status:    blocked (thinking-only replies hit the client default of 60000 and never called a tool)
+Changed:   no cassette and no src/monkeybot change. thinking_budget -1, reasoning_effort omitted, max_tokens omitted from the temporary config. Gateway on 8803, then stopped.
+Verify:    session 20261027T150920Z_t3loop0210ce2142. Three provider responses, tool_requests empty. Responses 2 and 3 each report output_tokens 60000, all thinking. Interventions empty_completion retry, then exhausted. Turn error: Empty model completion after recovery.
+Catalog:   T3-LOOP-02 stays empty.
+Recorded failures not fixed: none
+Open questions: none. Omitting model.max_tokens still sends the provider default of 60000.
+Next:      P3-02 stays open for T3-CTX-01 and T3-LOOP-02.
+
+### 2026-10-27 P3-02 cursor
+Task:      P3-02 Record the T3a cassettes (live), T3-LOOP-02 on minimax-m3.1-flash
+Status:    blocked (tool calls completed; no truncated batch)
+Changed:   no cassette and no src/monkeybot change. Temporary gateway model ollama-cloud/minimax-m3.1-flash, thinking_budget -1, no custom max_tokens. Gateway on 8803, then stopped.
+Verify:    First session 20261027T152646Z_t3loop020376c074 failed with Provider request failed (ReadError) and partial_chars 0. Retry session 20261027T152957Z_t3loop029547ef16 wrote essay.txt twice (160770 then 300504 bytes), ran a count command, then Error Max turns exceeded. No truncated_batch intervention.
+Catalog:   T3-LOOP-02 stays empty.
+Recorded failures not fixed: none
+Open questions: none
+Next:      P3-02 stays open for T3-CTX-01 and T3-LOOP-02.
+
+### 2026-10-27 P3-02 cursor
+Task:      P3-02 Record the T3a cassettes (live), T3-LOOP-02
+Status:    deferred (user 2026-10-27)
+Changed:   regression/plan/status.md and docs/testing.md. No cassette and no src/monkeybot change.
+Verify:    n/a
+Catalog:   T3-LOOP-02 Expect notes the deferral. Test cell stays empty. Listed under Deferred coverage. T2-LOOP-04 remains the rejection check.
+Recorded failures not fixed: none
+Open questions: none
+Next:      P3-02 stays open for T3-CTX-01.
+
+### 2026-10-27 P5-02 cursor
+Task:      P5-02 First baselines (live)
+Status:    in-progress
+Changed:   regression/plan/status.md only. No src/monkeybot change. The earlier smoke run was aborted at trial 1/8 when its shell died and the 8797 gateway shut down. No baseline file was written. A detached driver restarted the full suite list from smoke.
+Verify:    not yet. Gateway 8797 health 200. Driver pid 55685. First smoke trial of the aborted run was 11/12; file/core_write failed max_tool_errors 1 > 0.
+Catalog:   n/a
+Recorded failures not fixed: file/core_write max_tool_errors 1 > 0 on the aborted trial 1. Not fixed.
+Open questions: none
+Next:      the driver continues smoke, then coding, coding_hard, subagents, memory, mcp, both drift configs, then a smoke N=2 compare. P5-03 after that.
+
+### 2026-10-27 P3-02 cursor
+Task:      P3-02 Record the T3a cassettes (live), T3-CTX-01
+Status:    in-progress (T3-CTX-01 replays; T3-LOOP-02 stays deferred)
+Changed:   Summarizer streams are written to the transcript with exchange_id and rebuilt into the cassette in request order. T4-CTX-01 context window is 10000. Live session 20261027T153149Z_d128083b-1f11-4a7e-bff7-1524816b4da7 (72 summarizations) converted to regression/t3/trajectories/ctx/replay_live_compaction.cassette.json. Replay uses the same window and model.max_turns 25. grep schema lists path, which the executor already accepts as an alias of root. The live scenario approves up to 12 unlisted command confirmations so the recording does not wait out the pending-response timeout.
+Verify:    Live T4-CTX-01 passed (5 messages, 72 summarizations). uv run pytest regression/t3/trajectories/ctx/replay_live_compaction.yaml -q → passed, twice. Digest warnings only: tool_schema_digest and live-only tools the loop driver does not advertise.
+Catalog:   T3-CTX-01 → regression/t3/trajectories/ctx/replay_live_compaction.yaml. T3-LOOP-02 stays deferred.
+Recorded failures not fixed: test-runs/20261027T155350Z/20261027T155350Z-8248de8-56027.jsonl T3-CTX-01 cassette_stale: tool grep changed. The follow-up replay passed after the schema listed path.
+Open questions: none
+Next:      P3-02 stays open only because T3-LOOP-02 is deferred. P5-02 live baselines are the other in-progress task.
+
+### 2026-10-27 P3-02 cursor
+Task:      P3-02 Record the T3a cassettes (live)
+Status:    done
+Changed:   status.md only. The four recorded cassettes already replay. T3-LOOP-02 stays deferred, so it is not a fifth cassette.
+Verify:    no new run. T3-CTX-01 replay was already green.
+Catalog:   T3-CTX-01, T3-VER-01, T3-LOOP-01, and T3-SHELL-01 replay. T3-LOOP-02 stays deferred.
+Recorded failures not fixed: none
+Open questions: none
+Next:      P5-02. Phase 3 is done.
+
+### 2026-10-27 T3-LOOP-02 cursor
+Task:      T3-LOOP-02 replay live truncation
+Status:    done
+Changed:   regression/t3/trajectories/loop/replay_live_truncation.{cassette.json,yaml} from a live gemma4:31b turn (session 20261027T161455Z_t3loop02gemma1). thinking off, max_tokens 120, max_turns 1. docs/testing.md Test cell filled and the deferral removed. Pairing seeds 411 filled rows and 435 test paths. No src/monkeybot change. Temporary gateway on 8804.
+Verify:    uv run pytest regression/t3/trajectories/loop/replay_live_truncation.yaml -q → passed. Digest warnings only.
+Catalog:   T3-LOOP-02 → regression/t3/trajectories/loop/replay_live_truncation.yaml.
+Recorded failures not fixed: none
+Open questions: none
+Next:      P5-02
+
+### 2026-10-27 P6-01 cursor
+
+Task:      P6-01 Cutover, partial (old paths only)
+Status:    in-progress
+Changed:   Removed the leftover evals/ tree (knowledge_layer, runs, egg-info, TEST_COVERAGE.md, local venv, caches). 125 tracked evals files are deleted in the worktree and not committed. Dropped /evals/runs/ from .gitignore. Rewrote docs/live-evals.md as the T4 runbook and pointed README, CONTRIBUTING, getting-started, features, verifier-agent-design, and the smoke baseline note at regression/t4. docs/testing.md §2 now matches ci-local.sh and D3. Phase 5 was not deferred. T5-GW-01 and T5-GW-02 Test cells were left empty.
+Verify:    evals/, tests/evals/, tests/integration/, tests/acceptance/, and tests/profiling/ are absent. uv run pytest tests/contracts/test_catalog_pairing.py -q → 1 passed. uv run pytest regression/t2/loop/scenarios/file/tool_glob_grep.yaml -q → 1 passed. ci-local.sh and the live smoke were not run.
+Catalog:   unchanged. T5-GW-01 and T5-GW-02 stay empty until P5-03, or until Phase 5 is deferred and those rows are listed in docs/testing.md §9.
+Recorded failures not fixed: none
+Open questions: none
+Next:      P6-01 stays open until P5-03 is done or Phase 5 is deferred, then the full gate and one live smoke. P5-02 is still in progress.
+Left on purpose: tests/contracts/test_catalog_pairing.py imports tests.contracts (current package). tests/contracts/test_migrations_replay.py names tests/core/test_session_branches_migration.py as the path in commit 164b76cd. tests/unit/core/fixtures/bitbucket_dc_style_pr.diff is stored diff text a test reads.
+
+### 2026-10-27 P6-01 cursor
+Task:      P6-01 Cutover
+Status:    done
+Changed:   Phase 5 marked deferred (P5-02, P5-03). Stopped the live baseline processes. docs/testing.md §9 lists T4-RT-01, T3-PROV-01..05, the non-Ollama families of T3-PROV-06, and the Phase 5 deferral. scripts/ci-local.sh clears pytest addopts for browser-mcp so it does not load regression.plugin. No src/monkeybot change.
+Verify:    bash scripts/ci-local.sh → exit 0. Deterministic pytest 4255 passed, 54 skipped. cli 357 passed. browser-mcp 320 passed, 18 skipped. ruff format clean. mypy clean. cassette staleness ok. Live smoke was not run (no confirmation; Phase 5 live work was deferred).
+Catalog:   empty Test cells are T4-RT-01, T3-PROV-01..05. T5-GW-01 and T5-GW-02 have Test cells. Listed in §9.
+Recorded failures not fixed: test-runs/20261027T163137Z/20261027T163137Z-8248de8-64024.jsonl T5-GW-01 TimeoutError; T5-GW-02 AssertionError (no ToolCallStarted call id).
+Open questions: none
+Next:      none. Phase 5 stays deferred.
+Left on purpose: tests/contracts/test_catalog_pairing.py imports tests.contracts. tests/contracts/test_migrations_replay.py names the old tests/core path as history. tests/unit/core/fixtures/bitbucket_dc_style_pr.diff is fixture diff text.

@@ -1,0 +1,15 @@
+# Uses the in-process fixture MCP server wired up in
+# regression/t4/agent/monkeybot_config/mcp.json (server "fixture", see
+# regression/fixtures/mcp/fixture_mcp_server.py). No network calls, CI-reachable.
+case: T4-MCP-01
+mode: live
+description: "Agent invokes an MCP-provided tool (fixture server's echo tool) when asked to use it"
+tags: [mcp]
+messages:
+  - "You have an MCP server called 'fixture' connected, with a 'fixture__echo' tool that echoes back text. Use it to echo the text 'ping'."
+assertions:
+  metrics: [response_relevancy]
+  required_tools: [fixture__echo]
+  tool_calls: {min: 1}
+  max_tool_errors: 0
+  verdicts: {max: 0}

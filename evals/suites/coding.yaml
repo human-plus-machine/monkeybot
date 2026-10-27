@@ -1,9 +1,0 @@
-# Coding-agent suite: each scenario copies evals/fixtures/coding/calc_repo into the agent
-# workspace and checks the resulting files, not just telemetry. Not in smoke — it needs
-# `pytest` in the agent's environment and a model strong enough to edit code.
-# Run against a gateway whose workspace is MONKEYBOT_AGENT_WORKSPACE. See docs/live-evals.md.
-id: coding
-scenarios:
-  - coding/fix_failing_test
-  - coding/add_feature_with_tests
-  - coding/navigate_repo

@@ -1,0 +1,216 @@
+{
+  "label": "run",
+  "suite": "subagents",
+  "trials": 5,
+  "overall_pass_rate": 0.5,
+  "scenarios": {
+    "subagents/dispatch_complete": {
+      "runs": 5,
+      "passed": 5,
+      "pass_rate": 1.0,
+      "mean_tool_calls": 2.0,
+      "mean_tool_calls_by_name": {
+        "task": 2.0
+      },
+      "mean_tool_errors": 0.0,
+      "mean_tokens": 11087.8,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": [],
+      "class": "reliability",
+      "case": "T5-SUB-01",
+      "baseline_passed": null,
+      "baseline_runs": null,
+      "verdict": "updated",
+      "wilson95": null
+    },
+    "subagents/persona_dispatch": {
+      "runs": 5,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "mean_tool_calls": 1.8,
+      "mean_tool_calls_by_name": {
+        "task": 1.8
+      },
+      "mean_tool_errors": 0.0,
+      "mean_tokens": 11778.8,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": [
+        "subagent_manifest: subagent_type 'researcher' not in no child manifests",
+        "subagent_manifest: subagent_type 'researcher' not in no child manifests",
+        "subagent_manifest: subagent_type 'researcher' not in no child manifests",
+        "subagent_manifest: subagent_type 'researcher' not in no child manifests",
+        "subagent_manifest: subagent_type 'researcher' not in no child manifests"
+      ],
+      "class": "reliability",
+      "case": "T5-SUB-01",
+      "baseline_passed": null,
+      "baseline_runs": null,
+      "verdict": "updated",
+      "wilson95": null
+    }
+  },
+  "raw": [
+    [
+      {
+        "scenario_id": "subagents/dispatch_complete",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "task": 2
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 9015,
+        "output_tokens": 641,
+        "latency_ms": 11985,
+        "final_text": "ies: `.monkeybot/` only\n- Files: none\n\n**Summary:** This workspace contains no project. The only entry is `.monkeybot/`, which is the agent's own runtime directory (spill/transcript storage), not project content. There are no manifests (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `requirements.txt`), no README, and no source directories of any kind \u2014 so there's nothing here to characterize as a codebase.\n\nOne note on the process: my first delegation attempt failed because I passed a `subagent_type` of \"default\" which isn't configured; I retried without that field and it ran fine."
+      },
+      {
+        "scenario_id": "subagents/persona_dispatch",
+        "status": "failed",
+        "failure": "subagent_manifest: subagent_type 'researcher' not in no child manifests",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "task": 2
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 10307,
+        "output_tokens": 509,
+        "latency_ms": 14651,
+        "final_text": "nd:\n\n**Top-level listing (non-recursive):**\n- Directories: `.monkeybot/` only\n- Files: none\n\n**Summary:** This workspace contains no project. The only entry is `.monkeybot/`, which is the agent harness's own runtime directory (spill files and transcripts), not project content. There are no source files, no manifests (`package.json`, `pyproject.toml`, `Cargo.toml`), no configs, READMEs, or documentation \u2014 so there's no application or library here to classify.\n\nIf you expected a codebase in this workspace, it hasn't been created or placed here yet \u2014 it would need to be cloned or copied in first."
+      }
+    ],
+    [
+      {
+        "scenario_id": "subagents/dispatch_complete",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "task": 2
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 9697,
+        "output_tokens": 783,
+        "latency_ms": 10908,
+        "final_text": "), no README, no source directories, and no files of any kind at the top level. The single entry, `.monkeybot/`, is the monkeybot harness's own runtime directory (spill files and subagent runs), not project content.\n\nSo: the workspace is effectively empty \u2014 a blank environment with only runtime scaffolding.\n\nOne note: the `researcher` persona isn't configured in this harness, so the subagent ran with the default persona instead. Same result as earlier checks \u2014 if you were expecting project files here, they may need to be added or the workspace root may be pointing somewhere else than intended."
+      },
+      {
+        "scenario_id": "subagents/persona_dispatch",
+        "status": "failed",
+        "failure": "subagent_manifest: subagent_type 'researcher' not in no child manifests",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "task": 2
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 10809,
+        "output_tokens": 609,
+        "latency_ms": 15497,
+        "final_text": "Summary:** This workspace contains **no project**. There are no source files, no build or dependency manifests (`package.json`, `pyproject.toml`, `Cargo.toml`, etc.), no README, and no configuration files at the root. The listing succeeded fresh this session and wasn't truncated, so that's a complete picture of the root.\n\nThe single directory, `.monkeybot/`, is the MonkeyBot harness's own runtime directory (spill paths and transcripts) \u2014 harness infrastructure, not project content. So there's nothing here to characterize as a codebase or document repository; the workspace is effectively empty."
+      }
+    ],
+    [
+      {
+        "scenario_id": "subagents/dispatch_complete",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "task": 2
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 9938,
+        "output_tokens": 664,
+        "latency_ms": 9784,
+        "final_text": "rsive):**\n   - Directories: `.monkeybot/` (the only entry)\n   - Files: none\n\n2. **Summary:** This workspace contains **no project**. There are no source files, no build or dependency manifests (`package.json`, `pyproject.toml`, `Cargo.toml`, etc.), no README, and no configs or docs. The sole directory, `.monkeybot/`, is the agent harness's own runtime location (spill files, transcripts, bookkeeping) \u2014 infrastructure, not project content. It's effectively an empty workspace apart from harness artifacts.\n\nThis matches what previous delegations of the same task found, so the result is consistent."
+      },
+      {
+        "scenario_id": "subagents/persona_dispatch",
+        "status": "failed",
+        "failure": "subagent_manifest: subagent_type 'researcher' not in no child manifests",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "task": 2
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 12160,
+        "output_tokens": 977,
+        "latency_ms": 17657,
+        "final_text": "no build/dependency manifests (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, etc.), no README or documentation, and no `.git` directory. The single directory, `.monkeybot/`, is the agent harness's own runtime folder (spill files and transcripts), not project content \u2014 it would exist in any workspace regardless of its contents.\n\nThe listing succeeded fresh this session and wasn't truncated, so this is a verified complete picture: an effectively empty workspace. If a project was expected here, it either hasn't been created/synced yet or lives somewhere other than this workspace root."
+      }
+    ],
+    [
+      {
+        "scenario_id": "subagents/dispatch_complete",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "task": 2
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 11471,
+        "output_tokens": 614,
+        "latency_ms": 12879,
+        "final_text": "none\n\n**Project assessment:** This workspace contains **no project**. There are no source files, no manifests (`package.json`, `requirements.txt`, etc.), no README, and no git repo \u2014 nothing to characterize as a codebase. The sole entry, `.monkeybot/`, is the monkeybot harness's own runtime directory (session transcripts and spill files), not project content \u2014 it exists in any monkeybot session by default.\n\nIn short: an empty workspace with harness scaffolding only. If a project was expected here, it either hasn't been created or lives elsewhere \u2014 point me at a path if you'd like it inspected."
+      },
+      {
+        "scenario_id": "subagents/persona_dispatch",
+        "status": "failed",
+        "failure": "subagent_manifest: subagent_type 'researcher' not in no child manifests",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "task": 2
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 11960,
+        "output_tokens": 890,
+        "latency_ms": 18453,
+        "final_text": ": no project.** The workspace contains no source code, no manifests (`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, etc.), no README, no `.git`, and no build or CI configuration \u2014 so there's no language, framework, or tooling to identify. The single `.monkeybot/` directory is harness runtime state (spill/transcript storage), not project content.\n\nIt verified this fresh this session with two independent checks (`list_dir` and `ls -A1`, both exit code 0, not truncated), so the result is complete and current. If a project was expected here, nothing has been scaffolded or copied in yet."
+      }
+    ],
+    [
+      {
+        "scenario_id": "subagents/dispatch_complete",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "task": 2
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 11975,
+        "output_tokens": 641,
+        "latency_ms": 19261,
+        "final_text": "`, which is the agent harness's own runtime directory (transcripts/spill storage), not project content. There are no source files, no language or framework to identify, and no build or manifest files of any kind \u2014 no `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `Makefile`, or README.\n\nThe subagent confirmed this with a fresh directory listing this session, so it's not a stale or incomplete scan. If you expected a repo checkout or files here, they likely haven't been cloned or mounted into this workspace yet \u2014 point me at a location or tell me what to scaffold, and I can set it up."
+      },
+      {
+        "scenario_id": "subagents/persona_dispatch",
+        "status": "failed",
+        "failure": "subagent_manifest: subagent_type 'researcher' not in no child manifests",
+        "tool_calls_count": 1,
+        "tool_calls_by_name": {
+          "task": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 10014,
+        "output_tokens": 659,
+        "latency_ms": 15836,
+        "final_text": "me directory (spill files and transcripts), not project content. There is no source code, no README, no manifests (`package.json`, `pyproject.toml`, etc.), and not even a `.git/` directory \u2014 so it isn't a cloned or initialized repo either. No project-type classification applies; there's nothing to build, test, or lint.\n\nThe subagent's assessment: it's effectively a blank slate, consistent with a freshly provisioned scratch workspace (the sandbox path under `/private/tmp/.../subagents/workspace` supports this). If you intended a project to live here, it hasn't been placed in this workspace yet."
+      }
+    ]
+  ]
+}
