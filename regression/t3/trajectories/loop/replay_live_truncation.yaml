@@ -1,0 +1,30 @@
+id: regression/t3/trajectories/loop/replay_live_truncation
+case: T3-LOOP-02
+description: A recorded gemma4:31b finish=length write_file batch is still rejected, then the one-turn cap ends the turn.
+mode: replay
+driver: loop
+executor: recording
+cassette: replay_live_truncation.cassette.json
+config:
+  model.max_turns: 1
+messages:
+  - >
+    Call the write_file tool now. path is note.txt.
+    content must be the letter a repeated 4000 times.
+    Do not explain. Do not shorten the content. Do not call any other tool.
+assertions:
+  turn_completed: true
+  provider_calls: 1
+  tool_calls:
+    write_file: 1
+  interventions:
+    - intervention: truncated_batch
+      detail: stream_truncated
+    - intervention: max_turns
+      detail: Max turns exceeded
+  error_contains: Max turns exceeded
+  events_sequence:
+    - type: ToolCallResult
+      call_id: call_qsnmc3ib
+      error:
+        regex: was not executed

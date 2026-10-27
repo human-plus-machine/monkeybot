@@ -14,7 +14,7 @@ Fix these during the relevant phase; several make current results misleading.
 7. `FakeProvider` returns nothing past the script, masking under-scripted tests as empty completions.
 8. `agent_event_to_wire_dict` (test-only serializer) differs from production `event_to_json`; `docs/sse-gateway-ui.md` documents the test shape (`chat_request_id`).
 9. monkeyapp fake gateway drift (section 6.U).
-10. `scripts/create_schema.py` does not run the `_ensure_*` upgrades or the branch rebuild.
+10. `scripts/create_schema.py` does not run the `_ensure_*` upgrades or the branch rebuild. **Fixed:** the script calls `apply_schema`.
 11. Goal ledger is absent on Postgres/Firestore; usage/runs/loops/turn locks are not agent-scoped; turn-lock PK is `session_id` only.
 12. Default gateway port is 8000 in `main.py`, 8080 in Docker and docs; Docker CMD runs SSE-only while `monkeybot run` runs SSE + realtime.
 13. `docs/features.md` subagent defaults (600 s / 25 turns) are stale versus `SubagentSettings` (3600 s / 1000); it also says the worker has no claim heartbeat (it does).

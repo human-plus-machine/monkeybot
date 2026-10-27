@@ -1,0 +1,33 @@
+# Class list, not a runnable T4 suite. These scenarios get a Wilson 95% interval (§5.8).
+cases:
+  -
+    case: T5-CTX-01
+    scenarios:
+      - context/post_compaction_continuity
+  -
+    case: T5-CODE-01
+    scenarios:
+      - coding/fix_failing_test
+      - coding/add_feature_with_tests
+      - coding/navigate_repo
+      - coding_hard/fix_discount_rounding
+      - coding_hard/add_bulk_discount
+      - coding_hard/noisy_test_failure
+      - coding_hard/navigate_intl_rate
+      - coding_hard/rename_calc_tax
+      - coding_hard/honest_unfixable_failure
+      - coding_hard/multi_feature_long
+  -
+    case: T5-SCHED-01
+    scenarios:
+      - scheduler/model_starts_loop
+  -
+    case: T5-MCP-01
+    scenarios:
+      - mcp/enable_then_echo_live
+  -
+    case: T5-MEM-01
+    scenarios:
+      - memory/recall_single_session
+      - memory/recall_cross_session
+      - memory/search_past_session

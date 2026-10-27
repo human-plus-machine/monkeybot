@@ -31,7 +31,7 @@ Migrations and the rest:
 | ID | Case | Asserts |
 |---|---|---|
 | T1-STORE-20 | `legacy_db_apply_schema` | Each `fixtures/legacy_db/*.sqlite` through `apply_schema`: columns present, row counts kept, legacy rows load as `legacy:<key>`. |
-| T1-STORE-21 | `create_schema_matches_apply_schema` | `xfail(strict=True)` today: `scripts/create_schema.py` misses the `_ensure_*` upgrades and branch rebuild. Turns green when fixed. |
+| T1-STORE-21 | `create_schema_matches_apply_schema` | A fresh database from `scripts/create_schema.py` has the same `sqlite_master` snapshot as `apply_schema`. |
 | T1-STORE-22 | `auto_schema_false` | `paths.auto_schema: false` skips DDL; missing `memory_outbox` fails ready. |
 | T1-STORE-23 | `embedding_migrate_lock` | Second migrator skips while the lock is held; explicit Gemma palaces untouched. |
 | T1-STORE-24 | `layout_migrate_nonempty_dest` | Non-empty destination not merged. |

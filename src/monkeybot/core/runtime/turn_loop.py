@@ -98,7 +98,9 @@ from .history_compaction import (
     _summarization_model_id,
     _summarization_viable,
     _workspace_trailer_from_ctx,
+    bind_summary_transcript,
     protect_recent_count,
+    reset_summary_transcript,
     truncate_history_preserving_pins,
 )
 from .input_admission import InputAdmission, SteerItem, join_text, preview_text
@@ -168,6 +170,25 @@ def _require_prompt(state: _TurnState) -> tuple[Message, EpochAdmit]:
     return state.system, state.admit
 
 
+def _rebind_summary_transcript(
+    holder: list[Any] | None,
+    writer: TranscriptWriter | None,
+    *,
+    request_id: str,
+    inner_turn: int,
+) -> None:
+    """Point summary recording at this inner turn. A background job keeps the previous binding."""
+    if holder is None:
+        return
+    current = holder[0]
+    if current is not None:
+        reset_summary_transcript(current)
+        holder[0] = None
+    if writer is None:
+        return
+    holder[0] = bind_summary_transcript(writer, request_id=request_id, inner_turn=inner_turn)
+
+
 async def _run_inner(
     user_content: list[ContentBlock],
     ctx: TurnContext,
@@ -191,26 +212,34 @@ async def _run_inner(
 
     last_assistant: list[str] = [""]
     user_text = _user_text_from_content(user_content)
+    summary_token: list[Any] = [None]
     async with span_run(ctx, user_message=user_text):
-        async for evt in _run_inner_core(
-            user_content,
-            ctx,
-            provider=provider,
-            history=history,
-            inspectors=inspectors,
-            tool_executor=tool_executor,
-            cancelled=cancelled,
-            max_turns=max_turns,
-            usage=usage,
-            hook_manager=hook_manager,
-            last_assistant=last_assistant,
-            attachment_store=attachment_store,
-            attachment_catalog=attachment_catalog,
-            transcript_writer=transcript_writer,
-            vertex_google_search=vertex_google_search,
-            input_admission=input_admission,
-        ):
-            yield evt
+        try:
+            async for evt in _run_inner_core(
+                user_content,
+                ctx,
+                provider=provider,
+                history=history,
+                inspectors=inspectors,
+                tool_executor=tool_executor,
+                cancelled=cancelled,
+                max_turns=max_turns,
+                usage=usage,
+                hook_manager=hook_manager,
+                last_assistant=last_assistant,
+                attachment_store=attachment_store,
+                attachment_catalog=attachment_catalog,
+                transcript_writer=transcript_writer,
+                vertex_google_search=vertex_google_search,
+                input_admission=input_admission,
+                summary_token=summary_token,
+            ):
+                yield evt
+        finally:
+            current = summary_token[0]
+            if current is not None:
+                reset_summary_transcript(current)
+                summary_token[0] = None
         set_run_output(last_assistant[0])
         if trace_id_out is not None:
             try:
@@ -1923,6 +1952,7 @@ async def _run_inner_core(
     transcript_writer: TranscriptWriter | None = None,
     vertex_google_search: bool = False,
     input_admission: InputAdmission | None = None,
+    summary_token: list[Any] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import (
         begin_turn_span,
@@ -1977,6 +2007,12 @@ async def _run_inner_core(
         state.verifier_replan_turn = False
         state.tools_suppressed = False
         state.turn_index += 1
+        _rebind_summary_transcript(
+            summary_token,
+            transcript_writer,
+            request_id=state.ctx.request_id,
+            inner_turn=state.turn_index,
+        )
         state.turn_input_text = state.user_text
         state.turn_output_text = ""
         logger.debug(

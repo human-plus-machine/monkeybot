@@ -1,0 +1,18 @@
+{
+  "config": null,
+  "model": "glm-5.3-flash",
+  "provider": "ollama-cloud",
+  "scenarios": {
+    "subagents/dispatch_complete": {
+      "passed": 5,
+      "runs": 5
+    },
+    "subagents/persona_dispatch": {
+      "passed": 0,
+      "runs": 5
+    }
+  },
+  "schema_version": 1,
+  "suite": "subagents",
+  "trials": 5
+}

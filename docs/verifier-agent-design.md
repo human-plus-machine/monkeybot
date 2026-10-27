@@ -3,7 +3,7 @@
 **Status:** Phase 6 done on `feat/verifier-agent`. Escalation ladder through `block` is in tree; `steer` remains optional.  
 **Branch:** `feat/verifier-agent` — all phases commit here; no phase gets its own branch; do not push unless asked  
 **Audience:** MonkeyBot harness maintainers  
-**Related:** [Features & Design Reference](features.md) · `core/hooks/` · `core/runtime/turn_loop.py` · `core/hooks/evidence_guard.py` · [live-evals.md](live-evals.md) · [smoke baseline](../evals/baselines/smoke.md)  
+**Related:** [Features & Design Reference](features.md) · `core/hooks/` · `core/runtime/turn_loop.py` · `core/hooks/evidence_guard.py` · [live-evals.md](live-evals.md) · [smoke baseline](../regression/t4/baselines/smoke.md)  
 **Depends on:** goal ledger (landed), `SystemNotification` wire type extension (frontend contract — Phase 3)  
 **Spiked:** 2026-09-04 — compaction split accounting; `role="system"` persistence across HistoryStore backends (see Part 4)  
 **Reviewed:** 2026-09-04 — line references re-verified against `develop`; fixes folded in for the end-of-turn commit boundary, the steer tap, provenance of follow-ups/steers, the structured constraint schema, `USER_MESSAGE` settlement latency, config gating, and realtime-loop scope; Phase 0 (measurement harness) added to the build order  
@@ -29,15 +29,15 @@ A new session should read this section, then Part 8. Phases 0–6 are in the tre
 - Config is **YAML-only**. No `ENV_MAP` / `ENV_SPEC` / new env vars for `verifier:`. `MONKEYBOT_CONFIG` is a bootstrap pointer (allowed) for pairing `monkeybot.yaml` vs `monkeybot.verifier-on.yaml`.
 - Defaults stay **off**. Do not wire a `build_verifier` live slice until there is a consumer (Phase 1+). The parser and snapshot field already exist.
 - Smoke fixture model is `ollama-cloud` / `glm-5.3-flash` (`OLLAMA_API_KEY`). Local scorecard uses `JUDGE_PROVIDER=fake` — deepeval's GPTModel against Ollama Cloud timed out with no scores. Do not add `--require-baseline` to `.github/workflows/live-eval-smoke.yml` until CI uses the same provider (it still expects `NVIDIA_API_KEY`; this baseline's `$0` cost is unpriced GLM).
-- Do not commit `evals/smoke_agent/memory/` or workspace `notes/` / `scratch/` left by live runs.
+- Do not commit `regression/t4/agent/memory/` or workspace `notes/` / `scratch/` left by live runs.
 
 **Phase 0 left in the tree (do not recreate):**
 
-- Parser: `VerifierConfig` in `src/monkeybot/core/config/settings.py`; `RuntimeConfig.verifier`; `VERIFIER_DIFF_KEY` + `REBUILD` bump. Tests in `tests/core/test_config_extensions.py` and `test_runtime_config_snapshot.py`.
-- Live evals: `VerdictRecord` / `TurnResult.verdicts` / `path_args` in `evals/models.py` + `evals/runner.py`; assertions in `evals/assertions.py`; nested `verifier_off` / `verifier_on` via `EVAL_VERIFIER_MODE`.
-- Deterministic: `system_prompt_contains_once`, `tools_empty_on_turn` in `tests/evals/scenario_runner.py`.
-- Drift suite: `evals/scenarios/drift/*.yaml`, `evals/suites/drift.yaml` (not in smoke), `evals/smoke_agent/monkeybot_config/monkeybot.verifier-on.yaml`. Recipe in [live-evals.md](live-evals.md).
-- Baseline: [evals/baselines/smoke.json](../evals/baselines/smoke.json) / [smoke.md](../evals/baselines/smoke.md) — 11/11, `glm-5.3-flash`, judge skipped.
+- Parser: `VerifierConfig` in `src/monkeybot/core/config/settings.py`; `RuntimeConfig.verifier`; `VERIFIER_DIFF_KEY` + `REBUILD` bump. Tests in `tests/unit/core/config/test_config_extensions.py` and `test_runtime_config_snapshot.py`.
+- Live evals: `VerdictRecord` / `TurnResult.verdicts` / `path_args` in `regression/t4/models.py` + `regression/t4/runner.py`; assertions in `regression/t4/assertions.py`; nested `verifier_off` / `verifier_on` via `EVAL_VERIFIER_MODE`.
+- Deterministic: `system_prompt_contains_once`, `tools_empty_on_turn` in `regression/schema/assertions.py`, driven by `regression/drivers/loop.py`.
+- Drift suite: `regression/t4/scenarios/drift/*.yaml`, `regression/t4/suites/drift.yaml` (not in smoke), `regression/t4/agent/monkeybot_config/monkeybot.verifier-tracker.yaml`. Recipe in [live-evals.md](live-evals.md).
+- Baseline: [regression/t4/baselines/smoke.json](../regression/t4/baselines/smoke.json) / [smoke.md](../regression/t4/baselines/smoke.md) — 11/11, `glm-5.3-flash`, judge skipped.
 
 **Phase 1 left in the tree (do not recreate):**
 
@@ -46,7 +46,7 @@ A new session should read this section, then Part 8. Phases 0–6 are in the tre
 - Taps: `HookEvent.USER_MESSAGE` + `_drain_steers` (provenance on `SteerItem`).
 - `ResolvedIntent` into compaction (`_summarize_history` `intent_facts`) and `SubagentEnvelope.context`.
 - Gateway: `GatewayRuntime.build_verifier` when `verifier.enabled` and `ledger.enabled`.
-- Tests: `tests/core/test_goal_ledger.py`.
+- Tests: `tests/unit/core/persistence/test_goal_ledger.py`.
 
 **Phase 2 left in the tree (do not recreate):**
 
@@ -56,7 +56,7 @@ A new session should read this section, then Part 8. Phases 0–6 are in the tre
 - Event: `VerifierVerdict` in `runtime/events.py`. Phase 3 adds it to `DURABLE_EVENT_KINDS`.
 - Drain: `_drain_verdicts` at inner preamble (via `_drain_steers`) and `loop.py` `finally` before `TurnComplete`.
 - Gateway: `build_verifier` constructs mailbox + tracker when `tracker.enabled`; `build_context(..., verdict_mailbox=)`.
-- Tests: `tests/core/test_progress_tracker.py` plus `VerifierVerdict` roundtrip in `test_events.py`.
+- Tests: `tests/unit/core/verifier/test_progress_tracker.py` plus `VerifierVerdict` roundtrip in `tests/unit/core/runtime/test_events.py`.
 
 **Phase 3 left in the tree (do not recreate):**
 
@@ -75,7 +75,7 @@ A new session should read this section, then Part 8. Phases 0–6 are in the tre
   the next user message.
 - Judge rate limits are charged at `enqueue` and refunded when no verdict lands, so a slow port
   cannot slip past `max_verdicts_per_message` while a call is in flight.
-- Tests: `tests/core/test_progress_tracker.py` (`test_nudge_reaches_next_system_message_once`), `tests/evals/test_verifier_port.py`.
+- Tests: `tests/unit/core/verifier/test_progress_tracker.py` (`test_nudge_reaches_next_system_message_once`), and the T2-VER scenarios under `regression/t2/`.
 
 **Phase 5 left in the tree (do not recreate):**
 
@@ -459,7 +459,7 @@ class VerifierPort(Protocol):
     ) -> Verdict: ...
 ```
 
-Making this a `Protocol` is load-bearing for testability: it lets the deterministic scenario runner in `tests/evals/` stub verdicts and assert on **the loop's reaction to a verdict**, independently of whether any real model produces that verdict. Without it, the entire feature is only testable against live models.
+Making this a `Protocol` is load-bearing for testability: it lets the deterministic scenario runner in `regression/t2/` stub verdicts and assert on **the loop's reaction to a verdict**, independently of whether any real model produces that verdict. Without it, the entire feature is only testable against live models.
 
 ### Why it must be async
 
@@ -749,7 +749,7 @@ verifier:
 1. **`verifier.enabled` is the master switch.** When `false`, nothing below runs — not the ledger, not the tracker, not the judge, and not actuation — regardless of child `enabled` flags or `escalation.max_severity`. That is the one switch an operator needs to turn the whole feature off.
 2. **When the master is on, omitted child `enabled` flags inherit on** for `ledger` and `tracker`. Omitted `judge.enabled` inherits on only if the tracker is on. Explicit `enabled: false` still opts a nested section out. A child set `true` while the master is `false` is a no-op, not an override.
 3. **`judge` requires `tracker` at runtime.** `build_verifier` skips an explicit `judge.enabled: true` when the tracker is off and logs that skip. `tracker` without `ledger` runs only the ledger-independent signals (`error_streak`, `no_progress`, `write_without_read`, `budget_burn`, `rewrite_churn`). `ledger` can run alone (Phase 1 ships this way).
-4. **`escalation.max_severity` caps actuation, it does not enable anything.** `enabled: true` plus `max_severity: none` is "on but muted": observe/record verdicts at `none`, never nudge/replan/steer/block. Raising the cap cannot turn on a disabled child. The smoke fixture `evals/smoke_agent/monkeybot_config/monkeybot.verifier-on.yaml` uses this shape on purpose.
+4. **`escalation.max_severity` caps actuation, it does not enable anything.** `enabled: true` plus `max_severity: none` is "on but muted": observe/record verdicts at `none`, never nudge/replan/steer/block. Raising the cap cannot turn on a disabled child. The smoke fixture `regression/t4/agent/monkeybot_config/monkeybot.verifier-tracker.yaml` uses this shape on purpose.
 
 The parser does not rewrite child flags when the master is off; readers must check `verifier.enabled` first. `max_severity` values are `none | nudge | replan | steer | block` in that rank order (`VERIFIER_SEVERITY_ORDER` in `core/config/settings.py`). `steer` is reserved for a later optional phase; Phases 4–6 ship nudge/replan/block.
 
@@ -780,7 +780,7 @@ Each phase is independently shippable and independently reversible: **one commit
 **Phase 0 — Measurement harness. Done (2026-09-05).** Landed before any verifier loop code. Typed `verifier:` parser is live so a `verifier.enabled: true` YAML file is not a silently-ignored no-op. `build_verifier` is **not** wired — parser + snapshot only. Details and file pointers are in Progress / handoff above. Remaining Phase 0-shaped work that is *acceptance for a later phase*, not unfinished Phase 0:
 
 - Zero-verdict smoke **with a real emitter** (`verifier.enabled: true`, `escalation.max_severity: none`, no verdicts, baseline gates green) is Phase 2 acceptance. `max_verdicts: 0` is already on every smoke scenario.
-- Deterministic `verifier=None` vs stubbed `VerifierPort` pairs in `tests/evals/` are Phase 4+ (nothing to stub yet).
+- Deterministic `verifier=None` vs stubbed `VerifierPort` pairs live in `regression/t2/`.
 
 **Phase 1 — Goal ledger. Next.** `GoalLedgerStore` protocol + SQLite backend; `USER_MESSAGE` hook **and** the steer tap in `_drain_steers`; write-time provenance (`HUMAN` for message / steer / follow-up); the typed `Constraint` schema and a classifier prompt that emits it; classifier running in a ledger-owned per-thread worker (hook only enqueues); `ResolvedIntent` derivation with `pending_classification`. No verification yet. Independently valuable: feed `ResolvedIntent` into compaction as an additive input (current template stays the fallback) and into `SubagentEnvelope.context`. Log the typed / free-text constraint ratio.
 
@@ -800,7 +800,7 @@ Each phase is independently shippable and independently reversible: **one commit
 
 ## Part 9 — Testing
 
-**Deterministic loop evals** (`tests/evals/scenario_runner.py` with the fake provider) are the primary harness. Stub `VerifierPort` to return fixed verdicts and assert on loop reaction: that `nudge` reaches the next system message exactly once, that `replan` empties the tool list for exactly one turn, that a verdict row is committed at the expected position, that a blocked call is denied. YAML assertion keys `system_prompt_contains_once` and `tools_empty_on_turn` land in that same PR, not earlier.
+**Deterministic loop evals** (`regression/drivers/loop.py` with the scripted provider) are the primary harness. Stub `VerifierPort` to return fixed verdicts and assert on loop reaction: that `nudge` reaches the next system message exactly once, that `replan` empties the tool list for exactly one turn, that a verdict row is committed at the expected position, that a blocked call is denied. YAML assertion keys `system_prompt_contains_once` and `tools_empty_on_turn` live in `regression/schema/assertions.py`.
 
 **Ledger unit tests** for classification and lifecycle: preempt defers rather than abandons, scope change supersedes, constraints accumulate across goal changes, verifier-steer provenance is excluded from intent derivation, **human steers and follow-ups are `HUMAN` and do derive intent**, and two rapid inputs on one thread are classified in `seq` order.
 
@@ -818,7 +818,7 @@ Each phase is independently shippable and independently reversible: **one commit
 
 **Before/after pairs** are the primary regression guard and landed in Phase 0 (Part 8): the committed smoke baseline arms the token / cost / latency gates in `compare_to_baseline`; the drift suite is ready to run paired `verifier_off` / `verifier_on` configs through `evals.diff` once Phase 2 emits verdicts; `max_verdicts: 0` on every smoke scenario pins false positives at zero. The evidence guard, the closest analog, has unit tests but no on/off comparison — this is new infrastructure, not an extension.
 
-**Live evals** (`evals/`, deepeval judge) measure end-to-end precision and recall of drift detection on the Phase 0 drift suite once Phase 4 lands.
+**Live evals** (`regression/t4/`, deepeval judge) measure end-to-end precision and recall of drift detection on the drift suite.
 
 ---
 

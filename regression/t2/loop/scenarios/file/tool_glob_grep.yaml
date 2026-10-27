@@ -20,7 +20,7 @@ script:
       file_glob: '*.py'
   - type: done
 - - type: text
-    text: Found matches in tests/evals/scenario_runner.py and test_agent_behavior.py.
+    text: Found matches in the scenario runner and the behavior tests.
   - type: done
 assertions:
   tool_categories_used:

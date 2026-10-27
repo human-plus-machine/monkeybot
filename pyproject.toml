@@ -48,7 +48,7 @@ gcs = ["google-cloud-storage>=2.18.0"]
 aws = ["boto3>=1.34.0"]
 council = ["google-cloud-storage>=2.18.0"]
 web-search = ["ddgs>=7.0"]
-# Live E2E eval report (evals/report.py). google-genai is required by deepeval's
+# Live E2E eval report (regression/t4/report.py). google-genai is required by deepeval's
 # GeminiModel judge (not bundled with deepeval); harmless when the judge is OpenAI/Anthropic.
 evals = ["deepeval>=3.0.0", "langfuse>=3.0.0", "google-genai>=1.0.0"]
 realtime = ["websockets>=14.0"]
@@ -125,6 +125,9 @@ known-first-party = ["monkeybot", "testkit", "regression"]
 [tool.ruff.lint.per-file-ignores]
 # ensure_gateway_runtime_env() must run before monkeybot imports read os.environ
 "src/monkeybot/gateway/sse/app.py" = ["E402"]
+# Fixture repos are the subject of live scenarios, not project code. Some carry unsorted
+# imports, unused imports, or an exception name on purpose, and the agent edits them.
+"regression/fixtures/workspaces/**" = ["ALL"]
 
 [tool.mypy]
 files = ["src/monkeybot", "testkit"]

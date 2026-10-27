@@ -1,6 +1,7 @@
 """§5.4 fixture properties.
 
-``legacy_db`` is P2-07. The coding repos under ``evals/fixtures/coding`` move in P4-01.
+``legacy_db`` is P2-07. The coding repos under ``workspaces/`` moved there from
+the old evals tree in P4-01.
 Generated pieces (oversized file, 301-entry directory, binary, symlinks) are built
 once per session by ``regression.fixtures.build`` and are not committed.
 """

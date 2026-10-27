@@ -1,0 +1,22 @@
+# The researcher persona is added only on this scenario's gateway, via config,
+# plus regression/t4/agent/monkeybot_config/AGENT.researcher.md. The default
+# agent config has no personas.
+case: T4-SUB-02
+mode: live
+description: "Dispatching the researcher persona records that subagent_type on the child manifest"
+tags: [subagents, persona]
+config:
+  subagents:
+    personas:
+      - name: researcher
+        description: Reads the workspace and reports what it contains.
+        agent_md: ./monkeybot_config/AGENT.researcher.md
+messages:
+  - >
+    Use the task tool to dispatch the researcher persona (subagent_type
+    "researcher") to list the top-level files in this workspace and summarize
+    what kind of project it is. Report back what it found.
+assertions:
+  required_tools: [task]
+  subagent_manifest:
+    subagent_type: researcher

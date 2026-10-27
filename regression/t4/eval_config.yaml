@@ -1,0 +1,4 @@
+# Judge model for deepeval scoring (D12): Ollama Cloud, the same model as the agent.
+# JUDGE_PROVIDER / JUDGE_MODEL environment variables still override these two keys.
+judge_provider: ollama-cloud
+judge_model: glm-5.3-flash

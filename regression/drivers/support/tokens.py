@@ -51,7 +51,7 @@ def _repo_tokens() -> dict[str, str]:
 def _expand_repo_root(text: str) -> str:
     """Replace ``{repo_root}`` with this checkout.
 
-    T2 MCP configs name ``evals/smoke_agent/fixture_mcp_server.py`` once, and
+    T2 MCP configs name ``regression/fixtures/mcp/fixture_mcp_server.py`` once, and
     scripted tool arguments can use the same token when they rewrite ``mcp.json``.
     """
     return _expand_tokens(text, _repo_tokens())

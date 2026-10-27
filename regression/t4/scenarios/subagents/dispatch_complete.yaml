@@ -1,0 +1,12 @@
+case: T4-SUB-01
+mode: live
+description: "Agent delegates a focused sub-task to a subagent via the task tool and the run completes"
+tags: [subagents]
+messages:
+  - "Delegate this to a subagent: have it list the top-level files in this workspace and summarize what kind of project it is. Report back what it found."
+assertions:
+  metrics: [response_relevancy]
+  required_tools: [task]
+  tool_calls:
+    task: {min: 1}
+  verdicts: {max: 0}

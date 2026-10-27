@@ -1,0 +1,9 @@
+{"type":"Thinking","request_id":"child"}
+{"type":"SystemPromptSnapshot","request_id":"child","inner_turn":1,"text":"[omitted 4104 chars]"}
+{"type":"ThinkingBlockDelta","request_id":"child","text":"Read the notes first.","signature":"sig-1"}
+{"type":"ThinkingBlockComplete","request_id":"child","signature":"sig-1"}
+{"type":"ToolCallStarted","request_id":"child","tool":"read_file","label":"read_file","args":{"path":"notes.txt"},"call_id":"c1"}
+{"type":"ToolCallResult","request_id":"child","tool":"read_file","result":"{\"ok\": true, \"content\": \"ship the beta on Friday\"}","error":null,"call_id":"c1"}
+{"type":"AssistantDelta","request_id":"child","delta":"The beta ships "}
+{"type":"AssistantDelta","request_id":"child","delta":"on Friday."}
+{"type":"TurnComplete","request_id":"child","usage":{"input_tokens":210,"output_tokens":12,"cached_tokens":64,"cache_read_tokens":0,"cache_creation_tokens":0,"cost_usd":0.0,"duration_ms":0,"estimated_prompt_tokens":0}}

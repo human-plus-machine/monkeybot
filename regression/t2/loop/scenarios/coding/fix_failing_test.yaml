@@ -4,7 +4,7 @@ description: Scripted read -> edit -> verify -> report run against a real execut
 mode: scripted
 driver: loop
 executor: real
-workspace_fixture: fixtures/coding/calc_repo
+workspace_fixture: calc_repo
 messages:
 - The divide-by-zero test fails. Fix calc/ops.py without touching the tests.
 script:

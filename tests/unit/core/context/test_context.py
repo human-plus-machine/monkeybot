@@ -27,7 +27,7 @@ def _memory_subsystem(mem_root: Path) -> MemorySubsystem:
     return make_memory_subsystem(mem_root)
 
 
-# Standard trusted skills fixture (e.g. evals/smoke_agent) — regression for list_skills descriptions.
+# Standard trusted skills fixture — regression for list_skills descriptions.
 _IMAGE_GENERATOR_SKILL_MD = """---
 name: image-generator
 description: Generate images with Vertex AI Nano Banana Pro (Gemini image models) and display them in chat.

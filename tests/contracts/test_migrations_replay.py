@@ -158,10 +158,6 @@ async def test_legacy_db_apply_schema(tmp_path: Path, name: str) -> None:
 
 
 @pytest.mark.case("T1-STORE-21")
-@pytest.mark.xfail(
-    strict=True,
-    reason="scripts/create_schema.py misses the _ensure_* upgrades and branch rebuild",
-)
 async def test_create_schema_matches_apply_schema(tmp_path: Path) -> None:
     applied = tmp_path / "apply.sqlite"
     conn = await open_connection(f"sqlite:///{applied}")

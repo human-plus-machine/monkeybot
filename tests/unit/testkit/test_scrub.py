@@ -41,6 +41,13 @@ def test_redacts_project_ids_and_long_secret_env(monkeypatch) -> None:
     assert REDACTED in cleaned
 
 
+def test_redacts_lowercase_secret_env_names(monkeypatch) -> None:
+    monkeypatch.setenv("ollama_api_key", "lowercase-secret-value-123")
+    cleaned = scrub("key lowercase-secret-value-123 end")
+    assert "lowercase-secret-value-123" not in cleaned
+    assert cleaned == f"key {REDACTED} end"
+
+
 def test_redacts_header_inside_a_quoted_source_line() -> None:
     cleaned = scrub('print("x-api-key: headersecretvalue123456")')
     assert "headersecretvalue123456" not in cleaned

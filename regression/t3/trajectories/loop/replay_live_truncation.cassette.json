@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "kind": "trajectory",
+  "recorded_at": "2026-10-27T16:14:55.629Z",
+  "harness_commit": "8248de81edf7926419799aeaa9ca514ab8ea5417",
+  "provider": "ollama-cloud",
+  "model": "gemma4:31b",
+  "tool_schema_digest": "cc1692b06eeb956fc0f4a27b7c6ab735b9b63bb5850ae3968118f832394f5cda",
+  "prompt_digest": "6ad53712dfac293b25a01cb40b337c27f93be5fa5ecf73130cf8fc88ccfd1fdf",
+  "scenario": "loop/replay_live_truncation",
+  "calls": [
+    {
+      "index": 0,
+      "request": {
+        "tool_names": [
+          "ask_user",
+          "run_command",
+          "await_command",
+          "kill_command",
+          "read_file",
+          "write_file",
+          "replace_in_file",
+          "glob",
+          "grep",
+          "list_dir",
+          "apply_patch",
+          "list_skills",
+          "task",
+          "enable_loops",
+          "load_file",
+          "web_search",
+          "todo_list"
+        ],
+        "message_count": 2
+      },
+      "events": [
+        {
+          "type": "tool_call",
+          "call_id": "call_qsnmc3ib",
+          "name": "write_file",
+          "args": {
+            "content": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        },
+        {
+          "type": "usage",
+          "input_tokens": 7743,
+          "output_tokens": 120,
+          "cached_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_creation_tokens": 0
+        },
+        {
+          "type": "done",
+          "truncated": true
+        }
+      ]
+    }
+  ],
+  "tool_results": {
+    "call_qsnmc3ib": ""
+  },
+  "classifier": [],
+  "judge": []
+}

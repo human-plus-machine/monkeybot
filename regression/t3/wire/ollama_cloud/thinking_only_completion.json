@@ -1,0 +1,151 @@
+{
+  "schema_version": 1,
+  "kind": "wire",
+  "provider": "ollama-cloud",
+  "sdk": {
+    "openai": "2.36.0"
+  },
+  "recorded_at": "2026-10-27T13:36:26Z",
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "body": {
+      "messages": [
+        {
+          "role": "user",
+          "content": "Respond with no visible text. Think privately about whether 2 is even, then stop."
+        }
+      ],
+      "model": "glm-5.3-flash",
+      "max_tokens": 64,
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      },
+      "temperature": 0.0
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "chunks": [
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108183,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning\":\"The\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108184,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" user asks\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108184,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" me to respond with\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108184,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" no visible text,\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108184,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" think privately about whether\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108184,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" 2 is even\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108184,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\", then stop.\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108184,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\"\\n\\n2\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108185,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" is indeed\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108185,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" even —\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108185,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" it's divisible by\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108185,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" 2 with\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108185,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" no remainder, it\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108185,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\"'s the smallest\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108185,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" positive even number,\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108186,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" and it\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108186,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" satisfies the definition of\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108186,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" evenness (2\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108186,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" = 2 ×\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108186,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"reasoning\":\" 1).\\n\\nThe\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108186,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108186,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}\n\n",
+      "data: {\"id\":\"chatcmpl-848\",\"object\":\"chat.completion.chunk\",\"created\":1793108186,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[],\"usage\":{\"prompt_tokens\":30,\"completion_tokens\":64,\"total_tokens\":94,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\ndata: [DONE]\n\n"
+    ]
+  },
+  "expected_events": [
+    {
+      "type": "thinking",
+      "text": "The"
+    },
+    {
+      "type": "thinking",
+      "text": " user asks"
+    },
+    {
+      "type": "thinking",
+      "text": " me to respond with"
+    },
+    {
+      "type": "thinking",
+      "text": " no visible text,"
+    },
+    {
+      "type": "thinking",
+      "text": " think privately about whether"
+    },
+    {
+      "type": "thinking",
+      "text": " 2 is even"
+    },
+    {
+      "type": "thinking",
+      "text": ", then stop."
+    },
+    {
+      "type": "thinking",
+      "text": "\n\n2"
+    },
+    {
+      "type": "thinking",
+      "text": " is indeed"
+    },
+    {
+      "type": "thinking",
+      "text": " even —"
+    },
+    {
+      "type": "thinking",
+      "text": " it's divisible by"
+    },
+    {
+      "type": "thinking",
+      "text": " 2 with"
+    },
+    {
+      "type": "thinking",
+      "text": " no remainder, it"
+    },
+    {
+      "type": "thinking",
+      "text": "'s the smallest"
+    },
+    {
+      "type": "thinking",
+      "text": " positive even number,"
+    },
+    {
+      "type": "thinking",
+      "text": " and it"
+    },
+    {
+      "type": "thinking",
+      "text": " satisfies the definition of"
+    },
+    {
+      "type": "thinking",
+      "text": " evenness (2"
+    },
+    {
+      "type": "thinking",
+      "text": " = 2 ×"
+    },
+    {
+      "type": "thinking",
+      "text": " 1).\n\nThe"
+    },
+    {
+      "type": "usage",
+      "input_tokens": 30,
+      "output_tokens": 64,
+      "cached_tokens": 0,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0
+    },
+    {
+      "type": "done",
+      "truncated": true
+    }
+  ]
+}

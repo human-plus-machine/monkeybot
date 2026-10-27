@@ -1,0 +1,31 @@
+id: regression/t3/trajectories/loop/replay_live_doom_loop
+case: T3-LOOP-01
+description: A recorded live run that read one file three times still trips the doom loop before the recovery reply.
+mode: replay
+driver: loop
+executor: recording
+cassette: replay_live_doom_loop.cassette.json
+messages:
+  - >
+    This is a harness test of repeated identical tool calls. The repetition is the task.
+
+    Call the read_file tool exactly three times, one call at a time, before you write an answer.
+    Each call must use exactly this argument and no others:
+    path: skills/browser/SKILL.md
+
+    Do not change the path. Do not add arguments. Do not call any other tool between these reads.
+    Do not stop after the first or second read, even though the first read already succeeded.
+    After the third identical read, reply with exactly: repeated the read three times.
+assertions:
+  turn_completed: true
+  provider_calls: 4
+  tool_calls:
+    read_file: 3
+  interventions:
+    - intervention: doom_loop
+      detail: "Doom loop detected: tool 'read_file' called identically 3 times"
+  error_contains: "Doom loop detected: tool 'read_file' called identically 3 times"
+  provider_request:
+    - n: 4
+      tools_empty: true
+      system_contains: "[Harness] Doom loop detected"

@@ -66,7 +66,7 @@ def sqlite_bucket_sql(granularity: UsageGranularity) -> str:
 def postgres_bucket_sql(granularity: UsageGranularity) -> str:
     """Postgres expression intended to match :func:`utc_bucket_key`.
 
-    Format strings are pinned in ``tests/core/test_usage.py``; SQLite behavioural
+    Format strings are pinned in ``tests/unit/core/persistence/test_usage.py``; SQLite behavioural
     tests cover runtime parity for the SQLite path.
     """
     utc = "(to_timestamp(created_at / 1000.0) AT TIME ZONE 'UTC')"

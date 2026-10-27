@@ -1,0 +1,11 @@
+# Subagent suite: the agent delegates through the task tool. See docs/live-evals.md.
+id: subagents
+scenarios:
+  - subagents/dispatch_complete
+  - subagents/persona_dispatch
+# pytest --suite subagents runs the regression/t4/python files named in `python`
+# and no others. With no --suite, every file in that directory runs, including
+# test_docker_image_health.py (T4-OPS-01). test_provider_live_matrix.py is named
+# so T4-PROV-01 runs with this suite. MONKEYBOT_LIVE_MATRIX_MODEL_<ID> is unchanged.
+python:
+  - test_provider_live_matrix.py

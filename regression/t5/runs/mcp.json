@@ -1,0 +1,468 @@
+{
+  "label": "run",
+  "suite": "mcp",
+  "trials": 6,
+  "overall_pass_rate": 0.75,
+  "scenarios": {
+    "mcp/tool_invoke": {
+      "runs": 6,
+      "passed": 6,
+      "pass_rate": 1.0,
+      "mean_tool_calls": 1.5,
+      "mean_tool_calls_by_name": {
+        "fixture__echo": 1.5
+      },
+      "mean_tool_errors": 0.0,
+      "mean_tokens": 9131.0,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": []
+    },
+    "mcp/list_resources": {
+      "runs": 6,
+      "passed": 6,
+      "pass_rate": 1.0,
+      "mean_tool_calls": 2.1666666666666665,
+      "mean_tool_calls_by_name": {
+        "enable_mcp": 0.16666666666666666,
+        "list_mcp_resources": 1.0,
+        "read_mcp_resource": 1.0
+      },
+      "mean_tool_errors": 0.0,
+      "mean_tokens": 12324.833333333334,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": []
+    },
+    "mcp/get_prompt": {
+      "runs": 6,
+      "passed": 6,
+      "pass_rate": 1.0,
+      "mean_tool_calls": 2.5,
+      "mean_tool_calls_by_name": {
+        "enable_mcp": 0.5,
+        "get_mcp_prompt": 1.0,
+        "list_mcp_prompts": 1.0
+      },
+      "mean_tool_errors": 0.0,
+      "mean_tokens": 17883.5,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": []
+    },
+    "mcp/enable_then_echo_live": {
+      "runs": 6,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "mean_tool_calls": 2.3333333333333335,
+      "mean_tool_calls_by_name": {
+        "enable_mcp": 2.0,
+        "run_command": 0.3333333333333333
+      },
+      "mean_tool_errors": 2.0,
+      "mean_tokens": 9600.666666666666,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": [
+        "max_tool_errors: 2 > 0; required_tools: missing ['fixture__echo'] (called: ['enable_mcp', 'run_command'])",
+        "max_tool_errors: 2 > 0; required_tools: missing ['fixture__echo'] (called: ['enable_mcp', 'run_command'])",
+        "max_tool_errors: 2 > 0; required_tools: missing ['fixture__echo'] (called: ['enable_mcp'])",
+        "max_tool_errors: 2 > 0; required_tools: missing ['fixture__echo'] (called: ['enable_mcp'])",
+        "max_tool_errors: 2 > 0; required_tools: missing ['fixture__echo'] (called: ['enable_mcp'])",
+        "max_tool_errors: 2 > 0; required_tools: missing ['fixture__echo'] (called: ['enable_mcp'])"
+      ]
+    }
+  },
+  "raw": [
+    [
+      {
+        "scenario_id": "mcp/tool_invoke",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "fixture__echo": 2
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 8571,
+        "output_tokens": 225,
+        "latency_ms": 6881,
+        "final_text": "Done \u2014 the `fixture__echo` tool returned `echo: ping` in response to the text 'ping'. The MCP server is working as expected."
+      },
+      {
+        "scenario_id": "mcp/list_resources",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 3,
+        "tool_calls_by_name": {
+          "enable_mcp": 1,
+          "list_mcp_resources": 1,
+          "read_mcp_resource": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 24649,
+        "output_tokens": 474,
+        "latency_ms": 3763,
+        "final_text": "I'll connect to the fixture server first, then list its resources.The `fixture` server exposes one resource: **readme** (`fixture://readme`, text/plain \u2014 described as a static fixture for testing resource listing/reading).\n\nI read it, and it says:\n\n> \"This is a fixture MCP resource for monkeybot's live eval smoke suite.\"\n\nSo it's just a placeholder text confirming the resource read path works."
+      },
+      {
+        "scenario_id": "mcp/get_prompt",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "list_mcp_prompts": 1,
+          "get_mcp_prompt": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 9190,
+        "output_tokens": 775,
+        "latency_ms": 6499,
+        "final_text": "I'll list the prompt templates on the `fixture` server first.The `fixture` server exposes one prompt template: **greet** (with a single required argument, `name`). Now fetching it with `name='World'`.The `fixture` server exposes one prompt template: **greet** (with a single required argument, `name`). Fetching `greet` with `name='World'` returns this prompt text:\n\n> \"Say hello to World in one short sentence.\"\n\nIt comes back as a single user-role message \u2014 the template simply substitutes the name into that instruction."
+      },
+      {
+        "scenario_id": "mcp/enable_then_echo_live",
+        "status": "failed",
+        "failure": "max_tool_errors: 2 > 0; required_tools: missing ['fixture__echo'] (called: ['enable_mcp', 'run_command'])",
+        "tool_calls_count": 3,
+        "tool_calls_by_name": {
+          "enable_mcp": 2,
+          "run_command": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 2,
+        "input_tokens": 8693,
+        "output_tokens": 1837,
+        "latency_ms": 13193,
+        "final_text": "I couldn't complete this. Enabling the `fixture` server failed \u2014 the connection attempt returned **\"Connection closed\"** both times I tried, so the `fixture__echo` tool never became available and there was nothing to call.\n\n(The shell `echo` I ran afterward only echoed text locally \u2014 it was not the MCP tool, and I'm not counting it as success.)\n\nWhat would resolve it: the `fixture` MCP server process appears to be down or misconfigured on the host (e.g., its command failing to start). Once the server is running again, I can enable it and run the echo."
+      }
+    ],
+    [
+      {
+        "scenario_id": "mcp/tool_invoke",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "fixture__echo": 2
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 9142,
+        "output_tokens": 158,
+        "latency_ms": 2146,
+        "final_text": "Done \u2014 the `fixture__echo` tool returned `echo: ping` in response to the text 'ping'. The MCP server is working as expected."
+      },
+      {
+        "scenario_id": "mcp/list_resources",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "list_mcp_resources": 1,
+          "read_mcp_resource": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 9379,
+        "output_tokens": 440,
+        "latency_ms": 3083,
+        "final_text": "I'll list the resources on the `fixture` server first, then read what I find.The listing found one resource \u2014 now I'll read it.The `fixture` server exposes one resource: **readme** (`fixture://readme`, text/plain \u2014 described as a static fixture resource for testing listing/reading).\n\nI read it, and it says:\n\n> \"This is a fixture MCP resource for monkeybot's live eval smoke suite.\"\n\nSo it's just a placeholder text used to verify that resource listing and reading work \u2014 nothing more substantive than that."
+      },
+      {
+        "scenario_id": "mcp/get_prompt",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 3,
+        "tool_calls_by_name": {
+          "enable_mcp": 1,
+          "list_mcp_prompts": 1,
+          "get_mcp_prompt": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 25363,
+        "output_tokens": 586,
+        "latency_ms": 4556,
+        "final_text": "I'll connect the `fixture` server first, then list and fetch the prompt.The `fixture` server exposes exactly one prompt template: **greet** (with a single required argument, `name`).\n\nFetching `greet` with `name='World'` returns this prompt text, as a single user-role message:\n\n> \"Say hello to World in one short sentence.\""
+      },
+      {
+        "scenario_id": "mcp/enable_then_echo_live",
+        "status": "failed",
+        "failure": "max_tool_errors: 2 > 0; required_tools: missing ['fixture__echo'] (called: ['enable_mcp', 'run_command'])",
+        "tool_calls_count": 3,
+        "tool_calls_by_name": {
+          "enable_mcp": 2,
+          "run_command": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 2,
+        "input_tokens": 8895,
+        "output_tokens": 651,
+        "latency_ms": 5166,
+        "final_text": "s sometimes appear on the next step \u2014 let me try calling the echo tool directly to see if it's actually available.I couldn't complete this. Enabling the `fixture` server failed \u2014 the connection attempt returned **\"Connection closed\"** both times I tried, so the `fixture__echo` tool never became available and there was nothing to call.\n\n(The shell `echo` I ran afterward only echoed text locally \u2014 that's not the MCP tool and doesn't count as a result.)\n\nTo unblock this, the `fixture` server needs to be reachable on the harness side; once it connects, I can enable it and run the echo immediately."
+      }
+    ],
+    [
+      {
+        "scenario_id": "mcp/tool_invoke",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "fixture__echo": 2
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 9019,
+        "output_tokens": 190,
+        "latency_ms": 2033,
+        "final_text": "Done \u2014 the `fixture__echo` tool returned `echo: ping` in response to the text 'ping'. The MCP server is working as expected."
+      },
+      {
+        "scenario_id": "mcp/list_resources",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "list_mcp_resources": 1,
+          "read_mcp_resource": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 9347,
+        "output_tokens": 333,
+        "latency_ms": 4144,
+        "final_text": "The `fixture` server exposes one resource: **readme** (`fixture://readme`, text/plain \u2014 described as a static fixture resource for testing listing/reading). I read it, and it says:\n\n> \"This is a fixture MCP resource for monkeybot's live eval smoke suite.\"\n\nSo it's just a placeholder resource used to verify that resource listing and reading work correctly."
+      },
+      {
+        "scenario_id": "mcp/get_prompt",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 3,
+        "tool_calls_by_name": {
+          "enable_mcp": 1,
+          "list_mcp_prompts": 1,
+          "get_mcp_prompt": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 25420,
+        "output_tokens": 465,
+        "latency_ms": 4584,
+        "final_text": "I'll connect the `fixture` server first, then list its prompts.The server is connected. Now I'll list its prompts.It has one prompt template: **greet** (requires a `name` argument). Fetching it now.Done. The `fixture` server exposes exactly one prompt template: **greet** (with a single required argument, `name`).\n\nFetching `greet` with `name='World'` returns this prompt text, as a single user-role message:\n\n> \"Say hello to World in one short sentence.\""
+      },
+      {
+        "scenario_id": "mcp/enable_then_echo_live",
+        "status": "failed",
+        "failure": "max_tool_errors: 2 > 0; required_tools: missing ['fixture__echo'] (called: ['enable_mcp'])",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "enable_mcp": 2
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 2,
+        "input_tokens": 8692,
+        "output_tokens": 557,
+        "latency_ms": 5271,
+        "final_text": "n attempt returned **\"Connection closed\"** both times I tried, so the `fixture__echo` tool never became available and there was nothing to call.\n\nI deliberately didn't substitute a shell `echo` command, since that would run locally in the workspace rather than through the MCP server and wouldn't actually prove the server works.\n\nWhat would resolve it: the `fixture` server process appears to be dying immediately on connect (the classic cause is a crashed or misconfigured server binary). If you can check/restart the fixture server on the host side, I'm happy to retry the enable + echo afterward."
+      }
+    ],
+    [
+      {
+        "scenario_id": "mcp/tool_invoke",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 1,
+        "tool_calls_by_name": {
+          "fixture__echo": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 8895,
+        "output_tokens": 336,
+        "latency_ms": 3200,
+        "final_text": "Done \u2014 the `fixture__echo` tool returned `echo: ping` in response to the text 'ping'. The MCP server is working as expected."
+      },
+      {
+        "scenario_id": "mcp/list_resources",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "list_mcp_resources": 1,
+          "read_mcp_resource": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 9338,
+        "output_tokens": 449,
+        "latency_ms": 3131,
+        "final_text": "The `fixture` server exposes one resource: **readme** (`fixture://readme`, text/plain \u2014 described as a static fixture resource for testing listing/reading).\n\nI read it, and it says:\n\n> \"This is a fixture MCP resource for monkeybot's live eval smoke suite.\"\n\nSo it's just a placeholder resource with no real content beyond confirming the resource listing/reading path works."
+      },
+      {
+        "scenario_id": "mcp/get_prompt",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "list_mcp_prompts": 1,
+          "get_mcp_prompt": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 9258,
+        "output_tokens": 626,
+        "latency_ms": 8403,
+        "final_text": "I'll list the prompts on the `fixture` server first.The listing shows one prompt template: **greet**. Now fetching it with `name='World'`.Done. The `fixture` server exposes exactly one prompt template: **greet** (with a single required argument, `name`). Fetching `greet` with `name='World'` returns this prompt text, as a single user-role message:\n\n> \"Say hello to World in one short sentence.\""
+      },
+      {
+        "scenario_id": "mcp/enable_then_echo_live",
+        "status": "failed",
+        "failure": "max_tool_errors: 2 > 0; required_tools: missing ['fixture__echo'] (called: ['enable_mcp'])",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "enable_mcp": 2
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 2,
+        "input_tokens": 8739,
+        "output_tokens": 622,
+        "latency_ms": 4646,
+        "final_text": "fully before.I couldn't complete this. Enabling the `fixture` server failed \u2014 the connection attempt returned **\"Connection closed\"** both times I tried, so the `fixture__echo` tool never became available and there was nothing to call.\n\nI deliberately didn't substitute a shell `echo` command, since the point of the task is to verify the MCP server itself works \u2014 a fake result would hide the real failure.\n\nWhat would resolve it: the `fixture` server process needs to be reachable again (restart it or check its transport/config on the host side), and then I can retry enabling it and run the echo."
+      }
+    ],
+    [
+      {
+        "scenario_id": "mcp/tool_invoke",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 1,
+        "tool_calls_by_name": {
+          "fixture__echo": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 8898,
+        "output_tokens": 268,
+        "latency_ms": 2259,
+        "final_text": "Done \u2014 the `fixture__echo` tool returned `echo: ping` in response to the text 'ping'. The MCP server is working as expected."
+      },
+      {
+        "scenario_id": "mcp/list_resources",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "list_mcp_resources": 1,
+          "read_mcp_resource": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 9343,
+        "output_tokens": 489,
+        "latency_ms": 4080,
+        "final_text": "The `fixture` server exposes one resource: **readme** (`fixture://readme`, text/plain \u2014 described as a static fixture resource for testing listing/reading). I read it, and it says:\n\n> \"This is a fixture MCP resource for monkeybot's live eval smoke suite.\"\n\nSo it's just a placeholder resource used for smoke-testing the MCP resource tools \u2014 no other content."
+      },
+      {
+        "scenario_id": "mcp/get_prompt",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 3,
+        "tool_calls_by_name": {
+          "enable_mcp": 1,
+          "list_mcp_prompts": 1,
+          "get_mcp_prompt": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 25434,
+        "output_tokens": 445,
+        "latency_ms": 4837,
+        "final_text": "I'll enable the `fixture` server first, then list its prompts.The `fixture` server is connected. Now I'll list its prompts.It exposes one prompt template: **greet**, with a single required argument `name`. Now I'll fetch it with `name='World'`.Done. The `fixture` server exposes exactly one prompt template: **greet** (with a single required argument, `name`).\n\nFetching `greet` with `name='World'` returns this prompt text, as a single user-role message:\n\n> \"Say hello to World in one short sentence.\""
+      },
+      {
+        "scenario_id": "mcp/enable_then_echo_live",
+        "status": "failed",
+        "failure": "max_tool_errors: 2 > 0; required_tools: missing ['fixture__echo'] (called: ['enable_mcp'])",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "enable_mcp": 2
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 2,
+        "input_tokens": 8740,
+        "output_tokens": 856,
+        "latency_ms": 6366,
+        "final_text": "hen call its echo tool.The first connection attempt failed with \"Connection closed\". Let me retry once.I couldn't complete this. Enabling the `fixture` server failed \u2014 the connection attempt returned **\"Connection closed\"** both times I tried, so the `fixture__echo` tool never became available and there was nothing to call.\n\nI deliberately didn't substitute a shell `echo` command or make up an output, since the request was specifically to exercise the MCP tool. To resolve this, the `fixture` server process itself needs to start successfully \u2014 once it connects, I can retry the echo of `'ping'`."
+      }
+    ],
+    [
+      {
+        "scenario_id": "mcp/tool_invoke",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 1,
+        "tool_calls_by_name": {
+          "fixture__echo": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 8898,
+        "output_tokens": 186,
+        "latency_ms": 1864,
+        "final_text": "Done \u2014 the `fixture__echo` tool returned `echo: ping` in response to the text 'ping'. The MCP server is working as expected."
+      },
+      {
+        "scenario_id": "mcp/list_resources",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "list_mcp_resources": 1,
+          "read_mcp_resource": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 9342,
+        "output_tokens": 366,
+        "latency_ms": 3394,
+        "final_text": "The `fixture` server exposes one resource: **readme** (`fixture://readme`, text/plain \u2014 described as a static fixture resource for testing listing/reading).\n\nI read it, and it says:\n\n> \"This is a fixture MCP resource for monkeybot's live eval smoke suite.\"\n\nSo it's just a placeholder for the smoke tests \u2014 no other resources are available."
+      },
+      {
+        "scenario_id": "mcp/get_prompt",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "list_mcp_prompts": 1,
+          "get_mcp_prompt": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 9285,
+        "output_tokens": 454,
+        "latency_ms": 3567,
+        "final_text": "I'll list the fixture server's prompt templates first, then fetch `greet`.The listing already succeeded \u2014 the `fixture` server exposes exactly one prompt template, **greet** (one required argument: `name`). Now fetching it with `name='World'`:Done. The `fixture` server exposes exactly one prompt template: **greet** (with a single required argument, `name`). Fetching `greet` with `name='World'` returns this prompt text, as a single user-role message:\n\n> \"Say hello to World in one short sentence.\""
+      },
+      {
+        "scenario_id": "mcp/enable_then_echo_live",
+        "status": "failed",
+        "failure": "max_tool_errors: 2 > 0; required_tools: missing ['fixture__echo'] (called: ['enable_mcp'])",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "enable_mcp": 2
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 2,
+        "input_tokens": 8693,
+        "output_tokens": 629,
+        "latency_ms": 4735,
+        "final_text": "I couldn't complete this. Enabling the `fixture` server failed \u2014 the connection attempt returned **\"Connection closed\"** both times I tried, so the `fixture__echo` tool never became available and there was nothing to call. I deliberately didn't substitute a shell `echo` command, since the point of the task is to verify the MCP server itself.\n\nIf you can restart or check the `fixture` server on the host side, I can retry the enable step and then echo 'ping' through it."
+      }
+    ]
+  ]
+}

@@ -11,8 +11,13 @@ internal/
 # Local scaffolded harness config (defaults ship in monkeybot-cli scaffold_defaults/)
 /monkeybot_config/
 
-# Live eval run artifacts (only evals/baselines/ is versioned)
-/evals/runs/
+# Live eval run artifacts. Baselines under regression/t4/baselines/ stay versioned.
+/regression/t4/runs/
+# Live-eval agent project local state. Live secrets come from the repo-root .env; a stray key
+# file in the agent project stays out of git. The two workspace .gitkeep files need git add -f.
+/regression/t4/agent/.env
+/regression/t4/agent/data/
+/regression/t4/agent/workspace/
 
 # Python
 __pycache__/
@@ -80,6 +85,6 @@ code/
 # monkeythink
 .monkeythink/
 # Eval fixtures ship their own build/ decoy
-!/evals/fixtures/coding/calc_repo/build/
-!/evals/fixtures/coding/calc_repo_green/build/
-!/evals/fixtures/coding/shop_repo/build/
+!/regression/fixtures/workspaces/calc_repo/build/
+!/regression/fixtures/workspaces/calc_repo_green/build/
+!/regression/fixtures/workspaces/shop_repo/build/

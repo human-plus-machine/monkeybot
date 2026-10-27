@@ -1,0 +1,19 @@
+case: T4-CODE-03
+mode: live
+description: >
+  Agent locates a symbol in a noisy repo (vendored node_modules, stale build/
+  copy) in a handful of tool calls and cites the real definition.
+tags: [coding, navigate]
+workspace_fixture: calc_repo
+messages:
+  - >
+    In the repository at `{workspace_subdir}/`, where is the Python function
+    `divide` defined? Answer with the file path and line number as `path:line`.
+    Do not modify anything.
+assertions:
+  required_tools: [grep]
+  tool_calls: {max: 8}
+  max_tool_errors: 1
+  final_text_regex: '(?<![\w/])(?:eval-[\w-]+/)?calc/ops\.py:\d+'
+  response_not_contains: ["build/calc/ops.py", "node_modules/left-pad/index.js"]
+  workspace_unchanged: [calc/ops.py, tests/test_ops.py]

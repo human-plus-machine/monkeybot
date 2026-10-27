@@ -16,11 +16,11 @@ from regression.schema.steps import TouchFileStep
 
 
 def resolve_workspace(name: str) -> Path:
-    """Find a fixture under the regression tree, then ``evals/fixtures/coding``.
+    """Find a fixture under ``regression/fixtures/workspaces``.
 
     ``calc_repo``, ``calc_repo_green``, ``shop_repo``, and ``overlays/...``
-    still live in the evals tree until P4-01. A ``fixtures/coding/`` prefix
-    is stripped so either spelling resolves.
+    live there beside the T2 fixtures. A ``regression/fixtures/workspaces/``
+    prefix is stripped so either spelling resolves.
     """
     relative = name.strip().replace("\\", "/")
     if not relative or relative.startswith("/") or ".." in Path(relative).parts:

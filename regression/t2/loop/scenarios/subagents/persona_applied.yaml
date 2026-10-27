@@ -9,12 +9,12 @@ messages:
 config:
   env:
     MONKEYBOT_SUBAGENT_SCRIPT: testkit/subagent_worker.py
-    AGENT_MD: evals/smoke_agent/monkeybot_config/AGENT.md
+    AGENT_MD: regression/t4/agent/monkeybot_config/AGENT.md
   subagents:
     personas:
     - name: researcher
       description: Research persona
-      agent_md: evals/smoke_agent/monkeybot_config/AGENT.md
+      agent_md: regression/t4/agent/monkeybot_config/AGENT.md
       model: persona-model
       skills:
       - diagnostics

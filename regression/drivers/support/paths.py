@@ -15,15 +15,8 @@ _RESULT_FIELD_TOKENS = (("{job_id}", "job_id"), ("{cursor}", "cursor"))
 _CONFIGS = _REPO / "regression" / "fixtures" / "configs"
 _GRANT_FIXTURE = _REPO / "regression" / "fixtures" / "workspaces" / "grants_ws" / "granted"
 _BASE_CONFIG = _CONFIGS / "agent.base.yaml"
-_WORKSPACE_ROOTS = (
-    _REPO / "regression" / "fixtures" / "workspaces",
-    _REPO / "evals" / "fixtures" / "coding",
-)
-_FIXTURE_PREFIXES = (
-    "regression/fixtures/workspaces/",
-    "evals/fixtures/coding/",
-    "fixtures/coding/",
-)
+_WORKSPACE_ROOTS = (_REPO / "regression" / "fixtures" / "workspaces",)
+_FIXTURE_PREFIXES = ("regression/fixtures/workspaces/",)
 # Scenario-only. Popped before the process env is pushed.
 _GIT_FIXTURE_ENV = "MB_LOOP_GIT_FIXTURE"
 _SESSION_ID_ENV = "MB_LOOP_SESSION_ID"
