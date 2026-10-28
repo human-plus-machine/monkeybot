@@ -1,0 +1,53 @@
+id: regression/t2/loop/scenarios/loop/doom_path_reset_on_success
+case: T2-LOOP-09
+description: A successful replace resets the path-failure streak so a later failure does not trip doom.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- write then replace
+script:
+- - type: tool_call
+    call_id: w1
+    name: write_file
+    args:
+      path: a
+      content: hello
+  - type: tool_call
+    call_id: f1
+    name: replace_in_file
+    args:
+      path: a
+      old_string: missing-one
+      new_string: x
+  - type: tool_call
+    call_id: f2
+    name: replace_in_file
+    args:
+      path: ./a
+      old_string: missing-two
+      new_string: y
+  - type: tool_call
+    call_id: ok1
+    name: replace_in_file
+    args:
+      path: a
+      old_string: hello
+      new_string: world
+  - type: tool_call
+    call_id: f3
+    name: replace_in_file
+    args:
+      path: a/./b/..
+      old_string: missing-three
+      new_string: z
+  - type: done
+- - type: text
+    text: no doom
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  interventions: []
+  response_contains: no doom

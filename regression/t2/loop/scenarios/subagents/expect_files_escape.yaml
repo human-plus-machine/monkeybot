@@ -1,0 +1,38 @@
+id: regression/t2/loop/scenarios/subagents/expect_files_escape
+case: T2-SUB-04
+description: expect_files that leaves the workspace is a validation error and does not spawn
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Check a path outside the workspace
+config:
+  env:
+    MONKEYBOT_SUBAGENT_SCRIPT: testkit/subagent_worker.py
+    AGENT_MD: regression/t4/agent/monkeybot_config/AGENT.md
+script:
+- - type: tool_call
+    call_id: c1
+    name: task
+    args:
+      task: roundtrip
+      expect_files:
+      - ../x
+  - type: done
+- - type: text
+    text: That path was rejected.
+  - type: done
+assertions:
+  required_tools:
+  - task
+  turn_completed: true
+  events_absent:
+  - SubagentStarted
+  event_fields:
+    ToolCallResult:
+      error:
+        regex: path escapes workspace root
+  workspace_command_passes:
+  - |
+    python -c "from pathlib import Path
+    raise SystemExit(0 if not Path('.monkeybot/subagent-runs').exists() else 1)"

@@ -10,14 +10,14 @@ Clone only if you are changing monkeybot itself (end users should use `uv tool i
 git clone https://github.com/human-plus-machine/monkeybot.git
 cd monkeybot && uv sync
 cd cli && uv sync
-uv tool install --editable .
+uv tool install --editable . --overrides src/monkeybot_cli/overrides.txt
 ```
 
-For live eval smoke runs against a local gateway, use [`evals/smoke_agent/`](evals/smoke_agent/) (see [docs/live-evals.md](docs/live-evals.md)).
+For live eval smoke runs against a local gateway, use [`regression/t4/agent/`](regression/t4/agent/) (see [docs/live-evals.md](docs/live-evals.md) and [docs/testing.md](docs/testing.md)).
 
 ### Checks
 
-CI runs `mypy` on `src/monkeybot` and pytest (root, `cli/`, `integrations/browser-mcp/`), plus standalone eval self-checks. Before submitting:
+CI runs `mypy` on `src/monkeybot` and `testkit`, then pytest for `tests/` and `regression/` (tiers 1–3, including `regression/selftest`), `cli/`, and `integrations/browser-mcp/`. Before submitting:
 
 ```bash
 uv run ruff format --check .

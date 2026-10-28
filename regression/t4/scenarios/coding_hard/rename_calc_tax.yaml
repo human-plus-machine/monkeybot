@@ -1,0 +1,19 @@
+case: T4-CODE-08
+mode: live
+description: >
+  A mechanical rename that touches code, tests and docs; every reference must move and the
+  suite must still pass.
+tags: [coding-hard, refactor]
+workspace_fixture: shop_repo
+messages:
+  - >
+    Rename `calc_tax` to `compute_tax` everywhere in `{workspace_subdir}/` — the code, the tests
+    that call it, and the docs. Behaviour must not change.
+assertions:
+  max_tool_errors: 2
+  workspace_command_passes:
+    - python -m pytest -q
+    - |-
+      python -c "import pathlib, sys; bad = [str(p) for p in pathlib.Path('.').rglob('*') if p.is_file() and p.suffix in {'.py', '.md'} and 'calc_tax' in p.read_text() and p.name != 'CHANGELOG.md' and not {'build', '.pytest_cache'} & set(p.parts)]; print(bad); sys.exit(1 if bad else 0)"
+    - python -c "from shop.taxes import compute_tax; assert compute_tax(1000, 'US') == 70"
+  verified_before_final: true

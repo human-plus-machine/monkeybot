@@ -139,7 +139,11 @@ class ComputerAwarePermissionInspector:
         # or remembered approval (see safety.precheck_policy's docstring).
         precheck_error = precheck_policy(call.name, call.args)
         if precheck_error is not None:
-            return Decision(kind="deny", message=precheck_error.message)
+            return Decision(
+                kind="deny",
+                message=precheck_error.message,
+                error_kind=precheck_error.kind,
+            )
 
         resource = resource_for_call(call)
         bus = ctx.sse_bus

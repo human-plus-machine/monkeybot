@@ -1,0 +1,91 @@
+id: regression/t2/loop/scenarios/loop/parallel_concurrency_cap
+case: T2-LOOP-28
+description: Twelve parallel reads stay within the concurrency cap of 10 and all return.
+mode: scripted
+driver: loop
+config:
+  env:
+    MONKEYBOT_PARALLEL_TOOL_CONCURRENCY: '10'
+messages:
+- read twelve files
+script:
+- - type: tool_call
+    call_id: r01
+    name: read_file
+    args:
+      path: p01
+  - type: tool_call
+    call_id: r02
+    name: read_file
+    args:
+      path: p02
+  - type: tool_call
+    call_id: r03
+    name: read_file
+    args:
+      path: p03
+  - type: tool_call
+    call_id: r04
+    name: read_file
+    args:
+      path: p04
+  - type: tool_call
+    call_id: r05
+    name: read_file
+    args:
+      path: p05
+  - type: tool_call
+    call_id: r06
+    name: read_file
+    args:
+      path: p06
+  - type: tool_call
+    call_id: r07
+    name: read_file
+    args:
+      path: p07
+  - type: tool_call
+    call_id: r08
+    name: read_file
+    args:
+      path: p08
+  - type: tool_call
+    call_id: r09
+    name: read_file
+    args:
+      path: p09
+  - type: tool_call
+    call_id: r10
+    name: read_file
+    args:
+      path: p10
+  - type: tool_call
+    call_id: r11
+    name: read_file
+    args:
+      path: p11
+  - type: tool_call
+    call_id: r12
+    name: read_file
+    args:
+      path: p12
+  - type: done
+- - type: text
+    text: all twelve
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  tool_calls:
+    read_file: 12
+  events_sequence:
+  - type: ToolCallResult
+    call_id: r01
+    result: ok
+    error: null
+  - type: ToolCallResult
+    call_id: r12
+    result: ok
+    error: null
+  response_contains: all twelve

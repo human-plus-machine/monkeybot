@@ -1,0 +1,97 @@
+id: regression/t2/loop/scenarios/mcp/catalog_diff_reload
+case: T2-MCP-09
+description: Editing mcp.json reconnects the changed server; a later bad JSON write keeps that connection.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Update mcp.json, call the new server, then write broken JSON and call it again.
+config:
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.autoconnect.json
+script:
+- - type: tool_call
+    call_id: c_read
+    name: read_file
+    args:
+      path: mcp.json
+  - type: done
+- - type: tool_call
+    call_id: c_edit
+    name: write_file
+    args:
+      path: mcp.json
+      content: |
+        {
+          "mcpServers": {
+            "relay": {
+              "enabled": true,
+              "autoConnect": true,
+              "command": "python",
+              "args": ["{repo_root}/regression/fixtures/mcp/fixture_mcp_server.py"]
+            }
+          }
+        }
+  - type: done
+- - type: tool_call
+    call_id: c_echo
+    name: relay__echo
+    args:
+      text: reconnected
+  - type: done
+- - type: tool_call
+    call_id: c_bad
+    name: write_file
+    args:
+      path: mcp.json
+      content: "{not json"
+  - type: done
+- - type: tool_call
+    call_id: c_kept
+    name: relay__echo
+    args:
+      text: kept
+  - type: done
+- - type: text
+    text: Kept the connection.
+  - type: done
+steps:
+- action: reload_config
+  when:
+    event: tool_result
+    call_id: c_edit
+- action: reload_config
+  when:
+    event: tool_result
+    call_id: c_bad
+assertions:
+  provider_calls: 6
+  provider_request:
+  - n: 1
+    tools_include:
+    - fixture__echo
+    tools_exclude:
+    - relay__echo
+  - n: 3
+    tools_include:
+    - relay__echo
+    tools_exclude:
+    - fixture__echo
+  - n: 5
+    tools_include:
+    - relay__echo
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c_echo
+    result: "echo: reconnected"
+  - type: ToolCallResult
+    call_id: c_kept
+    result: "echo: kept"
+  workspace_file_contains:
+    mcp.json: "{not json"
+  required_tools:
+  - read_file
+  - write_file
+  - relay__echo
+  turn_completed: true
+  no_errors: true

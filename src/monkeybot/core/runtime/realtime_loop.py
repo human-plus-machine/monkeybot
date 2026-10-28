@@ -49,7 +49,7 @@ from monkeybot.core.runtime.events import (
     TurnComplete,
     UsageTotals,
 )
-from monkeybot.core.tools.inspector import InspectorToolCall
+from monkeybot.core.tools.inspector import InspectorToolCall, format_denial
 from monkeybot.core.tools.permission import remember_always_approval, resource_for_call
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import (
@@ -232,6 +232,8 @@ class _RealtimeInspectorGate:
 
     allowed: bool = True
     denial_message: str | None = None
+    denial_code: str | None = None
+    denial_kind: str | None = None
     aborted: bool = False
     settled_responses: list[ToolResponse] = dataclasses.field(default_factory=list)
 
@@ -258,6 +260,8 @@ async def _resolve_realtime_inspector_decision(
         if decision.kind == "deny":
             outcome.allowed = False
             outcome.denial_message = decision.message
+            outcome.denial_code = decision.error_code
+            outcome.denial_kind = decision.error_kind
             return
         if decision.kind != "confirm":
             continue
@@ -629,7 +633,11 @@ async def run_realtime_turn(
 
             if not inspector_gate.allowed:
                 result = ToolExecutionResult.err(
-                    inspector_gate.denial_message or "tool call denied"
+                    format_denial(
+                        inspector_gate.denial_message,
+                        code=inspector_gate.denial_code,
+                        error_kind=inspector_gate.denial_kind,
+                    )
                 )
                 inject_text = None
             else:

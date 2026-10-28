@@ -11,14 +11,19 @@ Resolution order for an agent root:
 1. ``<root>/.venv/bin/python`` (or the Windows variant) — direct, no subprocess overhead.
 2. ``uv run python`` — when ``<root>/pyproject.toml`` exists but no ``.venv``.
 3. ``<cache>/monkeybot/runtimes/<key>/bin/python`` — a CLI-managed venv holding
-   ``monkeybot[memory]``. When this process is running from a source checkout
-   (or ``MONKEYBOT_CHECKOUT`` points at one), the install is that tree plus
-   extras from PyPI; otherwise it is ``monkeybot[memory]==<running version>``.
-   Used only for config-only trees with memory enabled when a previously
-   provisioned cache interpreter exists. The managed runtime also mirrors
-   provider/storage extras present in the CLI env (excluding extras whose
-   probe module is a base dep) and the extra required by the agent's YAML
-   ``model.provider`` (so a thin CLI still gets ``tiktoken`` for NVIDIA/OpenAI).
+   ``monkeybot[memory,web-search]`` and ``monkeybot-browser-mcp``. When this process is
+   running from a source checkout (or ``MONKEYBOT_CHECKOUT`` points at one),
+   the install is that tree plus extras from PyPI; otherwise it is
+   ``monkeybot[memory,web-search]==<running version>``. Used only for config-only trees
+   with memory enabled when a previously provisioned cache interpreter exists.
+   The managed runtime also mirrors provider/storage extras present in the CLI
+   env (excluding extras whose probe module is a base dep) and the extra
+   required by the agent's YAML ``model.provider`` (so a thin CLI still gets
+   ``tiktoken`` for NVIDIA/OpenAI). The browser package is installed here
+   because the gateway sets ``MONKEYBOT_PYTHON`` to this interpreter, and the
+   browser server is ``python -m browser_mcp.server``. ``web-search`` is always
+   installed: DuckDuckGo is the default backend, and a cache that cannot import
+   ``ddgs`` is rebuilt.
 4. ``sys.executable`` — legacy / config-only trees (just ``monkeybot_config/``, no
    ``pyproject.toml``). In this case extras must be installed in the CLI env,
    unless memory is enabled and ``prepare_runtime_python`` provisions (3).
@@ -104,6 +109,8 @@ if not (_key({COMPATIBLE_CORE_LOWER_VERSION!r}) <= _key(ver) < _key({COMPATIBLE_
     raise SystemExit(ver)
 """.strip()
 MEMORY_PROBE = f"import mempalace\n{CORE_PROBE}"
+BROWSER_MCP_PROBE = "import browser_mcp"
+WEB_SEARCH_PROBE = "import ddgs"
 
 
 class RuntimeUpgradeError(RuntimeError):
@@ -280,23 +287,12 @@ def mirrored_monkeybot_extras() -> tuple[str, ...]:
     )
 
 
-def _checkout_source_mtime_ns(checkout: Path) -> int:
-    """Newest mtime under the packaged source tree (and ``pyproject.toml``).
-
-    ``monkeybot @ file://`` is a snapshot copy, so the cache key must change when
-    anything that would be installed changes — not only when ``pyproject.toml``
-    itself is touched.
-    """
+def _newest_mtime_ns(root: Path) -> int:
+    """Newest file mtime under ``root``, or 0 when the tree is missing."""
+    if not root.is_dir():
+        return 0
     newest = 0
-    pyproject = checkout / "pyproject.toml"
-    try:
-        newest = max(newest, pyproject.stat().st_mtime_ns)
-    except OSError:
-        pass
-    src_root = checkout / "src"
-    if not src_root.is_dir():
-        return newest
-    for dirpath, dirnames, filenames in os.walk(src_root):
+    for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [name for name in dirnames if name != "__pycache__" and name != ".git"]
         for name in filenames:
             if name.endswith((".pyc", ".pyo")):
@@ -308,11 +304,49 @@ def _checkout_source_mtime_ns(checkout: Path) -> int:
     return newest
 
 
+def _checkout_source_mtime_ns(checkout: Path) -> int:
+    """Newest mtime under the packaged source tree (and ``pyproject.toml``).
+
+    ``monkeybot @ file://`` is a snapshot copy, so the cache key must change when
+    anything that would be installed changes — not only when ``pyproject.toml``
+    itself is touched. ``integrations/browser-mcp`` is installed into the same
+    runtime, so an edit there invalidates the snapshot too.
+    """
+    newest = 0
+    pyproject = checkout / "pyproject.toml"
+    try:
+        newest = max(newest, pyproject.stat().st_mtime_ns)
+    except OSError:
+        pass
+    newest = max(newest, _newest_mtime_ns(checkout / "src"))
+    newest = max(newest, _newest_mtime_ns(checkout / "integrations" / "browser-mcp"))
+    return newest
+
+
+def _browser_mcp_requirement(checkout: Path | None) -> str | None:
+    """Pip spec for the browser server this gateway will spawn, if one is available.
+
+    A local checkout contributes ``integrations/browser-mcp``. Otherwise the
+    version installed next to this CLI is pinned. ``None`` when neither exists,
+    so a stripped environment still gets a memory runtime.
+    """
+    if checkout is not None:
+        package = checkout / "integrations" / "browser-mcp"
+        if (package / "pyproject.toml").is_file():
+            return f"monkeybot-browser-mcp @ {package.resolve().as_uri()}"
+    try:
+        version = _package_version("monkeybot-browser-mcp")
+    except PackageNotFoundError:
+        return None
+    return f"monkeybot-browser-mcp=={version}"
+
+
 def managed_memory_runtime_dir(
     monkeybot_version: str,
     extras: Sequence[str] = (),
     *,
     checkout: Path | None = None,
+    browser_requirement: str | None = None,
 ) -> Path:
     """Deterministic cache directory for the managed MemPalace runtime.
 
@@ -332,6 +366,8 @@ def managed_memory_runtime_dir(
     if checkout is not None:
         resolved = checkout.resolve()
         digest_parts.append(f"checkout:{resolved.as_posix()}:{_checkout_source_mtime_ns(resolved)}")
+    if browser_requirement:
+        digest_parts.append(f"browser:{browser_requirement}")
     if digest_parts:
         digest = hashlib.sha256(",".join(digest_parts).encode()).hexdigest()[:8]
         key = f"{key}-{digest}"
@@ -353,14 +389,45 @@ def _managed_runtime(runtime_dir: Path, agent_root: Path) -> RuntimePython | Non
     return RuntimePython([str(interpreter)], MANAGED_RUNTIME_SOURCE, agent_root)
 
 
-def _managed_if_ready(runtime_dir: Path, agent_root: Path) -> RuntimePython | None:
-    """Return the managed interpreter only when it already passes the memory probe."""
+def _managed_runtime_cache_dir(
+    monkeybot_version: str,
+    extras: Sequence[str],
+    checkout: Path | None,
+) -> Path:
+    """Cache directory for this core version, extras, checkout, and browser package."""
+    return managed_memory_runtime_dir(
+        monkeybot_version,
+        extras,
+        checkout=checkout,
+        browser_requirement=_browser_mcp_requirement(checkout),
+    )
+
+
+def _browser_mcp_importable(runtime: RuntimePython, checkout: Path | None) -> bool:
+    """Whether ``runtime`` can start the browser server, when one should be installed.
+
+    A missing requirement means this environment has no browser package to mirror,
+    so the memory runtime is not held to that import.
+    """
+    if _browser_mcp_requirement(checkout) is None:
+        return True
+    return run_probe(runtime, BROWSER_MCP_PROBE)
+
+
+def _managed_if_ready(
+    runtime_dir: Path, agent_root: Path, checkout: Path | None
+) -> RuntimePython | None:
+    """Return the managed interpreter only when memory and the browser server import."""
     runtime = _managed_runtime(runtime_dir, agent_root)
     if runtime is None:
         return None
-    if run_probe(runtime, MEMORY_PROBE):
-        return runtime
-    return None
+    if not run_probe(runtime, MEMORY_PROBE):
+        return None
+    if not _browser_mcp_importable(runtime, checkout):
+        return None
+    if not run_probe(runtime, WEB_SEARCH_PROBE):
+        return None
+    return runtime
 
 
 def _agent_provider_extras(
@@ -421,8 +488,8 @@ def _existing_managed_runtime(
 ) -> RuntimePython | None:
     """Locate a cached managed interpreter without probing it.
 
-    ``prepare_runtime_python`` / ``doctor`` own the single harness probe so a
-    warm cache does not pay for two interpreter spawns per start. Never raises
+    ``prepare_runtime_python`` / ``doctor`` own the harness probes so a warm
+    cache does not pay to reprovision. Never raises
     on agent YAML errors — provisioning is the fail-closed path.
     """
     try:
@@ -430,12 +497,9 @@ def _existing_managed_runtime(
     except PackageNotFoundError:
         return None
     extras = _managed_runtime_extras(agent_root, config_path, fail_closed=False)
+    checkout = _monkeybot_checkout_root()
     return _managed_runtime(
-        managed_memory_runtime_dir(
-            monkeybot_version,
-            extras,
-            checkout=_monkeybot_checkout_root(),
-        ),
+        _managed_runtime_cache_dir(monkeybot_version, extras, checkout),
         agent_root,
     )
 
@@ -568,13 +632,15 @@ def provision_managed_memory_runtime(
     """Return a CLI-managed venv holding ``monkeybot[memory]`` at the running core version.
 
     Extras the CLI env already satisfies are mirrored into the runtime alongside
-    ``memory``. A cached runtime that already passes the memory probe is reused
-    as-is. Otherwise the runtime is created in a staging directory with
-    ``uv venv --python`` pointing at this CLI interpreter, then swapped into
-    the cache with ``os.replace``. Pins in an agent ``pyproject.toml`` are never
-    rewritten. An unpublished checkout is installed from disk so MemPalace can
-    still come from PyPI. Unreadable agent YAML fails closed here (not during
-    quiet resolve lookups).
+    ``memory``. ``monkeybot-browser-mcp`` is installed into the same venv when
+    the checkout or this CLI provides it, because the gateway spawns that server
+    with its own interpreter. A cached runtime is reused only when both memory
+    and that browser package import. Otherwise the runtime is created in a
+    staging directory with ``uv venv --python`` pointing at this CLI interpreter,
+    then swapped into the cache with ``os.replace``. Pins in an agent
+    ``pyproject.toml`` are never rewritten. An unpublished checkout is installed
+    from disk so MemPalace can still come from PyPI. Unreadable agent YAML fails
+    closed here (not during quiet resolve lookups).
     """
     try:
         monkeybot_version = _package_version("monkeybot")
@@ -583,25 +649,31 @@ def provision_managed_memory_runtime(
 
     extras = _managed_runtime_extras(agent_root, config_path, fail_closed=True)
     checkout = _monkeybot_checkout_root()
-    runtime_dir = managed_memory_runtime_dir(monkeybot_version, extras, checkout=checkout)
-    cached = _managed_if_ready(runtime_dir, agent_root)
+    runtime_dir = _managed_runtime_cache_dir(monkeybot_version, extras, checkout)
+    cached = _managed_if_ready(runtime_dir, agent_root, checkout)
     if cached is not None:
         return cached
 
     if shutil.which("uv") is None:
         raise _managed_runtime_error("uv was not found on PATH")
-    extra_spec = ",".join(("memory", *extras))
-    requirement = _managed_memory_requirement(monkeybot_version, extra_spec, checkout=checkout)
+    # web-search is not optional here. The tool is on by default, and mirroring
+    # only copies extras the CLI process can already import — a thin CLI never can.
+    extra_spec = ",".join(dict.fromkeys(("memory", "web-search", *extras)))
+    requirements = [_managed_memory_requirement(monkeybot_version, extra_spec, checkout=checkout)]
+    browser = _browser_mcp_requirement(checkout)
+    if browser is not None:
+        requirements.append(browser)
     print(
-        f"agent memory runtime is missing MemPalace; provisioning {requirement} in {runtime_dir}",
+        "agent memory runtime is missing MemPalace; provisioning "
+        f"{' '.join(requirements)} in {runtime_dir}",
         flush=True,
     )
     runtime_dir.parent.mkdir(parents=True, exist_ok=True)
     with _exclusive_file_lock(runtime_dir.parent / f".{runtime_dir.name}.lock"):
-        cached = _managed_if_ready(runtime_dir, agent_root)
+        cached = _managed_if_ready(runtime_dir, agent_root, checkout)
         if cached is not None:
             return cached
-        return _install_managed_runtime(runtime_dir, agent_root, requirement)
+        return _install_managed_runtime(runtime_dir, agent_root, requirements, checkout)
 
 
 def _retire_runtime_dir(runtime_dir: Path) -> None:
@@ -619,9 +691,10 @@ def _retire_runtime_dir(runtime_dir: Path) -> None:
 def _install_managed_runtime(
     runtime_dir: Path,
     agent_root: Path,
-    requirement: str,
+    requirements: Sequence[str],
+    checkout: Path | None,
 ) -> RuntimePython:
-    """Create ``requirement`` in a staging dir, then atomically replace ``runtime_dir``."""
+    """Create ``requirements`` in a staging dir, then atomically replace ``runtime_dir``."""
     staging: Path | None = Path(
         tempfile.mkdtemp(prefix=f".{runtime_dir.name}.tmp-", dir=runtime_dir.parent)
     )
@@ -635,13 +708,33 @@ def _install_managed_runtime(
         interpreter = _managed_interpreter(staging)
         if interpreter is None:
             raise _managed_runtime_error(f"no interpreter was created in {staging}")
+        # browser-harness pins pillow==12.3.0. The checkout override in
+        # pyproject.toml is not read by `uv pip install`.
+        overrides = Path(__file__).resolve().parent / "overrides.txt"
         _run_provisioning(
-            ["uv", "pip", "install", "--python", str(interpreter), requirement],
+            [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                str(interpreter),
+                "--overrides",
+                str(overrides),
+                *requirements,
+            ],
             "uv pip install",
         )
         staged = RuntimePython([str(interpreter)], MANAGED_RUNTIME_SOURCE, agent_root)
         if not run_probe(staged, MEMORY_PROBE):
             raise _managed_runtime_error(_probe_failure_detail(staged, MEMORY_PROBE))
+        if not _browser_mcp_importable(staged, checkout):
+            raise _managed_runtime_error(
+                _probe_failure_detail(staged, BROWSER_MCP_PROBE) or "browser_mcp did not import"
+            )
+        if not run_probe(staged, WEB_SEARCH_PROBE):
+            raise _managed_runtime_error(
+                _probe_failure_detail(staged, WEB_SEARCH_PROBE) or "ddgs did not import"
+            )
         if runtime_dir.exists():
             _retire_runtime_dir(runtime_dir)
         os.replace(staging, runtime_dir)
@@ -684,6 +777,24 @@ def prepare_runtime_python(
     )
     probe = MEMORY_PROBE if memory_enabled else CORE_PROBE
     ok, detail = _probe(runtime, probe)
+    if (
+        ok
+        and memory_enabled
+        and runtime.source == MANAGED_RUNTIME_SOURCE
+        and not _browser_mcp_importable(runtime, _monkeybot_checkout_root())
+    ):
+        # A cache built before the browser package was mirrored still imports
+        # MemPalace. Reprovision instead of spawning the browser server there.
+        ok = False
+        detail = "managed runtime is missing browser_mcp"
+    if (
+        ok
+        and memory_enabled
+        and runtime.source == MANAGED_RUNTIME_SOURCE
+        and not run_probe(runtime, WEB_SEARCH_PROBE)
+    ):
+        ok = False
+        detail = "managed runtime is missing ddgs"
     if ok:
         return runtime
     if not has_project:

@@ -1,0 +1,33 @@
+id: regression/t2/loop/scenarios/subagents/queue_pending_not_success
+case: T2-SUB-14
+description: Queue mode returns a pending result and does not emit SubagentStarted
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Queue a background analysis
+config:
+  env:
+    MONKEYBOT_SUBAGENT_SCRIPT: testkit/subagent_worker.py
+    AGENT_MD: regression/t4/agent/monkeybot_config/AGENT.md
+    MONKEYBOT_TASK_QUEUE: "1"
+script:
+- - type: tool_call
+    call_id: c1
+    name: task
+    args:
+      task: roundtrip
+  - type: done
+- - type: text
+    text: Queued.
+  - type: done
+assertions:
+  required_tools:
+  - task
+  turn_completed: true
+  events_absent:
+  - SubagentStarted
+  event_fields:
+    ToolCallResult:
+      error:
+        regex: '"queued": true.*"run_id":.*child_thread_id'

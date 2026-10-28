@@ -1,0 +1,21 @@
+id: regression/t2/realtime/scenarios/ws_guardrail_budget
+case: T2-RT-06
+description: A session past its duration budget ends with a reason.
+mode: scripted
+driver: realtime
+executor: real
+config:
+  realtime:
+    session:
+      max_duration_sec: 0
+invariants_skip:
+- name: turn_complete
+  reason: The guardrail ends the session before a turn.
+assertions:
+  events_sequence:
+  - type: connected
+  - type: session_ended
+  event_fields:
+    session_ended:
+      reason:
+        regex: ".+"

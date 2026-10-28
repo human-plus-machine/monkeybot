@@ -1,0 +1,43 @@
+id: regression/t2/loop/scenarios/ctx/compact_trailer_from_goal_ledger
+case: T2-CTX-06
+description: The summary row carries the workspace trailer from the read ledger.
+mode: scripted
+driver: loop
+executor: real
+config:
+  model.context_window: 4000
+messages:
+- write the note
+history:
+- role: user
+  content:
+  - type: text
+    text: earlier
+script:
+- - type: tool_call
+    call_id: c1
+    name: write_file
+    args:
+      path: note.txt
+      content: hello-note
+  - type: done
+- - type: text
+    text: sum-body
+  - type: done
+- - type: text
+    text: sum-body-2
+  - type: done
+- - type: text
+    text: Wrote it.
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 4
+  provider_request:
+  - n: 4
+    messages_contain: 'Files written this session: note.txt'
+  workspace_file_contains:
+    note.txt: hello-note
+  history:
+    summary_row: true

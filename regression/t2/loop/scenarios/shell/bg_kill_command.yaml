@@ -1,0 +1,51 @@
+id: regression/t2/loop/scenarios/shell/bg_kill_command
+case: T2-SHELL-13
+description: kill_command stops a background job and await_command reports it killed
+mode: scripted
+driver: loop
+executor: real
+config:
+  env:
+    SANDBOX_ENABLED: "false"
+messages:
+- Start a long sleep, then kill it.
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      argv:
+      - python
+      - -c
+      - import time; time.sleep(30)
+      background: true
+      timeout: 60
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: kill_command
+    args:
+      job_id: "{job_id}"
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: await_command
+    args:
+      job_id: "{job_id}"
+      wait_seconds: 5
+  - type: done
+- - type: text
+    text: The job was killed.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c2
+    result:
+      regex: '"status": "killed"'
+  - type: ToolCallResult
+    call_id: c3
+    result:
+      regex: '"status": "killed"'
+  turn_completed: true
+  no_errors: true

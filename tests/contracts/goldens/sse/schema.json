@@ -1,0 +1,1270 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "event": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/Thinking"
+        },
+        {
+          "$ref": "#/$defs/AssistantDelta"
+        },
+        {
+          "$ref": "#/$defs/AssistantTextStarted"
+        },
+        {
+          "$ref": "#/$defs/AssistantTextEnded"
+        },
+        {
+          "$ref": "#/$defs/ToolInputDelta"
+        },
+        {
+          "$ref": "#/$defs/ToolCallStarted"
+        },
+        {
+          "$ref": "#/$defs/ToolCallResult"
+        },
+        {
+          "$ref": "#/$defs/TurnComplete"
+        },
+        {
+          "$ref": "#/$defs/Error"
+        },
+        {
+          "$ref": "#/$defs/ContextSummarizing"
+        },
+        {
+          "$ref": "#/$defs/ContextSummarized"
+        },
+        {
+          "$ref": "#/$defs/ContextUsage"
+        },
+        {
+          "$ref": "#/$defs/ContextEpochStarted"
+        },
+        {
+          "$ref": "#/$defs/SystemContextUpdated"
+        },
+        {
+          "$ref": "#/$defs/SystemPromptSnapshot"
+        },
+        {
+          "$ref": "#/$defs/ImageBlock"
+        },
+        {
+          "$ref": "#/$defs/FileBlock"
+        },
+        {
+          "$ref": "#/$defs/ThinkingBlockStarted"
+        },
+        {
+          "$ref": "#/$defs/ThinkingBlockDelta"
+        },
+        {
+          "$ref": "#/$defs/ThinkingBlockComplete"
+        },
+        {
+          "$ref": "#/$defs/RedactedThinkingBlock"
+        },
+        {
+          "$ref": "#/$defs/ToolConfirmationRequest"
+        },
+        {
+          "$ref": "#/$defs/AskUserRequest"
+        },
+        {
+          "$ref": "#/$defs/ActionRequiredEvent"
+        },
+        {
+          "$ref": "#/$defs/FrontendToolRequest"
+        },
+        {
+          "$ref": "#/$defs/SystemNotificationEvent"
+        },
+        {
+          "$ref": "#/$defs/AttachmentDescriptor"
+        },
+        {
+          "$ref": "#/$defs/GroundingEvent"
+        },
+        {
+          "$ref": "#/$defs/UserSteered"
+        },
+        {
+          "$ref": "#/$defs/QueuedInputAccepted"
+        },
+        {
+          "$ref": "#/$defs/ConfigReloaded"
+        },
+        {
+          "$ref": "#/$defs/SubagentStarted"
+        },
+        {
+          "$ref": "#/$defs/SubagentEvent"
+        },
+        {
+          "$ref": "#/$defs/SubagentCompleted"
+        },
+        {
+          "$ref": "#/$defs/CredentialEgressBlocked"
+        },
+        {
+          "$ref": "#/$defs/VerifierVerdict"
+        },
+        {
+          "$ref": "#/$defs/HistoryRewritten"
+        },
+        {
+          "$ref": "#/$defs/ActiveRequests"
+        },
+        {
+          "$ref": "#/$defs/HarnessIntervention"
+        }
+      ]
+    },
+    "Thinking": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "Thinking"
+        },
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id"
+      ]
+    },
+    "AssistantDelta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "AssistantDelta"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "delta": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "delta"
+      ]
+    },
+    "AssistantTextStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "AssistantTextStarted"
+        },
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id"
+      ]
+    },
+    "AssistantTextEnded": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "AssistantTextEnded"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id"
+      ]
+    },
+    "ToolInputDelta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "ToolInputDelta"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "call_id": {
+          "type": "string"
+        },
+        "delta": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "call_id",
+        "delta",
+        "tool"
+      ]
+    },
+    "ToolCallStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "ToolCallStarted"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "args": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "call_id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "parse_error": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "args",
+        "label",
+        "tool"
+      ]
+    },
+    "ToolCallResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "ToolCallResult"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "call_id": {
+          "type": "string"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "result": {
+          "type": "string"
+        },
+        "tool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "error",
+        "result",
+        "tool"
+      ]
+    },
+    "TurnComplete": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "TurnComplete"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "trace_id": {
+          "type": "string"
+        },
+        "usage": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "cache_creation_tokens": {
+              "type": "integer"
+            },
+            "cache_read_tokens": {
+              "type": "integer"
+            },
+            "cached_tokens": {
+              "type": "integer"
+            },
+            "cost_usd": {
+              "type": "number"
+            },
+            "duration_ms": {
+              "type": "integer"
+            },
+            "estimated_prompt_tokens": {
+              "type": "integer"
+            },
+            "input_tokens": {
+              "type": "integer"
+            },
+            "output_tokens": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "cache_creation_tokens",
+            "cache_read_tokens",
+            "cached_tokens",
+            "cost_usd",
+            "duration_ms",
+            "estimated_prompt_tokens",
+            "input_tokens",
+            "output_tokens"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "usage"
+      ]
+    },
+    "Error": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "Error"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "error"
+      ]
+    },
+    "ContextSummarizing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "ContextSummarizing"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "context_window_tokens": {
+          "type": "integer"
+        },
+        "estimated_tokens": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "context_window_tokens",
+        "estimated_tokens"
+      ]
+    },
+    "ContextSummarized": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "ContextSummarized"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "turns_summarized": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "turns_summarized"
+      ]
+    },
+    "ContextUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "ContextUsage"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "context_window_tokens": {
+          "type": "integer"
+        },
+        "estimated_tokens": {
+          "type": "integer"
+        },
+        "inner_turn": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "context_window_tokens",
+        "estimated_tokens"
+      ]
+    },
+    "ContextEpochStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "ContextEpochStarted"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "changed_sources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "epoch_id": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "changed_sources",
+        "epoch_id"
+      ]
+    },
+    "SystemContextUpdated": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "SystemContextUpdated"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "changed_sources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "epoch_id": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "changed_sources",
+        "epoch_id"
+      ]
+    },
+    "SystemPromptSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "SystemPromptSnapshot"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "inner_turn": {
+          "type": "integer"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "inner_turn",
+        "text"
+      ]
+    },
+    "ImageBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "ImageBlock"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "string"
+        },
+        "image_id": {
+          "type": "string"
+        },
+        "mime_type": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "mime_type"
+      ]
+    },
+    "FileBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "FileBlock"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "file_id": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "mime_type": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "mime_type"
+      ]
+    },
+    "ThinkingBlockStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "ThinkingBlockStarted"
+        },
+        "request_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id"
+      ]
+    },
+    "ThinkingBlockDelta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "ThinkingBlockDelta"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "signature": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "signature",
+        "text"
+      ]
+    },
+    "ThinkingBlockComplete": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "ThinkingBlockComplete"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "signature": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "signature"
+      ]
+    },
+    "RedactedThinkingBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "RedactedThinkingBlock"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "data"
+      ]
+    },
+    "ToolConfirmationRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "ToolConfirmationRequest"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "prompt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_call_id": {
+          "type": "string"
+        },
+        "tool_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "arguments",
+        "prompt",
+        "tool_call_id",
+        "tool_name"
+      ]
+    },
+    "AskUserRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "AskUserRequest"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "choices": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "question": {
+          "type": "string"
+        },
+        "tool_call_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "choices",
+        "question",
+        "tool_call_id"
+      ]
+    },
+    "ActionRequiredEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "ActionRequiredEvent"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "action_type": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "action_type",
+        "id",
+        "payload"
+      ]
+    },
+    "FrontendToolRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "FrontendToolRequest"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "args": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "name": {
+          "type": "string"
+        },
+        "tool_call_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "args",
+        "name",
+        "tool_call_id"
+      ]
+    },
+    "SystemNotificationEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "SystemNotificationEvent"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "data": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        },
+        "msg": {
+          "type": "string"
+        },
+        "notification_type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "data",
+        "msg",
+        "notification_type"
+      ]
+    },
+    "AttachmentDescriptor": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "AttachmentDescriptor"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "attachment_id": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "filename": {
+          "type": "string"
+        },
+        "mime_type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "attachment_id",
+        "description",
+        "filename",
+        "mime_type"
+      ]
+    },
+    "GroundingEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "GroundingEvent"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "search_queries": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "search_queries",
+        "sources"
+      ]
+    },
+    "UserSteered": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "UserSteered"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "queued_request_id": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "text"
+      ]
+    },
+    "QueuedInputAccepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "QueuedInputAccepted"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "position": {
+          "type": "integer"
+        },
+        "queue": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "position",
+        "queue"
+      ]
+    },
+    "ConfigReloaded": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "ConfigReloaded"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "applied": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "digest": {
+          "type": "string"
+        },
+        "hot": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "restart_required": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "applied",
+        "digest",
+        "hot",
+        "restart_required",
+        "revision"
+      ]
+    },
+    "SubagentStarted": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "SubagentStarted"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "child_thread_id": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "parent_call_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "subagent_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "child_thread_id",
+        "label",
+        "parent_call_id",
+        "run_id",
+        "subagent_type",
+        "task"
+      ]
+    },
+    "SubagentEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "SubagentEvent"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "child_thread_id": {
+          "type": "string"
+        },
+        "inner": {
+          "$ref": "#/$defs/event"
+        },
+        "parent_call_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "subagent_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "child_thread_id",
+        "inner",
+        "parent_call_id",
+        "run_id",
+        "subagent_type"
+      ]
+    },
+    "SubagentCompleted": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "SubagentCompleted"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "child_thread_id": {
+          "type": "string"
+        },
+        "errors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "final_message": {
+          "type": "string"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "parent_call_id": {
+          "type": "string"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "subagent_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tool_call_count": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "child_thread_id",
+        "errors",
+        "final_message",
+        "ok",
+        "parent_call_id",
+        "run_id",
+        "subagent_type",
+        "tool_call_count"
+      ]
+    },
+    "CredentialEgressBlocked": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "CredentialEgressBlocked"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "scan_kind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "scan_kind"
+      ]
+    },
+    "VerifierVerdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "VerifierVerdict"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "checkpoint_id": {
+          "type": "string"
+        },
+        "confidence": {
+          "type": "number"
+        },
+        "correction": {
+          "type": "string"
+        },
+        "judge_tokens": {
+          "type": "integer"
+        },
+        "rationale": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "triggering_signal_epochs": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "triggering_signals": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "verdict_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "checkpoint_id",
+        "confidence",
+        "judge_tokens",
+        "rationale",
+        "severity",
+        "status",
+        "triggering_signal_epochs",
+        "triggering_signals",
+        "verdict_id"
+      ]
+    },
+    "HistoryRewritten": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "HistoryRewritten"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "branch_id": {
+          "type": "string"
+        },
+        "op": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "branch_id",
+        "op",
+        "session_id"
+      ]
+    },
+    "ActiveRequests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "request_ids"
+      ],
+      "properties": {
+        "type": {
+          "const": "ActiveRequests"
+        },
+        "request_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "HarnessIntervention": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "HarnessIntervention"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "inner_turn": {
+          "type": "integer"
+        },
+        "intervention": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "detail",
+        "inner_turn",
+        "intervention"
+      ]
+    }
+  },
+  "$ref": "#/$defs/event"
+}

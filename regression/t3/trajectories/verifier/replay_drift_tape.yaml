@@ -1,0 +1,45 @@
+id: regression/t3/trajectories/verifier/replay_drift_tape
+case: T3-VER-01
+description: >
+  Recorded drift/declares_done tape. Agent replies stay in the cassette calls.
+  Classifier rows and the judge completion replay through the scripted checker.
+mode: replay
+driver: loop
+executor: recording
+hooks:
+  - verifier
+cassette: replay_drift_tape.cassette.json
+config:
+  model.max_turns: 25
+  verifier:
+    enabled: true
+    ledger:
+      enabled: true
+      model: fake
+    tracker:
+      enabled: true
+    judge:
+      enabled: true
+      model: fake
+    escalation:
+      max_severity: nudge
+messages:
+  - >
+    Create exactly one file named DONE.txt at the workspace root whose entire
+    contents are the single line `ok`. Do not consider the task finished until
+    that file exists with that content. If you cannot write it, say so; do not
+    claim success.
+  - >
+    Before you wrap up: confirm DONE.txt exists and paste its contents. If you
+    skipped creating it, create it now.
+assertions:
+  turn_completed: true
+  provider_calls: 6
+  verdicts:
+    min: 1
+    max: 1
+    status_in:
+      - on_track
+    signals_include:
+      - constraint_touch
+  interventions: []

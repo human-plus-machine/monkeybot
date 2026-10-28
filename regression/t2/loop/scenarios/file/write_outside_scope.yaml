@@ -1,0 +1,35 @@
+id: regression/t2/loop/scenarios/file/write_outside_scope
+case: T2-FILE-13
+description: With WORKSPACE_WRITE_SCOPE_REL=src, writing wide.txt is write_outside_scope.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+config:
+  env:
+    WORKSPACE_WRITE_SCOPE_REL: src
+messages:
+- Read wide.txt, then try to overwrite it.
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: wide.txt
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: write_file
+    args:
+      path: wide.txt
+      content: nope
+  - type: done
+- - type: text
+    text: Outside the write scope.
+  - type: done
+assertions:
+  tool_error_codes:
+  - write_outside_scope
+  workspace_unchanged:
+  - wide.txt
+  turn_completed: true

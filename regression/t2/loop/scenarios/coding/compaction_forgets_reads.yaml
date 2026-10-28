@@ -1,0 +1,67 @@
+id: regression/t2/loop/scenarios/coding/compaction_forgets_reads
+case: T2-CODE-17
+description: After compaction, editing a file read earlier returns read_before_write
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+hooks:
+  - read_ledger_compaction
+config:
+  model:
+    context_window: 4000
+    max_turns: 12
+messages:
+  - Read huge.txt and then edit it.
+history:
+  - role: user
+    content:
+      - type: text
+        text: prior-QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ
+  - role: assistant
+    content:
+      - type: text
+        text: ack-QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ
+script:
+  - - type: tool_call
+      call_id: r1
+      name: read_file
+      args:
+        path: huge.txt
+    - type: done
+  - - type: text
+      text: summary-body-one
+    - type: done
+  - - type: text
+      text: summary-body-two
+    - type: done
+  - - type: tool_call
+      call_id: e1
+      name: replace_in_file
+      args:
+        path: huge.txt
+        old_string: H
+        new_string: h
+    - type: done
+  - - type: text
+      text: summary-body-three
+    - type: done
+  - - type: text
+      text: summary-body-four
+    - type: done
+  - - type: text
+      text: Edit refused after compaction.
+    - type: done
+assertions:
+  tool_error_codes:
+    - read_before_write
+  events_sequence:
+    - ToolCallResult
+    - ContextSummarized
+    - ToolCallResult
+  event_fields:
+    ToolCallResult:
+      error:
+        regex: read_before_write
+  response_contains: Edit refused after compaction.
+  turn_completed: true

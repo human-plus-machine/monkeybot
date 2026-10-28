@@ -1,0 +1,13 @@
+# Memory suite: recall within a session and across sessions on one running agent. The agent's
+# workspace must persist between sessions. See docs/live-evals.md.
+id: memory
+scenarios:
+  - memory/recall_single_session
+  - memory/recall_cross_session
+  - memory/search_past_session
+# pytest --suite memory runs the regression/t4/python files named in `python`
+# and no others. With no --suite, every file in that directory runs, including
+# test_docker_image_health.py (T4-OPS-01). test_provider_live_matrix.py is named
+# so T4-PROV-01 runs with this suite. MONKEYBOT_LIVE_MATRIX_MODEL_<ID> is unchanged.
+python:
+  - test_provider_live_matrix.py

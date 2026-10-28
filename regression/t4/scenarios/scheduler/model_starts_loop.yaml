@@ -1,0 +1,20 @@
+# "Check X every 5 minutes" must call start_loop with a stop guard. The runner
+# approves the confirmation so the turn does not wait for a person.
+case: T4-SCHED-02
+mode: live
+description: "Asking for a periodic check makes the model start a loop that has a stop guard"
+tags: [scheduler]
+messages:
+  - >
+    Check the workspace README every 5 minutes. Enable scheduled loops if they
+    are not in your tool list, then start a loop for that check. The loop must
+    have a stop guard (a max tick count or a max runtime); do not leave it unbounded.
+steps:
+  - action: confirm_tool
+    decision: approve
+    when: {event: tool_confirmation, name: start_loop}
+assertions:
+  required_tools: [start_loop]
+  tool_args:
+    start_loop:
+      stop_guard: true

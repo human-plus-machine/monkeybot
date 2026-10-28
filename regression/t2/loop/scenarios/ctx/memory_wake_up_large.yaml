@@ -1,0 +1,19 @@
+id: regression/t2/loop/scenarios/ctx/memory_wake_up_large
+case: T2-CTX-19
+description: Large memory_index does not prevent turn completion
+mode: scripted
+driver: loop
+messages:
+- Summarise everything
+memory:
+  index:
+  - line 1
+  - line 2
+  - '... 50 more lines ...'
+script:
+- - type: text
+    text: Here is a summary.
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true

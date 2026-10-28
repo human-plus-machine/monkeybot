@@ -1,0 +1,37 @@
+id: regression/t2/loop/scenarios/loop/mixed_parse_error_batch_runs_valid
+case: T2-LOOP-06
+description: In a mixed batch the unparseable call is skipped and the valid call runs.
+mode: scripted
+driver: loop
+messages:
+- one good tool and one broken tool
+script:
+- - type: tool_call
+    call_id: good
+    name: read_file
+    args:
+      path: a.txt
+  - type: tool_call
+    call_id: bad
+    name: read_file
+    args: {}
+    parse_error: malformed arguments
+  - type: done
+- - type: text
+    text: continued
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  tool_calls:
+    read_file: 2
+  interventions: []
+  events_sequence:
+  - type: ToolCallResult
+    call_id: bad
+    error: malformed arguments
+  - type: ToolCallResult
+    call_id: good
+    result: ok
+    error: null

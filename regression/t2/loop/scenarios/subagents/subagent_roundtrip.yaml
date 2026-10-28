@@ -1,0 +1,50 @@
+id: regression/t2/loop/scenarios/subagents/subagent_roundtrip
+case: T2-SUB-01
+description: Fake child roundtrip writes progress.jsonl and output.json
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Run a background analysis
+config:
+  env:
+    MONKEYBOT_SUBAGENT_SCRIPT: testkit/subagent_worker.py
+    AGENT_MD: regression/t4/agent/monkeybot_config/AGENT.md
+script:
+- - type: tool_call
+    call_id: c1
+    name: task
+    args:
+      task: roundtrip
+  - type: done
+- - type: text
+    text: Analysis complete.
+  - type: done
+assertions:
+  required_tools:
+  - task
+  tool_calls:
+    task: 1
+  turn_completed: true
+  events_sequence:
+  - SubagentStarted
+  - SubagentEvent
+  - type: SubagentCompleted
+    ok: true
+  subagent:
+    started: true
+    completed_ok: true
+    output_json_present: true
+    progress_jsonl_lines_min: 1
+  event_fields:
+    ToolCallResult:
+      result:
+        regex: '"ok": true'
+  workspace_command_passes:
+  - |
+    python -c "from pathlib import Path
+    root = Path('.monkeybot/subagent-runs')
+    prog = list(root.glob('*/progress.jsonl'))
+    out = list(root.glob('*/output.json'))
+    ok = bool(prog and out and prog[0].read_text().strip() and 'TurnComplete' in out[0].read_text())
+    raise SystemExit(0 if ok else 1)"

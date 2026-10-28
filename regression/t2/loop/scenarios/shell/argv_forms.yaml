@@ -1,0 +1,59 @@
+id: regression/t2/loop/scenarios/shell/argv_forms
+case: T2-SHELL-02
+description: argv list, JSON-string argv, command+args, and shell all parse and run
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Run echo four ways.
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      argv:
+      - echo
+      - form-argv-list
+  - type: tool_call
+    call_id: c2
+    name: run_command
+    args:
+      argv: '["echo", "form-argv-json"]'
+  - type: tool_call
+    call_id: c3
+    name: run_command
+    args:
+      command: echo
+      args:
+      - form-command-args
+  - type: tool_call
+    call_id: c4
+    name: run_command
+    args:
+      shell: echo form-shell
+  - type: done
+- - type: text
+    text: All four forms printed their token.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    result:
+      regex: 'form-argv-list.*"exit_code": 0'
+  - type: ToolCallResult
+    call_id: c2
+    result:
+      regex: 'form-argv-json.*"exit_code": 0'
+  - type: ToolCallResult
+    call_id: c3
+    result:
+      regex: 'form-command-args.*"exit_code": 0'
+  - type: ToolCallResult
+    call_id: c4
+    result:
+      regex: 'form-shell.*"exit_code": 0'
+  tool_categories_used:
+  - shell
+  turn_completed: true
+  no_errors: true

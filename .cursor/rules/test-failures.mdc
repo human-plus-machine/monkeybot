@@ -1,0 +1,10 @@
+---
+description: Report test failures from the ledger instead of fixing them.
+alwaysApply: true
+---
+
+- A failing test, scenario, or trial is a finding to report, not a task. Do not edit source, tests, scenarios, goldens, cassettes, or baselines to make it pass.
+- Do not skip, quarantine, `xfail`, delete, or loosen a check to make a run green.
+- In the reply, list the run file and each failure's case id, path, and one-line error. Then continue the original task, or stop if it cannot continue without the failing behavior.
+- Exception: the user explicitly asked to fix test failures (for example "fix the failures in run X" or "fix fingerprint abc123"). Then use `python -m testkit.failures prompt <fingerprint>` as the brief.
+- Running the tests again to confirm a failure is fine; changing things between runs is not.

@@ -1,0 +1,26 @@
+case: T4-CODE-10
+mode: live
+description: >
+  Four small additions across three modules, each needing a test and a CHANGELOG line: a longer
+  task where dropping conventions or skipping verification is easy.
+tags: [coding-hard, feature, long-horizon]
+workspace_fixture: shop_repo
+messages:
+  - >
+    In `{workspace_subdir}/`, please add four things, the way this project does things:
+    (1) `Cart.clear()` which empties the cart; (2) `Cart.subtotal()` which returns the cart's
+    subtotal in cents; (3) `Inventory.restock(sku, qty)` which adds qty units of stock for sku;
+    (4) `describe(code)` in the coupons module which returns e.g. `"10% off"` for a known coupon
+    and `"unknown coupon"` otherwise.
+assertions:
+  max_tool_errors: 3
+  workspace_command_passes:
+    - python -m pytest -q
+    - |-
+      python -c "from shop.cart import Cart; from shop.inventory import Inventory; from shop.coupons import describe; from shop.models import Item; c = Cart(); c.add(Item('a','A',250,2)); assert c.subtotal() == 500; c.clear(); assert len(c) == 0 and c.subtotal() == 0; i = Inventory({'a': 1}); i.restock('a', 4); i.restock('b', 2); assert i.available('a') == 5 and i.available('b') == 2; assert describe('save10') == '10% off' and describe('zzz') == 'unknown coupon'"
+  workspace_file_contains:
+    CHANGELOG.md: "restock"
+    tests/test_cart.py: "subtotal"
+    tests/test_inventory.py: "restock"
+    tests/test_coupons.py: "describe"
+  verified_before_final: true

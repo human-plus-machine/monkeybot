@@ -1,0 +1,27 @@
+id: regression/t2/loop/scenarios/file/read_absolute_needs_grant
+case: T2-FILE-06
+description: An absolute path outside the workspace is path_needs_grant.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Read /etc/hosts.
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: /etc/hosts
+  - type: done
+- - type: text
+    text: That path needs a grant.
+  - type: done
+assertions:
+  tool_error_codes:
+  - path_needs_grant
+  events_sequence:
+  - type: ToolCallResult
+    error:
+      regex: '\A(?![\s\S]*localhost)[\s\S]*path_needs_grant'
+  turn_completed: true

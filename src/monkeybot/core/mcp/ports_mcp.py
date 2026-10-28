@@ -115,8 +115,22 @@ class MCPClientPort(Protocol):
         """Fetch a named MCP prompt (optional string arguments)."""
         ...
 
-    async def load_from_config(self, path: Path, *, raise_on_error: bool = False) -> None:
-        """Load mcp.json if present; no-op when path is missing (Story 5 semantics)."""
+    async def load_from_config(
+        self, path: Path, *, raise_on_error: bool = False, wait: bool = True
+    ) -> None:
+        """Load mcp.json if present; no-op when path is missing (Story 5 semantics).
+
+        ``wait=False`` parses the catalog and finishes ``autoConnect`` servers in
+        the background. Invalid config still raises before returning.
+        """
+        ...
+
+    async def wait_until_ready(self) -> None:
+        """Wait until a background autoConnect batch has finished.
+
+        Returns immediately when nothing is in flight. Does not raise connect
+        failures; those are recorded on server status.
+        """
         ...
 
     def set_env_overlay(self, env: Mapping[str, str] | None) -> dict[str, str] | None:

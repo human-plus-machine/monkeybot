@@ -1,0 +1,22 @@
+id: regression/t2/loop/scenarios/coding/gate_question_not_gated
+case: T2-CODE-10
+description: A pure question with no writes is not gated
+mode: scripted
+driver: loop
+executor: recording
+hooks:
+  - verification_gate
+messages:
+  - What is 2 + 2?
+script:
+  - - type: text
+      text: Four.
+    - type: done
+assertions:
+  interventions: []
+  events_absent:
+    - HarnessIntervention
+  provider_calls: 1
+  response_contains: Four.
+  turn_completed: true
+  no_errors: true

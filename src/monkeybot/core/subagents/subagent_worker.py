@@ -36,7 +36,7 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
 )
-from monkeybot.core.mcp.mcp_client import MCPClient
+from monkeybot.core.mcp.mcp_client import MCPClient, run_cleanup
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import HistoryStore, create_storage_backend
 from monkeybot.core.persistence.transcript import TranscriptWriter, start_child_transcript
@@ -54,7 +54,7 @@ from monkeybot.core.subagents.subagent_proto import (
     resolve_default_agent_md_path,
     resolve_project_path,
 )
-from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
+from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider, scripted_provider_from_env
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
 from monkeybot.core.tools.path_grant_inspector import PathGrantInspector
@@ -241,6 +241,10 @@ def _resolve_provider() -> Provider:
     if mode != "fake":
         return get_provider_config(provider=mode, config=cfg).provider
 
+    scripted = scripted_provider_from_env()
+    if scripted is not None:
+        return scripted
+
     import json
 
     raw = current_env("MONKEYBOT_FAKE_PROVIDER_EVENTS", "")
@@ -341,7 +345,7 @@ async def _async_main() -> None:
         )
         strict = os.environ.get("MCP_STRICT_LOAD", "").strip().lower() in ("1", "true", "yes")
         try:
-            await mcp.load_from_config(mcp_config, raise_on_error=strict)
+            await mcp.load_from_config(mcp_config, raise_on_error=strict, wait=strict)
         except OSError as exc:
             logger.info("MCP config skipped (%s): %s", mcp_config, exc)
 
@@ -434,6 +438,7 @@ async def _async_main() -> None:
             agent_md_path=agent_md_path,
             memory=memory,
             skills_path=skills,
+            skill_names=envelope.skills or None,
             mcp_client=mcp,
             parent_run_id=envelope.parent_run_id,
             model=envelope.model,
@@ -514,12 +519,15 @@ async def _async_main() -> None:
     finally:
         _detach_trace(reset_token)
         _detach_trace(attach_token)
-        if executor is not None:
-            await executor.aclose()
-        if mcp is not None:
-            for name in list(getattr(mcp, "_servers", {}).keys()):
-                await mcp.disconnect(name)
-        await backend.close()
+
+        async def _close_worker() -> None:
+            if executor is not None:
+                await executor.aclose()
+            if mcp is not None:
+                await mcp.disconnect_all()
+            await backend.close()
+
+        await run_cleanup(_close_worker())
 
 
 def main() -> None:

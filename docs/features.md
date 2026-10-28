@@ -414,6 +414,19 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Invariants:** Recorded once per user message on `TurnComplete`.
 
+**Model pricing:** `estimate_cost` reads the built-in `MODEL_PRICING` table, then `pricing:` in `monkeybot.yaml` (and files it includes), then rates from `register_model_pricing()`; for the same id the later source wins. The longest matching id wins across the raw id and the normalized hosted id. When `MONKEYBOT_AGENT_ROOT` or `MONKEYBOT_CONFIG` is set, that file is used instead of a config found from the working directory. An unpriced model costs `0` and warns once per process. Claude-family ids still price 1-hour cache writes at 2× input; other models use the configured `cache_write`.
+
+```yaml
+pricing:
+  deepseek-v4.1-flash:             # USD per 1M tokens
+    input: 0.30
+    output: 1.20
+    cache_read: 0.03               # cache_write defaults to 0
+    aliases: [deepseek-ai/deepseek-v4.1-flash-maas]
+```
+
+`register_model_pricing` only affects the calling process. Subagent and scheduler workers read `monkeybot.yaml`.
+
 ---
 
 ### 10. Memory subsystem
@@ -424,20 +437,20 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 **Storage URI:** `local://` only (object-store palaces are not supported in this release).
 
-**Wake-up:** `load_index()` calls MemPalace `wake_up` and stores lines on `TurnContext.memory_index`; prompt composition injects them under `## Memory wake-up`. There is no sliding window or LLM curator. Leftover `context_curation:` YAML is ignored (one warning per process). Wake-up size is whatever MemPalace L0+L1 returns; `model.context_window` still only bounds history summarization. Subagents include the same wake-up block as the parent.
+**Wake-up:** `load_index()` calls MemPalace `wake_up` and stores lines on `TurnContext.memory_index`; prompt composition injects them under `## Memory wake-up`. There is no sliding window or LLM curator. Leftover `context_curation:` YAML is ignored (one warning per process). Wake-up size is whatever MemPalace L0+L1 returns; `model.context_window` still only bounds history summarization. Chats in the same project share that briefing by default. `MONKEYBOT_MEMORY_SHARE_THREADS=0` limits it to the current chat. Subagents include the same wake-up block as the parent when sharing is on.
 
 **Hook lifecycle:**
 
 | Event | Behavior |
 |-------|----------|
 | History append | Enqueue user / final assistant text on the outbox (same transaction when the backend supports it) |
-| `PRE_TURN` | Inject thread-scoped L2 recall into `inject_memory_lines` |
+| `PRE_TURN` | Inject L2 recall into `inject_memory_lines`. Shared across chats unless `MONKEYBOT_MEMORY_SHARE_THREADS` is off |
 | `POST_TURN` | Wake the per-agent writer |
 | `SESSION_END` | Bounded outbox drain |
 
 **Invariants:**
 - Chat history is canonical; MemPalace drawers are an idempotent projection.
-- Recall is scoped to the current `thread_id` by default.
+- Saved lines are shared across chats in the same project by default. `MONKEYBOT_MEMORY_SHARE_THREADS=0` (also `false`, `no`, `off`) keeps each chat's lines, including the wake-up briefing, in that chat. Unset shares.
 - `memory.enabled: false` (or `MONKEYBOT_MEMORY_HOOK_ENABLED=0`) skips capture, wake-up, and prompt teaching. Host `run_command` children then cannot see palace files: Linux user+mount namespaces or macOS `sandbox-exec` hide those directories. If isolation cannot be established and at least one hidden palace path exists, the command is refused rather than run with palace files visible. If none of the hidden paths exist on disk, the command runs unwrapped (memory was never configured; nothing to hide). OpenSandbox does not mount the palace. The kill switch is not an argv denylist; `bash` remains allowed, and the OS hides the files.
 - Postgres/Firestore persist the memory outbox with replica `palace_id` claim partitioning. Replicated deployments must share a lock-capable palace volume.
 - MemPalace (chromadb / onnxruntime) is the optional `monkeybot[memory]` extra. Missing the extra disables memory instead of failing startup.
@@ -700,7 +713,7 @@ Before spawning the gateway, the CLI probes that interpreter for MonkeyBot `>=3.
 - The gate is policy in a hook; the loop only offers the generic hold/refuse seam (§16) and is bounded (hook errors and timeouts are pass-through, refusals are capped, never raises, still ends in `TurnComplete`).
 - Realtime loop does not implement `PRE_FINAL_ANSWER`/`HISTORY_COMPACTED` yet.
 
-**Evals:** `evals/suites/coding.yaml` (live; workspace-checked assertions — see [live-evals.md](live-evals.md#coding-suite-workspace-checked)) and `tests/evals/scenarios/coding_*.yaml` (deterministic, `executor: real`).
+**Evals:** [`regression/t4/suites/coding.yaml`](../regression/t4/suites/coding.yaml) (live; workspace-checked assertions — see [live-evals.md](live-evals.md#coding-suite)) and the scripted scenarios under `regression/t2/`.
 
 ---
 
@@ -807,39 +820,20 @@ Use this when reviewing PRs or designing new features.
 
 ## Testing guide
 
-### Unit / integration (`tests/`)
+Tiers, commands, and the failure policy are in [testing.md](testing.md).
 
 | Area | Location |
 |------|----------|
-| Loop semantics | `tests/core/test_loop.py` |
-| Prompt composition | `tests/core/test_prompt.py`, `tests/core/test_harness_prompt.py` |
-| Tools | `tests/core/test_core_tool_executor.py` |
-| Memory | `tests/core/memory/` |
-| Providers | `tests/providers/` |
-| Gateway | `tests/gateway/` |
-| Integration | `tests/integration/` |
+| Loop semantics | `tests/unit/core/runtime/test_loop.py` |
+| Prompt composition | `tests/unit/core/prompts/test_prompt.py`, `tests/unit/core/prompts/test_harness_prompt.py` |
+| Tools | `tests/unit/core/tools/test_core_tool_executor.py` |
+| Memory | `tests/unit/core/memory/` |
+| Providers | `tests/unit/providers/` |
+| Gateway | `tests/unit/gateway/` |
+| Scripted trajectories | `regression/t2/` |
+| Live suites | `regression/t4/` (`uv run python -m regression.t4 --suite smoke`) |
 
-**Key test doubles:**
-- `core/testing/mocks_provider.py` — `ScriptedFakeProvider`
-- `tests/core/test_loop.py` — `FakeHistory`, `FakeProvider`, `RecordingExecutor`, `AllowInspector`
-
-**Global fixture:** `tests/conftest.py` forces `SANDBOX_ENABLED=false`.
-
-### Behavioral evals (`tests/evals/`)
-
-YAML-driven scenarios asserting harness behavior without live LLM.
-
-- `tests/evals/scenario_runner.py`
-- `tests/evals/eval_hook.py`
-- `tests/evals/scenarios/*.yaml`
-
-**Note:** Assert tools via `RecordingExecutor`; `POST_TOOL` hook may not complete before `run()` returns.
-
-### Judge-based evals (`evals/`)
-
-Separate harness at repo root for higher-level agent evaluation, run as a CLI against a
-live gateway: `uv run python -m evals.report --suite smoke` (see `evals/report.py`; diff
-two runs with `python -m evals.diff`).
+Doubles live in `testkit/` (`FakeHistory`, `ScriptedProvider`, `RecordingExecutor`). `tests/conftest.py` forces `SANDBOX_ENABLED=false`.
 
 ---
 

@@ -1,0 +1,64 @@
+# Union of the other suites for the nightly job, in suite order, plus the live cases
+# that have no area suite. The runner groups scenarios by config and starts or reuses
+# a gateway per group: drift needs EVAL_VERIFIER_MODE (scenarios fail to load without
+# it) and, when that mode is on, the verifier config; context needs context_window
+# 6000; mcp/enable_then_echo_live needs the progressive MCP config. A reload_config
+# scenario gets a gateway of its own. See each suite file and docs/live-evals.md.
+id: nightly
+scenarios:
+  # smoke
+  - file/core_read
+  - file/core_read_error
+  - file/core_write
+  - shell/core_run_command
+  - skills/skill_invocation
+  - subagents/dispatch_complete
+  - memory/recall_single_session
+  - memory/recall_cross_session
+  - multi_turn/task_tracking
+  - mcp/tool_invoke
+  - mcp/list_resources
+  - mcp/get_prompt
+  # coding
+  - coding/fix_failing_test
+  - coding/add_feature_with_tests
+  - coding/navigate_repo
+  # coding_hard
+  - coding_hard/fix_discount_rounding
+  - coding_hard/add_bulk_discount
+  - coding_hard/noisy_test_failure
+  - coding_hard/navigate_intl_rate
+  - coding_hard/rename_calc_tax
+  - coding_hard/honest_unfixable_failure
+  - coding_hard/multi_feature_long
+  # drift
+  - drift/path_constraint
+  - drift/supersession
+  - drift/preempt
+  - drift/declares_done
+  - drift/repeat_correction
+  # context
+  - context/summarization_trigger
+  - context/post_compaction_continuity
+  # mcp (the rest is in smoke)
+  - mcp/enable_then_echo_live
+  # file and attachments (no area suite)
+  - file/grep_absence_honesty
+  - attachments/describe_image_live
+  # memory
+  - memory/search_past_session
+  # subagents
+  - subagents/persona_dispatch
+  # scheduler
+  - scheduler/http_one_tick_live
+  - scheduler/model_starts_loop
+  # hooks, config, gateway (no area suite)
+  - hooks/evidence_citation_live
+  - config/reload_memory_off_live
+  - gateway/live_resume
+# pytest --suite nightly runs the regression/t4/python files named in `python`
+# and no others. With no --suite, every file in that directory runs, including
+# test_docker_image_health.py (T4-OPS-01). test_provider_live_matrix.py is named
+# so T4-PROV-01 runs with this suite. MONKEYBOT_LIVE_MATRIX_MODEL_<ID> is unchanged.
+python:
+  - test_provider_live_matrix.py

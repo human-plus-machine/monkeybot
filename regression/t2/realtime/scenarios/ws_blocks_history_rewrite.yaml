@@ -1,0 +1,17 @@
+id: regression/t2/realtime/scenarios/ws_blocks_history_rewrite
+case: T2-RT-07
+description: Deleting chat history during a live voice session is rejected.
+mode: scripted
+driver: realtime
+executor: real
+invariants_skip:
+- name: turn_complete
+  reason: The live socket is held open for the history delete; no turn is run.
+assertions:
+  events_sequence:
+  - type: connected
+  - type: chat_history_delete
+    status: 409
+  event_fields:
+    chat_history_delete:
+      status: 409

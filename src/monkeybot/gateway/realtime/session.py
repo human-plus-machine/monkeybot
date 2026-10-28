@@ -23,7 +23,7 @@ from monkeybot.core.llm.realtime_provider import (
 )
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.transcript import TranscriptWriter
-from monkeybot.core.runtime.utterance_buffer import UtteranceBuffer
+from monkeybot.core.runtime.utterance_buffer import AssistantTurn, UtteranceBuffer
 from monkeybot.gateway.pending_response_bus import TERMINATED_PENDING_KEYS_MAXLEN
 from monkeybot.todo_list.store import TodoListStore
 
@@ -193,16 +193,21 @@ class RealtimeConnectionState:
             self.metrics.end_turn()
             self.transition("listening")
 
-    def handle_user_interrupt(self) -> None:
-        """Client or user barge-in."""
+    def handle_user_interrupt(self) -> AssistantTurn | None:
+        """Client or user barge-in.
+
+        Returns the spoken fragment when the assistant was interrupted, including
+        an empty turn when it had not spoken yet. ``None`` means the interrupt
+        was ignored.
+        """
         if self.state in ("speaking", "thinking"):
             self.metrics.mark_interrupt()
-            self.buffer.interrupt()
+            spoken = self.buffer.interrupt()
             self.transition("interrupted")
             # The provider interrupt call is made by the gateway; here we just update state.
-        elif self.state == "tool_running":
-            # Constraint 4: do not interrupt a tool call once dispatched.
-            pass
+            return spoken
+        # Constraint 4: do not interrupt a tool call once dispatched.
+        return None
 
     def mark_user_audio(self, duration_sec: float) -> None:
         """Track user audio duration and activity."""

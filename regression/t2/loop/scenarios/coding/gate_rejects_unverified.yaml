@@ -1,0 +1,61 @@
+id: regression/t2/loop/scenarios/coding/gate_rejects_unverified
+case: T2-CODE-02
+description: An edit followed by a bare 'done' is refused once; the retry verifies and reports the result
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: calc_repo
+hooks:
+- verification_gate
+messages:
+- Add a power() helper to calc/ops.py.
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: calc/ops.py
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: replace_in_file
+    args:
+      path: calc/ops.py
+      old_string: |
+        def divide(a: float, b: float) -> float:
+      new_string: |
+        def power(a: float, b: float) -> float:
+            return a**b
+
+
+        def divide(a: float, b: float) -> float:
+  - type: done
+- - type: text
+    text: Added power(). All done!
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: run_command
+    args:
+      argv:
+      - python
+      - -m
+      - pytest
+      - -q
+      - -p
+      - no:cacheprovider
+      - -k
+      - not divide_by_zero
+  - type: done
+- - type: text
+    text: 'Added power(); verified with pytest -k ''not divide_by_zero'': 4 passed (the unrelated divide-by-zero
+      test still fails).'
+  - type: done
+assertions:
+  interventions:
+  - final_answer_gate
+  provider_calls: 5
+  workspace_file_contains:
+    calc/ops.py: def power(
+  turn_completed: true
+  no_errors: true

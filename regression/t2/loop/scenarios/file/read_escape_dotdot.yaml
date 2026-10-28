@@ -1,0 +1,27 @@
+id: regression/t2/loop/scenarios/file/read_escape_dotdot
+case: T2-FILE-04
+description: Reading ../outside is invalid_path and returns no outside bytes.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Read ../outside.
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: ../outside
+  - type: done
+- - type: text
+    text: That path is rejected.
+  - type: done
+assertions:
+  tool_error_codes:
+  - invalid_path
+  events_sequence:
+  - type: ToolCallResult
+    error:
+      regex: '\A(?![\s\S]*HOSTILE_SECRET_TOKEN)(?![\s\S]*outside the hostile workspace)[\s\S]*invalid_path'
+  turn_completed: true

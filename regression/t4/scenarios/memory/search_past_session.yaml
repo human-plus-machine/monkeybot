@@ -1,0 +1,19 @@
+# Session 2 must call mempalace search and answer with the fact from session 1.
+# The fact is asserted only on session 2, so session 1 echoing it does not pass.
+case: T4-MEM-03
+mode: live
+description: "A later session searches mempalace for a fact stored in an earlier session"
+tags: [memory, search]
+sessions:
+  - - "Remember this exact fact for later sessions: the vault code is 4419."
+  - - >
+      Use run_command to run `mempalace search` for the vault code from the earlier
+      session, then answer with that code.
+session_pause_sec: 8
+assertions:
+  per_session:
+    2:
+      response_contains: "4419"
+      tool_args:
+        run_command:
+          command_contains: [mempalace, search]

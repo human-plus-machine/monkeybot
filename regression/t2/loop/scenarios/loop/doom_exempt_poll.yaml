@@ -1,0 +1,58 @@
+id: regression/t2/loop/scenarios/loop/doom_exempt_poll
+case: T2-LOOP-10
+description: Exempt loop_status and await_command polls do not reset a failing replace streak.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- poll between failures
+script:
+- - type: tool_call
+    call_id: en
+    name: enable_loops
+    args: {}
+  - type: done
+- - type: tool_call
+    call_id: f1
+    name: replace_in_file
+    args:
+      path: ./a
+      old_string: one
+      new_string: two
+  - type: tool_call
+    call_id: poll1
+    name: loop_status
+    args: {}
+  - type: tool_call
+    call_id: f2
+    name: replace_in_file
+    args:
+      path: a
+      old_string: three
+      new_string: four
+  - type: tool_call
+    call_id: poll2
+    name: await_command
+    args:
+      job_id: missing-job
+  - type: tool_call
+    call_id: f3
+    name: replace_in_file
+    args:
+      path: a/./b/..
+      old_string: five
+      new_string: six
+  - type: done
+- - type: text
+    text: stopped
+  - type: done
+assertions:
+  turn_completed: true
+  provider_calls: 3
+  interventions:
+  - intervention: doom_loop
+  error_contains: 'Doom loop detected: tool ''replace_in_file'' failed 3 times in a row on ''a'''
+  provider_request:
+  - n: 3
+    tools_empty: true
+    system_contains: '[Harness] Doom loop detected'

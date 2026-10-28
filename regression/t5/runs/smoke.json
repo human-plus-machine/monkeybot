@@ -1,0 +1,394 @@
+{
+  "label": "run",
+  "suite": "smoke",
+  "trials": 1,
+  "overall_pass_rate": 0.9166666666666666,
+  "scenarios": {
+    "file/core_read": {
+      "runs": 1,
+      "passed": 1,
+      "pass_rate": 1.0,
+      "mean_tool_calls": 1.0,
+      "mean_tool_calls_by_name": {
+        "read_file": 1.0
+      },
+      "mean_tool_errors": 0.0,
+      "mean_tokens": 9399.0,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": []
+    },
+    "file/core_read_error": {
+      "runs": 1,
+      "passed": 1,
+      "pass_rate": 1.0,
+      "mean_tool_calls": 2.0,
+      "mean_tool_calls_by_name": {
+        "glob": 1.0,
+        "read_file": 1.0
+      },
+      "mean_tool_errors": 1.0,
+      "mean_tokens": 9771.0,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": []
+    },
+    "file/core_write": {
+      "runs": 1,
+      "passed": 0,
+      "pass_rate": 0.0,
+      "mean_tool_calls": 3.0,
+      "mean_tool_calls_by_name": {
+        "read_file": 1.0,
+        "run_command": 1.0,
+        "write_file": 1.0
+      },
+      "mean_tool_errors": 1.0,
+      "mean_tokens": 10805.0,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": [
+        "max_tool_errors: 1 > 0"
+      ]
+    },
+    "shell/core_run_command": {
+      "runs": 1,
+      "passed": 1,
+      "pass_rate": 1.0,
+      "mean_tool_calls": 1.0,
+      "mean_tool_calls_by_name": {
+        "run_command": 1.0
+      },
+      "mean_tool_errors": 0.0,
+      "mean_tokens": 9201.0,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": []
+    },
+    "skills/skill_invocation": {
+      "runs": 1,
+      "passed": 1,
+      "pass_rate": 1.0,
+      "mean_tool_calls": 3.0,
+      "mean_tool_calls_by_name": {
+        "enable_mcp": 1.0,
+        "list_skills": 1.0,
+        "read_file": 1.0
+      },
+      "mean_tool_errors": 0.0,
+      "mean_tokens": 28574.0,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": []
+    },
+    "subagents/dispatch_complete": {
+      "runs": 1,
+      "passed": 1,
+      "pass_rate": 1.0,
+      "mean_tool_calls": 1.0,
+      "mean_tool_calls_by_name": {
+        "task": 1.0
+      },
+      "mean_tool_errors": 0.0,
+      "mean_tokens": 12245.0,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": []
+    },
+    "memory/recall_single_session": {
+      "runs": 1,
+      "passed": 1,
+      "pass_rate": 1.0,
+      "mean_tool_calls": 5.0,
+      "mean_tool_calls_by_name": {
+        "read_file": 1.0,
+        "replace_in_file": 1.0,
+        "run_command": 2.0,
+        "write_file": 1.0
+      },
+      "mean_tool_errors": 3.0,
+      "mean_tokens": 23427.0,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": []
+    },
+    "memory/recall_cross_session": {
+      "runs": 1,
+      "passed": 1,
+      "pass_rate": 1.0,
+      "mean_tool_calls": 2.0,
+      "mean_tool_calls_by_name": {
+        "read_file": 1.0,
+        "replace_in_file": 1.0
+      },
+      "mean_tool_errors": 0.0,
+      "mean_tokens": 18961.0,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": []
+    },
+    "multi_turn/task_tracking": {
+      "runs": 1,
+      "passed": 1,
+      "pass_rate": 1.0,
+      "mean_tool_calls": 9.0,
+      "mean_tool_calls_by_name": {
+        "ask_user": 1.0,
+        "grep": 2.0,
+        "list_dir": 5.0,
+        "read_file": 1.0
+      },
+      "mean_tool_errors": 0.0,
+      "mean_tokens": 34502.0,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": []
+    },
+    "mcp/tool_invoke": {
+      "runs": 1,
+      "passed": 1,
+      "pass_rate": 1.0,
+      "mean_tool_calls": 1.0,
+      "mean_tool_calls_by_name": {
+        "fixture__echo": 1.0
+      },
+      "mean_tool_errors": 0.0,
+      "mean_tokens": 9074.0,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": []
+    },
+    "mcp/list_resources": {
+      "runs": 1,
+      "passed": 1,
+      "pass_rate": 1.0,
+      "mean_tool_calls": 3.0,
+      "mean_tool_calls_by_name": {
+        "enable_mcp": 1.0,
+        "list_mcp_resources": 1.0,
+        "read_mcp_resource": 1.0
+      },
+      "mean_tool_errors": 0.0,
+      "mean_tokens": 25850.0,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": []
+    },
+    "mcp/get_prompt": {
+      "runs": 1,
+      "passed": 1,
+      "pass_rate": 1.0,
+      "mean_tool_calls": 3.0,
+      "mean_tool_calls_by_name": {
+        "enable_mcp": 1.0,
+        "get_mcp_prompt": 1.0,
+        "list_mcp_prompts": 1.0
+      },
+      "mean_tool_errors": 0.0,
+      "mean_tokens": 25987.0,
+      "mean_mempalace_calls": 0.0,
+      "mempalace_call_rate": 0.0,
+      "failures": []
+    }
+  },
+  "raw": [
+    [
+      {
+        "scenario_id": "file/core_read",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 1,
+        "tool_calls_by_name": {
+          "read_file": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 9129,
+        "output_tokens": 270,
+        "latency_ms": 1712,
+        "final_text": "The first heading in `skills/browser/SKILL.md` is **`# Browser`** \u2014 it's on line 6, immediately after the YAML frontmatter (which spans lines 1\u20134 with the name and description)."
+      },
+      {
+        "scenario_id": "file/core_read_error",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "read_file": 1,
+          "glob": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 1,
+        "input_tokens": 9054,
+        "output_tokens": 717,
+        "latency_ms": 3346,
+        "final_text": "r than guessing:\n\n- **Direct read** of `definitely-not-a-real-file-in-this-repo.md` failed with a `not_found` error.\n- **A full workspace search** for any file matching that name found zero matches (the scan completed cleanly, so this isn't an incomplete-listing artifact).\n\nSo I can't tell you what's in it, because there is no \"it.\" If you expected this file to exist, the likely causes are a misspelled filename, or it lives outside this workspace \u2014 if you point me at the right folder or correct name, I'll read it. And if you'd like, I can create the file with whatever content you have in mind."
+      },
+      {
+        "scenario_id": "file/core_write",
+        "status": "failed",
+        "failure": "max_tool_errors: 1 > 0",
+        "tool_calls_count": 3,
+        "tool_calls_by_name": {
+          "write_file": 1,
+          "read_file": 1,
+          "run_command": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 1,
+        "input_tokens": 9516,
+        "output_tokens": 1289,
+        "latency_ms": 5899,
+        "final_text": "rm through an independent channel before claiming success.Done \u2014 the file is in place and verified.\n\n- **Path:** `scratch/eval_write_check.txt`\n- **Content:** the single line `monkeybot write check ok`\n\nOne transparency note: my initial write call was refused by the harness's read-before-write guard, but the read that followed showed the file already contained exactly the requested line \u2014 so the end state is what you asked for. I then confirmed it through a second, independent channel (`cat` via shell, exit code 0), which returned the same content. The file exists with the correct single line."
+      },
+      {
+        "scenario_id": "shell/core_run_command",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 1,
+        "tool_calls_by_name": {
+          "run_command": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 8916,
+        "output_tokens": 285,
+        "latency_ms": 2510,
+        "final_text": "It printed exactly:\n\n```\nmonkeybot-shell-check\n```\n\nThat's the full stdout (followed by a trailing newline). Stderr was empty and the command exited with code 0."
+      },
+      {
+        "scenario_id": "skills/skill_invocation",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 3,
+        "tool_calls_by_name": {
+          "list_skills": 1,
+          "read_file": 1,
+          "enable_mcp": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 26520,
+        "output_tokens": 2054,
+        "latency_ms": 10430,
+        "final_text": "e skill's workflow \u2014 tabs, observations, playbooks).\n\nThat said \u2014 the skill's *guidance* is still usable if you have a task in mind. What would you like help with? For example:\n\n- If you have a URL or a web flow in mind, tell me and I'll check what's actually reachable with the current tools (web search works; interactive browsing doesn't).\n- If you meant to test the skill fixture itself, I can report exactly which pieces exist and which are missing, as above.\n- Or if \"help me\" was about something else entirely \u2014 a file, code, research \u2014 just say the word and I'll use the right tools for that."
+      },
+      {
+        "scenario_id": "subagents/dispatch_complete",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 1,
+        "tool_calls_by_name": {
+          "task": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 11448,
+        "output_tokens": 797,
+        "latency_ms": 11870,
+        "final_text": "n -m pytest -q`\") and a scenario name describing the behavior under test: fixing a failing test, honestly reporting an unfixable failure, completing a long multi-feature task, and diagnosing a noisy/flaky test failure. The `.deepeval` directories indicate the scenarios are graded by an evaluation harness (DeepEval-style).\n\nIt backed the summary with direct reads \u2014 e.g. `eval-coding-fix_failing_test/AGENTS.md` (\"Tiny arithmetic library\u2026 fix the code instead\") and the `shop` README describing `calc_tax` and `order_total` \u2014 so the characterization is evidence-based, not inferred from names alone."
+      },
+      {
+        "scenario_id": "memory/recall_single_session",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 5,
+        "tool_calls_by_name": {
+          "run_command": 2,
+          "write_file": 1,
+          "read_file": 1,
+          "replace_in_file": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 3,
+        "input_tokens": 19150,
+        "output_tokens": 4277,
+        "latency_ms": 627016,
+        "final_text": "**'silver-fox'.**\n\nThat's recorded in `scratch/memory-notes.md` (first noted 2026-10-26, re-confirmed by you today) \u2014 and it also matches the verbatim conversation memory from when you first told me."
+      },
+      {
+        "scenario_id": "memory/recall_cross_session",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 2,
+        "tool_calls_by_name": {
+          "read_file": 1,
+          "replace_in_file": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 17724,
+        "output_tokens": 1237,
+        "latency_ms": 9913,
+        "final_text": "**'project-marigold'.** You told me earlier today (2026-10-27) and it's also recorded in `scratch/memory-notes.md` (first noted 2026-10-26, re-confirmed today)."
+      },
+      {
+        "scenario_id": "multi_turn/task_tracking",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 9,
+        "tool_calls_by_name": {
+          "list_dir": 5,
+          "grep": 2,
+          "ask_user": 1,
+          "read_file": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 29830,
+        "output_tokens": 4672,
+        "latency_ms": 21202,
+        "final_text": " one-way:** `main \u2192 routers \u2192 services/schemas`. Routers never import each other \u2014 that's how you avoid circular imports.\n\nFor a genuinely small app (2\u20133 endpoints), a single `routers.py` is fine \u2014 don't build the full tree until you need it.\n\nOne caveat from earlier: I still haven't seen your actual FastAPI app \u2014 it's not in this workspace, so this is general guidance rather than advice fitted to your code. If you want, I can scaffold this structure here in the workspace as a starting point, or you can point me at the real project folder and I'll review how its routes are currently organized."
+      },
+      {
+        "scenario_id": "mcp/tool_invoke",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 1,
+        "tool_calls_by_name": {
+          "fixture__echo": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 8827,
+        "output_tokens": 247,
+        "latency_ms": 2310,
+        "final_text": "The echo came back: **`echo: ping`** \u2014 the fixture MCP server's echo tool is working as expected."
+      },
+      {
+        "scenario_id": "mcp/list_resources",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 3,
+        "tool_calls_by_name": {
+          "enable_mcp": 1,
+          "list_mcp_resources": 1,
+          "read_mcp_resource": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 25334,
+        "output_tokens": 516,
+        "latency_ms": 3854,
+        "final_text": "I'll connect the fixture server first, then list its resources.The fixture server is connected. Now listing its resources:One resource found \u2014 `readme` at `fixture://readme`. Reading it now:Here's what I found:\n\n**Resources (1):** `readme` \u2014 `fixture://readme`, described as a static fixture resource used to test the resource listing/reading tools.\n\n**What it says:** \"This is a fixture MCP resource for monkeybot's live eval smoke suite.\"\n\nSo it's a test placeholder \u2014 the resource exists purely as a fixture for the live eval smoke suite, with no substantive content beyond that description."
+      },
+      {
+        "scenario_id": "mcp/get_prompt",
+        "status": "passed",
+        "failure": "",
+        "tool_calls_count": 3,
+        "tool_calls_by_name": {
+          "enable_mcp": 1,
+          "list_mcp_prompts": 1,
+          "get_mcp_prompt": 1
+        },
+        "mempalace_calls": 0,
+        "tool_errors_count": 0,
+        "input_tokens": 25542,
+        "output_tokens": 445,
+        "latency_ms": 3819,
+        "final_text": " then list its prompts.The fixture server is connected. Now I'll list its prompt templates.Found one prompt: **greet** (requires argument `name`). Fetching it with name='World':Here's what I found:\n\n**Prompts (1):** `greet` \u2014 described as \"Fixture prompt template used to test list_mcp_prompts / get_mcp_prompt\", with one required argument `name`.\n\n**Resulting prompt text for name='World':**\n\n> \"Say hello to World in one short sentence.\"\n\nIt comes back as a single message with role `user`. Like the `readme` resource, it's a test placeholder for the fixture server's prompt tooling \u2014 nothing more."
+      }
+    ]
+  ]
+}

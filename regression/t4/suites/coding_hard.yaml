@@ -1,0 +1,18 @@
+# Harder coding suite over regression/fixtures/workspaces/shop_repo (see docs/live-evals.md).
+# Meant to be run several times per configuration (`python -m regression.t5.trials`)
+# because one LLM run proves little.
+id: coding_hard
+scenarios:
+  - coding_hard/fix_discount_rounding
+  - coding_hard/add_bulk_discount
+  - coding_hard/noisy_test_failure
+  - coding_hard/navigate_intl_rate
+  - coding_hard/rename_calc_tax
+  - coding_hard/honest_unfixable_failure
+  - coding_hard/multi_feature_long
+# pytest --suite coding_hard runs the regression/t4/python files named in `python`
+# and no others. With no --suite, every file in that directory runs, including
+# test_docker_image_health.py (T4-OPS-01). test_provider_live_matrix.py is named
+# so T4-PROV-01 runs with this suite. MONKEYBOT_LIVE_MATRIX_MODEL_<ID> is unchanged.
+python:
+  - test_provider_live_matrix.py

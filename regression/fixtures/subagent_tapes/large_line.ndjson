@@ -1,0 +1,2 @@
+{"control": true, "redact_pipe": false, "pad_event_bytes": 1048576}
+{"type": "TurnComplete", "request_id": "child"}

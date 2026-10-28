@@ -30,6 +30,8 @@ if ((${#missing[@]} > 0)); then
 fi
 
 export CI=true
+export MONKEYBOT_TEST_TRIGGER=pre-push
+export MONKEYBOT_TEST_RUN_GROUP="pre-push-$(date -u +%Y%m%dT%H%M%SZ)"
 
 # Hooks export GIT_DIR and other repo-local vars. Left set, `git init` and
 # `git -C` in tests operate on this checkout instead of the temp workspace they
@@ -52,27 +54,29 @@ trap restore_locks EXIT
 
 uv sync --extra claude --extra vertex-claude --extra bedrock --extra firestore --extra evals
 uv run ruff format --check .
-uv run mypy src/monkeybot
+uv run mypy src/monkeybot testkit
+uv run python -m regression.t3.tools.check_staleness
 # Each worker is its own process. Tests keep state in tmp_path, so the
 # suite is safe to fan out across the machine.
-uv run pytest tests/ -q -n auto
+# Phase 5 (T5 trials) is not part of a pull request. Opt in with CI_PHASE5=1.
+uv run pytest tests regression -m "t1 or t2 or t3" -q -n auto
+if [[ "${CI_PHASE5:-}" == "1" ]]; then
+  uv run pytest regression/t5 --live -q
+fi
 
 (
   cd cli
   uv sync
-  uv run pytest -q
+  PYTHONPATH="$root" uv run pytest -q -p testkit.failure_ledger --ledger-dir "$root/test-runs"
 )
 
 (
   cd integrations/browser-mcp
   uv sync --dev
-  uv run pytest -q
+  # The repo pytest.ini addopts load regression.plugin, which imports monkeybot.
+  # This package does not install monkeybot. Clear those addopts and keep the ledger.
+  PYTHONPATH="$root" uv run pytest -q -o addopts= -p testkit.failure_ledger --ledger-dir "$root/test-runs"
 )
-
-uv run python evals/test_assertions.py
-uv run python evals/test_report.py
-uv run python evals/test_runner_sse.py
-uv run python evals/test_coding_hard_oracle.py
 
 if [[ -z "$(git status --porcelain)" ]]; then
   printf '%s\n' "$head_sha" >"$stamp_file"

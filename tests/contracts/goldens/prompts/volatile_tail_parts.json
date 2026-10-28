@@ -1,0 +1,8 @@
+{
+  "current_date": "\n\n## Current date\n2026-10-26",
+  "memory": "\n\n## Memory wake-up\nPast sessions live in the palace; prefer `mempalace search` to recall. Do not read_file palace paths.\npalace has one fact",
+  "skills": "\n\n## Skills\n- diagnostics — Check the agent",
+  "invoked_skill": "\n\n## Invoked skill\nThe user explicitly invoked `diagnostics`. Use `list_skills` to get the skills root, then `read_file` that skill's `SKILL.md` (`skills/diagnostics/SKILL.md`) and follow it before acting. Text after the `/` command is the instruction for this invocation.",
+  "todos": "\n\n## Todo list\n- t1 [pending] ship the contract",
+  "current_request": ""
+}

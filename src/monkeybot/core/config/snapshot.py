@@ -297,7 +297,9 @@ class ConfigStore:
         Overlay-only digest changes (layout paths) do not count as a reload:
         comparison uses the last disk-built digest, not the overlay-folded one.
         Layout overlays are re-applied onto the rebuilt snapshot so a later
-        admin reload cannot drop ``DB_URL`` / ``AGENT_MD`` / etc.
+        admin reload cannot drop ``DB_URL`` / ``AGENT_MD`` / etc. A restart-tier
+        key whose file value differs from that overlay is reported and the
+        overlay stays, so the process keeps the value it booted with.
         """
         with self._lock:
             path = self._config_path if config_path is None else config_path
@@ -323,6 +325,8 @@ class ConfigStore:
                 tiers=frozenset(ENV_TIERS[k] for k in prepared.env_values if k in ENV_TIERS),
             )
         )
+        if current is not None:
+            diff = _flag_restart_keys_hidden_by_overlay(diff, built, overlays)
         with self._lock:
             self._prepared_disk[id(prepared)] = built.digest
         return prepared, diff
@@ -623,6 +627,34 @@ def build_runtime_config(
         verifier=verifier,
         env_values=env_values,
         coding=coding,
+    )
+
+
+def _flag_restart_keys_hidden_by_overlay(
+    diff: ConfigDiff, built: RuntimeConfig, overlays: Mapping[str, str]
+) -> ConfigDiff:
+    """Report a restart key the file changed while the booted overlay stays.
+
+    Layout export stamps the open database back onto every reload so the
+    process does not switch stores in place. When the file names a different
+    value, the overlay still wins and the key is listed as restart-required.
+    A key the file never set is left alone: the overlay is filling it in, not
+    hiding an edit.
+    """
+    hidden = frozenset(
+        key
+        for key, overlay in overlays.items()
+        if ENV_TIERS.get(key) is ConfigTier.RESTART
+        and (disk := built.env_values.get(key)) is not None
+        and disk != overlay
+    )
+    if not hidden:
+        return diff
+    return ConfigDiff(
+        noop=False,
+        changed_env_keys=diff.changed_env_keys | hidden,
+        changed_content=diff.changed_content,
+        tiers=diff.tiers | {ConfigTier.RESTART},
     )
 
 

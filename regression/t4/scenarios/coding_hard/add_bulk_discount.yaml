@@ -1,0 +1,24 @@
+case: T4-CODE-05
+mode: live
+description: >
+  Add a small function "the way this project does things": type hints, docstring, a test in the
+  matching test module and a CHANGELOG entry (all spelled out only in AGENTS.md).
+tags: [coding-hard, feature, conventions]
+workspace_fixture: shop_repo
+messages:
+  - >
+    In `{workspace_subdir}/`, add a function `bulk_discount(items, min_units, pct)` to the pricing
+    module. When the items add up to at least `min_units` units, take `pct` percent off the
+    subtotal and return the resulting cents; otherwise return the plain subtotal. Add it the way
+    this project does things.
+assertions:
+  max_tool_errors: 2
+  workspace_command_passes:
+    - python -m pytest -q
+    - |-
+      python -c "import shop.pricing as p; from shop.models import Item; f = p.bulk_discount; assert f.__doc__ and 'return' in f.__annotations__ and len(f.__annotations__) >= 4; assert f([Item('a','A',1000,3)], 3, 10) == 2700; assert f([Item('a','A',1000,2)], 3, 10) == 2000; assert f([Item('a','A',999,3)], 3, 15) == 2547"
+  workspace_file_contains:
+    shop/pricing.py: "def bulk_discount("
+    tests/test_pricing.py: "bulk_discount"
+    CHANGELOG.md: "bulk_discount"
+  verified_before_final: true

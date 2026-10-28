@@ -1,0 +1,38 @@
+id: regression/t2/loop/scenarios/loop/registry_refresh_same_turn
+case: T2-LOOP-29
+description: enable_mcp refreshes the tool list so the next provider request includes the new tool.
+mode: scripted
+driver: loop
+executor: real
+config:
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.progressive.json
+messages:
+- enable the fixture server
+script:
+- - type: tool_call
+    call_id: en
+    name: enable_mcp
+    args:
+      name: fixture
+  - type: done
+- - type: tool_call
+    call_id: echo
+    name: fixture__echo
+    args:
+      text: hello
+  - type: done
+- - type: text
+    text: echoed
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 3
+  provider_request:
+  - n: 1
+    tools_exclude:
+    - fixture__echo
+  - n: 2
+    tools_include:
+    - fixture__echo

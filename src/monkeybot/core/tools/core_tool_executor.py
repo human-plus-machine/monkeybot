@@ -104,6 +104,7 @@ from monkeybot.core.tools.background_jobs import (
 from monkeybot.core.tools.command_executor import BackgroundCommandExecutor
 from monkeybot.core.tools.fs_isolation import (
     JailRoots,
+    chroma_onnx_model_dirs,
     isolation_support,
     local_whisper_model_dirs,
     memory_hidden_paths,
@@ -886,10 +887,21 @@ def _workspace_error_envelope(exc: WorkspaceError) -> str:
             "the user for access to that folder; retrying with a rewritten path "
             "will not help."
         )
+    elif code == "credential_denied":
+        error_kind = "policy"
+        hint = (
+            "A folder grant does not unlock a credential file. Do not copy, move, "
+            "or symlink it into the workspace to get around this."
+        )
     elif code == "path_escape":
         hint = (
             "Use a path relative to the workspace root with no `..` or `~` "
             '(e.g. {"path": "README.md"}).'
+        )
+    elif code == "invalid_cwd":
+        hint = (
+            "cwd must be a directory inside the workspace. Omit cwd to run at the "
+            "workspace root, or pass a relative path that does not climb out with `..`."
         )
     elif code == "invalid_path":
         hint = "Remove `..`, `~`, and leading `/`; use a repo-relative path."
@@ -1957,6 +1969,11 @@ class CoreToolExecutor(ToolExecutorPort):
             subagent_type=subagent_type,
             parent_session_id=ctx.session_id,
             child_thread_id=child_thread_id,
+            skills=tuple(
+                skill.strip()
+                for skill in (persona.skills if persona is not None else ())
+                if isinstance(skill, str) and skill.strip()
+            ),
         )
 
         scratch = self._workspace.repo_root / ".monkeybot" / "subagent-runs" / uuid.uuid4().hex
@@ -2050,7 +2067,13 @@ class CoreToolExecutor(ToolExecutorPort):
             return self._workspace.repo_root
         if not isinstance(raw, str):
             raise WorkspaceError("cwd must be a string", code="invalid_cwd")
-        cwd = self._workspace._resolve_root_dir(raw)
+        try:
+            cwd = self._workspace._resolve_root_dir(raw)
+        except WorkspaceError as exc:
+            raise WorkspaceError(
+                f"Invalid cwd: {raw.strip()} is outside the workspace",
+                code="invalid_cwd",
+            ) from exc
         if not cwd.is_dir():
             raise WorkspaceError(
                 f"cwd is not an existing directory: {raw.strip()}",
@@ -2058,7 +2081,7 @@ class CoreToolExecutor(ToolExecutorPort):
             )
         return cwd
 
-    def _jail_roots(self, ctx: TurnContext) -> JailRoots:
+    def _jail_roots(self, ctx: TurnContext, cmd: str) -> JailRoots:
         """Deny-by-default filesystem policy for one `run_command` call.
 
         `deny` is the user's home directory — the only boundary that
@@ -2074,6 +2097,7 @@ class CoreToolExecutor(ToolExecutorPort):
         desktop app), PATH ``bin`` directories that sit inside the denied home
         (read-only — onefile tools such as bundled ``yt-dlp`` have to read
         their own executable), an installed on-device Whisper model directory
+        (read-only), Chroma's installed MiniLM model for ``mempalace``
         (read-only), and any folder the user has granted read access to,
         durably or for this turn (read-only).
         """
@@ -2113,6 +2137,8 @@ class CoreToolExecutor(ToolExecutorPort):
             deny.append(Path.home())
         read_only.extend(readable_bin_dirs_under_deny(deny))
         read_only.extend(local_whisper_model_dirs(deny=deny))
+        if cmd == "mempalace":
+            read_only.extend(chroma_onnx_model_dirs())
 
         return JailRoots(
             read_write=tuple(dict.fromkeys(p.resolve() for p in read_write)),
@@ -2172,7 +2198,7 @@ class CoreToolExecutor(ToolExecutorPort):
             if isinstance(executor, TerminalExecutor):
                 # jail_roots is a TerminalExecutor-only concept — SandboxExecutor
                 # runs in a container that already isolates the host filesystem.
-                jail_roots = self._jail_roots(ctx)
+                jail_roots = self._jail_roots(ctx, cmd)
                 execute_kwargs["jail_roots"] = jail_roots
                 # Same boundary: default caches live under the denied home.
                 # The container path keeps the host environment instead, and so
@@ -2492,13 +2518,24 @@ class CoreToolExecutor(ToolExecutorPort):
     async def _tool_disable_mcp(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         sname = _str_arg(args, "name")
         if not sname:
-            return (None, "disable_mcp requires name")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "disable_mcp requires name",
+                    "Pass the server name from the harness MCP list.",
+                ),
+            )
         known = list(self._mcp.known_server_names())
         if sname not in known and not self._mcp.is_connected(sname):
             known_msg = ", ".join(known) if known else "(none)"
             return (
                 None,
-                f"Unknown MCP server {sname!r}. Known servers: {known_msg}",
+                _built_in_tool_error(
+                    "validation",
+                    f"Unknown MCP server {sname!r}. Known servers: {known_msg}",
+                    "Pass a name from that list, or enable_mcp the server first.",
+                ),
             )
         await self._mcp.disconnect(sname)
         logger.info("disable_mcp ok %s", kv(server=sname, disconnected=True))
@@ -2573,17 +2610,38 @@ class CoreToolExecutor(ToolExecutorPort):
             result = await coro
         except MCPServerNotConnectedError as exc:
             logger.warning("%s failed %s", tool_name, kv(error=str(exc)))
-            return (None, str(exc))
+            return (
+                None,
+                _built_in_tool_error(
+                    "runtime",
+                    str(exc),
+                    "Call enable_mcp for that server, then retry.",
+                ),
+            )
         except MCPDiagnosticError as exc:
             logger.warning(
                 "%s failed %s",
                 tool_name,
                 kv(server=exc.server_name, error=str(exc)),
             )
-            return (None, str(exc))
+            return (
+                None,
+                _built_in_tool_error(
+                    "runtime",
+                    str(exc),
+                    "Read the message and connect a server that supports this call.",
+                ),
+            )
         except Exception as exc:
             logger.warning("%s failed %s", tool_name, kv(error=str(exc)))
-            return (None, f"{tool_name} failed: {exc}")
+            return (
+                None,
+                _built_in_tool_error(
+                    "runtime",
+                    f"{tool_name} failed: {exc}",
+                    "Retry after the server is connected.",
+                ),
+            )
         if ok_payload is None:
             return (_j({"ok": True, **result}), None)
         return (_j({"ok": True, **ok_payload(result)}), None)
@@ -2600,9 +2658,23 @@ class CoreToolExecutor(ToolExecutorPort):
         sname = _str_arg(args, "server")
         uri = _str_arg(args, "uri")
         if not sname:
-            return (None, "read_mcp_resource requires server")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "read_mcp_resource requires server",
+                    "Pass the MCP server name.",
+                ),
+            )
         if not uri:
-            return (None, "read_mcp_resource requires uri")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "read_mcp_resource requires uri",
+                    "Pass the resource URI from list_mcp_resources.",
+                ),
+            )
         return await self._mcp_meta_call(
             "read_mcp_resource",
             self._mcp.read_resource(sname, uri),
@@ -2620,9 +2692,23 @@ class CoreToolExecutor(ToolExecutorPort):
         sname = _str_arg(args, "server")
         prompt_name = _str_arg(args, "prompt")
         if not sname:
-            return (None, "get_mcp_prompt requires server")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "get_mcp_prompt requires server",
+                    "Pass the MCP server name.",
+                ),
+            )
         if not prompt_name:
-            return (None, "get_mcp_prompt requires prompt")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "get_mcp_prompt requires prompt",
+                    "Pass the prompt name from list_mcp_prompts.",
+                ),
+            )
         raw_args = args.get("arguments")
         prompt_args: dict[str, str] = {}
         if isinstance(raw_args, dict):
@@ -2654,21 +2740,49 @@ class CoreToolExecutor(ToolExecutorPort):
         store = store_or_err
         prompt = _str_arg(args, "prompt", "plan", "message")
         if not prompt:
-            return (None, "start_loop requires prompt with the agreed loop plan")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "start_loop requires prompt with the agreed loop plan",
+                    "Pass the agreed loop plan in prompt.",
+                ),
+            )
         interval_raw = args.get("interval")
         if interval_raw is None:
-            return (None, "start_loop requires interval (e.g. 20s, 5m, 1h)")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "start_loop requires interval (e.g. 20s, 5m, 1h)",
+                    "Pass interval as a duration such as 20s, 5m, or 1h.",
+                ),
+            )
         try:
             interval_ms = parse_interval_ms(interval_raw)
             max_runtime_ms = parse_optional_duration_ms(args.get("max_runtime"))
         except ValueError as exc:
-            return (None, str(exc))
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    str(exc),
+                    "Use a duration such as 20s, 5m, or 1h.",
+                ),
+            )
         max_ticks_raw = args.get("max_ticks")
         max_ticks: int | None = None
         if max_ticks_raw is not None:
             max_ticks = _coerce_int(max_ticks_raw, 0)
             if max_ticks is None or max_ticks < 1:
-                return (None, "max_ticks must be a positive integer when set")
+                return (
+                    None,
+                    _built_in_tool_error(
+                        "validation",
+                        "max_ticks must be a positive integer when set",
+                        "Omit max_ticks, or pass an integer of 1 or more.",
+                    ),
+                )
         session_id = _str_arg(args, "session_id") or ctx.session_id
         loop_id = _str_arg(args, "loop_id")
         skip_if_busy = args.get("skip_if_busy", True)
@@ -2691,7 +2805,14 @@ class CoreToolExecutor(ToolExecutorPort):
         try:
             row = await store.create(spec)
         except ValueError as exc:
-            return (None, str(exc))
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    str(exc),
+                    "Change the loop fields named in the message.",
+                ),
+            )
         return (
             _j(
                 {
@@ -2721,7 +2842,14 @@ class CoreToolExecutor(ToolExecutorPort):
         if loop_id:
             row = await store.get(loop_id)
             if row is None or row.kind == KIND_GOAL:
-                return (None, f"unknown loop: {loop_id}")
+                return (
+                    None,
+                    _built_in_tool_error(
+                        "validation",
+                        f"unknown loop: {loop_id}",
+                        "Pass a loop_id from start_loop or loop_status.",
+                    ),
+                )
             return (_j({"ok": True, "loop": self._loop_row_json(row)}), None)
         rows = await store.list_kind(KIND_LOOP)
         return (_j({"ok": True, "loops": [self._loop_row_json(r) for r in rows]}), None)
@@ -2754,13 +2882,34 @@ class CoreToolExecutor(ToolExecutorPort):
             return None, store_or_err[1]
         loop_id = _str_arg(args, "loop_id", "id")
         if not loop_id:
-            return (None, "pause_loop requires loop_id")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "pause_loop requires loop_id",
+                    "Pass the loop_id to pause.",
+                ),
+            )
         row = await store_or_err.get(loop_id)
         if row is None or row.kind == KIND_GOAL:
-            return (None, f"unknown loop: {loop_id}")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    f"unknown loop: {loop_id}",
+                    "Pass a loop_id from start_loop or loop_status.",
+                ),
+            )
         ok = await store_or_err.pause(loop_id)
         if not ok:
-            return (None, f"unknown loop: {loop_id}")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    f"unknown loop: {loop_id}",
+                    "Pass a loop_id from start_loop or loop_status.",
+                ),
+            )
         return (_j({"ok": True, "loop_id": loop_id, "status": "paused"}), None)
 
     async def _tool_resume_loop(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -2769,13 +2918,34 @@ class CoreToolExecutor(ToolExecutorPort):
             return None, store_or_err[1]
         loop_id = _str_arg(args, "loop_id", "id")
         if not loop_id:
-            return (None, "resume_loop requires loop_id")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "resume_loop requires loop_id",
+                    "Pass the loop_id of a paused loop.",
+                ),
+            )
         row = await store_or_err.get(loop_id)
         if row is None or row.kind == KIND_GOAL:
-            return (None, f"paused loop not found: {loop_id}")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    f"paused loop not found: {loop_id}",
+                    "Pass a loop_id that loop_status shows as paused.",
+                ),
+            )
         ok = await store_or_err.resume(loop_id)
         if not ok:
-            return (None, f"paused loop not found: {loop_id}")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    f"paused loop not found: {loop_id}",
+                    "Pass a loop_id that loop_status shows as paused.",
+                ),
+            )
         return (_j({"ok": True, "loop_id": loop_id, "status": "active"}), None)
 
     async def _tool_stop_loop(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -2784,13 +2954,34 @@ class CoreToolExecutor(ToolExecutorPort):
             return None, store_or_err[1]
         loop_id = _str_arg(args, "loop_id", "id")
         if not loop_id:
-            return (None, "stop_loop requires loop_id")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "stop_loop requires loop_id",
+                    "Pass the loop_id to stop.",
+                ),
+            )
         row = await store_or_err.get(loop_id)
         if row is None or row.kind == KIND_GOAL:
-            return (None, f"unknown loop: {loop_id}")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    f"unknown loop: {loop_id}",
+                    "Pass a loop_id from start_loop or loop_status.",
+                ),
+            )
         ok = await store_or_err.stop(loop_id)
         if not ok:
-            return (None, f"unknown loop: {loop_id}")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    f"unknown loop: {loop_id}",
+                    "Pass a loop_id from start_loop or loop_status.",
+                ),
+            )
         return (_j({"ok": True, "loop_id": loop_id, "status": "completed"}), None)
 
     def _goal_service(self) -> DurableGoalService | tuple[None, str]:
@@ -2807,10 +2998,24 @@ class CoreToolExecutor(ToolExecutorPort):
             return None, service_or_err[1]
         invoked = ctx.invoked_skill
         if invoked is None or invoked.name.lower() != "goal":
-            return (None, "create_goal is only available when the user invoked /goal")
+            return (
+                None,
+                _built_in_tool_error(
+                    "policy",
+                    "create_goal is only available when the user invoked /goal",
+                    "The user has to start this turn with /goal.",
+                ),
+            )
         objective = _str_arg(args, "objective")
         if not objective:
-            return (None, "create_goal requires a non-empty objective")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "create_goal requires a non-empty objective",
+                    "Pass a non-empty objective.",
+                ),
+            )
         try:
             row, created = await service_or_err.create(
                 objective=objective,
@@ -2821,13 +3026,27 @@ class CoreToolExecutor(ToolExecutorPort):
                 "create_goal conflict %s",
                 kv(session_id=ctx.session_id, error=str(exc)),
             )
-            return (None, str(exc))
+            return (
+                None,
+                _built_in_tool_error(
+                    "policy",
+                    str(exc),
+                    "Update the open goal instead of creating another.",
+                ),
+            )
         except ValueError as exc:
             logger.warning(
                 "create_goal rejected %s",
                 kv(session_id=ctx.session_id, error=str(exc)),
             )
-            return (None, str(exc))
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    str(exc),
+                    "Fix the objective and try again.",
+                ),
+            )
         logger.info(
             "create_goal %s",
             kv(session_id=ctx.session_id, goal_id=row.loop_id, created=created, status=row.status),
@@ -2857,10 +3076,24 @@ class CoreToolExecutor(ToolExecutorPort):
             return None, service_or_err[1]
         status = _str_arg(args, "status")
         if not status:
-            return (None, "update_goal requires status")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "update_goal requires status",
+                    "Pass status as active or complete.",
+                ),
+            )
         goal_id = _str_arg(args, "goal_id", "id")
         if not goal_id:
-            return (None, "update_goal requires goal_id")
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "update_goal requires goal_id",
+                    "Pass the goal_id from create_goal.",
+                ),
+            )
         try:
             row = await service_or_err.update(
                 goal_id=goal_id,
@@ -2872,13 +3105,27 @@ class CoreToolExecutor(ToolExecutorPort):
                 "update_goal missed %s",
                 kv(session_id=ctx.session_id, status=status, error=str(exc)),
             )
-            return (None, str(exc))
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    str(exc),
+                    "Pass a goal_id that is open in this session.",
+                ),
+            )
         except ValueError as exc:
             logger.warning(
                 "update_goal rejected %s",
                 kv(session_id=ctx.session_id, status=status, error=str(exc)),
             )
-            return (None, str(exc))
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    str(exc),
+                    "Use status active or complete.",
+                ),
+            )
         logger.info(
             "update_goal %s",
             kv(session_id=ctx.session_id, goal_id=row.loop_id, status=row.status),
@@ -2899,11 +3146,25 @@ class CoreToolExecutor(ToolExecutorPort):
     ) -> tuple[str | None, str | None]:
         parsed = parse_ask_user_args(args)
         if isinstance(parsed, str):
-            return (None, parsed)
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    parsed,
+                    "Pass a non-empty question. Choices, when set, are 2 to 6 unique short strings.",
+                ),
+            )
         question, choices = parsed
         bus = ctx.sse_bus
         if bus is None:
-            return (None, "ask_user is only available in an interactive chat")
+            return (
+                None,
+                _built_in_tool_error(
+                    "policy",
+                    "ask_user is only available in an interactive chat",
+                    "ask_user only works in a live chat that can show the question.",
+                ),
+            )
         answer = await await_ask_user_answer(
             bus,
             call_id=call.call_id,
@@ -2912,7 +3173,21 @@ class CoreToolExecutor(ToolExecutorPort):
             choices=choices,
         )
         if answer is None:
-            return (None, "ask_user is only available in an interactive chat")
+            return (
+                None,
+                _built_in_tool_error(
+                    "policy",
+                    "ask_user is only available in an interactive chat",
+                    "ask_user only works in a live chat that can show the question.",
+                ),
+            )
         if not answer:
-            return (None, "ask_user received an empty answer")
+            return (
+                None,
+                _built_in_tool_error(
+                    "runtime",
+                    "ask_user received an empty answer",
+                    "The host returned no text. Ask again with a clear question.",
+                ),
+            )
         return (_j({"answer": answer}), None)

@@ -1,0 +1,67 @@
+id: regression/t2/loop/scenarios/file/replace_error_codes
+case: T2-FILE-15
+description: replace_in_file reports not_found_replace, ambiguous_replace, no_change, and empty_old_string.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Exercise the replace error codes.
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: notes.txt
+  - type: tool_call
+    call_id: c2
+    name: write_file
+    args:
+      path: dup.txt
+      content: |
+        alpha
+        alpha
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: replace_in_file
+    args:
+      path: notes.txt
+      old_string: NO_SUCH_TOKEN
+      new_string: x
+  - type: tool_call
+    call_id: c4
+    name: replace_in_file
+    args:
+      path: dup.txt
+      old_string: alpha
+      new_string: beta
+  - type: tool_call
+    call_id: c5
+    name: replace_in_file
+    args:
+      path: notes.txt
+      old_string: A note inside the hostile workspace.
+      new_string: A note inside the hostile workspace.
+  - type: tool_call
+    call_id: c6
+    name: replace_in_file
+    args:
+      path: notes.txt
+      old_string: ""
+      new_string: x
+  - type: done
+- - type: text
+    text: All four replace errors were reported.
+  - type: done
+assertions:
+  tool_error_codes:
+  - not_found_replace
+  - ambiguous_replace
+  - no_change
+  - empty_old_string
+  workspace_unchanged:
+  - notes.txt
+  workspace_file_contains:
+    dup.txt: alpha
+  turn_completed: true

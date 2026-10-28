@@ -121,6 +121,9 @@ class VerdictMailbox:
         self._current: OrderedDict[str, str] = OrderedDict()
         self._active: OrderedDict[str, ActiveNudge] = OrderedDict()
         self._episodes: OrderedDict[str, _SignalEpisode] = OrderedDict()
+        # Verdicts already given a one-shot replan. The judge arms on deposit
+        # and the turn loop arms again when it drains the same verdict.
+        self._replan_armed: OrderedDict[str, None] = OrderedDict()
 
     def snapshot(self) -> MailboxSnapshot:
         """Copy request-local continuity state for a replacement mailbox."""
@@ -395,11 +398,18 @@ class VerdictMailbox:
                 )
                 return armed
             if capped in ("replan", "steer"):
+                if verdict.verdict_id and verdict.verdict_id in self._replan_armed:
+                    return False
                 self.put_replan(
                     thread_id,
                     verdict.request_id,
                     replan_text(verdict.triggering_signals),
                 )
+                stored = self._replans.get(thread_id)
+                if verdict.verdict_id and stored is not None and stored[0] == verdict.request_id:
+                    self._replan_armed[verdict.verdict_id] = None
+                    self._replan_armed.move_to_end(verdict.verdict_id)
+                    _cap(self._replan_armed)
                 return True
         except Exception:
             logger.warning(
@@ -454,10 +464,23 @@ class VerdictMailbox:
 
     def peek_nudge(self, thread_id: str, request_id: str) -> str | None:
         """Return the active correction without consuming it. Wrong request → None."""
+        active = self._active_nudge(thread_id, request_id)
+        if active is None:
+            return None
+        return active.text
+
+    def active_nudge_signals(self, thread_id: str, request_id: str) -> tuple[str, ...]:
+        """Signals still backing the sticky correction. Empty when none is armed."""
+        active = self._active_nudge(thread_id, request_id)
+        if active is None:
+            return ()
+        return active.triggering_signals
+
+    def _active_nudge(self, thread_id: str, request_id: str) -> ActiveNudge | None:
         active = self._active.get(thread_id)
         if active is None or active.request_id != request_id:
             return None
-        return active.text
+        return active
 
     def note_nudge_injection(self, thread_id: str, request_id: str) -> None:
         """Count a provider injection only after the actuator actually appended it."""

@@ -1,52 +1,55 @@
-"""Apply monkeybot SQLite schema DDL idempotently (stdlib sqlite3)."""
+"""Apply the monkeybot SQLite schema the same way startup does."""
 
 from __future__ import annotations
 
 import argparse
-import logging
+import asyncio
 import os
 import sqlite3
 import sys
+import threading
 
-from monkeybot.core.persistence.sqlite import (
-    _LEGACY_SCHEMA_MESSAGE,
-    SCHEMA_DDLS,
-    sqlite_path_from_db_url,
-)
-
-logger = logging.getLogger(__name__)
+from monkeybot.core.persistence.sqlite import apply_schema, open_connection, sqlite_path_from_db_url
 
 
-def _configure(conn: sqlite3.Connection) -> None:
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA synchronous=NORMAL")
+def _url_for(path: str) -> str:
+    if path == ":memory:":
+        return "sqlite:///:memory:"
+    return f"sqlite:///{path}"
 
 
-def _sync_connection_db_path(conn: sqlite3.Connection) -> str:
-    cur = conn.execute("PRAGMA database_list")
-    rows = cur.fetchall()
-    for row in rows:
-        if len(row) >= 3 and str(row[1]) == "main":
-            file_col = row[2]
-            return ":memory:" if not file_col else str(file_col)
-    return ":memory:"
+def _apply(url: str) -> None:
+    async def _run() -> None:
+        conn = await open_connection(url)
+        try:
+            await apply_schema(conn)
+        finally:
+            await conn.close()
 
+    def _worker() -> None:
+        asyncio.run(_run())
 
-def _log_legacy_schema_error_sync(conn: sqlite3.Connection) -> None:
-    path = _sync_connection_db_path(conn)
-    logger.error("Legacy conversation_history schema detected; db=%s", path)
+    # The contract test calls main() from a running loop. asyncio.run cannot
+    # start on that thread, and apply_schema is the one schema path.
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        _worker()
+        return
 
+    errors: list[BaseException] = []
 
-def _apply_schema_sync(conn: sqlite3.Connection) -> None:
-    for ddl in SCHEMA_DDLS:
-        conn.execute(ddl)
-    conn.commit()
-    cur = conn.execute("PRAGMA table_info(conversation_history)")
-    col_names = {str(r[1]) for r in cur.fetchall()}
-    if "tool_name" in col_names or "tool_call_id" in col_names:
-        _log_legacy_schema_error_sync(conn)
-        raise RuntimeError(_LEGACY_SCHEMA_MESSAGE)
+    def _threaded() -> None:
+        try:
+            _worker()
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=_threaded)
+    thread.start()
+    thread.join()
+    if errors:
+        raise errors[0]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -58,23 +61,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     ns = parser.parse_args(argv)
     try:
-        path = ns.db if ns.db is not None else sqlite_path_from_db_url(os.environ.get("DB_URL"))
+        if ns.db is not None:
+            url = _url_for(ns.db)
+        else:
+            url = _url_for(sqlite_path_from_db_url(os.environ.get("DB_URL")))
+        _apply(url)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-
-    conn = sqlite3.connect(path)
-    try:
-        _configure(conn)
-        _apply_schema_sync(conn)
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
     except sqlite3.Error as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    finally:
-        conn.close()
     return 0
 
 

@@ -1,0 +1,30 @@
+id: regression/t2/loop/scenarios/attachments/load_both_args
+case: T2-ATT-04
+description: load_file rejects a call that passes both path and attachment_id.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Load a file both ways.
+script:
+- - type: tool_call
+    call_id: c1
+    name: load_file
+    args:
+      path: notes.txt
+      attachment_id: att-both
+  - type: done
+- - type: text
+    text: That call was rejected.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    tool: load_file
+    error:
+      regex: "load_file accepts either attachment_id or path, not both"
+  required_tools:
+  - load_file
+  turn_completed: true
+  no_errors: true

@@ -1,0 +1,41 @@
+id: regression/t2/realtime/scenarios/ws_tool_confirmation
+case: T2-RT-03
+description: A tool confirmation frame is answered with tool_confirmation_response.
+mode: scripted
+driver: realtime
+executor: real
+policy:
+  permissions: ask
+messages:
+- Read note.txt
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: note.txt
+  - type: done
+- - type: text
+    text: continued
+  - type: done
+steps:
+- action: confirm_tool
+  decision: approve
+  call_id: c1
+  when:
+    event: tool_confirmation
+    call_id: c1
+invariants_skip:
+- name: turn_complete
+  reason: The websocket turn ends on a usage frame, not TurnComplete.
+assertions:
+  events_sequence:
+  - type: tool_confirmation
+    tool_call_id: c1
+  - type: tool_confirmation_response
+    tool_call_id: c1
+    approved: true
+  - type: tool_result
+    call_id: c1
+  events_absent:
+  - error

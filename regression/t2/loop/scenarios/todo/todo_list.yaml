@@ -1,0 +1,22 @@
+id: regression/t2/loop/scenarios/todo/todo_list
+case: T2-TODO-01
+description: Multi-step task request triggers todo_list tool to track work items
+mode: scripted
+driver: loop
+messages:
+- Track a todo to write the release notes for this project.
+script:
+- - type: tool_call
+    call_id: c1
+    name: todo_list
+    args:
+      action: add
+      text: Write release notes
+  - type: done
+- - type: text
+    text: Added 'Write release notes' to the todo list.
+  - type: done
+assertions:
+  tool_categories_used:
+  - todo
+  turn_completed: true

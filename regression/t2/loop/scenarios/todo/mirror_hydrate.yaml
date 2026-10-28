@@ -1,0 +1,37 @@
+id: regression/t2/loop/scenarios/todo/mirror_hydrate
+case: T2-TODO-06
+description: mirror_to_disk writes todos.json; a new store hydrates the same ids and one in_progress item.
+mode: scripted
+driver: loop
+executor: real
+messages:
+  - Add two todos and start the second.
+script:
+  - - type: tool_call
+      call_id: add
+      name: todo_list
+      args:
+        action: add
+        text:
+          - A
+          - B
+    - type: done
+  - - type: tool_call
+      call_id: start
+      name: todo_list
+      args:
+        action: start
+        id: t2
+    - type: done
+  - - type: text
+      text: B is in progress.
+    - type: done
+assertions:
+  turn_completed: true
+  events_sequence:
+    - type: ToolCallResult
+      call_id: start
+      result:
+        regex: '"id": "t1", "text": "A", "status": "pending".*"id": "t2", "text": "B", "status": "in_progress"'
+  workspace_command_passes:
+    - 'python -c "import asyncio, json; from pathlib import Path; from monkeybot.todo_list import TodoListStore; root = Path(''.'').resolve(); hits = list((root / ''.monkeybot'' / ''transcripts'').rglob(''todos.json'')); assert len(hits) == 1, hits; raw = json.loads(hits[0].read_text(encoding=''utf-8'')); assert raw[''next_n''] == 3, raw[''next_n'']; store = TodoListStore(str(raw[''session_id'']), workspace_root=root); asyncio.run(store.hydrate_from_disk()); got = [(item.id, item.status, item.text) for item in store.items]; assert got == [(''t1'', ''pending'', ''A''), (''t2'', ''in_progress'', ''B'')], got; assert sum(item.status == ''in_progress'' for item in store.items) == 1"'

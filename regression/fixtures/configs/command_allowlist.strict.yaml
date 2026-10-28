@@ -1,0 +1,7 @@
+# A tighter allowlist than command_allowlist.default.yaml: echo only.
+allowed_commands:
+  - echo
+allowed_path_prefixes:
+  - ./src/
+deny_patterns:
+  - "^sudo\\s+"

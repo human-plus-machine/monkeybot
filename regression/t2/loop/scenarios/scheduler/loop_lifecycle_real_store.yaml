@@ -1,0 +1,96 @@
+id: regression/t2/loop/scenarios/scheduler/loop_lifecycle_real_store
+case: T2-SCHED-02
+description: Confirmed start_loop, then status, pause, resume, and stop leave the row completed.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Start a checked loop, report it, pause it, resume it, then stop it.
+config:
+  env:
+    PENDING_RESPONSE_TIMEOUT_SEC: "2"
+script:
+- - type: tool_call
+    call_id: c-enable
+    name: enable_loops
+    args: {}
+  - type: done
+- - type: tool_call
+    call_id: c-start
+    name: start_loop
+    args:
+      prompt: "BUSINESS: check the deploy\nRULES: report status only"
+      interval: 5m
+      max_ticks: 3
+      loop_id: loop-1
+  - type: done
+- - type: tool_call
+    call_id: c-status
+    name: loop_status
+    args:
+      loop_id: loop-1
+  - type: done
+- - type: tool_call
+    call_id: c-pause
+    name: pause_loop
+    args:
+      loop_id: loop-1
+  - type: done
+- - type: tool_call
+    call_id: c-resume
+    name: resume_loop
+    args:
+      loop_id: loop-1
+  - type: done
+- - type: tool_call
+    call_id: c-stop
+    name: stop_loop
+    args:
+      loop_id: loop-1
+  - type: done
+- - type: text
+    text: The loop is completed.
+  - type: done
+steps:
+- action: confirm_tool
+  decision: approve
+  call_id: c-start
+  when:
+    event: tool_confirmation
+    call_id: c-start
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 7
+  required_tools:
+  - enable_loops
+  - start_loop
+  - loop_status
+  - pause_loop
+  - resume_loop
+  - stop_loop
+  store:
+    loops: 1
+  events_sequence:
+  - type: ToolConfirmationRequest
+    tool_name: start_loop
+  - type: ToolCallResult
+    tool: start_loop
+    result:
+      regex: '"status": "active"'
+  - type: ToolCallResult
+    tool: loop_status
+    result:
+      regex: '"status": "active"'
+  - type: ToolCallResult
+    tool: pause_loop
+    result:
+      regex: '"status": "paused"'
+  - type: ToolCallResult
+    tool: resume_loop
+    result:
+      regex: '"status": "active"'
+  - type: ToolCallResult
+    tool: stop_loop
+    result:
+      regex: '"status": "completed"'

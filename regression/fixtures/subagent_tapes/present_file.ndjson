@@ -1,0 +1,3 @@
+{"control": true, "write_files": {"report.txt": "present"}}
+{"type": "AssistantDelta", "request_id": "child", "delta": "wrote"}
+{"type": "TurnComplete", "request_id": "child"}

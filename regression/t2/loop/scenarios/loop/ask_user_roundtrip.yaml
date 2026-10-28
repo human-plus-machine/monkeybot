@@ -1,0 +1,42 @@
+id: regression/t2/loop/scenarios/loop/ask_user_roundtrip
+case: T2-LOOP-32
+description: ask_user publishes a question and returns the host answer.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- ask a question
+script:
+- - type: tool_call
+    call_id: c1
+    name: ask_user
+    args:
+      question: Continue?
+      choices:
+      - "yes"
+      - "no"
+  - type: done
+- - type: text
+    text: got the answer
+  - type: done
+steps:
+- action: answer_ask_user
+  answer: "yes"
+  call_id: c1
+  when:
+    event: ask_user
+    call_id: c1
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  events_sequence:
+  - type: AskUserRequest
+    tool_call_id: c1
+    question: Continue?
+  - type: ToolCallResult
+    call_id: c1
+    error: null
+    result:
+      regex: '"answer": "yes"'
+  response_contains: got the answer

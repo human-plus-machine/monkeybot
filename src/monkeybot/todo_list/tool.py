@@ -13,8 +13,11 @@ _TODO_LIST_SCHEMA: dict[str, object] = {
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["add", "complete", "remove"],
-            "description": ("add one or more pending items, mark one done, or remove one by id."),
+            "enum": ["add", "start", "complete", "remove", "clear"],
+            "description": (
+                "add pending items, mark one in_progress, mark one done, "
+                "remove one by id, or clear the list."
+            ),
         },
         "text": {
             "description": (
@@ -28,7 +31,7 @@ _TODO_LIST_SCHEMA: dict[str, object] = {
         },
         "id": {
             "type": "string",
-            "description": "Item id (required for complete and remove).",
+            "description": "Item id (required for start, complete, and remove).",
         },
     },
     "required": ["action"],
@@ -43,11 +46,19 @@ class TodoListTool:
         self.tool_def = ToolDef(
             "todo_list",
             (
-                "Maintain an ordered, session-scoped task list. "
-                "Use add / complete / remove. For add, pass text as a string or a "
-                "list of strings to append many items in one call. The live list "
-                "appears under ## Todo list in the system prompt when non-empty — "
-                "keep it updated as you work."
+                "Maintain an ordered, session-scoped task list. The live list, with ids, "
+                "appears under ## Todo list when it is not empty. "
+                "Use it for work of 3 or more distinct steps, or when the user lists several "
+                "things. Skip it for a single step or a conversational reply. "
+                "add appends text (one string, or a list — prefer one call for the whole plan); "
+                "new items are pending. "
+                "start sets one id to in_progress before you work on it; only one item is "
+                "in_progress, and the previous one returns to pending. "
+                "complete marks one id done right after you finish it — do not batch completions "
+                "at the end. "
+                "remove drops an item that no longer applies. "
+                "clear empties the list when a new, unrelated request arrives. "
+                "Add tasks you discover along the way, and keep the list updated as you work."
             ),
             _TODO_LIST_SCHEMA,
         )
@@ -65,6 +76,11 @@ class TodoListTool:
                 item=added[0] if len(added) == 1 else None,
                 added=added,
             )
+        if action == "start":
+            started = await self._store.start(str(args.get("id") or ""))
+            if isinstance(started, str):
+                return self._err(started)
+            return self._ok(action=action, item=asdict(started))
         if action == "complete":
             completed = await self._store.complete(str(args.get("id") or ""))
             if isinstance(completed, str):
@@ -75,8 +91,11 @@ class TodoListTool:
             if isinstance(removed, str):
                 return self._err(removed)
             return self._ok(action=action, item=asdict(removed))
+        if action == "clear":
+            await self._store.clear()
+            return self._ok(action=action)
         return self._err(
-            "todo_list action must be one of: add, complete, remove.",
+            "todo_list action must be one of: add, start, complete, remove, clear.",
             error_kind="validation",
         )
 
@@ -119,7 +138,7 @@ class TodoListTool:
                 "message": message,
                 "hint": (
                     "Pass action=add with text (string or list of strings), "
-                    "or action=complete|remove with id."
+                    "action=start|complete|remove with id, or action=clear."
                 ),
                 "items": self._store.snapshot(),
             },

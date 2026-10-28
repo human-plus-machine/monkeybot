@@ -1,0 +1,23 @@
+id: regression/t2/loop/scenarios/file/grep_invalid_regex
+case: T2-FILE-28
+description: An invalid grep pattern is invalid_regex.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Search with a bad pattern.
+script:
+- - type: tool_call
+    call_id: c1
+    name: grep
+    args:
+      pattern: "("
+  - type: done
+- - type: text
+    text: The pattern was rejected.
+  - type: done
+assertions:
+  tool_error_codes:
+  - invalid_regex
+  turn_completed: true

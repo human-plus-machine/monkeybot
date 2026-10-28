@@ -1,0 +1,13 @@
+# `skills/` is the read-only virtual file-tool prefix. This scenario targets
+# regression/t4/agent/skills/browser/SKILL.md, which is committed and always present.
+case: T4-FILE-01
+mode: live
+description: "Agent reads a trusted skill via the read_file core tool"
+tags: [tools, core]
+messages:
+  - "Read the file skills/browser/SKILL.md in this workspace and tell me the first heading in it."
+assertions:
+  metrics: [response_relevancy, faithfulness]
+  required_tools: [read_file]
+  max_tool_errors: 0
+  verdicts: {max: 0}

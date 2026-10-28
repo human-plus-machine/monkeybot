@@ -1,0 +1,31 @@
+id: regression/t2/loop/scenarios/file/spill_session_id_sanitized
+case: T2-FILE-32
+description: A session id containing .. cannot write a spill file outside the spill tree.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+config:
+  env:
+    MB_LOOP_SESSION_ID: ".."
+messages:
+- Spill output for a session id that contains dot-dot.
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      argv:
+      - python
+      - -c
+      - 'print("\n".join(f"line{i}" for i in range(3000)))'
+  - type: done
+- - type: text
+    text: The spill stayed inside the spill tree.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    result:
+      regex: \.monkeybot/spill/_/c1-output\.txt
+  turn_completed: true

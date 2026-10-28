@@ -1,0 +1,59 @@
+id: regression/t2/loop/scenarios/scheduler/enable_loops_progressive
+case: T2-SCHED-01
+description: Loop tools absent until enable_loops; present on the next request; disable_loops removes them.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Advertise scheduled-loop tools, then remove them.
+script:
+- - type: tool_call
+    call_id: c-enable
+    name: enable_loops
+    args: {}
+  - type: done
+- - type: tool_call
+    call_id: c-disable
+    name: disable_loops
+    args: {}
+  - type: done
+- - type: text
+    text: Scheduled-loop tools are off.
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 3
+  required_tools:
+  - enable_loops
+  - disable_loops
+  provider_request:
+  - n: 1
+    tools_include:
+    - enable_loops
+    tools_exclude:
+    - start_loop
+    - loop_status
+    - pause_loop
+    - resume_loop
+    - stop_loop
+    - disable_loops
+  - n: 2
+    tools_include:
+    - enable_loops
+    - start_loop
+    - loop_status
+    - pause_loop
+    - resume_loop
+    - stop_loop
+    - disable_loops
+  - n: 3
+    tools_include:
+    - enable_loops
+    tools_exclude:
+    - start_loop
+    - loop_status
+    - pause_loop
+    - resume_loop
+    - stop_loop
+    - disable_loops

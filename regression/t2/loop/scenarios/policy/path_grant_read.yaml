@@ -1,0 +1,52 @@
+id: regression/t2/loop/scenarios/policy/path_grant_read
+case: T2-POL-04
+description: An absolute read without a grant is path_needs_grant; approving the folder reads it in place.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Read an absolute path, then a folder outside the workspace.
+policy:
+  command_allowlist: default
+script:
+- - type: tool_call
+    call_id: c-abs
+    name: read_file
+    args:
+      path: "{workspace}/missing.txt"
+  - type: done
+- - type: tool_call
+    call_id: c-grant
+    name: read_file
+    args:
+      path: "{repo_root}/regression/fixtures/workspaces/grants_ws/granted/notes.md"
+  - type: done
+- - type: text
+    text: The granted notes were read in place.
+  - type: done
+steps:
+- action: confirm_tool
+  decision: approve
+  call_id: c-grant
+  when:
+    event: tool_confirmation
+    call_id: c-grant
+assertions:
+  tool_error_codes:
+  - path_needs_grant
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c-abs
+    error:
+      regex: path_needs_grant
+  - type: ToolConfirmationRequest
+    tool_name: read_file
+    tool_call_id: c-grant
+  - type: ToolCallResult
+    call_id: c-grant
+    result:
+      regex: '"path": "/.*Notes the folder grant may read'
+  forbidden_tools:
+  - write_file
+  turn_completed: true
+  no_errors: true

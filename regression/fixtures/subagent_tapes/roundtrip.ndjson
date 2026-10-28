@@ -1,0 +1,3 @@
+{"control": true}
+{"type": "AssistantDelta", "request_id": "child", "delta": "analysis ready"}
+{"type": "TurnComplete", "request_id": "child"}

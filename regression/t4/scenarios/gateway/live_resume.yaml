@@ -1,0 +1,17 @@
+# Drop the SSE client on the first text delta and reconnect with Last-Event-ID
+# of that frame. Concatenated deltas must equal the settled assistant text.
+case: T4-GW-02
+mode: live
+description: "Reconnecting mid-delta with Last-Event-ID still yields the full assistant text"
+tags: [gateway, sse]
+messages:
+  - Write three short sentences about the color blue. Do not use tools.
+steps:
+  - action: disconnect_sse
+    when: {event: text}
+  - action: reconnect_sse
+    last_event_id: last_seen
+    when: {event: text}
+assertions:
+  sse:
+    deltas_equal_final: true

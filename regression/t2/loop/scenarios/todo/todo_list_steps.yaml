@@ -1,0 +1,67 @@
+id: regression/t2/loop/scenarios/todo/todo_list_steps
+case: T2-TODO-01
+description: 'Multi-step task: add the plan, start each item, then complete it before the next'
+mode: scripted
+driver: loop
+messages:
+- 'Do three things: draft the changelog, run the tests, and write the release notes. Track each step.'
+script:
+- - type: tool_call
+    call_id: c1
+    name: todo_list
+    args:
+      action: add
+      text:
+      - Draft the changelog
+      - Run the tests
+      - Write the release notes
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: todo_list
+    args:
+      action: start
+      id: t1
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: todo_list
+    args:
+      action: complete
+      id: t1
+  - type: done
+- - type: tool_call
+    call_id: c4
+    name: todo_list
+    args:
+      action: start
+      id: t2
+  - type: done
+- - type: tool_call
+    call_id: c5
+    name: todo_list
+    args:
+      action: complete
+      id: t2
+  - type: done
+- - type: tool_call
+    call_id: c6
+    name: todo_list
+    args:
+      action: start
+      id: t3
+  - type: done
+- - type: tool_call
+    call_id: c7
+    name: todo_list
+    args:
+      action: complete
+      id: t3
+  - type: done
+- - type: text
+    text: Finished the changelog, tests, and release notes.
+  - type: done
+assertions:
+  tool_categories_used:
+  - todo
+  turn_completed: true

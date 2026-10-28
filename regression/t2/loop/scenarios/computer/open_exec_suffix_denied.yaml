@@ -1,0 +1,35 @@
+id: regression/t2/loop/scenarios/computer/open_exec_suffix_denied
+case: T2-COMP-01
+description: computer_open on an x.sh path is error_kind policy for the executable suffix.
+mode: scripted
+driver: loop
+executor: real
+tags:
+- darwin-only
+messages:
+- Open the shell script.
+config:
+  computer:
+    enabled: true
+  env:
+    MONKEYBOT_COMPUTER_TOOLS: "1"
+script:
+- - type: tool_call
+    call_id: c1
+    name: computer_open
+    args:
+      path: "{repo_root}/regression/t2/loop/scenarios/computer/x.sh"
+  - type: done
+- - type: text
+    text: Refused.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    tool: computer_open
+    error_kind: policy
+    error:
+      regex: "Refusing to open an executable file type"
+  turn_completed: true
+  no_errors: true

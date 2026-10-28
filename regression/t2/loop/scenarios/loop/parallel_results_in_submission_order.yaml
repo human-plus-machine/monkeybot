@@ -1,0 +1,52 @@
+id: regression/t2/loop/scenarios/loop/parallel_results_in_submission_order
+case: T2-LOOP-27
+description: Two parallel reads and one write return in one user row, in submission order.
+mode: scripted
+driver: loop
+messages:
+- read twice then write
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: a.txt
+  - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: b.txt
+  - type: tool_call
+    call_id: c3
+    name: write_file
+    args:
+      path: c.txt
+      content: written
+  - type: done
+- - type: text
+    text: ordered
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  tool_calls:
+    read_file: 2
+    write_file: 1
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    result: ok
+  - type: ToolCallResult
+    call_id: c2
+    result: ok
+  - type: ToolCallResult
+    call_id: c3
+    result: ok
+  history:
+    roles:
+    - user
+    - assistant
+    - user
+    - assistant
+    tool_pairs_intact: true

@@ -1,0 +1,34 @@
+id: regression/t2/loop/scenarios/attachments/load_pdf
+case: T2-ATT-02
+description: load_file by attachment_id puts a PDF file block on the turn.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: att_ws
+messages:
+- Load the stored PDF.
+script:
+- - type: tool_call
+    call_id: c1
+    name: load_file
+    args:
+      attachment_id: att-pdf
+  - type: done
+- - type: text
+    text: Loaded the PDF.
+  - type: done
+assertions:
+  provider_calls: 2
+  event_fields:
+    FileBlock:
+      mime_type: application/pdf
+      filename: with-text.pdf
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    tool: load_file
+    result: "[loaded pdf]"
+  required_tools:
+  - load_file
+  turn_completed: true
+  no_errors: true

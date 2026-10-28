@@ -1,0 +1,35 @@
+# Runs on the same gateway as T4-CTX-01: the runner starts it with the context_window
+# below. With the agent's default window nothing compacts and
+# the scenario fails on min_summarizations. The last turn needs the error messages given in
+# the first two turns, after the compaction has summarized them.
+case: T4-CTX-02
+mode: live
+config:
+  model.context_window: 6000
+description: "A multi-step coding task that spans a forced compaction still completes"
+tags: [context, summarization, coding]
+workspace_fixture: calc_repo_green
+messages:
+  - >
+    In the repository at `{workspace_subdir}/`, add a `modulo(a, b)` function to
+    `calc/ops.py`. It must raise `ValueError("modulo by zero")` when `b` is 0.
+    Do not add tests yet.
+  - >
+    Next, add an `average(values)` function to `calc/ops.py` that returns the arithmetic
+    mean of a list of numbers and raises `ValueError("average of empty list")` when the
+    list is empty. Still no tests.
+  - >
+    Read `{workspace_subdir}/calc/ops.py`, `{workspace_subdir}/tests/test_ops.py`,
+    `{workspace_subdir}/AGENTS.md` and `{workspace_subdir}/pyproject.toml`, then describe
+    the repository's layout and conventions in detail.
+  - >
+    Now add tests to `tests/test_ops.py` for both functions you added, including each
+    error case with the exact message I gave you. Run the tests and tell me the result.
+assertions:
+  min_summarizations: 1
+  workspace_file_contains:
+    calc/ops.py: "modulo by zero"
+    tests/test_ops.py: "average of empty list"
+  workspace_command_passes:
+    - python -c "from calc.ops import average, modulo"
+    - python -m pytest -q

@@ -580,6 +580,13 @@ def _core_tool_defs(
                     "(default workspace root). A file path searches just that file."
                 ),
             },
+            "path": {
+                "type": "string",
+                "description": (
+                    "Alias of root: a repo-relative directory or file to search. "
+                    "root wins when both are set."
+                ),
+            },
             "ignore_case": {
                 "type": "boolean",
                 "description": "Case-insensitive search (default false).",
@@ -838,6 +845,9 @@ def _core_tool_defs(
                 f"Without limit, returns up to {default_lines} lines from offset. "
                 f"Prefer that default (or a larger limit) over many small reads; "
                 f"use offset+limit only to continue from next_offset when truncated. "
+                f"When several paths are already known and the reads do not depend "
+                f"on each other, issue one read_file call per path in the same "
+                f"response. Do not take one file per turn. "
                 f"An absolute path outside the workspace is read in place once the "
                 f"user grants that folder — pass it directly rather than copying "
                 f"or moving the file into the workspace first."
@@ -877,10 +887,11 @@ def _core_tool_defs(
             "grep",
             "Search workspace file contents with a Python regex. Prefer over run_command+grep. "
             "Use this for exact identifiers and for conceptual or cross-file questions: pick "
-            "distinctive terms, then `read_file` the matching paths. "
-            "An empty match list is evidence of absence only when the payload has "
-            "scan_complete=true (incomplete scans return ok:false / incomplete_scan — narrow "
-            "root or pass file_glob). Capped pages still report total_match_count and next_offset. "
+            "distinctive terms, then `read_file` the matching paths in the same "
+            "response once you have them. "
+            "Matches are always returned. An empty match list is evidence of absence only when "
+            "scan_complete=true; when false, `incomplete` lists what was not searched and how to "
+            "finish. Capped pages still report total_match_count and next_offset. "
             "Use `context` to see lines around a match and `files_only` to just list files.",
             grep_schema,
             parallel_safe=True,
@@ -1079,6 +1090,7 @@ async def build_context(
     verdict_mailbox: VerdictMailbox | None = None,
     session_id: str | None = None,
     read_ledger: FileReadLedger | None = None,
+    skill_names: Sequence[str] | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -1088,7 +1100,11 @@ async def build_context(
         agent_md_path: Path to AGENT.md (must be non-empty).
         memory: Optional memory subsystem; when set, L0+L1 wake-up is loaded.
         skills_path: Root directory for skill folders (each with ``SKILL.md``).
+        skill_names: When set, only these skill directory names are visible on the turn.
+            ``None`` keeps every skill under ``skills_path``.
         mcp_client: Client exposing ``all_tools()`` for MCP-registered tools.
+            ``wait_until_ready`` runs before the catalog and tool list are read, so a
+            background autoConnect still in flight is included in this turn.
         user_id: Optional authenticated user.
         parent_run_id: Optional parent run for subagent linkage.
         model: Model id for this turn.
@@ -1127,11 +1143,15 @@ async def build_context(
         ValueError: When AGENT.md is missing or empty after normalization.
     """
     agent_md = _load_agent_md(agent_md_path)
-    memory_index = await memory.load_index() if memory is not None else []
+    memory_index = await memory.load_index(thread_id=thread_id) if memory is not None else []
     skills = _discover_skills(skills_path)
+    if skill_names is not None:
+        allowed = {name for name in skill_names if name}
+        skills = [skill for skill in skills if skill.name in allowed]
     registry = subagent_registry or {}
     type_names = sorted(registry)
     personas = tuple((name, registry[name].description) for name in type_names)
+    await mcp_client.wait_until_ready()
     catalog_names = normalize_catalog_mcp_names(mcp_client.catalog_names())
     tools = list(
         _core_tool_defs(
@@ -1194,7 +1214,7 @@ async def refresh_memory_index(ctx: TurnContext) -> TurnContext:
         return ctx
 
     try:
-        fresh = await ctx.memory.load_index()
+        fresh = await ctx.memory.load_index(thread_id=ctx.thread_id)
         return dataclasses.replace(ctx, memory_index=fresh)
     except Exception as exc:
         _log.warning(

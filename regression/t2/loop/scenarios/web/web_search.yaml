@@ -1,0 +1,37 @@
+id: regression/t2/loop/scenarios/web/web_search
+case: T2-WEB-01
+description: web_search returns ok true, echoes the query, and passes the fake backend results through.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- What's the latest news on the Rust 1.80 release?
+config:
+  env:
+    WEB_SEARCH_BACKEND: fake
+script:
+- - type: tool_call
+    call_id: c1
+    name: web_search
+    args:
+      query: Rust 1.80 release notes
+  - type: done
+- - type: text
+    text: Rust 1.80 was released with several new stabilized APIs.
+  - type: done
+assertions:
+  provider_calls: 2
+  provider_request:
+  - n: 1
+    tools_include:
+    - web_search
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    tool: web_search
+    result:
+      regex: '(?s)"ok": true.*"query": "Rust 1.80 release notes".*"title": "Rust 1.80".*"title": "Release notes"'
+  required_tools:
+  - web_search
+  turn_completed: true
+  no_errors: true

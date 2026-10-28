@@ -1,0 +1,47 @@
+id: regression/t2/loop/scenarios/mcp/enable_then_call
+case: T2-MCP-01
+description: Progressive config hides fixture__echo until enable_mcp, then the echo call returns.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Enable the fixture MCP server and echo ping.
+config:
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.progressive.json
+script:
+- - type: tool_call
+    call_id: c1
+    name: enable_mcp
+    args:
+      name: fixture
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: fixture__echo
+    args:
+      text: ping
+  - type: done
+- - type: text
+    text: "echo: ping"
+  - type: done
+assertions:
+  provider_calls: 3
+  provider_request:
+  - n: 1
+    tools_include:
+    - enable_mcp
+    tools_exclude:
+    - fixture__echo
+  - n: 2
+    tools_include:
+    - fixture__echo
+  events_sequence:
+  - type: ToolCallResult
+    tool: fixture__echo
+    result: "echo: ping"
+  required_tools:
+  - enable_mcp
+  - fixture__echo
+  turn_completed: true
+  no_errors: true

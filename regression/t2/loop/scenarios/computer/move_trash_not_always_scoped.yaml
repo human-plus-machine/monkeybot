@@ -1,0 +1,58 @@
+id: regression/t2/loop/scenarios/computer/move_trash_not_always_scoped
+case: T2-COMP-05
+description: Always allow on computer_trash does not persist, so the next trash still asks.
+mode: scripted
+driver: loop
+executor: real
+tags:
+- darwin-only
+messages:
+- Trash the same missing file twice, and remember the first approval.
+config:
+  computer:
+    enabled: true
+  env:
+    MONKEYBOT_COMPUTER_TOOLS: "1"
+script:
+- - type: tool_call
+    call_id: c1
+    name: computer_trash
+    args:
+      path: "~/Downloads/mb-p1-17-comp05-does-not-exist.txt"
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: computer_trash
+    args:
+      path: "~/Downloads/mb-p1-17-comp05-does-not-exist.txt"
+  - type: done
+- - type: text
+    text: The second trash still asked.
+  - type: done
+steps:
+- action: confirm_tool
+  decision: always
+  call_id: c1
+  when:
+    event: tool_confirmation
+    call_id: c1
+- action: confirm_tool
+  decision: approve
+  call_id: c2
+  when:
+    event: tool_confirmation
+    call_id: c2
+assertions:
+  events_sequence:
+  - type: ToolConfirmationRequest
+    tool_name: computer_trash
+    tool_call_id: c1
+    prompt:
+      regex: "Allow this action on your computer\\?"
+  - type: ToolConfirmationRequest
+    tool_name: computer_trash
+    tool_call_id: c2
+    prompt:
+      regex: "Allow this action on your computer\\?"
+  turn_completed: true
+  no_errors: true

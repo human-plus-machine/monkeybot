@@ -1,0 +1,25 @@
+id: regression/t2/loop/scenarios/loop/thinking_only_is_empty
+case: T2-LOOP-15
+description: Thinking with no assistant text is an empty completion and is retried.
+mode: scripted
+driver: loop
+messages:
+- think then answer
+script:
+- - type: thinking
+    text: private reasoning
+  - type: done
+- - type: text
+    text: visible answer
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  interventions:
+  - intervention: empty_completion
+    detail: retry
+  response_contains: visible answer
+  response_not_contains: private reasoning
+  events_absent:
+  - Error

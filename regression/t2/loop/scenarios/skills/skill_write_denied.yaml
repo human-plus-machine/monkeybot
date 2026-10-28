@@ -1,0 +1,64 @@
+id: regression/t2/loop/scenarios/skills/skill_write_denied
+case: T2-SKILL-02
+description: write, replace, and patch under skills/ are skills_read_only and leave SKILL.md unchanged.
+mode: scripted
+driver: loop
+executor: real
+messages:
+  - Try to change a skill file.
+script:
+  - - type: tool_call
+      call_id: write
+      name: write_file
+      args:
+        path: skills/diagnostics/new.md
+        content: nope
+    - type: done
+  - - type: tool_call
+      call_id: replace
+      name: replace_in_file
+      args:
+        path: skills/diagnostics/other.md
+        old_string: a
+        new_string: b
+    - type: done
+  - - type: tool_call
+      call_id: patch
+      name: apply_patch
+      args:
+        patch_text: |
+          *** Begin Patch
+          *** Add File: skills/diagnostics/added.md
+          +nope
+          *** End Patch
+    - type: done
+  - - type: tool_call
+      call_id: read
+      name: read_file
+      args:
+        path: skills/diagnostics/SKILL.md
+    - type: done
+  - - type: text
+      text: The skill file was not changed.
+    - type: done
+assertions:
+  turn_completed: true
+  tool_error_codes:
+    - skills_read_only
+  events_sequence:
+    - type: ToolCallResult
+      call_id: write
+      error:
+        regex: skills_read_only
+    - type: ToolCallResult
+      call_id: replace
+      error:
+        regex: skills_read_only
+    - type: ToolCallResult
+      call_id: patch
+      error:
+        regex: skills_read_only
+    - type: ToolCallResult
+      call_id: read
+      result:
+        regex: Read the traceback before changing code

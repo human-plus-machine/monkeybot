@@ -1,0 +1,37 @@
+id: regression/t2/loop/scenarios/file/tool_write
+case: T2-FILE-08
+description: A new file is created with the exact bytes that were written.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Create created.txt with the text hello.
+script:
+- - type: tool_call
+    call_id: c1
+    name: write_file
+    args:
+      path: created.txt
+      content: hello
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: created.txt
+  - type: done
+- - type: text
+    text: Created created.txt.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    result:
+      regex: '"bytes": 5'
+  - type: ToolCallResult
+    result:
+      regex: '"content": "     1\|hello"[\s\S]*"total_lines": 1'
+  workspace_file_contains:
+    created.txt: hello
+  turn_completed: true

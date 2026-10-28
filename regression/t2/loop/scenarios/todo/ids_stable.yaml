@@ -1,0 +1,58 @@
+id: regression/t2/loop/scenarios/todo/ids_stable
+case: T2-TODO-04
+description: Issued tN ids are not reused after remove or clear, including a store hydrated from the mirror.
+mode: scripted
+driver: loop
+executor: real
+messages:
+  - Add two todos, remove one, clear the list, then add another.
+script:
+  - - type: tool_call
+      call_id: add
+      name: todo_list
+      args:
+        action: add
+        text:
+          - A
+          - B
+    - type: done
+  - - type: tool_call
+      call_id: remove
+      name: todo_list
+      args:
+        action: remove
+        id: t2
+    - type: done
+  - - type: tool_call
+      call_id: clear
+      name: todo_list
+      args:
+        action: clear
+    - type: done
+  - - type: tool_call
+      call_id: again
+      name: todo_list
+      args:
+        action: add
+        text: C
+    - type: done
+  - - type: text
+      text: The new item is t3.
+    - type: done
+assertions:
+  turn_completed: true
+  events_sequence:
+    - type: ToolCallResult
+      call_id: remove
+      result:
+        regex: '"action": "remove".*"items": \[{"id": "t1"'
+    - type: ToolCallResult
+      call_id: clear
+      result:
+        regex: '"action": "clear".*"items": \[\]'
+    - type: ToolCallResult
+      call_id: again
+      result:
+        regex: '"id": "t3", "text": "C", "status": "pending"'
+  workspace_command_passes:
+    - 'python -c "import asyncio, json; from pathlib import Path; from monkeybot.todo_list import TodoListStore; root = Path(''.'').resolve(); hits = list((root / ''.monkeybot'' / ''transcripts'').rglob(''todos.json'')); assert len(hits) == 1, hits; raw = json.loads(hits[0].read_text(encoding=''utf-8'')); store = TodoListStore(str(raw[''session_id'']), workspace_root=root); asyncio.run(store.hydrate_from_disk()); got = [(item.id, item.status, item.text) for item in store.items]; assert got == [(''t3'', ''pending'', ''C'')], got; nxt = asyncio.run(store.add(''D'')); assert getattr(nxt, ''id'', None) == ''t4'', nxt"'

@@ -19,7 +19,7 @@ from monkeybot.core.memory.uri import object_store_memory_scheme
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_EMBEDDING_MODEL = "embeddinggemma-300m"
+DEFAULT_EMBEDDING_MODEL = "minilm"
 DEFAULT_BACKEND = "chroma"
 CONVERSATION_ROOM = "conversation"
 EMBEDDER_IDENTITY_FILE = ".embedder_identity"
@@ -55,7 +55,7 @@ class PalacePort(Protocol):
 
     def get_drawer(self, drawer_id: str) -> DrawerRecord | None: ...
 
-    def wake_up(self, wing: str | None = None) -> str: ...
+    def wake_up(self, wing: str | None = None, thread_id: str | None = None) -> str: ...
 
     def recall(
         self,
@@ -245,13 +245,14 @@ class MemPalaceAdapter:
 
     @contextmanager
     def acquire_write_lock(self) -> Iterator[None]:
-        from mempalace.palace import mine_palace_lock
+        # MemPalace 3.11 exec()s these into mempalace.palace at import, so mypy cannot see them.
+        from mempalace.palace import mine_palace_lock  # type: ignore[attr-defined]
 
         with palace_volume_lock(self.palace_path), mine_palace_lock(str(self.palace_path)):
             yield
 
     def _collection(self, *, create: bool = True) -> Any:
-        from mempalace.palace import get_collection
+        from mempalace.palace import get_collection  # type: ignore[attr-defined]
 
         return get_collection(str(self.palace_path), create=create)
 
@@ -291,7 +292,15 @@ class MemPalaceAdapter:
             metadata=meta,
         )
 
-    def wake_up(self, wing: str | None = None) -> str:
+    def wake_up(self, wing: str | None = None, thread_id: str | None = None) -> str:
+        if thread_id:
+            identity = (self.palace_path / "identity.txt").read_text(encoding="utf-8").strip()
+            return format_thread_wake_up(
+                identity,
+                self.list_drawers(),
+                wing=wing,
+                thread_id=thread_id,
+            )
         from mempalace.layers import MemoryStack
 
         stack = MemoryStack(
@@ -404,6 +413,41 @@ class MemPalaceAdapter:
         payload["backend"] = self.backend
         payload["embedding_model"] = self.embedding_model
         return payload
+
+
+def drawer_visible_to_thread(metadata: dict[str, str], thread_id: str | None) -> bool:
+    """A drawer with no chat id stays. A different chat's drawer drops when scoped."""
+    if not thread_id:
+        return True
+    owner = (metadata.get("thread_id") or "").strip()
+    return not owner or owner == thread_id
+
+
+def format_thread_wake_up(
+    identity: str,
+    drawers: list[DrawerRecord],
+    *,
+    wing: str | None,
+    thread_id: str,
+) -> str:
+    """Identity plus this chat's drawers. Other chats' lines are omitted."""
+    selected = [
+        drawer
+        for drawer in drawers
+        if (wing is None or drawer.wing == wing)
+        and drawer_visible_to_thread(drawer.metadata, thread_id)
+    ]
+    selected.sort(key=lambda drawer: drawer.filed_at, reverse=True)
+    lines = [identity.strip(), "", "## L1 — ESSENTIAL STORY"]
+    if not selected:
+        lines.append("No memories yet.")
+        return "\n".join(lines)
+    for drawer in selected[:15]:
+        snippet = " ".join(drawer.content.split())
+        if len(snippet) > 200:
+            snippet = snippet[:197] + "..."
+        lines.append(f"- [{drawer.room}] {snippet}")
+    return "\n".join(lines)
 
 
 def format_recall_lines(drawers: list[DrawerRecord], *, max_chars: int = L2_MAX_CHARS) -> list[str]:

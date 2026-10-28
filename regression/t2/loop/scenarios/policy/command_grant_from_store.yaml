@@ -1,0 +1,33 @@
+id: regression/t2/loop/scenarios/policy/command_grant_from_store
+case: T2-POL-07
+description: ffmpeg is listed in grants.json and runs without a confirmation.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Run ffmpeg -version.
+policy:
+  command_allowlist: strict
+  grants: default
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      argv:
+      - ffmpeg
+      - -version
+  - type: done
+- - type: text
+    text: ffmpeg ran.
+  - type: done
+assertions:
+  events_absent:
+  - ToolConfirmationRequest
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    result:
+      regex: '"ok": true'
+  turn_completed: true
+  no_errors: true

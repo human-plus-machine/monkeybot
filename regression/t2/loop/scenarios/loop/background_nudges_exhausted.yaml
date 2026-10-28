@@ -1,0 +1,47 @@
+id: regression/t2/loop/scenarios/loop/background_nudges_exhausted
+case: T2-LOOP-18
+description: After three background nudges the next finish reports the still-running jobs and drops the
+  held text.
+mode: scripted
+driver: loop
+executor: real
+config:
+  env:
+    SANDBOX_ENABLED: 'false'
+messages:
+- leave a job running
+script:
+- - type: tool_call
+    call_id: bg
+    name: run_command
+    args:
+      argv:
+      - python3
+      - -c
+      - import time; time.sleep(60)
+      background: true
+      timeout: 120
+  - type: done
+- - type: text
+    text: NUDGE1
+  - type: done
+- - type: text
+    text: NUDGE2
+  - type: done
+- - type: text
+    text: NUDGE3
+  - type: done
+- - type: text
+    text: KILLED
+  - type: done
+assertions:
+  turn_completed: true
+  interventions:
+  - intervention: background_jobs_nudge
+  - intervention: background_jobs_nudge
+  - intervention: background_jobs_nudge
+  error_contains: Ending the turn kills them with no result.
+  response_not_contains:
+  - NUDGE1
+  - NUDGE2
+  - NUDGE3

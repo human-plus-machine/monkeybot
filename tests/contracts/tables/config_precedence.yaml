@@ -1,0 +1,116 @@
+# T1-CFG-01. Env beats YAML and includes. Includes beat the base file.
+# MONKEYBOT_CONFIG selects the file. model.* is YAML-only. Leftover
+# MODEL_PROVIDER with no YAML model.provider raises.
+cases:
+  - id: env_wins_over_yaml
+    env:
+      PORT: "2222"
+    config: monkeybot_config/monkeybot.yaml
+    files:
+      monkeybot_config/monkeybot.yaml: |
+        runtime:
+          port: 7777
+    expect:
+      environ:
+        PORT: "2222"
+      snapshot:
+        gateway.port: "2222"
+  - id: yaml_fills_unset_env
+    unset: [PORT]
+    config: monkeybot_config/monkeybot.yaml
+    files:
+      monkeybot_config/monkeybot.yaml: |
+        runtime:
+          port: 9191
+    expect:
+      environ:
+        PORT: "9191"
+      snapshot:
+        gateway.port: "9191"
+  - id: include_overrides_base
+    unset: [PORT, MODEL_NAME, MODEL_PROVIDER]
+    config: monkeybot_config/monkeybot.yaml
+    files:
+      monkeybot_config/monkeybot.yaml: |
+        model:
+          provider: fake
+          name: from-base
+        runtime:
+          port: 1000
+        includes:
+          - inc.yaml
+      monkeybot_config/inc.yaml: |
+        model:
+          name: from-include
+        runtime:
+          port: 2000
+    expect:
+      environ:
+        PORT: "2000"
+      environ_absent: [MODEL_NAME, MODEL_PROVIDER]
+      snapshot:
+        model.name: from-include
+        model.provider: fake
+        gateway.port: "2000"
+  - id: env_beats_include
+    env:
+      PORT: "1"
+    config: monkeybot_config/monkeybot.yaml
+    files:
+      monkeybot_config/monkeybot.yaml: |
+        runtime:
+          port: 2
+        includes:
+          - inc.yaml
+      monkeybot_config/inc.yaml: |
+        runtime:
+          port: 3
+    expect:
+      environ:
+        PORT: "1"
+      snapshot:
+        gateway.port: "1"
+  - id: monkeybot_config_selects_file
+    unset: [PORT]
+    monkeybot_config: custom.yaml
+    files:
+      monkeybot_config/monkeybot.yaml: |
+        runtime:
+          port: 1111
+      custom.yaml: |
+        runtime:
+          port: 2222
+    expect:
+      environ:
+        PORT: "2222"
+      snapshot:
+        gateway.port: "2222"
+  - id: model_yaml_only
+    env:
+      MODEL_NAME: from-env
+      MODEL_PROVIDER: from-env
+    unset: []
+    config: monkeybot_config/monkeybot.yaml
+    files:
+      monkeybot_config/monkeybot.yaml: |
+        model:
+          provider: fake
+          name: from-yaml
+    expect:
+      environ:
+        MODEL_NAME: from-env
+        MODEL_PROVIDER: from-env
+      snapshot:
+        model.name: from-yaml
+        model.provider: fake
+  - id: leftover_model_provider_without_yaml_raises
+    env:
+      MODEL_PROVIDER: aws_bedrock
+    config: monkeybot_config/monkeybot.yaml
+    files:
+      monkeybot_config/monkeybot.yaml: |
+        runtime:
+          port: 8080
+    expect:
+      raises: ConfigError
+      match: no model.provider

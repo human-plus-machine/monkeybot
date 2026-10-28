@@ -1,0 +1,35 @@
+id: regression/t2/loop/scenarios/memory/outbox_thread_isolation
+case: T2-MEM-02
+description: With share-threads off, thread B does not see thread A's lines.
+mode: scripted
+driver: loop
+hooks:
+- memory
+config:
+  env:
+    MONKEYBOT_MEMORY_SHARE_THREADS: "false"
+sessions:
+- - remember alpha-thread-secret-line
+  - What did this thread say?
+- - What did the other thread say?
+script:
+- - type: text
+    text: Stored the line.
+  - type: done
+- - type: text
+    text: This thread said it.
+  - type: done
+- - type: text
+    text: Nothing from the other thread.
+  - type: done
+assertions:
+  provider_request:
+  - n: 2
+    system_contains: alpha-thread-secret-line
+  - n: 3
+    system_not_contains: alpha-thread-secret-line
+  store:
+    outbox:
+      min: 1
+  turn_completed: true
+  no_errors: true

@@ -1,0 +1,37 @@
+id: regression/t2/loop/scenarios/mcp/disabled_server_not_catalogued
+case: T2-MCP-11
+description: A server with enabled false is omitted from the catalog and is not offered as a tool.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Look at the MCP catalog.
+config:
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.progressive.json
+script:
+- - type: tool_call
+    call_id: c1
+    name: enable_mcp
+    args:
+      name: disabled_fixture
+  - type: done
+- - type: text
+    text: Not offered.
+  - type: done
+assertions:
+  provider_calls: 2
+  provider_request:
+  - n: 1
+    tools_include:
+    - enable_mcp
+    tools_exclude:
+    - disabled_fixture__echo
+    system_contains: '`fixture`'
+    system_not_contains: '`disabled_fixture`'
+  event_fields:
+    ToolCallResult:
+      tool: enable_mcp
+      error: "Unknown MCP server 'disabled_fixture'. Known configured servers: fixture"
+  turn_completed: true
+  no_errors: true

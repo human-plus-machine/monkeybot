@@ -1,0 +1,31 @@
+id: regression/t2/loop/scenarios/shell/shell_wrapper_bypass
+case: T2-SHELL-04
+description: bash -c 'pip install x' is denied by deny patterns before execute
+mode: scripted
+driver: loop
+executor: real
+policy:
+  command_allowlist: no_deny_patterns
+messages:
+- Install a package through bash.
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      argv:
+      - bash
+      - -c
+      - pip install x
+  - type: done
+- - type: text
+    text: The wrapped install was denied.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    error:
+      regex: denied by run_command deny_patterns policy
+  turn_completed: true
+  no_errors: true

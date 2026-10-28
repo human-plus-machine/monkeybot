@@ -1,0 +1,22 @@
+id: regression/t2/loop/scenarios/loop/empty_then_text
+case: T2-LOOP-12
+description: A silent completion is retried once and the recovered text is the reply.
+mode: scripted
+driver: loop
+messages:
+- say something
+script:
+- - type: done
+- - type: text
+    text: recovered text
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  interventions:
+  - intervention: empty_completion
+    detail: retry
+  response_contains: recovered text
+  events_absent:
+  - Error

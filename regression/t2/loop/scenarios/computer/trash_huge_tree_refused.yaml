@@ -1,0 +1,42 @@
+id: regression/t2/loop/scenarios/computer/trash_huge_tree_refused
+case: T2-COMP-06
+description: computer_trash on a tree of more than 10000 items is refused by check_trashable.
+mode: scripted
+driver: loop
+executor: real
+tags:
+- darwin-only
+messages:
+- Trash the huge tree.
+config:
+  computer:
+    enabled: true
+  env:
+    MONKEYBOT_COMPUTER_TOOLS: "1"
+script:
+- - type: tool_call
+    call_id: c1
+    name: computer_trash
+    args:
+      path: "{workspace}/huge"
+  - type: done
+- - type: text
+    text: Refused.
+  - type: done
+steps:
+- action: confirm_tool
+  decision: approve
+  call_id: c1
+  when:
+    event: tool_confirmation
+    call_id: c1
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    tool: computer_trash
+    error_kind: policy
+    result:
+      regex: "Refusing to trash more than 10000 items at once"
+  turn_completed: true
+  no_errors: true

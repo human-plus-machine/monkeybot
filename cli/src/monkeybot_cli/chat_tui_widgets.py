@@ -28,6 +28,10 @@ from monkeybot_cli.chat_tool_display import format_tool_expand_body
 _SPIN = "⠋⠙⠹⠸⠴⠦⠧⠇⠏"
 _HISTORY_LIMIT = 500
 _COMPOSER_PLACEHOLDER = "Message the agent — / commands · @ files · ! shell"
+# Enter's raw bytes. modifyOtherKeys and a few terminals report Shift/Alt+Enter
+# as these characters instead of the name "enter".
+_ENTER_KEY_NAMES = frozenset({"enter", "\r", "\n"})
+_NEWLINE_MODIFIERS = frozenset({"shift", "alt"})
 
 
 def _plain_title(text: str) -> Content:
@@ -747,6 +751,50 @@ class ShortcutsScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+def is_newline_key(key: str) -> bool:
+    """True when this key should insert a newline instead of sending.
+
+    Kitty-protocol terminals report ``shift+enter``. modifyOtherKeys and some
+    macOS terminals report the same chord as ``shift+`` plus a raw CR or LF.
+    ``ctrl+j`` is the chord every terminal can deliver.
+    """
+    if key in {"shift+enter", "alt+enter", "ctrl+j", "newline"}:
+        return True
+    parts = key.split("+")
+    if len(parts) < 2 or parts[-1] not in _ENTER_KEY_NAMES:
+        return False
+    return bool(_NEWLINE_MODIFIERS.intersection(parts[:-1]))
+
+
+def install_terminal_newline_keys() -> None:
+    """Teach Textual's parser the Enter chords it currently mislabels.
+
+    Alt+Enter arrives as ESC then CR, and Textual drops the Alt because Enter
+    is not a single-character key. modifyOtherKeys Shift+Enter arrives as
+    ``shift+`` plus a raw carriage return, which matches no binding.
+    """
+    from textual._xterm_parser import XTermParser
+
+    current = XTermParser._sequence_to_key_events
+    if getattr(current, "_monkeybot_newline", False):
+        return
+
+    def _sequence_to_key_events(self: XTermParser, sequence: str, alt: bool = False):  # type: ignore[no-untyped-def]
+        for event in current(self, sequence, alt=alt):
+            key = event.key
+            if alt and key == "enter":
+                yield Key("alt+enter", None)
+            elif key in {"shift+\r", "shift+\n"}:
+                yield Key("shift+enter", None)
+            elif key in {"alt+\r", "alt+\n"}:
+                yield Key("alt+enter", None)
+            else:
+                yield event
+
+    _sequence_to_key_events._monkeybot_newline = True  # type: ignore[attr-defined]
+    XTermParser._sequence_to_key_events = _sequence_to_key_events  # type: ignore[method-assign]
+
+
 class Composer(TextArea):
     """Growing multiline input: Enter sends, Shift+Enter/Ctrl+J newline, history, slash."""
 
@@ -1003,6 +1051,11 @@ class Composer(TextArea):
         if self._search_mode:
             self._handle_search_key(event)
             return
+        if is_newline_key(event.key):
+            self.action_insert_newline()
+            event.prevent_default()
+            event.stop()
+            return
         if event.character == "?" and not self.text.strip():
             with contextlib.suppress(Exception):
                 app = self.app
@@ -1054,7 +1107,8 @@ class Composer(TextArea):
             event.prevent_default()
             event.stop()
             return
-        super()._on_key(event)
+        # TextArea._on_key runs next via the message MRO and inserts printable
+        # characters. Calling it here as well only creates an unawaited coroutine.
         self.call_after_refresh(self._sync_height)
 
     def _handle_search_key(self, event: Key) -> None:
@@ -1115,3 +1169,6 @@ class TranscriptPane(VerticalScroll):
         on_scroll = getattr(app, "_on_transcript_scroll", None)
         if callable(on_scroll):
             on_scroll()
+
+
+install_terminal_newline_keys()

@@ -5,21 +5,33 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from collections.abc import AsyncIterator, Sequence
-from contextlib import aclosing
+from contextvars import ContextVar, Token
+from dataclasses import dataclass
 from typing import Any, cast
 
+from monkeybot.core.attachments.text import parse_attachment_descriptor_text
 from monkeybot.core.coding.verification_gate import last_proven_verification
 from monkeybot.core.config.snapshot import current_env, env_value
 from monkeybot.core.context import TurnContext
 from monkeybot.core.context.epoch import ContextEpochTracker
 from monkeybot.core.hooks import HookEvent, HookManager
-from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta
+from monkeybot.core.llm.provider import (
+    Done,
+    Message,
+    Provider,
+    TextDelta,
+    ThinkingDelta,
+    UsageEvent,
+)
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.messages.tool_integrity import interrupted_tool_result_text
 from monkeybot.core.messages.transform_context import is_provider_visible, provider_visible_blocks
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.thread_summary import CONTEXT_SUMMARY_PREFIX
+from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.context_budget import (
     ContextBudgeter,
     estimate_tokens_from_char_count,
@@ -43,6 +55,34 @@ from .loop_messages import _load_agent_chat_history, _summary_line_for_message
 from .loop_usage import _prompt_input_tokens_for_history
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.history_compaction")
+
+
+@dataclass(frozen=True, slots=True)
+class _SummaryTranscript:
+    """The turn whose transcript should record the next summary model call."""
+
+    writer: TranscriptWriter
+    request_id: str
+    inner_turn: int
+
+
+_summary_transcript: ContextVar[_SummaryTranscript | None] = ContextVar(
+    "monkeybot_summary_transcript",
+    default=None,
+)
+
+
+def bind_summary_transcript(
+    writer: TranscriptWriter, *, request_id: str, inner_turn: int
+) -> Token[_SummaryTranscript | None]:
+    """Record summary model calls on ``writer`` until the token is reset."""
+    return _summary_transcript.set(
+        _SummaryTranscript(writer=writer, request_id=request_id, inner_turn=inner_turn)
+    )
+
+
+def reset_summary_transcript(token: Token[_SummaryTranscript | None]) -> None:
+    _summary_transcript.reset(token)
 
 
 def _intent_facts_from_ctx(ctx: TurnContext) -> str | None:
@@ -262,16 +302,82 @@ def _estimate_message_tokens(message: Message) -> int:
 _PINNED_NOTIFICATION_TYPES = frozenset({"verifierVerdict"})
 
 
-def _is_pinned_history_row(msg: Message) -> bool:
-    """True for verifierVerdict rows that must survive compaction.
+def _is_pinned_block(block: ContentBlock) -> bool:
+    """True for a block compaction must keep even when it sits in the summarized middle."""
+    if isinstance(block, SystemNotification):
+        return block.notification_type in _PINNED_NOTIFICATION_TYPES
+    return isinstance(block, Text) and parse_attachment_descriptor_text(block.text) is not None
 
+
+def _is_pinned_history_row(msg: Message) -> bool:
+    """True when every block on the row must survive compaction.
+
+    Pinned rows are verifier verdicts and frozen attachment-descriptor lines.
     Other ``SystemNotification`` kinds (thinking / inline / credits) stay compactable.
+    A descriptor mixed into a normal text row is not pinned; the product stores
+    each descriptor as its own line.
     """
-    return bool(msg.content) and all(
-        isinstance(block, SystemNotification)
-        and block.notification_type in _PINNED_NOTIFICATION_TYPES
-        for block in msg.content
+    return bool(msg.content) and all(_is_pinned_block(block) for block in msg.content)
+
+
+def _message_tool_ids(message: Message) -> tuple[set[str], set[str]]:
+    requests: set[str] = set()
+    responses: set[str] = set()
+    for block in message.content:
+        if isinstance(block, ToolRequest) and block.id:
+            requests.add(block.id)
+        elif isinstance(block, ToolResponse) and block.id and not _is_unpersisted_repair(block):
+            responses.add(block.id)
+    return requests, responses
+
+
+def _is_unpersisted_repair(block: ToolResponse) -> bool:
+    """True for the in-memory placeholder ``repair_tool_turn_integrity`` inserts.
+
+    That row is not stored. Treating it as a tail response pulls its request out
+    of the middle and makes a repaired view look unsplittable.
+    """
+    expected = interrupted_tool_result_text(block.tool_name)
+    return block.is_error and any(
+        isinstance(part, Text) and part.text == expected for part in block.result
     )
+
+
+def _extend_tail_to_keep_tool_pairs(
+    messages: Sequence[Message], tail: list[Message]
+) -> list[Message]:
+    """Include the tool request when the budget already kept its response.
+
+    The minimum tail can fill up on a huge response plus a newer row, then stop
+    before the request. That stores a response with no request. The request is
+    small; the pair stays together in the tail.
+    """
+    if not tail:
+        return tail
+    start = len(messages) - len(tail)
+    if start <= 0:
+        return tail
+    request_ids: set[str] = set()
+    response_ids: set[str] = set()
+    for message in tail:
+        requests, responses = _message_tool_ids(message)
+        request_ids |= requests
+        response_ids |= responses
+    missing = response_ids - request_ids
+    if not missing:
+        return tail
+    found_at: int | None = None
+    for index in range(start - 1, -1, -1):
+        requests, _responses = _message_tool_ids(messages[index])
+        if not requests & missing:
+            continue
+        missing -= requests
+        found_at = index
+        if not missing:
+            break
+    if found_at is None or missing:
+        return tail
+    return list(messages[found_at:])
 
 
 def _split_accountable(
@@ -320,8 +426,13 @@ def _split_accountable(
             visible_in_tail += 1
         tail_rev.append(msg)
 
-    tail = list(reversed(tail_rev))
-    middle = list(messages[head_end : n - len(tail)])
+    tail = _extend_tail_to_keep_tool_pairs(messages, list(reversed(tail_rev)))
+    tail_start = n - len(tail)
+    if tail_start < head_end:
+        head = list(messages[:tail_start])
+        middle = []
+    else:
+        middle = list(messages[head_end:tail_start])
     return head, middle, tail
 
 
@@ -469,7 +580,24 @@ async def _compact_history_if_needed(
     intent_facts: str | None = None,
     workspace_trailer: str | None = None,
 ) -> int:
-    """Summarize middle history when tool results exhausted headroom."""
+    """Summarize middle history when the thread has exhausted headroom.
+
+    A summary prepared earlier in the background is applied first. A miss, a changed
+    prefix, a tail that has grown past the rows that summary can keep, or a failed
+    job falls through to the inline summarizer.
+    """
+    # Lazy import: background_summary imports this module's split and prompt helpers.
+    from .background_summary import apply_pending_summary
+
+    applied = await apply_pending_summary(
+        thread_id=thread_id,
+        history=history,
+        model=model,
+        window_tokens=window_tokens,
+        workspace_trailer=workspace_trailer,
+    )
+    if applied is not None:
+        return applied
     return await _summarize_history(
         thread_id,
         history,
@@ -551,6 +679,144 @@ async def _append_budgeted_tool_responses(
     )
 
 
+async def _generate_summary_text(
+    provider: Provider,
+    model: str,
+    middle: Sequence[Message],
+    *,
+    window_tokens: int,
+    intent_facts: str | None = None,
+) -> str | None:
+    """Stream a summary of ``middle``. ``None`` when those rows have nothing to compact.
+
+    The workspace trailer is not applied here. It is taken from the ledger when the
+    summary is written, so files touched after this call still appear.
+    """
+    lines = _middle_summary_lines(middle, window_tokens=window_tokens)
+    if not lines:
+        return None
+    blob = "\n\n---\n\n".join(lines)
+    user_text = "Create a structured summary from the conversation segment below.\n\n" + blob
+    if intent_facts:
+        user_text = intent_facts + "\n\n" + user_text
+    summarize_messages = [
+        Message(
+            role="system",
+            content=[Text(text=_COMPACTION_SUMMARY_SYSTEM)],
+        ),
+        Message(
+            role="user",
+            content=[Text(text=user_text)],
+        ),
+    ]
+    binding = _summary_transcript.get()
+    exchange_id = uuid.uuid4().hex if binding is not None else None
+    summary_text = ""
+    thinking_text = ""
+    usage: dict[str, object] = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cached_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+    }
+    recorded = False
+    try:
+        if binding is not None and exchange_id is not None:
+            # Written before stream() is entered. The write's await is the last
+            # yield before iteration starts, so this record sits at the index
+            # replay consumes for this call.
+            await binding.writer.write_provider_request(
+                request_id=binding.request_id,
+                inner_turn=binding.inner_turn,
+                model=model,
+                messages=[message.to_dict() for message in summarize_messages],
+                tools=[],
+                thinking_budget=None,
+                exchange_id=exchange_id,
+            )
+            recorded = True
+        summary_text, thinking_text, usage = await _stream_summary(
+            provider, summarize_messages, model=model
+        )
+        return summary_text.strip() or "(empty summary)"
+    finally:
+        if recorded and binding is not None and exchange_id is not None:
+            await binding.writer.write_provider_response(
+                request_id=binding.request_id,
+                inner_turn=binding.inner_turn,
+                model=model,
+                text=summary_text,
+                thinking=thinking_text,
+                tool_requests=[],
+                usage=usage,
+                exchange_id=exchange_id,
+            )
+
+
+async def _stream_summary(
+    provider: Provider,
+    messages: Sequence[Message],
+    *,
+    model: str,
+) -> tuple[str, str, dict[str, object]]:
+    """Read one summary stream. The raw text is returned before any stored-row rewrite."""
+    summary_text = ""
+    thinking_text = ""
+    input_tokens = 0
+    output_tokens = 0
+    cached_tokens = 0
+    cache_read_tokens = 0
+    cache_creation_tokens = 0
+    stream = cast(Any, provider.stream(messages, [], model=model))
+    try:
+        async for ev in stream:
+            if isinstance(ev, TextDelta):
+                summary_text += ev.text
+            elif isinstance(ev, ThinkingDelta):
+                thinking_text += ev.text
+            elif isinstance(ev, UsageEvent):
+                input_tokens += ev.input_tokens
+                output_tokens += ev.output_tokens
+                cached_tokens += ev.cached_tokens
+                cache_read_tokens += ev.cache_read_tokens
+                cache_creation_tokens += ev.cache_creation_tokens
+            elif isinstance(ev, Done):
+                break
+    finally:
+        aclose = getattr(stream, "aclose", None)
+        if aclose is not None:
+            await aclose()
+    return (
+        summary_text,
+        thinking_text,
+        {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cached_tokens": cached_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_creation_tokens": cache_creation_tokens,
+        },
+    )
+
+
+def _finalize_summary_row(text: str, workspace_trailer: str | None) -> Message:
+    """Build the stored summary row, including the apply-time workspace trailer."""
+    summary_text = text.strip() or "(empty summary)"
+    if workspace_trailer:
+        # A prior compaction's trailer may have been echoed into the new summary; ours replaces it.
+        summary_text = summary_text.split(_WORKSPACE_STATE_HEADING)[0].rstrip() or "(empty summary)"
+        summary_text = f"{summary_text}\n\n{workspace_trailer}"
+    if _POST_COMPACTION_STANDING_HEADING in summary_text:
+        summary_body = f"{CONTEXT_SUMMARY_PREFIX}\n{summary_text}"
+    else:
+        summary_body = f"{CONTEXT_SUMMARY_PREFIX}\n{summary_text}\n\n{_POST_COMPACTION_STANDING}"
+    return Message(
+        role="assistant",
+        content=[Text(text=summary_body)],
+    )
+
+
 async def _summarize_history(
     thread_id: str,
     history: HistoryStore,
@@ -570,8 +836,7 @@ async def _summarize_history(
     """
     messages = await history.load(thread_id)
     head, middle, tail = split_messages_for_compaction(messages, window_tokens=window_tokens)
-    lines = _middle_summary_lines(middle, window_tokens=window_tokens)
-    if not lines:
+    if not _middle_summary_lines(middle, window_tokens=window_tokens):
         return 0
     logger.debug(
         "history compaction split %s",
@@ -584,40 +849,16 @@ async def _summarize_history(
             tail_budget=max(1, int(max(1, window_tokens) * SUMMARY_KEEP_TAIL_RATIO)),
         ),
     )
-    blob = "\n\n---\n\n".join(lines)
-    user_text = "Create a structured summary from the conversation segment below.\n\n" + blob
-    if intent_facts:
-        user_text = intent_facts + "\n\n" + user_text
-    summarize_messages = [
-        Message(
-            role="system",
-            content=[Text(text=_COMPACTION_SUMMARY_SYSTEM)],
-        ),
-        Message(
-            role="user",
-            content=[Text(text=user_text)],
-        ),
-    ]
-    summary_text = ""
-    async with aclosing(cast(Any, provider.stream(summarize_messages, [], model=model))) as stream:
-        async for ev in stream:
-            if isinstance(ev, TextDelta):
-                summary_text += ev.text
-            elif isinstance(ev, Done):
-                break
-    summary_text = summary_text.strip() or "(empty summary)"
-    if workspace_trailer:
-        # A prior compaction's trailer may have been echoed into the new summary; ours replaces it.
-        summary_text = summary_text.split(_WORKSPACE_STATE_HEADING)[0].rstrip() or "(empty summary)"
-        summary_text = f"{summary_text}\n\n{workspace_trailer}"
-    if _POST_COMPACTION_STANDING_HEADING in summary_text:
-        summary_body = f"{CONTEXT_SUMMARY_PREFIX}\n{summary_text}"
-    else:
-        summary_body = f"{CONTEXT_SUMMARY_PREFIX}\n{summary_text}\n\n{_POST_COMPACTION_STANDING}"
-    summary_row = Message(
-        role="assistant",
-        content=[Text(text=summary_body)],
+    summary_text = await _generate_summary_text(
+        provider,
+        model,
+        middle,
+        window_tokens=window_tokens,
+        intent_facts=intent_facts,
     )
+    if not summary_text:
+        return 0
+    summary_row = _finalize_summary_row(summary_text, workspace_trailer)
     merged = rebuild_compacted_history(messages, head=head, summary=summary_row, tail=tail)
     await history.reset(thread_id, merged)
     logger.debug(

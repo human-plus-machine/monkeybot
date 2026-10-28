@@ -1,0 +1,32 @@
+id: regression/t2/loop/scenarios/loop/post_tool_empty_retry
+case: T2-LOOP-14
+description: An empty completion after a tool result is retried and the tool row stays in history.
+mode: scripted
+driver: loop
+messages:
+- read then answer
+script:
+- - type: tool_call
+    call_id: r1
+    name: read_file
+    args:
+      path: a.txt
+  - type: done
+- - type: done
+- - type: text
+    text: after the tool
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 3
+  tool_calls:
+    read_file: 1
+  interventions:
+  - intervention: post_tool_empty
+    detail: retry
+  history:
+    tool_pairs_intact: true
+  response_contains: after the tool
+  events_absent:
+  - Error

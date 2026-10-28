@@ -1,0 +1,36 @@
+id: regression/t2/loop/scenarios/verifier/rewrite_effects_branch_copy
+case: T2-VER-21
+description: A branch edit copies ledger rows onto the new thread. A truncate drops those rows.
+mode: scripted
+driver: loop
+executor: recording
+hooks:
+- verifier
+messages:
+- Track this goal across a history branch, then drop it on truncate.
+config:
+  verifier:
+    enabled: true
+    ledger:
+      enabled: true
+      model: fake
+    tracker:
+      enabled: true
+    judge:
+      enabled: false
+    escalation:
+      max_severity: nudge
+  env:
+    MONKEYBOT_CLASSIFIER_ROWS: '[{"intent":"new_goal","relates_to":null,"constraints":[{"kind":"path_glob","pattern":"db/migrations/**","verbatim":"do
+      not touch migrations"}]}]'
+script:
+- - type: text
+    text: Goal noted.
+  - type: done
+assertions:
+  turn_completed: true
+  store:
+    goals:
+      min: 1
+    branches:
+      min: 1

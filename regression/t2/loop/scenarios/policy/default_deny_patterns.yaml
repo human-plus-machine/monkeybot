@@ -1,0 +1,71 @@
+id: regression/t2/loop/scenarios/policy/default_deny_patterns
+case: T2-POL-03
+description: Omitted deny_patterns still blocks pip install, uv add, npm i, and brew install.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Install a package four ways.
+policy:
+  command_allowlist: no_deny_patterns
+script:
+- - type: tool_call
+    call_id: c-pip
+    name: run_command
+    args:
+      argv:
+      - pip
+      - install
+      - x
+  - type: done
+- - type: tool_call
+    call_id: c-uv
+    name: run_command
+    args:
+      argv:
+      - uv
+      - add
+      - x
+  - type: done
+- - type: tool_call
+    call_id: c-npm
+    name: run_command
+    args:
+      argv:
+      - npm
+      - i
+      - x
+  - type: done
+- - type: tool_call
+    call_id: c-brew
+    name: run_command
+    args:
+      argv:
+      - brew
+      - install
+      - x
+  - type: done
+- - type: text
+    text: Every install was denied.
+  - type: done
+assertions:
+  provider_calls: 5
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c-pip
+    error:
+      regex: denied by run_command deny_patterns policy
+  - type: ToolCallResult
+    call_id: c-uv
+    error:
+      regex: denied by run_command deny_patterns policy
+  - type: ToolCallResult
+    call_id: c-npm
+    error:
+      regex: denied by run_command deny_patterns policy
+  - type: ToolCallResult
+    call_id: c-brew
+    error:
+      regex: denied by run_command deny_patterns policy
+  turn_completed: true
+  no_errors: true

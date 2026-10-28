@@ -1,32 +1,25 @@
 name: Live eval smoke
 
 # Runs the live eval smoke suite (see docs/live-evals.md) and posts a Markdown
-# scorecard. LLM-judge calls cost money and take minutes, so this does not run on
-# ordinary feature-branch -> develop PRs. Trigger points:
-#   (a) any PR from develop into main (release-promotion gate; --fail-on-regression)
-#   (b) any PR that touches a dependency lockfile (catches silent SDK breakage,
-#       e.g. provider request/response shape changes, that code review won't see)
-#   (c) every push to main (scores the new release; report-only, never fails the build)
-#   (d) manual: Actions tab -> Live eval smoke -> Run workflow
-# The scorecard always lands on the workflow run's Summary page; PR events also get it
-# as a PR comment. The run JSON is uploaded as an artifact — download two of them and
-# compare with `uv run python -m evals.diff <old.json> <new.json>`.
+# scorecard. Manual only (Actions tab -> Live eval smoke -> Run workflow): live runs
+# happen locally (decision D1), and GitHub has no provider key, so an automatic trigger
+# would only report an empty scorecard.
+# The scorecard lands on the workflow run's Summary page. The run JSON is uploaded as
+# an artifact — download two of them and
+# compare with `uv run python -m regression.t4.diff <old.json> <new.json>`.
 #
-# Cost/time budget: smoke suite is ~11 scenarios x 2-5 turns x (agent call + judge call),
+# Cost/time budget: smoke suite is 12 scenarios x 2-5 turns x (agent call + judge call),
 # paced by EVAL_SCENARIO_DELAY_SEC=150 between scenarios to stay under the current
-# model's provider rate limit. Expect roughly $0.75-3.00 and ~30-45 minutes per run
-# (10 delays x 150s = 25 min of pacing alone, plus actual call time) — this is not
-# stuck if it runs long; see timeout-minutes below.
+# model's provider rate limit. Expect ~30-45 minutes per run (11 delays x 150s = 27.5 min
+# of pacing alone, plus actual call time) — this is not stuck if it runs long; see
+# timeout-minutes below.
 #
-# Secrets required: NVIDIA_API_KEY only (https://build.nvidia.com — free tier). The agent
-# and the judge both run on NVIDIA-hosted models through the same key, pinned to two
-# *different* models below so the judge isn't grading its own output and scoring doesn't
-# silently drift.
+# No provider key is passed to this workflow (decision D1): the live smoke suite runs
+# locally with `uv run python -m regression.t4 --suite smoke`, reading the Ollama Cloud
+# key from the shell or the repo-root .env. Here the suite's preflight finds no key and
+# exits 2 with a run_error instead of skipping silently.
 
 on:
-  pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -60,7 +53,7 @@ jobs:
               run=true
             fi
             changed="$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")"
-            for f in uv.lock cli/uv.lock evals/smoke_agent/uv.lock; do
+            for f in uv.lock cli/uv.lock regression/t4/agent/uv.lock; do
               if grep -qxF "$f" <<<"$changed"; then
                 run=true
               fi
@@ -68,30 +61,11 @@ jobs:
           fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
 
-  secrets:
+  live-eval:
     needs: gate
     if: needs.gate.outputs.run == 'true'
     runs-on: ubuntu-latest
-    outputs:
-      available: ${{ steps.check.outputs.available }}
-    steps:
-      - name: Require live-eval secrets
-        id: check
-        env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-        run: |
-          if [[ -z "$NVIDIA_API_KEY" ]]; then
-            echo "::warning::NVIDIA_API_KEY is not configured; skipping live-eval smoke (https://build.nvidia.com)"
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "available=true" >> "$GITHUB_OUTPUT"
-
-  live-eval:
-    needs: [gate, secrets]
-    if: needs.gate.outputs.run == 'true' && needs.secrets.outputs.available == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60 # 11 scenarios x ~150s inter-scenario delay (see EVAL_SCENARIO_DELAY_SEC) + run time,
+    timeout-minutes: 60 # 12 scenarios x ~150s inter-scenario delay (see EVAL_SCENARIO_DELAY_SEC) + run time,
     # plus headroom for checkout/uv sync/gateway boot and slow judge or subagent turns
     steps:
       - uses: actions/checkout@v4
@@ -100,24 +74,23 @@ jobs:
         with:
           version: "latest"
 
-      - name: Sync root deps (evals/report.py needs deepeval, langfuse)
+      - name: Sync root deps (regression/t4/report.py needs deepeval, langfuse)
         run: uv sync --extra evals
 
-      - name: Sync smoke_agent deps
-        working-directory: evals/smoke_agent
+      - name: Sync agent project deps
+        working-directory: regression/t4/agent
         run: uv sync
 
-      - name: Boot monkeybot gateway (evals/smoke_agent workspace)
-        working-directory: evals/smoke_agent
+      - name: Boot monkeybot gateway (regression/t4/agent workspace)
+        working-directory: regression/t4/agent
         env:
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-          # Agent model is YAML-only (evals/smoke_agent/monkeybot_config/monkeybot.yaml).
-          # smoke_agent monkeybot.yaml sets runtime.port: 8080; the health check and
+          # Agent model is YAML-only (regression/t4/agent/monkeybot_config/monkeybot.yaml).
+          # The agent monkeybot.yaml sets runtime.port: 8080; the health check and
           # AGENT_URL below expect 8787, so pin PORT explicitly (env beats yaml).
           PORT: "8787"
           SANDBOX_ENABLED: "false" # no Docker socket in this runner
           # summarization_trigger is excluded from smoke; if it returns, set
-          # model.context_window in smoke_agent YAML (not MODEL_CONTEXT_WINDOW env).
+          # model.context_window in the agent YAML (not MODEL_CONTEXT_WINDOW env).
         run: |
           uv run -m monkeybot.gateway.main > /tmp/gateway.log 2>&1 &
           echo $! > /tmp/gateway.pid
@@ -135,33 +108,31 @@ jobs:
       - name: Run smoke suite report
         env:
           AGENT_URL: http://127.0.0.1:8787
-          # Judge on a different NVIDIA-hosted model than the agent (same key).
-          JUDGE_PROVIDER: nvidia
-          JUDGE_MODEL: nvidia/nemotron-3-ultra-550b-a55b
-          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-          # Scorecard metadata: read the model the gateway ran from smoke_agent YAML.
-          MONKEYBOT_AGENT_CONFIG: evals/smoke_agent/monkeybot_config/monkeybot.yaml
+          # The judge comes from regression/t4/eval_config.yaml.
+          # Scorecard metadata: read the model the gateway ran from the agent YAML.
+          MONKEYBOT_AGENT_CONFIG: regression/t4/agent/monkeybot_config/monkeybot.yaml
           EVENT_NAME: ${{ github.event_name }}
-          # thinkingmachines/inkling gets rate-limited by NVIDIA even at low concurrency;
-          # each scenario itself makes several requests in quick succession, so space
-          # scenarios out rather than trying to throttle within one.
+          # Each scenario itself makes several requests in quick succession, so space
+          # scenarios out to stay under the provider's rate limit rather than trying to
+          # throttle within one.
           EVAL_SCENARIO_DELAY_SEC: "150"
         run: |
           # PRs are a gate and must block on regressions; main pushes and manual runs
           # just score the build and always report. --fail-on-regression always blocks on
-          # this run's own scenario errors/failures. It does NOT require evals/baselines/
-          # smoke.json to exist (that's the separate --require-baseline flag, intentionally
-          # omitted below) — no trusted baseline has been committed yet. Once one has
-          # (`uv run python -m evals.report --suite smoke --update-baseline`, committed),
+          # this run's own scenario errors/failures. It does NOT require
+          # regression/t4/baselines/smoke.json to exist (that's the separate
+          # --require-baseline flag, intentionally omitted below) — no trusted baseline has
+          # been committed yet. Once one has
+          # (`uv run python -m regression.t4 --suite smoke --update-baseline`, committed),
           # add --require-baseline here too so a missing/deleted file can't silently skip
           # the token/cost/latency drift checks.
           flags=""
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
             flags="--fail-on-regression"
           fi
-          uv run python -m evals.report \
+          uv run python -m regression.t4 \
             --suite smoke \
-            --baseline evals/baselines/smoke.json \
+            --baseline regression/t4/baselines/smoke.json \
             $flags \
             | tee eval-report.md
 
@@ -198,11 +169,11 @@ jobs:
         with:
           name: live-eval-smoke-${{ github.run_id }}
           path: |
-            evals/runs/
+            regression/t4/runs/
             eval-report.md
           if-no-files-found: ignore
 
       - name: Stop gateway
         if: always()
-        working-directory: evals/smoke_agent
+        working-directory: regression/t4/agent
         run: kill "$(cat /tmp/gateway.pid)" 2>/dev/null || true

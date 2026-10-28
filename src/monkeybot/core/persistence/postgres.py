@@ -57,6 +57,7 @@ from monkeybot.core.persistence.scheduled_loops import (
     _try_row_from_tuple,
     planned_create,
     resolve_complete_tick,
+    resolve_now_ms,
 )
 from monkeybot.core.persistence.thread_summary import (
     BRANCH_THREAD_ID_PREFIX,
@@ -905,8 +906,10 @@ class PostgresRunStore:
         except (ValueError, IndexError):
             return False
 
-    async def list_stale_claims(self, stale_after_ms: int) -> list[SubagentRunRow]:
-        cutoff = int(time.time() * 1000) - stale_after_ms
+    async def list_stale_claims(
+        self, stale_after_ms: int, now_ms: int | None = None
+    ) -> list[SubagentRunRow]:
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         columns = ", ".join(_SUBAGENT_COLUMNS)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -926,8 +929,9 @@ class PostgresRunStore:
         stale_after_ms: int,
         *,
         worker_id: str | None = None,
+        now_ms: int | None = None,
     ) -> bool:
-        cutoff = int(time.time() * 1000) - stale_after_ms
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         async with self._pool.acquire() as conn:
             if worker_id is None:
                 result = await conn.execute(
@@ -966,8 +970,8 @@ class PostgresRunStore:
         except (ValueError, IndexError):
             return False
 
-    async def reset_stale_claims(self, stale_after_ms: int) -> int:
-        cutoff = int(time.time() * 1000) - stale_after_ms
+    async def reset_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int:
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         async with self._pool.acquire() as conn:
             result = await conn.execute(
                 """
@@ -1231,8 +1235,10 @@ class PostgresScheduledLoopStore:
             )
         return _map_loop_tuples(rows)
 
-    async def claim_tick(self, loop_id: str, worker_id: str) -> ScheduledLoopRow | None:
-        now_ms = int(time.time() * 1000)
+    async def claim_tick(
+        self, loop_id: str, worker_id: str, now_ms: int | None = None
+    ) -> ScheduledLoopRow | None:
+        now_ms = resolve_now_ms(now_ms)
         async with self._pool.acquire() as conn:
             status = await conn.execute(
                 """
@@ -1251,8 +1257,8 @@ class PostgresScheduledLoopStore:
             return None
         return await self.get(loop_id)
 
-    async def release_stale_claims(self, stale_after_ms: int) -> int:
-        cutoff = int(time.time() * 1000) - stale_after_ms
+    async def release_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int:
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         async with self._pool.acquire() as conn:
             status = await conn.execute(
                 """
@@ -1290,11 +1296,12 @@ class PostgresScheduledLoopStore:
         *,
         worker_id: str,
         error: str | None = None,
+        now_ms: int | None = None,
     ) -> ScheduledLoopRow | None:
         row = await self.get(loop_id)
         if row is None or not row.tick_in_flight or row.worker_id != worker_id:
             return None
-        now_ms = int(time.time() * 1000)
+        now_ms = resolve_now_ms(now_ms)
         result = resolve_complete_tick(row, error=error, now_ms=now_ms)
         async with self._pool.acquire() as conn:
             await conn.execute(
@@ -1318,11 +1325,18 @@ class PostgresScheduledLoopStore:
             )
         return await self.get(loop_id)
 
-    async def defer_tick(self, loop_id: str, *, worker_id: str, reason: str) -> bool:
+    async def defer_tick(
+        self,
+        loop_id: str,
+        *,
+        worker_id: str,
+        reason: str,
+        now_ms: int | None = None,
+    ) -> bool:
         row = await self.get(loop_id)
         if row is None or row.worker_id != worker_id or not row.tick_in_flight:
             return False
-        now_ms = int(time.time() * 1000)
+        now_ms = resolve_now_ms(now_ms)
         async with self._pool.acquire() as conn:
             status = await conn.execute(
                 """
@@ -1339,8 +1353,10 @@ class PostgresScheduledLoopStore:
             )
         return _asyncpg_affected_rows(status) == 1
 
-    async def renew_tick_claim(self, loop_id: str, worker_id: str) -> bool:
-        now_ms = int(time.time() * 1000)
+    async def renew_tick_claim(
+        self, loop_id: str, worker_id: str, now_ms: int | None = None
+    ) -> bool:
+        now_ms = resolve_now_ms(now_ms)
         async with self._pool.acquire() as conn:
             status = await conn.execute(
                 """
@@ -1404,8 +1420,8 @@ class PostgresSessionTurnLockStore:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
 
-    async def release_stale_claims(self, stale_after_ms: int) -> int:
-        cutoff = int(time.time() * 1000) - stale_after_ms
+    async def release_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int:
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         async with self._pool.acquire() as conn:
             status = await conn.execute(
                 """
@@ -1722,6 +1738,21 @@ class PostgresOutboxStore:
                     next_at,
                     row_id,
                 )
+        try:
+            return int(str(result).split()[-1])
+        except (ValueError, IndexError):
+            return 0
+
+    async def release_processing(self, *, lease_owner: str) -> int:
+        async with self._pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE memory_outbox
+                SET status = 'pending', lease_owner = NULL, lease_expires_at = NULL
+                WHERE status = 'processing' AND lease_owner = $1
+                """,
+                lease_owner,
+            )
         try:
             return int(str(result).split()[-1])
         except (ValueError, IndexError):

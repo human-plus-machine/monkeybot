@@ -1,0 +1,43 @@
+id: regression/t2/loop/scenarios/subagents/subagent_timeout
+case: T2-SUB-06
+description: A hanging child hits subagents.timeout_sec and the process group is gone
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Run a job that never returns
+config:
+  subagents:
+    timeout_sec: 2
+  env:
+    MONKEYBOT_SUBAGENT_SCRIPT: testkit/subagent_worker.py
+    AGENT_MD: regression/t4/agent/monkeybot_config/AGENT.md
+script:
+- - type: tool_call
+    call_id: c1
+    name: task
+    args:
+      task: hang
+  - type: done
+- - type: text
+    text: The child timed out.
+  - type: done
+assertions:
+  required_tools:
+  - task
+  turn_completed: true
+  event_fields:
+    ToolCallResult:
+      result:
+        regex: '"ok": false.*exceeded 2s timeout'
+  workspace_command_passes:
+  - |
+    python -c "import os, subprocess
+    from pathlib import Path
+    pid = int(Path('subagent.pgid').read_text().split()[0])
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        raise SystemExit(0)
+    state = subprocess.check_output(['ps', '-p', str(pid), '-o', 'state='], text=True).strip()
+    raise SystemExit(0 if state.startswith('Z') else 1)"

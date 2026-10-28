@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "kind": "wire",
+  "provider": "ollama-cloud",
+  "sdk": {
+    "openai": "2.36.0"
+  },
+  "recorded_at": "2026-10-27T13:34:24Z",
+  "request": {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "body": {
+      "messages": [
+        {
+          "role": "user",
+          "content": "Call the add tool once with a=2 and b=3. Do not answer in text."
+        }
+      ],
+      "model": "glm-5.3-flash",
+      "max_tokens": 256,
+      "reasoning_effort": "none",
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      },
+      "temperature": 0.0,
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "add",
+            "description": "Add two integers.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "a": {
+                  "type": "integer"
+                },
+                "b": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "a",
+                "b"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "content-type": "text/event-stream"
+    },
+    "chunks": [
+      "data: {\"id\":\"chatcmpl-325\",\"object\":\"chat.completion.chunk\",\"created\":1793108064,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"The\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-325\",\"object\":\"chat.completion.chunk\",\"created\":1793108064,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" user wants me to\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-325\",\"object\":\"chat.completion.chunk\",\"created\":1793108064,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" call the add tool\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-325\",\"object\":\"chat.completion.chunk\",\"created\":1793108064,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" with a=2\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-325\",\"object\":\"chat.completion.chunk\",\"created\":1793108064,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" and b=3\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-325\",\"object\":\"chat.completion.chunk\",\"created\":1793108064,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\", and not answer\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-325\",\"object\":\"chat.completion.chunk\",\"created\":1793108064,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" in text. So\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-325\",\"object\":\"chat.completion.chunk\",\"created\":1793108064,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" I should just make\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-325\",\"object\":\"chat.completion.chunk\",\"created\":1793108064,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" the tool\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-325\",\"object\":\"chat.completion.chunk\",\"created\":1793108064,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" call.\"},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-325\",\"object\":\"chat.completion.chunk\",\"created\":1793108064,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\",\"tool_calls\":[{\"id\":\"call_2i66pzls\",\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"add\",\"arguments\":\"{\\\"a\\\":2,\\\"b\\\":3}\"}}]},\"finish_reason\":null}]}\n\n",
+      "data: {\"id\":\"chatcmpl-325\",\"object\":\"chat.completion.chunk\",\"created\":1793108064,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"chatcmpl-325\",\"object\":\"chat.completion.chunk\",\"created\":1793108064,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+      "data: {\"id\":\"chatcmpl-325\",\"object\":\"chat.completion.chunk\",\"created\":1793108064,\"model\":\"glm-5.3-flash\",\"system_fingerprint\":\"fp_ollama\",\"choices\":[],\"usage\":{\"prompt_tokens\":182,\"completion_tokens\":50,\"total_tokens\":232,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\ndata: [DONE]\n\n"
+    ]
+  },
+  "expected_events": [
+    {
+      "type": "text",
+      "text": "The"
+    },
+    {
+      "type": "text",
+      "text": " user wants me to"
+    },
+    {
+      "type": "text",
+      "text": " call the add tool"
+    },
+    {
+      "type": "text",
+      "text": " with a=2"
+    },
+    {
+      "type": "text",
+      "text": " and b=3"
+    },
+    {
+      "type": "text",
+      "text": ", and not answer"
+    },
+    {
+      "type": "text",
+      "text": " in text. So"
+    },
+    {
+      "type": "text",
+      "text": " I should just make"
+    },
+    {
+      "type": "text",
+      "text": " the tool"
+    },
+    {
+      "type": "text",
+      "text": " call."
+    },
+    {
+      "type": "tool_call",
+      "call_id": "call_2i66pzls",
+      "name": "add",
+      "args": {
+        "a": 2,
+        "b": 3
+      }
+    },
+    {
+      "type": "usage",
+      "input_tokens": 182,
+      "output_tokens": 50,
+      "cached_tokens": 0,
+      "cache_read_tokens": 0,
+      "cache_creation_tokens": 0
+    },
+    {
+      "type": "done",
+      "truncated": false
+    }
+  ]
+}

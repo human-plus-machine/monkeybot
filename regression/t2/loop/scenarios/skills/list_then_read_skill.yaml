@@ -1,0 +1,37 @@
+id: regression/t2/loop/scenarios/skills/list_then_read_skill
+case: T2-SKILL-01
+description: list_skills returns the discovered skills, then read_file returns diagnostics/SKILL.md.
+mode: scripted
+driver: loop
+executor: real
+messages:
+  - List the skills, then read the diagnostics skill.
+script:
+  - - type: tool_call
+      call_id: list
+      name: list_skills
+      args: {}
+    - type: done
+  - - type: tool_call
+      call_id: read
+      name: read_file
+      args:
+        path: skills/diagnostics/SKILL.md
+    - type: done
+  - - type: text
+      text: Diagnostics says to read the traceback first.
+    - type: done
+assertions:
+  turn_completed: true
+  required_tools:
+    - list_skills
+    - read_file
+  events_sequence:
+    - type: ToolCallResult
+      call_id: list
+      result:
+        regex: diagnostics.*Inspect a failing run and report the first error.*plain.*Print the workspace layout before changing files
+    - type: ToolCallResult
+      call_id: read
+      result:
+        regex: Read the traceback before changing code

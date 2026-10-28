@@ -1,0 +1,30 @@
+id: regression/t2/loop/scenarios/attachments/load_text_rejected
+case: T2-ATT-03
+description: load_file on a .py path tells the model to use read_file.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Load src/app.py.
+script:
+- - type: tool_call
+    call_id: c1
+    name: load_file
+    args:
+      path: src/app.py
+  - type: done
+- - type: text
+    text: That path is text.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    tool: load_file
+    error:
+      regex: "For text files use read_file\\."
+  required_tools:
+  - load_file
+  turn_completed: true
+  no_errors: true

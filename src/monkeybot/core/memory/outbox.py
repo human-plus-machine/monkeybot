@@ -129,6 +129,8 @@ class OutboxStore(Protocol):
         lease_owner: str | None = None,
     ) -> int: ...
 
+    async def release_processing(self, *, lease_owner: str) -> int: ...
+
     async def gc_committed(self, *, days: int = _GC_AFTER_DAYS) -> int: ...
 
     async def pending_depth(self, *, agent_id: str | None = None) -> tuple[int, float]: ...
@@ -354,6 +356,26 @@ async def mark_retry(
     return int(cur.rowcount or 0)
 
 
+async def release_processing(conn: aiosqlite.Connection, *, lease_owner: str) -> int:
+    """Return this writer's in-flight rows to pending.
+
+    A drain that gave up on a hung embedder has already claimed the rows.
+    Only rows still ``processing`` for ``lease_owner`` change, so a commit
+    that won the race stays committed.
+    """
+    cur = await conn.execute(
+        """
+        UPDATE memory_outbox
+        SET status = 'pending', lease_owner = NULL, lease_expires_at = NULL
+        WHERE status = 'processing' AND lease_owner = ?
+        """,
+        (lease_owner,),
+    )
+    await conn.commit()
+    count = cur.rowcount
+    return int(count) if count is not None and count >= 0 else 0
+
+
 async def gc_committed(conn: aiosqlite.Connection, *, days: int = _GC_AFTER_DAYS) -> int:
     cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")
     cur = await conn.execute(
@@ -481,6 +503,10 @@ class SqliteOutboxStore:
                 permanent=permanent,
                 lease_owner=lease_owner,
             )
+
+    async def release_processing(self, *, lease_owner: str) -> int:
+        async with self._lock:
+            return await release_processing(self._conn, lease_owner=lease_owner)
 
     async def gc_committed(self, *, days: int = _GC_AFTER_DAYS) -> int:
         async with self._lock:

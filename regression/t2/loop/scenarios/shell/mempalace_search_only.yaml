@@ -1,0 +1,83 @@
+id: regression/t2/loop/scenarios/shell/mempalace_search_only
+case: T2-SHELL-15
+description: mempalace edit, update, forget, and repair are denied; search is allowed when memory is on
+mode: scripted
+driver: loop
+executor: real
+hooks:
+- memory
+messages:
+- Try mempalace mutations, then search.
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      argv:
+      - mempalace
+      - edit
+      - drawer
+  - type: tool_call
+    call_id: c2
+    name: run_command
+    args:
+      argv:
+      - mempalace
+      - update
+      - drawer
+  - type: tool_call
+    call_id: c3
+    name: run_command
+    args:
+      argv:
+      - mempalace
+      - forget
+      - drawer
+  - type: tool_call
+    call_id: c4
+    name: run_command
+    args:
+      argv:
+      - mempalace
+      - repair
+  - type: tool_call
+    call_id: c5
+    name: run_command
+    args:
+      argv:
+      - mempalace
+      - search
+      - hello
+      timeout: 20
+  - type: done
+- - type: text
+    text: Mutations were denied and search was allowed.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    error_kind: policy
+    error:
+      regex: mempalace subcommand 'edit' is not allowed
+  - type: ToolCallResult
+    call_id: c2
+    error_kind: policy
+    error:
+      regex: mempalace subcommand 'update' is not allowed
+  - type: ToolCallResult
+    call_id: c3
+    error_kind: policy
+    error:
+      regex: mempalace subcommand 'forget' is not allowed
+  - type: ToolCallResult
+    call_id: c4
+    error_kind: policy
+    error:
+      regex: mempalace subcommand 'repair' is not allowed
+  - type: ToolCallResult
+    call_id: c5
+    result:
+      regex: '"exit_code":'
+  turn_completed: true
+  no_errors: true

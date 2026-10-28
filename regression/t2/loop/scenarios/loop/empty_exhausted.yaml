@@ -1,0 +1,22 @@
+id: regression/t2/loop/scenarios/loop/empty_exhausted
+case: T2-LOOP-13
+description: Three silent completions exhaust the empty-completion retries and end the turn.
+mode: scripted
+driver: loop
+messages:
+- say something
+script:
+- - type: done
+- - type: done
+- - type: done
+assertions:
+  turn_completed: true
+  provider_calls: 3
+  interventions:
+  - intervention: empty_completion
+    detail: retry
+  - intervention: empty_completion
+    detail: retry
+  - intervention: empty_completion
+    detail: exhausted
+  error_contains: 'Empty model completion after recovery: ending turn with no reply'

@@ -142,7 +142,7 @@ memory:
   # Env override: MONKEYBOT_MEMORY_HOOK_ENABLED=0
   enabled: true
   backend: chroma
-  embedding_model: embeddinggemma-300m
+  embedding_model: minilm
 
 emission:
   # Terse emission-style guidance injected into the cached harness prefix.

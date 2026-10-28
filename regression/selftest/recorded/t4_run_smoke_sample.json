@@ -1,0 +1,121 @@
+{
+  "agent_url": "http://127.0.0.1:8787",
+  "dirty_worktree": false,
+  "finished_at": "2026-10-26T20:00:14+00:00",
+  "git_branch": "develop",
+  "git_sha": "0000000000000000000000000000000000000000",
+  "judge_model": "glm-5.3-flash",
+  "judge_provider": "ollama-cloud",
+  "model_name": "glm-5.3-flash",
+  "model_provider": "ollama-cloud",
+  "run_id": "00000000-0000-4000-8000-000000000001",
+  "scenarios": [
+    {
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "cached_tokens": 0,
+      "cost_usd": 0.0,
+      "description": "Agent reads a trusted skill via the read_file core tool",
+      "failure_reason": null,
+      "input_tokens": 2310,
+      "latency_ms_by_turn": [
+        4210
+      ],
+      "latency_ms_total": 4210,
+      "messages_count": 1,
+      "output_tokens": 187,
+      "pass_rate": null,
+      "quality_reasons": {},
+      "quality_scores": {},
+      "requirement_failures": [],
+      "scenario_id": "tools/core_read",
+      "status": "passed",
+      "subagent_calls_count": 0,
+      "summarizations_count": 0,
+      "tags": [
+        "tools",
+        "core"
+      ],
+      "tool_calls_by_name": {
+        "read_file": 1
+      },
+      "tool_calls_count": 1,
+      "tool_errors_count": 0,
+      "trace_ids": [
+        "trace-0001"
+      ],
+      "turns": [
+        {
+          "duration_ms": 4210,
+          "input": "Read the file skills/browser/SKILL.md in this workspace and tell me the first heading in it.",
+          "output": "The first heading is \"# Browser\".",
+          "turn_completes": 1
+        }
+      ]
+    },
+    {
+      "cache_creation_tokens": 0,
+      "cache_read_tokens": 0,
+      "cached_tokens": 0,
+      "cost_usd": 0.0,
+      "description": "Agent tracks a three-step task across turns",
+      "failure_reason": null,
+      "input_tokens": 5120,
+      "latency_ms_by_turn": [
+        4300,
+        4820
+      ],
+      "latency_ms_total": 9120,
+      "messages_count": 2,
+      "output_tokens": 402,
+      "pass_rate": null,
+      "quality_reasons": {},
+      "quality_scores": {},
+      "requirement_failures": [],
+      "scenario_id": "multi_turn/task_tracking",
+      "status": "passed",
+      "subagent_calls_count": 0,
+      "summarizations_count": 0,
+      "tags": [
+        "multi_turn"
+      ],
+      "tool_calls_by_name": {
+        "todo_write": 2
+      },
+      "tool_calls_count": 2,
+      "tool_errors_count": 0,
+      "trace_ids": [
+        "trace-0002",
+        "trace-0003"
+      ],
+      "turns": [
+        {
+          "duration_ms": 4300,
+          "input": "Plan: write a, then b, then c.",
+          "output": "Planned three steps.",
+          "turn_completes": 1
+        },
+        {
+          "duration_ms": 4820,
+          "input": "Done with a.",
+          "output": "Marked step a done.",
+          "turn_completes": 1
+        }
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "started_at": "2026-10-26T20:00:00+00:00",
+  "suite": "smoke",
+  "suite_aggregate": {
+    "errored_count": 0,
+    "failed_count": 0,
+    "mean_latency_ms": 6665.0,
+    "mean_quality_by_metric": {},
+    "p95_latency_ms": 4210.0,
+    "passed_count": 2,
+    "scenario_count": 2,
+    "total_cost_usd": 0.0,
+    "total_tokens": 8019
+  }
+}

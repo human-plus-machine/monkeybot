@@ -1,0 +1,47 @@
+id: regression/t2/loop/scenarios/memory/memory_off
+case: T2-MEM-05
+description: memory.enabled false skips the wake-up block and refuses mempalace search.
+mode: scripted
+driver: loop
+executor: real
+hooks:
+- memory
+config:
+  memory:
+    enabled: false
+memory:
+  palace:
+  - drawer_id: hidden
+    content: would-have-woken-alpha
+messages:
+- Search memory.
+script:
+- - type: tool_call
+    call_id: c1
+    name: run_command
+    args:
+      argv:
+      - mempalace
+      - search
+      - hello
+      timeout: 5
+  - type: done
+- - type: text
+    text: Memory is off.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c1
+    error_kind: policy
+    error:
+      regex: Memory is unavailable
+  provider_request:
+  - n: 1
+    system_contains: "memory storage: disabled"
+  - n: 1
+    system_not_contains: "## Memory wake-up"
+  - n: 1
+    system_not_contains: would-have-woken-alpha
+  turn_completed: true
+  no_errors: true

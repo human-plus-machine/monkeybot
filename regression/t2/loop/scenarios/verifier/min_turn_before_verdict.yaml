@@ -1,0 +1,74 @@
+id: regression/t2/loop/scenarios/verifier/min_turn_before_verdict
+case: T2-VER-10
+description: constraint_touch emits before turn 3. write_without_read waits until turn 3.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: drift_ws
+hooks:
+- verifier
+messages:
+- Do not touch migrations.
+config:
+  verifier:
+    enabled: true
+    ledger:
+      enabled: true
+      model: fake
+    tracker:
+      enabled: true
+    judge:
+      enabled: false
+    escalation:
+      max_severity: nudge
+  env:
+    MONKEYBOT_CLASSIFIER_ROWS: '[{"intent":"new_goal","relates_to":null,"constraints":[{"kind":"path_glob","pattern":"db/migrations/**","verbatim":"do
+      not touch migrations"}]}]'
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: src/models.py
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: write_file
+    args:
+      path: db/migrations/002_early.sql
+      content: early
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: write_file
+    args:
+      path: src/fresh.py
+      content: fresh
+  - type: done
+- - type: text
+    text: Done.
+  - type: done
+assertions:
+  turn_completed: true
+  verdicts:
+    min: 2
+    status_in:
+    - drifting
+    severity_max: none
+    signals_include:
+    - constraint_touch
+    - write_without_read
+    signals_exclude:
+    - error_streak
+    - rewrite_churn
+    - repeat_correction
+    - done_unmet
+    - no_progress
+    - budget_burn
+  events_sequence:
+  - type: VerifierVerdict
+    rationale: constraint_touch
+    status: drifting
+  - type: VerifierVerdict
+    rationale: write_without_read
+    status: drifting

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "monkeybot"
-version = "3.10.0"
+version = "3.11.0"
 description = "monkeybot agent harness — FastAPI SSE gateway, owned loop, SQLite, and MCP."
 requires-python = ">=3.11"
 readme = "README.md"
@@ -17,14 +17,14 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0.2",
     "httpx>=0.27.0",
-    "mcp>=1.27.1,<2",
+    "mcp>=1.30.0,<2",
     "python-ulid>=2.0.0",
     "google-genai>=1.0.0",
-    "pillow>=10.0.0",
+    "pillow>=13.0.0",
 ]
 
 [project.optional-dependencies]
-memory = ["mempalace>=3.7.0,<4"]
+memory = ["mempalace>=3.11,<3.12"]
 gemini = ["google-genai>=1.0.0"]
 vertex = [
     "google-genai>=1.0.0",
@@ -34,12 +34,12 @@ vertex = [
 claude = ["anthropic>=0.40.0"]
 vertex-claude = ["anthropic[vertex]>=0.40.0"]
 bedrock = ["anthropic[bedrock]>=0.40.0", "boto3>=1.34.0"]
-openai = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.14.2"]
-huggingface = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.14.2"]
-ollama = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.14.2"]
-nvidia = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.14.2"]
-openrouter = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.14.2"]
-fireworks = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.14.2"]
+openai = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.2"]
+huggingface = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.2"]
+ollama = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.2"]
+nvidia = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.2"]
+openrouter = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.2"]
+fireworks = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.2"]
 sandbox = ["opensandbox>=0.1.7"]
 scheduler = ["croniter>=2.0"]
 postgres = ["asyncpg>=0.29.0"]
@@ -48,7 +48,7 @@ gcs = ["google-cloud-storage>=2.18.0"]
 aws = ["boto3>=1.34.0"]
 council = ["google-cloud-storage>=2.18.0"]
 web-search = ["ddgs>=7.0"]
-# Live E2E eval report (evals/report.py). google-genai is required by deepeval's
+# Live E2E eval report (regression/t4/report.py). google-genai is required by deepeval's
 # GeminiModel judge (not bundled with deepeval); harmless when the judge is OpenAI/Anthropic.
 evals = ["deepeval>=3.0.0", "langfuse>=3.0.0", "google-genai>=1.0.0"]
 realtime = ["websockets>=14.0"]
@@ -59,17 +59,17 @@ realtime-gemini = ["monkeybot[realtime]", "google-genai>=1.0.0"]
 cli = ["monkeybot[realtime]", "typer>=0.12.0"]
 cli-realtime = ["monkeybot[cli]", "pyaudio>=0.2.11", "pynput>=1.7.6"]
 observability = [
-    "opentelemetry-api>=1.28",
-    "opentelemetry-sdk>=1.28",
-    "opentelemetry-exporter-otlp-proto-http>=1.28",
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.1",
     "opentelemetry-instrumentation-fastapi>=0.62b1",
 ]
 
 [dependency-groups]
 dev = [
-    "opentelemetry-api>=1.28",
-    "opentelemetry-sdk>=1.28",
-    "opentelemetry-exporter-otlp-proto-http>=1.28",
+    "opentelemetry-api>=1.45.1",
+    "opentelemetry-sdk>=1.45.1",
+    "opentelemetry-exporter-otlp-proto-http>=1.45.1",
     "opentelemetry-instrumentation-fastapi>=0.62b1",
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
@@ -81,7 +81,7 @@ dev = [
     "tiktoken>=0.7.0",
     # PDF extraction tests import pypdf directly. It used to arrive through the
     # knowledge-media extra; the openai-family extras still ship it at runtime.
-    "pypdf>=6.14.2",
+    "pypdf>=6.21.2",
     "types-pyyaml>=6.0.12",
     "asgi-lifespan>=2.1.0",
     "anthropic[vertex,bedrock]>=0.40.0",
@@ -94,10 +94,15 @@ dev = [
     "monkeybot[memory]",
     # Native goal persistence tests hit a real Postgres via asyncpg.
     "monkeybot[postgres]",
+    "jsonschema>=4.26.0",
 ]
 
 [tool.uv]
 default-groups = ["dev"]
+# browser-harness 0.1.13 pins pillow==12.3.0. That pin is inside the
+# Pillow 13 advisory range, so the lock overrides it. Tool and pip installs
+# pass cli/src/monkeybot_cli/overrides.txt; this table does not apply to them.
+override-dependencies = ["pillow>=13"]
 
 [tool.uv.sources]
 monkeybot-cli = { path = "cli", editable = true }
@@ -115,13 +120,17 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["monkeybot"]
+known-first-party = ["monkeybot", "testkit", "regression"]
 
 [tool.ruff.lint.per-file-ignores]
 # ensure_gateway_runtime_env() must run before monkeybot imports read os.environ
 "src/monkeybot/gateway/sse/app.py" = ["E402"]
+# Fixture repos are the subject of live scenarios, not project code. Some carry unsorted
+# imports, unused imports, or an exception name on purpose, and the agent edits them.
+"regression/fixtures/workspaces/**" = ["ALL"]
 
 [tool.mypy]
+files = ["src/monkeybot", "testkit"]
 python_version = "3.11"
 strict = true
 warn_return_any = true

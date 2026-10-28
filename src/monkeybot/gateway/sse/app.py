@@ -24,6 +24,9 @@ from monkeybot.computer import build_computer_tools, should_enable_computer_tool
 from monkeybot.computer.permissions import build_computer_permission_inspector, build_persist_hook
 from monkeybot.core.attachments.config import attachments_enabled_from_env
 from monkeybot.core.attachments.store import AttachmentStore, FilesystemAttachmentStore
+from monkeybot.core.coding.git_context_hook import GitContextHook
+from monkeybot.core.coding.read_ledger_hook import ReadLedgerCompactionHook
+from monkeybot.core.coding.verification_gate import VerificationGate
 from monkeybot.core.config.runtime_env import (
     CODING_DIFF_KEY,
     SUBAGENTS_DIFF_KEY,
@@ -52,9 +55,6 @@ from monkeybot.core.config.snapshot import (
 )
 from monkeybot.core.context import LoopsToolRegistry, TurnContext, build_context
 from monkeybot.core.context.common import text_from_blocks
-from monkeybot.core.coding.git_context_hook import GitContextHook
-from monkeybot.core.coding.read_ledger_hook import ReadLedgerCompactionHook
-from monkeybot.core.coding.verification_gate import VerificationGate
 from monkeybot.core.context.slash_skills import apply_invoked_skill
 from monkeybot.core.hooks import HookEvent, HookManager
 from monkeybot.core.hooks.evidence_guard import EvidencePathGuard
@@ -71,7 +71,7 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.llm.usage import Usage as UsageRecord
 from monkeybot.core.llm.usage import UsageGranularity
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.mcp.mcp_client import MCPClient, mcp_file_env_refs
+from monkeybot.core.mcp.mcp_client import MCPClient, mcp_file_env_refs, run_cleanup
 from monkeybot.core.mcp.ports_mcp import MCPCatalogApplyResult
 from monkeybot.core.memory.config import memory_enabled_from_config
 from monkeybot.core.memory.ingest import persist_message
@@ -99,7 +99,7 @@ from monkeybot.core.runtime.loop import SUMMARY_TRIGGER_RATIO
 from monkeybot.core.runtime.loop import run as run_loop
 from monkeybot.core.runtime.loop_hooks import _fire_hook
 from monkeybot.core.runtime.loop_messages import _user_text_from_content
-from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider
+from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider, scripted_provider_from_env
 from monkeybot.core.tools.background_jobs import jobs_killed_at_turn_end_error
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.grant_store import build_grants_persist_hook
@@ -131,7 +131,7 @@ from monkeybot.gateway.sse.reload import (
 )
 from monkeybot.gateway.sse.routes import create_app as build_sse_app
 from monkeybot.gateway.sse.session_bus import SessionBus, SessionRegistry
-from monkeybot.todo_list import TodoListStore, TodoListTool
+from monkeybot.todo_list import TodoListReminder, TodoListStore, TodoListTool
 from monkeybot.web_search import WebSearchTool
 from monkeybot.web_search import build_backend as _build_web_search_backend
 
@@ -197,6 +197,23 @@ def _resolved_cfg_path(
     return resolve_agent_path(raw, agent_root) if raw else fallback
 
 
+# Env keys that rebuild the chat provider. A new host or key needs a warm socket.
+_PROVIDER_REBUILD_KEYS = frozenset(
+    {
+        "MODEL_PROVIDER",
+        "MODEL_TEMPERATURE",
+        "MODEL_MAX_TOKENS",
+        "MODEL_THINKING_BUDGET",
+        "MODEL_REASONING_EFFORT",
+        "VERTEX_AI_PROJECT_ID",
+        "VERTEX_AI_LOCATION",
+        "ANTHROPIC_VERTEX_PROJECT_ID",
+        "ANTHROPIC_VERTEX_REGION",
+        "MONKEYBOT_FAKE_PROVIDER_EVENTS",
+    }
+)
+
+
 @dataclass
 class GatewayRuntime:
     """Process-level deps populated on startup; ``apply()`` rebuilds hot slices.
@@ -224,6 +241,7 @@ class GatewayRuntime:
     nudge_actuator: NudgeActuator | None = None
     judge_worker: JudgeWorker | None = None
     evidence_guard: EvidencePathGuard = field(default_factory=EvidencePathGuard)
+    todo_reminder: TodoListReminder = field(default_factory=TodoListReminder)
 
     def build_inspectors(
         self, layout: AgentLayout, cfg: RuntimeConfig | None = None, *, fail_closed: bool = False
@@ -455,6 +473,7 @@ class GatewayRuntime:
         if enabled and self.memory is not None:
             self.memory.register_hooks(mgr)
         self.evidence_guard.register(mgr)
+        self.todo_reminder.register(mgr)
         if self.goal_ledger is not None:
             self.goal_ledger.register(mgr)
         if self.progress_tracker is not None:
@@ -498,18 +517,7 @@ class GatewayRuntime:
     ) -> tuple[list[str], str | None]:
         applied: list[str] = []
         error: str | None = None
-        provider_keys = {
-            "MODEL_PROVIDER",
-            "MODEL_TEMPERATURE",
-            "MODEL_MAX_TOKENS",
-            "MODEL_THINKING_BUDGET",
-            "MODEL_REASONING_EFFORT",
-            "VERTEX_AI_PROJECT_ID",
-            "VERTEX_AI_LOCATION",
-            "ANTHROPIC_VERTEX_PROJECT_ID",
-            "ANTHROPIC_VERTEX_REGION",
-            "MONKEYBOT_FAKE_PROVIDER_EVENTS",
-        }
+        provider_keys = _PROVIDER_REBUILD_KEYS
         inspector_keys = {
             "COMMAND_ALLOWLIST_CONFIG",
             "PERMISSION_CONFIG",
@@ -696,6 +704,12 @@ class GatewayRuntime:
                 return self._abort_staged(staging, fastapi_app, memory_prev, mcp_result, error)
         self._install_live_slices(staging)
         self._close_replaced_after_commit(prev_ledger, prev_judge)
+        if _PROVIDER_REBUILD_KEYS.intersection(applied):
+            from monkeybot.providers._openai_compat import (  # noqa: PLC0415
+                warm_provider_connection,
+            )
+
+            await warm_provider_connection(self.provider)
         return RuntimeApplyResult(applied=applied, mcp=mcp_result)
 
     def _abort_staged(
@@ -933,6 +947,9 @@ def _default_agent_path(bus: SessionBus) -> Path:
 
 def _scripted_fake_provider() -> Provider:
     """Deterministic provider for ``MODEL_PROVIDER=fake`` (tests and local dev)."""
+    scripted = scripted_provider_from_env()
+    if scripted is not None:
+        return scripted
     raw = current_env("MONKEYBOT_FAKE_PROVIDER_EVENTS", "")
     if not raw:
         return ScriptedFakeProvider(
@@ -1317,12 +1334,15 @@ async def _startup(fastapi_app: FastAPI) -> None:
         mcp.set_env_overlay(cfg.env_values)
     strict = os.environ.get("MCP_STRICT_LOAD", "").strip().lower() in ("1", "true", "yes")
     try:
-        await mcp.load_from_config(mcp_config, raise_on_error=strict)
+        await mcp.load_from_config(mcp_config, raise_on_error=strict, wait=strict)
     except OSError as exc:
         logger.info("MCP config skipped (%s): %s", mcp_config, exc)
 
     gateway_runtime.build_inspectors(layout, cfg)
     gateway_runtime.build_provider(cfg)
+    from monkeybot.providers._openai_compat import warm_provider_connection  # noqa: PLC0415
+
+    await warm_provider_connection(gateway_runtime.provider)
     gateway_runtime.build_web_search(cfg)
 
     vertex_gs = vertex_google_search_enabled_from_config()
@@ -1461,8 +1481,7 @@ async def _teardown_runtime(fastapi_app: FastAPI) -> None:
 
     mcp = gateway_runtime.mcp
     if mcp is not None:
-        for name in list(getattr(mcp, "_servers", {}).keys()):
-            await mcp.disconnect(name)
+        await mcp.disconnect_all()
 
     try:
         gateway_runtime.close_verifier()
@@ -1506,11 +1525,13 @@ async def _teardown_runtime(fastapi_app: FastAPI) -> None:
 
 @contextlib.asynccontextmanager
 async def _gateway_lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
-    await _startup(fastapi_app)
     try:
+        await _startup(fastapi_app)
         yield
     finally:
-        await _shutdown(fastapi_app)
+        # Startup returns while autoConnect is still in flight. If it raises
+        # or the process is cancelled before yield, this is the only teardown.
+        await run_cleanup(_shutdown(fastapi_app))
 
 
 _registry = SessionRegistry(workspace_root=_resolved_workspace_paths()[0])

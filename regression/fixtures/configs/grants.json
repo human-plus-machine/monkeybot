@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "command": "ffmpeg",
+      "created_at": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "paths": [
+    {
+      "path": "regression/fixtures/workspaces/grants_ws/granted",
+      "mode": "read",
+      "created_at": "2026-01-01T00:00:00Z"
+    }
+  ]
+}

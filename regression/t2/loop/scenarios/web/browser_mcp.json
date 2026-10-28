@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "browser": {
+      "enabled": true,
+      "autoConnect": true,
+      "command": "python",
+      "args": ["{repo_root}/regression/t2/loop/scenarios/web/browser_stop_server.py"],
+      "env": {
+        "MB_BROWSER_STOP_MARKER": "${MB_BROWSER_STOP_MARKER}"
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+case: T4-CODE-07
+mode: live
+description: >
+  A question that needs the real definition among decoys (deprecated module, vendored copy,
+  stale build copy), answered with a path:line citation and the value.
+tags: [coding-hard, navigate]
+workspace_fixture: shop_repo
+messages:
+  - >
+    In `{workspace_subdir}/`, what is the base rate for international shipping, and where is it
+    defined? Answer with the value and `path:line`. Don't change anything.
+assertions:
+  tool_calls: {max: 12}
+  max_tool_errors: 2
+  final_text_regex: '(?s)(?=.*(?<![\w/])(?:eval-[\w-]+/)?shop/shipping\.py:6\b)(?=.*(?<!\d)(1850|18\.50)(?!\d))'
+  workspace_unchanged: [shop/shipping.py, shop/legacy/shipping_v1.py]

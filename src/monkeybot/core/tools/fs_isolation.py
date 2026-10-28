@@ -568,6 +568,34 @@ def local_whisper_model_dirs(
     return tuple(found)
 
 
+def chroma_onnx_model_dirs(*, home: Path | None = None) -> tuple[Path, ...]:
+    """Chroma's installed MiniLM ONNX model directory, for ``mempalace search``.
+
+    Chroma always loads ``all-MiniLM-L6-v2`` from ``~/.cache/chroma/onnx_models``
+    with no override, so a jailed search cannot embed its query unless that
+    directory is readable. Only granted when the model file is installed; a
+    missing model would need a download the jail cannot write anyway.
+    """
+    if home is None:
+        try:
+            home = Path.home()
+        except RuntimeError as exc:
+            logger.debug("chroma model dir lookup skipped: %s", exc)
+            return ()
+    model_dir = home / ".cache" / "chroma" / "onnx_models" / "all-MiniLM-L6-v2"
+    if not _nonempty_file(model_dir / "onnx" / "model.onnx"):
+        return ()
+    try:
+        resolved = model_dir.resolve()
+    except (OSError, RuntimeError) as exc:
+        logger.debug("skipping chroma model dir %s: %s", model_dir, exc)
+        return ()
+    if _SEATBELT_PATH_METACHARS.intersection(str(resolved)):
+        logger.debug("skipping chroma model dir with seatbelt metacharacters: %s", resolved)
+        return ()
+    return (resolved,)
+
+
 def _seatbelt_jail_profile(roots: JailRoots) -> str:
     deny = _resolved_strs(roots.deny)
     read_write = _resolved_strs(roots.read_write)
@@ -586,10 +614,12 @@ def _seatbelt_jail_profile(roots: JailRoots) -> str:
         # GPU grandchildren included. `same-sandbox` reaches every jailed
         # descendant and nothing outside the jail (pid 1 stays denied).
         "(allow signal (target same-sandbox))",
-        # Headless Chromium (cadgen snapshot) SIGSEGVs under deny-default
-        # without these. Measured against chromium-headless-shell with WebGL
-        # (SwiftShader): one IOKit class and its own bootstrap names suffice.
+        # Headless Chromium SIGSEGVs under deny-default without Mach bootstrap
+        # and RootDomainUserClient. Chrome 145 also allocates the WebGL
+        # backbuffer as an IOSurface; without that user client the context
+        # comes back as WEBGL=none.
         '(allow iokit-open (iokit-user-client-class "RootDomainUserClient"))',
+        '(allow iokit-open (iokit-user-client-class "IOSurfaceRootUserClient"))',
         '(allow mach-register (global-name-regex #"^org\\.chromium\\."))',
         "(allow mach-lookup)",
         "(allow sysctl-read)",

@@ -1,0 +1,35 @@
+id: regression/t2/loop/scenarios/loop/steer_mid_turn
+case: T2-LOOP-19
+description: A steer queued on a tool result is delivered before the next provider call.
+mode: scripted
+driver: loop
+messages:
+- read a file
+script:
+- - type: tool_call
+    call_id: r1
+    name: read_file
+    args:
+      path: a.txt
+  - type: done
+- - type: text
+    text: steered reply
+  - type: done
+steps:
+- action: steer
+  text: steer-now
+  when:
+    event: tool_result
+    nth: 1
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  events_sequence:
+  - type: ToolCallResult
+    call_id: r1
+  - type: UserSteered
+    text: steer-now
+  provider_request:
+  - n: 2
+    messages_contain: steer-now

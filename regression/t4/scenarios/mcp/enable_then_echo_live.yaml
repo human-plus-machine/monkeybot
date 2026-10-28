@@ -1,0 +1,19 @@
+# Progressive disclosure: the runner starts a gateway with MCP_CONFIG pointing at
+# regression/t4/agent/monkeybot_config/mcp.progressive.json (autoConnect false).
+# T4-MCP-01..03 stay on the default autoConnect gateway. On that gateway
+# fixture__echo is already connected and enable_mcp is not needed.
+case: T4-MCP-04
+mode: live
+config:
+  env:
+    MCP_CONFIG: monkeybot_config/mcp.progressive.json
+description: "Agent enables a configured MCP server, then calls its echo tool"
+tags: [mcp, progressive]
+messages:
+  - >
+    An MCP server called 'fixture' is configured but not connected. Enable it, then use
+    its 'fixture__echo' tool to echo the text 'ping'.
+assertions:
+  metrics: [response_relevancy]
+  required_tools: [enable_mcp, fixture__echo]
+  max_tool_errors: 0

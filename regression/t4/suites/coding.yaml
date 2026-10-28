@@ -1,0 +1,15 @@
+# Coding-agent suite: each scenario copies regression/fixtures/workspaces/calc_repo into the agent
+# workspace and checks the resulting files, not just telemetry. Not in smoke — it needs
+# `pytest` in the agent's environment and a model strong enough to edit code.
+# Run against a gateway whose workspace is MONKEYBOT_AGENT_WORKSPACE. See docs/live-evals.md.
+id: coding
+scenarios:
+  - coding/fix_failing_test
+  - coding/add_feature_with_tests
+  - coding/navigate_repo
+# pytest --suite coding runs the regression/t4/python files named in `python`
+# and no others. With no --suite, every file in that directory runs, including
+# test_docker_image_health.py (T4-OPS-01). test_provider_live_matrix.py is named
+# so T4-PROV-01 runs with this suite. MONKEYBOT_LIVE_MATRIX_MODEL_<ID> is unchanged.
+python:
+  - test_provider_live_matrix.py

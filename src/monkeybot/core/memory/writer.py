@@ -63,11 +63,28 @@ class MemoryWriter:
         self._wake.set()
 
     async def drain(self, *, timeout_s: float = 5.0) -> int:
-        """Flush pending rows until empty or timeout. Pending rows survive timeout."""
-        deadline = asyncio.get_running_loop().time() + max(0.1, timeout_s)
+        """Flush pending rows until empty or timeout. Pending rows survive timeout.
+
+        The budget covers the in-flight embed. A hung embedder is abandoned and
+        its claimed rows return to ``pending``. The worker thread may still run.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.1, timeout_s)
         flushed = 0
-        while asyncio.get_running_loop().time() < deadline:
-            n = await self.flush_once()
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            try:
+                n = await asyncio.wait_for(self.flush_once(), timeout=remaining)
+            except TimeoutError:
+                released = await self._outbox.release_processing(lease_owner=self._lease_owner)
+                logger.warning(
+                    "memory writer drain timed out after %.1fs; left %s row(s) pending",
+                    timeout_s,
+                    released,
+                )
+                break
             flushed += n
             if n == 0:
                 break

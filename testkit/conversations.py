@@ -1,0 +1,153 @@
+"""Typed message fixtures shared by provider adapter tests."""
+
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+from monkeybot.core.llm.provider import Message
+from monkeybot.core.types.content_blocks import (
+    File,
+    Image,
+    Text,
+    Thinking,
+    ToolRequest,
+    ToolResponse,
+)
+from monkeybot.core.types.types_tools import ToolDef
+
+CANONICAL_TOOL_DEFS: tuple[ToolDef, ...] = (
+    ToolDef(
+        name="echo",
+        description="echo",
+        input_schema={"type": "object", "properties": {"x": {"type": "integer"}}},
+    ),
+    ToolDef(
+        name="ls",
+        description="list",
+        input_schema={"type": "object", "properties": {}},
+    ),
+)
+
+
+def typed_messages_four_turn() -> list[Message]:
+    """Four-turn conversation: user hi → assistant text+tool → user tool result → assistant."""
+    return [
+        Message.text("user", "hi"),
+        Message(
+            role="assistant",
+            content=[
+                Text(text="ok"),
+                ToolRequest(id="c1", name="echo", args={"x": 1}),
+            ],
+        ),
+        Message(
+            role="user",
+            content=[
+                ToolResponse(
+                    id="c1",
+                    tool_name="echo",
+                    result=[Text(text="done")],
+                ),
+            ],
+        ),
+        Message.text("assistant", "all set"),
+    ]
+
+
+def typed_messages_four_turn_image_tool_result() -> list[Message]:
+    """Same shape as typed_messages_four_turn, but the tool result carries an Image."""
+    return [
+        Message.text("user", "what's on my screen?"),
+        Message(
+            role="assistant",
+            content=[
+                Text(text="ok"),
+                ToolRequest(id="c1", name="load_file", args={"path": "x.png"}),
+            ],
+        ),
+        Message(
+            role="user",
+            content=[
+                ToolResponse(
+                    id="c1",
+                    tool_name="load_file",
+                    result=[Image(mime_type="image/png", data="aW1n")],
+                ),
+            ],
+        ),
+        Message.text("assistant", "a screenshot"),
+    ]
+
+
+def make_anthropic_stream_mock(events: list[object]) -> MagicMock:
+    """Async context manager mock for ``client.messages.stream(...)``."""
+
+    class _AsyncStreamCM:
+        async def __aenter__(self) -> object:
+            async def _gen() -> object:
+                for event in events:
+                    yield event
+
+            return _gen()
+
+        async def __aexit__(self, *_exc: object) -> bool:
+            return False
+
+    client = MagicMock()
+    client.messages.stream = MagicMock(side_effect=lambda **_kw: _AsyncStreamCM())
+    return client
+
+
+def canonical_conversation() -> list[Message]:
+    """System, user, assistant text + two parallel tool calls, media tool result, signed thinking.
+
+    Shared by provider converter contracts. Adapters that keep system text beside the
+    message list split this leading system row themselves.
+    """
+    return [
+        Message.text("system", "You are a careful assistant."),
+        Message.text("user", "look at these"),
+        Message(
+            role="assistant",
+            content=[
+                Thinking(thinking="checking both tools", signature="sig-canonical"),
+                Text(text="on it"),
+                ToolRequest(id="c-echo", name="echo", args={"x": 1}),
+                ToolRequest(id="c-ls", name="ls", args={}),
+            ],
+        ),
+        Message(
+            role="user",
+            content=[
+                ToolResponse(
+                    id="c-echo",
+                    tool_name="echo",
+                    result=[
+                        Text(text="done"),
+                        Image(mime_type="image/png", data="aW1n"),
+                        File(
+                            mime_type="application/pdf",
+                            data="JVBERi0xLjQKbm90IGEgcmVhbCBwZGY=",
+                        ),
+                    ],
+                ),
+                ToolResponse(
+                    id="c-ls",
+                    tool_name="ls",
+                    result=[Text(text="listed")],
+                ),
+            ],
+        ),
+    ]
+
+
+def typed_messages_turn_2b_tool_only() -> list[Message]:
+    """Single assistant turn: tool request only (no Text block)."""
+    return [
+        Message(
+            role="assistant",
+            content=[
+                ToolRequest(id="c2", name="ls", args={}),
+            ],
+        ),
+    ]

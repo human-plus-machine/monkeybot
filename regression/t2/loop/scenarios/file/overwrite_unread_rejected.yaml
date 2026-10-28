@@ -1,0 +1,26 @@
+id: regression/t2/loop/scenarios/file/overwrite_unread_rejected
+case: T2-FILE-10
+description: Overwriting an unread file is read_before_write and leaves the bytes unchanged.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Overwrite notes.txt.
+script:
+- - type: tool_call
+    call_id: c1
+    name: write_file
+    args:
+      path: notes.txt
+      content: overwritten
+  - type: done
+- - type: text
+    text: Refused.
+  - type: done
+assertions:
+  tool_error_codes:
+  - read_before_write
+  workspace_unchanged:
+  - notes.txt
+  turn_completed: true

@@ -1,0 +1,46 @@
+id: regression/t2/loop/scenarios/scheduler/one_open_goal_per_session
+case: T2-SCHED-10
+description: A second create_goal with a different objective is refused because a goal is already active.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- /goal Watch the deploy until it is green.
+script:
+- - type: tool_call
+    call_id: c-first
+    name: create_goal
+    args:
+      objective: Watch the deploy until it is green.
+  - type: done
+- - type: tool_call
+    call_id: c-second
+    name: create_goal
+    args:
+      objective: Rewrite the deploy pipeline instead.
+  - type: done
+- - type: text
+    text: A goal is already open.
+  - type: done
+assertions:
+  turn_completed: true
+  provider_calls: 3
+  required_tools:
+  - create_goal
+  tool_calls:
+    create_goal:
+      min: 2
+      max: 2
+  store:
+    goals: 1
+  events_sequence:
+  - type: ToolCallResult
+    tool: create_goal
+    call_id: c-first
+    result:
+      regex: '"created": true'
+  - type: ToolCallResult
+    tool: create_goal
+    call_id: c-second
+    error:
+      regex: a goal is already active in this session

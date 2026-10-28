@@ -1,0 +1,44 @@
+id: regression/t2/loop/scenarios/policy/permissions_last_match_wins
+case: T2-POL-09
+description: Overlapping permission rules resolve by the last match.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Check git status, then push.
+policy:
+  command_allowlist: default
+  permissions: overlap
+script:
+- - type: tool_call
+    call_id: c-status
+    name: run_command
+    args:
+      argv:
+      - git
+      - status
+  - type: done
+- - type: tool_call
+    call_id: c-push
+    name: run_command
+    args:
+      argv:
+      - git
+      - push
+      - origin
+  - type: done
+- - type: text
+    text: Push was denied by the later rule.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    call_id: c-status
+    result:
+      regex: not a git repository
+  - type: ToolCallResult
+    call_id: c-push
+    error:
+      regex: git push is denied by the later overlap rule
+  turn_completed: true
+  no_errors: true

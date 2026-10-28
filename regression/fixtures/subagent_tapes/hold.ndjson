@@ -1,0 +1,2 @@
+{"control": true, "probe_concurrency": true, "hold_seconds": 2}
+{"type": "TurnComplete", "request_id": "child"}

@@ -1,0 +1,36 @@
+id: regression/t2/loop/scenarios/loop/resume_thinking_budget_routine
+case: T2-LOOP-40
+description: >
+  A routine resume on a gemini-named provider sets MONKEYBOT_RESUME_THINKING_BUDGET.
+  The first call is the user message, so its budget stays unset.
+mode: scripted
+driver: loop
+config:
+  scripted_provider: gemini
+  env:
+    MONKEYBOT_RUN_KIND: routine
+    MONKEYBOT_RESUME_THINKING_BUDGET: "64"
+messages:
+- resume after a tool
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: a.txt
+  - type: done
+- - type: text
+    text: resumed
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  provider_request:
+  - n: 1
+    thinking_budget: null
+  - n: 2
+    thinking_budget: 64
+  history:
+    tool_pairs_intact: true
+  response_contains: resumed

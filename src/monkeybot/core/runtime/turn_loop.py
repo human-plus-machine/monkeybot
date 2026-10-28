@@ -19,6 +19,7 @@ from monkeybot.core.context import (
     refresh_memory_index,
 )
 from monkeybot.core.context.epoch import ContextEpochTracker, EpochAdmit
+from monkeybot.core.context.project_context import load_project_instructions
 from monkeybot.core.hooks import HookEvent, HookManager
 from monkeybot.core.llm.provider import (
     Done,
@@ -66,6 +67,7 @@ from monkeybot.core.verifier.severity import cap_severity
 from monkeybot.providers._utils import note_anthropic_token_estimate_observation
 from monkeybot.providers.pricing import estimate_cost
 
+from .background_summary import maybe_start
 from .doom_loop import (
     _doom_loop_exempt_names,
     _DoomLoopTracker,
@@ -93,10 +95,12 @@ from .history_compaction import (
     _compact_history_if_needed,
     _fire_history_compacted,
     _intent_facts_from_ctx,
-    _workspace_trailer_from_ctx,
     _summarization_model_id,
     _summarization_viable,
+    _workspace_trailer_from_ctx,
+    bind_summary_transcript,
     protect_recent_count,
+    reset_summary_transcript,
     truncate_history_preserving_pins,
 )
 from .input_admission import InputAdmission, SteerItem, join_text, preview_text
@@ -166,6 +170,25 @@ def _require_prompt(state: _TurnState) -> tuple[Message, EpochAdmit]:
     return state.system, state.admit
 
 
+def _rebind_summary_transcript(
+    holder: list[Any] | None,
+    writer: TranscriptWriter | None,
+    *,
+    request_id: str,
+    inner_turn: int,
+) -> None:
+    """Point summary recording at this inner turn. A background job keeps the previous binding."""
+    if holder is None:
+        return
+    current = holder[0]
+    if current is not None:
+        reset_summary_transcript(current)
+        holder[0] = None
+    if writer is None:
+        return
+    holder[0] = bind_summary_transcript(writer, request_id=request_id, inner_turn=inner_turn)
+
+
 async def _run_inner(
     user_content: list[ContentBlock],
     ctx: TurnContext,
@@ -189,26 +212,34 @@ async def _run_inner(
 
     last_assistant: list[str] = [""]
     user_text = _user_text_from_content(user_content)
+    summary_token: list[Any] = [None]
     async with span_run(ctx, user_message=user_text):
-        async for evt in _run_inner_core(
-            user_content,
-            ctx,
-            provider=provider,
-            history=history,
-            inspectors=inspectors,
-            tool_executor=tool_executor,
-            cancelled=cancelled,
-            max_turns=max_turns,
-            usage=usage,
-            hook_manager=hook_manager,
-            last_assistant=last_assistant,
-            attachment_store=attachment_store,
-            attachment_catalog=attachment_catalog,
-            transcript_writer=transcript_writer,
-            vertex_google_search=vertex_google_search,
-            input_admission=input_admission,
-        ):
-            yield evt
+        try:
+            async for evt in _run_inner_core(
+                user_content,
+                ctx,
+                provider=provider,
+                history=history,
+                inspectors=inspectors,
+                tool_executor=tool_executor,
+                cancelled=cancelled,
+                max_turns=max_turns,
+                usage=usage,
+                hook_manager=hook_manager,
+                last_assistant=last_assistant,
+                attachment_store=attachment_store,
+                attachment_catalog=attachment_catalog,
+                transcript_writer=transcript_writer,
+                vertex_google_search=vertex_google_search,
+                input_admission=input_admission,
+                summary_token=summary_token,
+            ):
+                yield evt
+        finally:
+            current = summary_token[0]
+            if current is not None:
+                reset_summary_transcript(current)
+                summary_token[0] = None
         set_run_output(last_assistant[0])
         if trace_id_out is not None:
             try:
@@ -390,6 +421,16 @@ def _stash_escalation(
     mailbox.arm_escalation(thread_id, verdict, max_severity=capped)
 
 
+def _write_nudge_unresolved(state: _TurnState) -> bool:
+    """True when this request still owes a read for a write-without-read nudge."""
+    mailbox = state.ctx.verdict_mailbox
+    if mailbox is None:
+        return False
+    return "write_without_read" in mailbox.active_nudge_signals(
+        state.ctx.thread_id, state.ctx.request_id
+    )
+
+
 def _arm_replan_from_mailbox(state: _TurnState) -> str | None:
     """Reuse doom-loop ``force_no_tools`` for a drained ``replan`` verdict.
 
@@ -409,6 +450,7 @@ def _arm_replan_from_mailbox(state: _TurnState) -> str | None:
         return None
     if not note:
         return None
+    state.verifier_replan_turn = True
     state.doom_tracker.force_no_tools = True
     existing = state.doom_tracker.recovery_note
     state.doom_tracker.recovery_note = f"{existing}\n\n{note}" if existing else note
@@ -486,6 +528,10 @@ class _TurnState:
     assistant_write_task: asyncio.Task[None] | None = None
     pre_turn_extra: str | None = None
     pre_tool_extra_next: str | None = None
+    # Runtime notes already folded into this inner turn's system prompt.
+    # History compaction rebuilds that prompt; it must reapply these notes or
+    # a one-shot PRE_TOOL reminder is dropped before the model sees it.
+    turn_runtime_notes: str | None = None
     empty_completion_retries_left: int = _EMPTY_COMPLETION_RETRIES
     post_tool_empty_retries_left: int = _POST_TOOL_EMPTY_RETRIES
     background_job_nudges_left: int = _BACKGROUND_JOB_NUDGES
@@ -507,6 +553,11 @@ class _TurnState:
     resolved_messages: list[Message] = dataclasses.field(default_factory=list)
     stream_thinking: int | None = None
     action: TurnAction | None = None
+    # This inner turn consumed a verifier replan, so a text reply is the plan
+    # restatement and the loop calls the model once more with tools restored.
+    verifier_replan_turn: bool = False
+    # Doom-loop and replan recovery empty the tool list for this inner turn.
+    tools_suppressed: bool = False
     pending: dict[str, ToolCall] = dataclasses.field(default_factory=dict)
     assistant_text: str = ""
     thinking_text: str = ""
@@ -516,6 +567,23 @@ class _TurnState:
     provider_stream_failed: bool = False
     tools_dirty_reason: str | None = None
     tools_schema_hash: str = ""
+
+
+async def _reload_project_instructions(ctx: TurnContext) -> TurnContext:
+    """Re-read AGENTS.md so a change between inner turns opens a new epoch.
+
+    Instructions are part of the stable prefix. The file can change while a
+    reply is still running; the next provider call has to see the new text.
+    """
+    config = ctx.config
+    root = ctx.workspace_root
+    if config is None or root is None:
+        return ctx
+    names = config.coding.project_instructions_files
+    instructions = await asyncio.to_thread(load_project_instructions, root, names)
+    if instructions == ctx.project_instructions:
+        return ctx
+    return dataclasses.replace(ctx, project_instructions=instructions)
 
 
 async def _prepare_turn_context(
@@ -531,6 +599,7 @@ async def _prepare_turn_context(
 
     state.chat_messages = await _load_agent_chat_history(history, state.ctx.thread_id)
     state.ctx = await refresh_memory_index(state.ctx)
+    state.ctx = await _reload_project_instructions(state.ctx)
     state.turn_input_text = latest_user_message_text(state.chat_messages) or state.user_text
     set_turn_io(input_value=state.turn_input_text)
 
@@ -574,7 +643,9 @@ async def _prepare_turn_context(
             detail=replan_note,
         )
     force_no_tools, doom_loop_note = state.doom_tracker.consume_recovery()
+    state.tools_suppressed = force_no_tools
     combined_extra = _combine_extras(combined_extra, doom_loop_note)
+    state.turn_runtime_notes = combined_extra
     state.system = _append_extra_system_text(system, combined_extra)
     state.pre_tool_extra_next = None
     state.turn_tools = () if force_no_tools else state.ctx.tools
@@ -639,7 +710,7 @@ async def _refresh_prompt_after_history_change(
         yield epoch_evt
     state.system = _append_extra_system_text(
         _system_message_from_text(state.admit.leading_system_text),
-        state.pre_turn_extra,
+        state.turn_runtime_notes if state.turn_runtime_notes is not None else state.pre_turn_extra,
     )
     state.resolved_messages = convert_to_provider(
         state.chat_messages,
@@ -979,6 +1050,9 @@ async def _maybe_compact_and_shape(
         inner_turn=state.turn_index,
     )
     cap = max(1, int(state.ctx.context_window_tokens * SUMMARY_TRIGGER_RATIO))
+    # Schedule only. The model call runs beside this turn; the turn that crosses
+    # the bar applies it inside _compact_history_if_needed.
+    await maybe_start(state.ctx, history, provider, preflight)
     async for evt in _maybe_summarize_on_token_pressure(
         state,
         history=history,
@@ -1653,6 +1727,33 @@ async def _handle_empty_or_final_text(
         yield evt
     if state.action in ("continue", "break"):
         return
+    # A write-without-read reminder stays until that path is read. Ending on the
+    # text reply would drop the later inner turns that still have to read it.
+    # Tool-suppressing recovery (replan, doom loop) still owns that turn.
+    unresolved_write = _write_nudge_unresolved(state) and not state.tools_suppressed
+    if cleaned_text and (state.verifier_replan_turn or unresolved_write):
+        for evt in _release_held_text(state):
+            yield evt
+        assist_blocks: list[ContentBlock] = []
+        thinking = _thinking_block(state)
+        if thinking is not None:
+            assist_blocks.append(thinking)
+        assist_blocks.append(Text(text=cleaned_text))
+        # The next provider call reloads history, so this write cannot be deferred.
+        await persist_message(
+            history,
+            Message(role="assistant", content=assist_blocks),
+            thread_id=state.ctx.thread_id,
+            turn_id=state.ctx.request_id,
+            memory=state.ctx.memory,
+            ingest=True,
+        )
+        last_assistant[0] = cleaned_text
+        state.turn_output_text = cleaned_text
+        state.verifier_replan_turn = False
+        state.needs_followup_after_tools = False
+        state.action = "continue"
+        return
     async for evt in _gate_final_answer(state, hook_manager=hook_manager, candidate=cleaned_text):
         yield evt
     if state.action == "continue":
@@ -1664,15 +1765,15 @@ async def _handle_empty_or_final_text(
         # right after), so nothing reads it again in-loop. Keeping it
         # off the await path means the Firestore write does not delay
         # TurnComplete / the user-visible reply. Awaited at the tail.
-        assist_blocks: list[ContentBlock] = []
+        final_blocks: list[ContentBlock] = []
         thinking = _thinking_block(state)
         if thinking is not None:
-            assist_blocks.append(thinking)
-        assist_blocks.append(Text(text=cleaned_text))
+            final_blocks.append(thinking)
+        final_blocks.append(Text(text=cleaned_text))
         state.assistant_write_task = asyncio.create_task(
             persist_message(
                 history,
-                Message(role="assistant", content=assist_blocks),
+                Message(role="assistant", content=final_blocks),
                 thread_id=state.ctx.thread_id,
                 turn_id=state.ctx.request_id,
                 memory=state.ctx.memory,
@@ -1851,6 +1952,7 @@ async def _run_inner_core(
     transcript_writer: TranscriptWriter | None = None,
     vertex_google_search: bool = False,
     input_admission: InputAdmission | None = None,
+    summary_token: list[Any] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import (
         begin_turn_span,
@@ -1902,7 +2004,15 @@ async def _run_inner_core(
         # must finish (or time out) before the next provider call.
         await _drain_hook_settlement(hook_manager)
 
+        state.verifier_replan_turn = False
+        state.tools_suppressed = False
         state.turn_index += 1
+        _rebind_summary_transcript(
+            summary_token,
+            transcript_writer,
+            request_id=state.ctx.request_id,
+            inner_turn=state.turn_index,
+        )
         state.turn_input_text = state.user_text
         state.turn_output_text = ""
         logger.debug(

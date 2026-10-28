@@ -1,0 +1,57 @@
+id: regression/t2/loop/scenarios/file/grep_gitignore_default
+case: T2-FILE-24
+description: Default grep misses secret.txt; respect_gitignore false finds it; nested pkg/.gitignore is scoped. huge.txt is reported as skipped, not raised as an error.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Search ignored files.
+script:
+- - type: tool_call
+    call_id: c1
+    name: grep
+    args:
+      pattern: HOSTILE_SECRET_TOKEN
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: grep
+    args:
+      pattern: HOSTILE_SECRET_TOKEN
+      respect_gitignore: false
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: grep
+    args:
+      pattern: NESTED_IGNORE_TOKEN
+      root: pkg
+  - type: done
+- - type: tool_call
+    call_id: c4
+    name: grep
+    args:
+      pattern: NESTED_IGNORE_TOKEN
+      root: pkg
+      respect_gitignore: false
+  - type: done
+- - type: text
+    text: Gitignore was honored, including the nested file.
+  - type: done
+assertions:
+  max_tool_errors: 0
+  events_sequence:
+  - type: ToolCallResult
+    result:
+      regex: '\A(?![\s\S]*secret\.txt)[\s\S]*"matches": \[\][\s\S]*"scan_complete": false[\s\S]*"skipped_paths": \["huge\.txt"\]'
+  - type: ToolCallResult
+    result:
+      regex: '"path": "secret\.txt"'
+  - type: ToolCallResult
+    result:
+      regex: '\A(?![\s\S]*hidden\.txt)[\s\S]*"matches": \[\]'
+  - type: ToolCallResult
+    result:
+      regex: pkg/hidden\.txt
+  turn_completed: true

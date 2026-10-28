@@ -80,14 +80,14 @@ Walks through install, scaffold, config, and first chat. Source: [`cli/skills/mo
 | [Skills](docs/skills.md) | Skill directory layout and `SKILL.md` discovery |
 | [Model Context Protocol](docs/mcp.md) | MCP config, env interpolation, OAuth2 |
 | [Cloud deployment](docs/cloud-deployment-design.md) | Positioning + Patterns A–D index |
-| [Live evals](docs/live-evals.md) | Smoke suite, local + CI scorecard |
+| [Live evals](docs/live-evals.md) | Local T4 smoke suite and scorecard |
 | [Observability](docs/observability-runbook.md) | OpenTelemetry tracing runbook |
 
 Integrations matrix and roadmap: [CHANGELOG](CHANGELOG.md) · [BACKLOG](BACKLOG.md).
 
 ## Contributing
 
-Clone only if you are changing the harness. Setup, checks, and the release workflow are in **[CONTRIBUTING.md](CONTRIBUTING.md)**. Live eval smoke fixture: [`evals/smoke_agent/`](evals/smoke_agent/).
+Clone only if you are changing the harness. Setup, checks, and the release workflow are in **[CONTRIBUTING.md](CONTRIBUTING.md)**. Live eval smoke agent: [`regression/t4/agent/`](regression/t4/agent/).
 
 ## Support
 

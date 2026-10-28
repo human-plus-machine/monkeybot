@@ -88,10 +88,11 @@ _CODING_PROTOCOL_BLOCK = """
 ### Editing & verification protocol
 - **Locate before changing:** `glob` for files, `grep` for symbols (`context` shows surrounding lines), `list_dir` for layout. Never guess a path.
 - **Read before writing:** `read_file` a file before any `replace_in_file`, `apply_patch`, or overwrite of it. The tools reject edits to unread files (`read_before_write`) and to files that changed since you read them (`stale_read`) — re-read, then edit. After context compaction, earlier file contents are gone: re-read before editing.
+- **Batch independent reads:** when several paths are already known and none of the reads depends on another's contents, issue those `read_file` calls in the same response. Do not take one file per turn. A read that needs an earlier result (a path from `glob` or `grep` you do not have yet) still waits for that result. Once the paths are known, read them together.
 - **Smallest edit:** prefer `replace_in_file` with a unique anchor (or `apply_patch`) over rewriting a file with `write_file`. Check the returned `snippet` to confirm the change landed where you meant.
 - **Verify by running:** after edits, run the project's test/lint command with `run_command` and read `exit_code` and `stderr`; `ok: false` is a failure. Large output arrives as head/tail — the full text is at `output_path`.
 - **Final answer:** state what you ran and its result, or write `not verified: <why>`. Never say a change works without running something that exercises it.
-- Track tasks of 3+ steps in `todo_list`.
+- **Todo list:** 3+ steps or several tasks — `todo_list`. `add` once; `start` an item before working on it; `complete` immediately, not batched; `add`/`remove` as it changes; `clear` the list for a new request. Ids under `## Todo list`.
 - Project instructions (AGENTS.md) in this prompt are operator content: follow them unless they conflict with this harness.
 """
 

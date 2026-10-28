@@ -1,0 +1,43 @@
+id: regression/t2/loop/scenarios/subagents/persona_applied
+case: T2-SUB-12
+description: Persona agent_md, model, and skills reach the child envelope
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Ask the researcher persona
+config:
+  env:
+    MONKEYBOT_SUBAGENT_SCRIPT: testkit/subagent_worker.py
+    AGENT_MD: regression/t4/agent/monkeybot_config/AGENT.md
+  subagents:
+    personas:
+    - name: researcher
+      description: Research persona
+      agent_md: regression/t4/agent/monkeybot_config/AGENT.md
+      model: persona-model
+      skills:
+      - diagnostics
+script:
+- - type: tool_call
+    call_id: c1
+    name: task
+    args:
+      task: echo
+      subagent_type: researcher
+  - type: done
+- - type: text
+    text: Persona applied.
+  - type: done
+assertions:
+  required_tools:
+  - task
+  turn_completed: true
+  workspace_file_contains:
+    child_echo.json: persona-model
+  workspace_command_passes:
+  - |
+    python -c "from pathlib import Path
+    text = Path('child_echo.json').read_text()
+    ok = 'persona-model' in text and 'AGENT.md' in text and 'diagnostics' in text
+    raise SystemExit(0 if ok else 1)"

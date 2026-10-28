@@ -1,0 +1,36 @@
+id: regression/t2/loop/scenarios/subagents/child_errors_record_failed
+case: T2-SUB-08
+description: A clean child exit that emits Error leaves ok false in the task payload
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Run a child that reports an error
+config:
+  env:
+    MONKEYBOT_SUBAGENT_SCRIPT: testkit/subagent_worker.py
+    AGENT_MD: regression/t4/agent/monkeybot_config/AGENT.md
+script:
+- - type: tool_call
+    call_id: c1
+    name: task
+    args:
+      task: child_error
+  - type: done
+- - type: text
+    text: The child failed.
+  - type: done
+assertions:
+  required_tools:
+  - task
+  turn_completed: true
+  event_fields:
+    ToolCallResult:
+      result:
+        regex: '"ok": false.*"exit_reason": "error".*"child blew up'
+  workspace_command_passes:
+  - |
+    python -c "from pathlib import Path
+    outs = list(Path('.monkeybot/subagent-runs').glob('*/output.json'))
+    ok = bool(outs and 'TurnComplete' in outs[0].read_text())
+    raise SystemExit(0 if ok else 1)"

@@ -1,0 +1,21 @@
+id: regression/t3/trajectories/shell/replay_live_pytest_run
+case: T3-SHELL-01
+description: Recorded live coding/fix_failing_test cassette replays against calc_repo and ends with pytest green.
+mode: replay
+driver: loop
+executor: real
+workspace_fixture: calc_repo
+cassette: replay_live_pytest_run.cassette.json
+config:
+  model.max_turns: 25
+messages:
+  - >
+    The repository in this workspace has a failing test. Find the cause and fix it.
+    Do not change the tests. When you are done, say what you ran and what the result was.
+assertions:
+  turn_completed: true
+  max_tool_errors: 1
+  workspace_unchanged:
+    - tests/test_ops.py
+  workspace_command_passes: python -m pytest -q
+  verified_before_final: true

@@ -1,0 +1,4 @@
+{"control": true, "redact_pipe": true}
+{"type": "SystemPromptSnapshot", "request_id": "child", "inner_turn": 0, "text": "SUPER_SECRET_PROMPT_TEXT"}
+{"type": "AssistantDelta", "request_id": "child", "delta": "ok"}
+{"type": "TurnComplete", "request_id": "child"}

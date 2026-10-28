@@ -50,6 +50,7 @@ from monkeybot.core.persistence.durable_runs import (
 from monkeybot.core.persistence.errors import AmbiguousCommitError
 from monkeybot.core.persistence.firestore_scheduled_loops import FirestoreScheduledLoopStore
 from monkeybot.core.persistence.row_ids import loaded_row_id, row_id_for_insert
+from monkeybot.core.persistence.scheduled_loops import resolve_now_ms
 from monkeybot.core.persistence.thread_summary import (
     ChatThreadSummary,
     is_hidden_thread_id,
@@ -910,8 +911,10 @@ class FirestoreRunStore:
         )
         return bool(await renew_txn(transaction, doc_ref))
 
-    async def list_stale_claims(self, stale_after_ms: int) -> list[SubagentRunRow]:
-        cutoff = int(time.time() * 1000) - stale_after_ms
+    async def list_stale_claims(
+        self, stale_after_ms: int, now_ms: int | None = None
+    ) -> list[SubagentRunRow]:
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         query = (
             self._client.collection(self._collection)
             .where(filter=FieldFilter("status", "==", "running"))
@@ -931,8 +934,9 @@ class FirestoreRunStore:
         stale_after_ms: int,
         *,
         worker_id: str | None = None,
+        now_ms: int | None = None,
     ) -> bool:
-        cutoff = int(time.time() * 1000) - stale_after_ms
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         doc_ref = self._doc(run_id)
         transaction = self._client.transaction()
 
@@ -965,8 +969,8 @@ class FirestoreRunStore:
         )
         return bool(await reset_txn(transaction, doc_ref))
 
-    async def reset_stale_claims(self, stale_after_ms: int) -> int:
-        cutoff = int(time.time() * 1000) - stale_after_ms
+    async def reset_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int:
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         query = (
             self._client.collection(self._collection)
             .where(filter=FieldFilter("status", "==", "running"))
@@ -1111,8 +1115,8 @@ class FirestoreSessionTurnLockStore:
     def _doc(self, session_id: str) -> firestore.AsyncDocumentReference:
         return self._client.collection(self._collection).document(session_id)
 
-    async def release_stale_claims(self, stale_after_ms: int) -> int:
-        cutoff = int(time.time() * 1000) - stale_after_ms
+    async def release_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int:
+        cutoff = resolve_now_ms(now_ms) - stale_after_ms
         query = self._client.collection(self._collection).where(
             filter=FieldFilter("claimed_at_ms", "<", cutoff)
         )
@@ -1464,6 +1468,44 @@ class FirestoreOutboxStore:
             firestore.async_transactional(_retry_body),
         )
         return 1 if await retry_txn(transaction, self._ref(row_id)) else 0
+
+    async def release_processing(self, *, lease_owner: str) -> int:
+        n = 0
+        query = self._col.where(filter=FieldFilter("status", "==", "processing"))
+        async for doc in query.stream():
+            data = doc.to_dict() or {}
+            if str(data.get("lease_owner") or "") != lease_owner:
+                continue
+            transaction = self._client.transaction()
+
+            async def _release_body(
+                txn: firestore.AsyncTransaction,
+                ref: firestore.AsyncDocumentReference,
+            ) -> bool:
+                snapshot = await ref.get(transaction=txn)
+                if not snapshot.exists:
+                    return False
+                current = snapshot.to_dict() or {}
+                if str(current.get("status") or "") != "processing":
+                    return False
+                if str(current.get("lease_owner") or "") != lease_owner:
+                    return False
+                txn.update(
+                    ref,
+                    {"status": "pending", "lease_owner": None, "lease_expires_at": None},
+                )
+                return True
+
+            release_txn = cast(
+                Callable[
+                    [firestore.AsyncTransaction, firestore.AsyncDocumentReference],
+                    Awaitable[bool],
+                ],
+                firestore.async_transactional(_release_body),
+            )
+            if await release_txn(transaction, doc.reference):
+                n += 1
+        return n
 
     async def gc_committed(self, *, days: int = 7) -> int:
         cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat(timespec="seconds")

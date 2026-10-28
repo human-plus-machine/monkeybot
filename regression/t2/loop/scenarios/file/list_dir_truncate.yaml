@@ -1,0 +1,25 @@
+id: regression/t2/loop/scenarios/file/list_dir_truncate
+case: T2-FILE-29
+description: A directory of 301 entries is truncated with count 301.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- List crowd.
+script:
+- - type: tool_call
+    call_id: c1
+    name: list_dir
+    args:
+      path: crowd
+  - type: done
+- - type: text
+    text: The listing was truncated.
+  - type: done
+assertions:
+  events_sequence:
+  - type: ToolCallResult
+    result:
+      regex: '"count": 301[\s\S]*"truncated": true'
+  turn_completed: true

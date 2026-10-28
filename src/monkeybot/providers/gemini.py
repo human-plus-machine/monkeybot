@@ -31,7 +31,7 @@ from monkeybot.core.types.content_blocks import (
 )
 from monkeybot.core.types.interfaces import LLMError
 from monkeybot.core.types.types_tools import ToolDef
-from monkeybot.providers._utils import suppress_thinking_for_auxiliary_call
+from monkeybot.providers._utils import safe_parse_tool_args, suppress_thinking_for_auxiliary_call
 from monkeybot.providers.rejected_sampling import (
     is_status_400,
     remember_rejected_sampling,
@@ -478,6 +478,7 @@ def _messages_to_contents(rest: Sequence[Message]) -> list[Any]:
                 parts.append(
                     types.Part(
                         function_response=types.FunctionResponse(
+                            id=block.id or None,
                             name=block.tool_name,
                             response={"result": _flatten_tool_response_result(block)},
                         )
@@ -569,19 +570,52 @@ def _grounding_metadata_to_dict(gm: Any) -> dict[str, Any] | None:
     return out
 
 
+# String fragments are buffered until the call is finished. The key is not a
+# tool argument; ``_finalize_function_call_args`` strips it before the call is
+# yielded.
+_PARTIAL_ARGS_KEY = "\x00partial_args"
+
+
 def _merge_function_call_args(existing: dict[str, Any], fc: Any) -> dict[str, Any]:
-    merged = dict(existing)
+    """Merge one function-call chunk.
+
+    Dict ``args`` and ``partial_args`` update the object. String ``partial_args``
+    are concatenated and parsed once, when the call is finalized.
+    """
+    raw = existing.get(_PARTIAL_ARGS_KEY, "")
+    if not isinstance(raw, str):
+        raw = ""
+    merged = {key: value for key, value in existing.items() if key != _PARTIAL_ARGS_KEY}
     if isinstance(getattr(fc, "args", None), dict):
         merged.update(fc.args)
     partial = getattr(fc, "partial_args", None)
     if isinstance(partial, dict):
         merged.update(partial)
-    elif isinstance(partial, str) and partial.strip():
-        try:  # noqa: SIM105 — preserve streaming merge semantics (spec: verbatim)
-            merged.update(json.loads(partial))
-        except json.JSONDecodeError:
-            pass
+    elif isinstance(partial, str) and (raw or partial.strip()):
+        raw = f"{raw}{partial}"
+    if raw:
+        merged[_PARTIAL_ARGS_KEY] = raw
     return merged
+
+
+def _finalize_function_call_args(
+    merged: dict[str, Any],
+    *,
+    call_id: str,
+    tool_name: str,
+) -> tuple[dict[str, Any], str | None]:
+    """Parse a buffered argument string into tool args and a parse error."""
+    raw = merged.get(_PARTIAL_ARGS_KEY, "")
+    public = {key: value for key, value in merged.items() if key != _PARTIAL_ARGS_KEY}
+    if not isinstance(raw, str) or not raw.strip():
+        return public, None
+    parsed, error = safe_parse_tool_args(
+        raw, call_id=call_id, tool_name=tool_name, provider="gemini"
+    )
+    if error is not None:
+        return {}, error
+    public.update(parsed)
+    return public, None
 
 
 def _usage_from_response(um: Any) -> UsageEvent | None:
@@ -977,13 +1011,26 @@ class GeminiProvider:
                 search_queries=list(grounding_meta.get("search_queries", [])),
             )
 
+        # Insertion order = provider stream arrival order. Do not sort by
+        # call_id: Gemini thought_signature must stay on the first functionCall.
+        # Tool calls come before usage so a token count is not treated as the
+        # end of a reply that still has a tool request.
+        for tool_call in pending_tools.values():
+            args, parse_error = _finalize_function_call_args(
+                dict(tool_call.args),
+                call_id=tool_call.call_id,
+                tool_name=tool_call.name,
+            )
+            yield ToolCall(
+                call_id=tool_call.call_id,
+                name=tool_call.name,
+                args=args,
+                parse_error=parse_error,
+                metadata=tool_call.metadata,
+            )
+
         ev = _usage_from_response(last_usage)
         if ev is not None:
             yield ev
-
-        # Insertion order = provider stream arrival order. Do not sort by
-        # call_id: Gemini thought_signature must stay on the first functionCall.
-        for tool_call in pending_tools.values():
-            yield tool_call
 
         yield Done(truncated=truncated)
