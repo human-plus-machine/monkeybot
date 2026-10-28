@@ -11,6 +11,9 @@ internal/
 # Local scaffolded harness config (defaults ship in monkeybot-cli scaffold_defaults/)
 /monkeybot_config/
 
+# Local agent for manual CLI testing. Recreate with `monkeybot new --dest ./cli-agent`.
+/cli-agent/
+
 # Live eval run artifacts. Baselines under regression/t4/baselines/ stay versioned.
 /regression/t4/runs/
 # Live-eval agent project local state. Live secrets come from the repo-root .env; a stray key
