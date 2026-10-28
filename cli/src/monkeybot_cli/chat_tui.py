@@ -57,6 +57,7 @@ from monkeybot_cli.chat_tui_widgets import (
     ToolCallBlock,
     TranscriptPane,
     UserTurn,
+    activity_label,
     write_osc52_clipboard,
 )
 from monkeybot_cli.config_resolve import load_config_doc, resolve_config
@@ -360,6 +361,7 @@ class ChatApp(App[int]):
         self._assistant: AssistantTurn | None = None
         self._thinking: ThinkingLine | None = None
         self._thinking_trace: ThinkingTrace | None = None
+        self._status_note = ""
         self._hitl_card: HitlCard | None = None
         self._hitl_status_flash: str | None = None
         self._ring_text = "[dim]○ 0%[/]"
@@ -433,7 +435,10 @@ class ChatApp(App[int]):
         if self._hitl_status_flash:
             parts.append(self._hitl_status_flash)
         if self._turn_active and not self._hitl_active:
-            parts.append("working · Esc interrupt")
+            if self._status_note:
+                parts.append(f"{self._status_note} · Esc interrupt")
+            else:
+                parts.append("working · Esc interrupt")
         elif self._hitl_active:
             if self._hitl_kind == "elicit":
                 parts.append("Enter submit · Ctrl-C cancel")
@@ -647,8 +652,24 @@ class ChatApp(App[int]):
                 transcript.mount(earlier, before=0)
             earlier.absorb(digest)
 
+    def _mark_activity_lead(self, widget: object) -> None:
+        """First row of a thought/tool/search stack gets the gap above it."""
+        if not isinstance(widget, (ThinkingTrace, ToolCallBlock, GroundingBlock)):
+            return
+        prev = None
+        for child in reversed(self._transcript().children):
+            if child is widget or getattr(child, "id", None) == "empty-hint":
+                continue
+            if isinstance(child, ThinkingTrace) and not child._raw.strip():
+                continue
+            prev = child
+            break
+        if not isinstance(prev, (ThinkingTrace, ToolCallBlock, GroundingBlock)):
+            widget.add_class("-lead")
+
     def _mount(self, widget: object) -> None:
         self._hide_empty_hint()
+        self._mark_activity_lead(widget)
         if self._is_counted_turn(widget):
             self._trim_old_turns()
             self._turn_count += 1
@@ -673,10 +694,33 @@ class ChatApp(App[int]):
             self._thinking.remove()
         self._thinking = None
 
+    def _drop_empty_thinking(self) -> None:
+        trace = self._thinking_trace
+        if trace is None or not trace.is_attached or trace._raw.strip():
+            return
+        already = bool(getattr(trace, "_trimmed", False))
+        trace._trimmed = True  # type: ignore[attr-defined]
+        trace.remove()
+        self._thinking_trace = None
+        if not already:
+            self._turn_count = max(0, self._turn_count - 1)
+
+    def _ensure_live_thinking(self) -> None:
+        trace = self._thinking_trace
+        if trace is not None and trace.is_attached and not trace.has_class("-done"):
+            return
+        self._clear_thinking()
+        block = ThinkingTrace()
+        self._thinking_trace = block
+        self._mount(block)
+
     def _finish_thinking_trace(self, *, clear: bool = False) -> None:
-        if self._thinking_trace is not None and self._thinking_trace.is_attached:
-            if not self._thinking_trace.has_class("-done"):
-                self._thinking_trace.finish()
+        trace = self._thinking_trace
+        if trace is not None and trace.is_attached:
+            if not trace._raw.strip():
+                self._drop_empty_thinking()
+            elif not trace.has_class("-done"):
+                trace.finish()
         if clear:
             self._thinking_trace = None
 
@@ -973,7 +1017,11 @@ class ChatApp(App[int]):
         self._follow_scroll()
 
     def _ev_thinking(self, p: dict) -> None:
-        self._show_thinking(str(p.get("text") or "thinking…"))
+        text = str(p.get("text") or "thinking…")
+        if text.strip().lower() in {"thinking…", "thinking...", "thinking"}:
+            self._ensure_live_thinking()
+            return
+        self._show_thinking(text)
 
     def _ev_thinking_clear(self, _p: dict) -> None:
         self._clear_thinking()
@@ -981,13 +1029,16 @@ class ChatApp(App[int]):
     def _ev_turn_started(self, _p: dict) -> None:
         self._turn_active = True
         self._assistant = None
+        self._status_note = ""
         self._seal_thinking_trace()
         self._clear_open_tools()
-        self._show_thinking("thinking…")
+        self._clear_thinking()
+        self._ensure_live_thinking()
         self._refresh_status()
 
     def _ev_assistant_start(self, _p: dict) -> None:
         self._clear_thinking()
+        self._drop_empty_thinking()
 
     def _ev_assistant_delta(self, p: dict) -> None:
         delta = str(p.get("delta", ""))
@@ -1027,30 +1078,49 @@ class ChatApp(App[int]):
 
     def _ev_summarizing(self, p: dict) -> None:
         tokens = int(p.get("tokens") or 0)
-        self._show_thinking(f"summarizing context ({tokens:,} tokens)")
+        self._drop_empty_thinking()
+        self._clear_thinking()
+        self._status_note = f"summarizing context ({tokens:,} tokens)"
+        self._refresh_status()
 
     def _ev_summarized(self, p: dict) -> None:
         turns = int(p.get("turns") or 0)
         noun = "turn" if turns == 1 else "turns"
-        self._show_thinking(f"summarized {turns} {noun}")
+        self._status_note = f"summarized {turns} {noun}"
+        self._refresh_status()
 
     def _ev_grounding(self, p: dict) -> None:
         self._clear_thinking()
+        self._drop_empty_thinking()
         queries = p.get("search_queries") or []
-        lines = ["**grounded search**"]
-        if queries:
-            q = ", ".join(f'"{q}"' for q in queries)
-            lines[0] += f" — {q}"
-        for source in (p.get("sources") or [])[:5]:
-            if not isinstance(source, dict):
-                continue
+        raw_sources = p.get("sources") or []
+        sources = [source for source in raw_sources if isinstance(source, dict)]
+        lines: list[str] = []
+        shown = 0
+        linked = 0
+        for source in sources:
             title = str(source.get("title") or "").strip()
             uri = str(source.get("uri") or "").strip()
             if not uri:
                 continue
+            linked += 1
+            if shown >= 5:
+                continue
+            shown += 1
             label = title or uri
             lines.append(f"- [{label}]({uri})")
-        self._mount(GroundingBlock("\n".join(lines)))
+        query_text = ", ".join(str(query).strip() for query in queries if str(query).strip())
+        if query_text and linked:
+            noun = "source" if linked == 1 else "sources"
+            hint = f"{query_text} · {linked} {noun}"
+        elif query_text:
+            hint = query_text
+        elif linked:
+            noun = "source" if linked == 1 else "sources"
+            hint = f"{linked} {noun}"
+        else:
+            hint = ""
+        self._mount(GroundingBlock("\n".join(lines), title=activity_label("Web", hint)))
 
     def _ev_turn_error(self, p: dict) -> None:
         self._close_assistant()
@@ -1157,9 +1227,10 @@ class ChatApp(App[int]):
     def _ev_stream_ended(self, _p: dict) -> None:
         self._exit_code = 1 if self._controller.stream_error else self._exit_code
 
-    def _ev_thinking_trace(self, p: dict) -> None:
-        # Legacy --show-thinking path; prefer thinking_block_* when present.
-        self._show_thinking(f"thinking  {p.get('text')}")
+    def _ev_thinking_trace(self, _p: dict) -> None:
+        # thinking_block_* owns the collapsed row. This legacy event would
+        # print the trace inline.
+        return
 
     def _ev_thinking_block_delta(self, p: dict) -> None:
         text = str(p.get("text") or "")
@@ -1230,6 +1301,7 @@ class ChatApp(App[int]):
     def _finish_turn_ui(self) -> None:
         self._turn_active = False
         self._assistant = None
+        self._status_note = ""
         self._clear_open_tools()
         self._refresh_status()
         self.query_one("#prompt", Composer).focus()
