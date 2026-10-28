@@ -27,6 +27,7 @@ Configuration (all via env vars or monkeybot.yaml sandbox.*):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -90,6 +91,18 @@ def _int_at_least(raw: str, default: int, min_: int) -> int:
     except (TypeError, ValueError):
         return default
     return value if value >= min_ else default
+
+
+_VOLUME_NAME_MAX = 63
+_VOLUME_HASH_LEN = 8
+
+
+def _volume_name(path: str, fallback: str) -> str:
+    """DNS-label volume name for ``path``: at most 63 chars, unique per path."""
+    digest = hashlib.sha1(path.encode(), usedforsecurity=False).hexdigest()[:_VOLUME_HASH_LEN]
+    prefix = re.sub(r"[^a-z0-9-]+", "-", path.lower()).strip("-")
+    prefix = prefix[: _VOLUME_NAME_MAX - _VOLUME_HASH_LEN - 1].strip("-") or fallback
+    return f"{prefix}-{digest}"
 
 
 @dataclass
@@ -331,11 +344,9 @@ class SandboxExecutor:
         volumes: list[Any] = []
         mounted_paths: set[str] = set()
         if self._config.shared_filesystem:
-            # Derive DNS-safe names from host paths (max 63 chars).
-            vol_name = re.sub(r"[^a-z0-9-]", "-", workspace_str.lower()).strip("-")[:63]
             volumes.append(
                 Volume(
-                    name=vol_name or "workspace",
+                    name=_volume_name(workspace_str, "workspace"),
                     host=Host(path=workspace_str),
                     mountPath=workspace_str,
                     readOnly=False,
@@ -344,10 +355,9 @@ class SandboxExecutor:
             mounted_paths.add(workspace_str)
             if self._skills_path is not None:
                 skills_str = str(self._skills_path)
-                skills_vol_name = re.sub(r"[^a-z0-9-]", "-", skills_str.lower()).strip("-")[:63]
                 volumes.append(
                     Volume(
-                        name=skills_vol_name or "skills",
+                        name=_volume_name(skills_str, "skills"),
                         host=Host(path=skills_str),
                         mountPath=skills_str,
                         readOnly=True,
@@ -356,12 +366,9 @@ class SandboxExecutor:
                 mounted_paths.add(skills_str)
             if self._artifacts_path is not None:
                 artifacts_str = str(self._artifacts_path)
-                artifacts_vol_name = re.sub(r"[^a-z0-9-]", "-", artifacts_str.lower()).strip("-")[
-                    :63
-                ]
                 volumes.append(
                     Volume(
-                        name=artifacts_vol_name or "artifacts",
+                        name=_volume_name(artifacts_str, "artifacts"),
                         host=Host(path=artifacts_str),
                         mountPath=artifacts_str,
                         readOnly=False,
@@ -374,10 +381,9 @@ class SandboxExecutor:
                     continue
                 if not Path(cred_path).is_file():
                     continue
-                cred_vol_name = re.sub(r"[^a-z0-9-]", "-", cred_path.lower()).strip("-")[:63]
                 volumes.append(
                     Volume(
-                        name=cred_vol_name or "gcp-creds",
+                        name=_volume_name(cred_path, "gcp-creds"),
                         host=Host(path=cred_path),
                         mountPath=cred_path,
                         readOnly=True,
