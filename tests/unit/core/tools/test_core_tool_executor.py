@@ -622,25 +622,24 @@ async def test_grep_unparseable_glob(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_grep_incomplete_scan_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from monkeybot.core.tools.workspace_service import (
-        WorkspaceError,
-        WorkspaceFileService,
-        WorkspaceSettings,
-    )
+async def test_grep_python_file_cap_returns_partial_matches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
 
     monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
     root = tmp_path
-    for i in range(5):
-        (root / f"f{i}.py").write_text(f"MARKER_{i}\n", encoding="utf-8")
-    (root / "hit.py").write_text("KNOWN_MATCH_TOKEN\n", encoding="utf-8")
+    (root / "a_hit.py").write_text("KNOWN_MATCH_TOKEN\n", encoding="utf-8")
+    (root / "z_hit.py").write_text("KNOWN_MATCH_TOKEN\n", encoding="utf-8")
     svc = WorkspaceFileService(
         root,
-        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=2, WORKSPACE_GREP_MAX_MATCHES=50),
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=1, WORKSPACE_GREP_MAX_MATCHES=50),
     )
-    with pytest.raises(WorkspaceError) as ei:
-        svc.grep("KNOWN_MATCH_TOKEN")
-    assert ei.value.code == "incomplete_scan"
+    result = svc.grep("KNOWN_MATCH_TOKEN")
+    assert result["ok"] is True
+    assert result["scan_complete"] is False
+    assert [match["path"] for match in result["matches"]] == ["a_hit.py"]
+    assert result["incomplete"]["stop_reason"] == "max_files"
 
     mem = tmp_path / "mem"
     mem.mkdir()
@@ -654,35 +653,31 @@ async def test_grep_incomplete_scan_errors(tmp_path: Path, monkeypatch: pytest.M
     )
     ex._workspace = WorkspaceFileService(
         root,
-        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=2, WORKSPACE_GREP_MAX_MATCHES=50),
+        settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=1, WORKSPACE_GREP_MAX_MATCHES=50),
     )
-    ctx = _ctx()
-    _out, err = unwrap_tool_execution_result(
+    out, err = unwrap_tool_execution_result(
         await ex.execute(
             call=ToolCall(
                 call_id="1",
                 name="grep",
                 args={"pattern": "KNOWN_MATCH_TOKEN"},
             ),
-            ctx=ctx,
+            ctx=_ctx(),
         )
     )
-    assert err is not None
-    payload = json.loads(err)
-    assert payload["ok"] is False
-    assert payload["error_kind"] == "incomplete_scan"
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["scan_complete"] is False
+    assert payload["incomplete"]["stop_reason"] == "max_files"
 
 
 @pytest.mark.asyncio
-async def test_grep_incomplete_scan_errors_with_rg(tmp_path: Path) -> None:
-    """rg path must honor WORKSPACE_GREP_MAX_FILES (not only the Python walker)."""
+async def test_grep_rg_ignores_file_cap(tmp_path: Path) -> None:
+    """rg already searched every candidate, so WORKSPACE_GREP_MAX_FILES does not apply."""
     import shutil
 
-    from monkeybot.core.tools.workspace_service import (
-        WorkspaceError,
-        WorkspaceFileService,
-        WorkspaceSettings,
-    )
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
 
     if shutil.which("rg") is None:
         pytest.skip("rg not on PATH")
@@ -695,24 +690,22 @@ async def test_grep_incomplete_scan_errors_with_rg(tmp_path: Path) -> None:
         root,
         settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=2, WORKSPACE_GREP_MAX_MATCHES=50),
     )
-    with pytest.raises(WorkspaceError) as ei:
-        svc.grep("KNOWN_MATCH_TOKEN")
-    assert ei.value.code == "incomplete_scan"
+    result = svc.grep("KNOWN_MATCH_TOKEN")
+    assert result["scan_complete"] is True
+    assert "incomplete" not in result
+    assert [match["path"] for match in result["matches"]] == ["hit.py"]
+    assert result["files_scanned"] == 6
 
 
 @pytest.mark.asyncio
-async def test_grep_rg_file_cap_uses_candidate_count_when_summary_undercounts(
+async def test_grep_rg_counts_files_from_listing_when_summary_undercounts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Fail-closed even when rg JSON begin/summary only cover matching files."""
+    """A summary that only counts matching files must not hide the files rg listed."""
     import json
     from types import SimpleNamespace
 
-    from monkeybot.core.tools.workspace_service import (
-        WorkspaceError,
-        WorkspaceFileService,
-        WorkspaceSettings,
-    )
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
 
     root = tmp_path
     for i in range(5):
@@ -748,8 +741,11 @@ async def test_grep_rg_file_cap_uses_candidate_count_when_summary_undercounts(
             ),
         ]
     )
+    listing = "".join(f"./{path.name}\n" for path in sorted(root.iterdir()) if path.is_file())
 
-    def fake_run(*_args, **_kwargs):
+    def fake_run(cmd, *_args, **_kwargs):
+        if "--files" in cmd:
+            return SimpleNamespace(returncode=0, stdout=listing, stderr="")
         return SimpleNamespace(returncode=0, stdout=undercount, stderr="")
 
     monkeypatch.setattr(
@@ -771,35 +767,30 @@ async def test_grep_rg_file_cap_uses_candidate_count_when_summary_undercounts(
         root,
         settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=2, WORKSPACE_GREP_MAX_MATCHES=50),
     )
-    with pytest.raises(WorkspaceError) as ei:
-        svc.grep("KNOWN_MATCH_TOKEN")
-    assert ei.value.code == "incomplete_scan"
+    result = svc.grep("KNOWN_MATCH_TOKEN")
+    assert result["files_scanned"] == 6
+    assert result["scan_complete"] is True
 
 
 @pytest.mark.asyncio
 async def test_grep_skipped_oversized_is_incomplete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from monkeybot.core.tools.workspace_service import (
-        WorkspaceError,
-        WorkspaceFileService,
-        WorkspaceSettings,
-    )
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
 
     monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
     root = tmp_path
-    (root / "small.py").write_text("nope\n", encoding="utf-8")
+    (root / "small.py").write_text("SECRET_TOKEN\n", encoding="utf-8")
     (root / "big.py").write_bytes(b"SECRET_TOKEN\n" + b"x" * 200)
     svc = WorkspaceFileService(
         root,
         settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILE_BYTES=50, WORKSPACE_GREP_MAX_FILES=100),
     )
-    with pytest.raises(WorkspaceError) as ei:
-        svc.grep("SECRET_TOKEN")
-    assert ei.value.code == "incomplete_scan"
-    assert ei.value.details is not None
-    assert ei.value.details["files_skipped_oversized"] == 1
-    assert ei.value.details["stop_reason"] == "skipped_files"
+    result = svc.grep("SECRET_TOKEN")
+    assert result["ok"] is True
+    assert result["scan_complete"] is False
+    assert result["incomplete"]["skipped_paths"] == ["big.py"]
+    assert [match["path"] for match in result["matches"]] == ["small.py"]
 
     mem = tmp_path / "mem"
     mem.mkdir()
@@ -815,30 +806,36 @@ async def test_grep_skipped_oversized_is_incomplete(
         root,
         settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILE_BYTES=50, WORKSPACE_GREP_MAX_FILES=100),
     )
-    _out, err = unwrap_tool_execution_result(
+    out, err = unwrap_tool_execution_result(
         await ex.execute(
             call=ToolCall(call_id="1", name="grep", args={"pattern": "SECRET_TOKEN"}),
             ctx=_ctx(),
         )
     )
-    assert err is not None
-    payload = json.loads(err)
-    assert payload["ok"] is False
-    assert payload["error_kind"] == "incomplete_scan"
-    assert payload["details"]["files_skipped_oversized"] == 1
+    assert err is None and out is not None
+    payload = json.loads(out)
+    assert payload["ok"] is True
+    assert payload["scan_complete"] is False
+    assert payload["incomplete"]["skipped_paths"] == ["big.py"]
+    assert [match["path"] for match in payload["matches"]] == ["small.py"]
 
 
+@pytest.mark.parametrize("use_rg", [False, True])
 @pytest.mark.asyncio
-async def test_grep_skipped_binary_is_incomplete(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_grep_binary_files_do_not_make_scan_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_rg: bool
 ) -> None:
-    from monkeybot.core.tools.workspace_service import (
-        WorkspaceError,
-        WorkspaceFileService,
-        WorkspaceSettings,
-    )
+    import shutil
 
-    monkeypatch.setattr("monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None)
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
+
+    if use_rg:
+        if shutil.which("rg") is None:
+            pytest.skip("rg not on PATH")
+    else:
+        monkeypatch.setattr(
+            "monkeybot.core.tools.workspace_service.shutil.which", lambda _name: None
+        )
     root = tmp_path
     (root / "a.py").write_text("hello\n", encoding="utf-8")
     (root / "blob.bin").write_bytes(b"abc\x00defSECRET")
@@ -846,38 +843,32 @@ async def test_grep_skipped_binary_is_incomplete(
         root,
         settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILES=100),
     )
-    with pytest.raises(WorkspaceError) as ei:
-        svc.grep("SECRET")
-    assert ei.value.code == "incomplete_scan"
-    assert ei.value.details is not None
-    assert ei.value.details["files_skipped_binary"] == 1
+    result = svc.grep("hello")
+    assert result["scan_complete"] is True
+    assert [match["path"] for match in result["matches"]] == ["a.py"]
 
 
 @pytest.mark.asyncio
 async def test_grep_skipped_oversized_incomplete_with_rg(tmp_path: Path) -> None:
     import shutil
 
-    from monkeybot.core.tools.workspace_service import (
-        WorkspaceError,
-        WorkspaceFileService,
-        WorkspaceSettings,
-    )
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService, WorkspaceSettings
 
     if shutil.which("rg") is None:
         pytest.skip("rg not on PATH")
 
     root = tmp_path
-    (root / "small.py").write_text("nope\n", encoding="utf-8")
+    (root / "small.py").write_text("SECRET_TOKEN\n", encoding="utf-8")
     (root / "big.py").write_bytes(b"SECRET_TOKEN\n" + b"x" * 200)
     svc = WorkspaceFileService(
         root,
         settings=WorkspaceSettings(WORKSPACE_GREP_MAX_FILE_BYTES=50, WORKSPACE_GREP_MAX_FILES=100),
     )
-    with pytest.raises(WorkspaceError) as ei:
-        svc.grep("SECRET_TOKEN")
-    assert ei.value.code == "incomplete_scan"
-    assert ei.value.details is not None
-    assert ei.value.details["files_skipped_oversized"] == 1
+    result = svc.grep("SECRET_TOKEN")
+    assert result["ok"] is True
+    assert result["scan_complete"] is False
+    assert result["incomplete"]["skipped_paths"] == ["big.py"]
+    assert [match["path"] for match in result["matches"]] == ["small.py"]
 
 
 @pytest.mark.asyncio

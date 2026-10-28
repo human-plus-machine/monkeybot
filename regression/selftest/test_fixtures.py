@@ -99,28 +99,20 @@ def test_hostile_text_fixtures_are_committed() -> None:
     assert not (SKILLS_SOURCE / SKILL_ESCAPE_NAME).exists()
 
 
-def _partial_paths(exc: WorkspaceError) -> list[str]:
-    details = exc.details or {}
-    matches = details.get("partial_matches") or []
-    return [str(match["path"]) for match in matches]
-
-
 def test_gitignore_is_honored(generated: BuiltFixtures) -> None:
     """Default grep skips ignored files.
 
     A ``file_glob`` is not used here. Ripgrep treats ``--glob`` as a whitelist
-    and will search an ignored path the glob names. The root scan also raises
-    ``incomplete_scan`` because the generated oversized and binary files are in
-    the same tree; ignored paths stay out of ``partial_matches``.
+    and will search an ignored path the glob names. The root scan is partial
+    because the generated oversized file is in the same tree; ignored paths
+    stay out of ``matches``.
     """
     service = WorkspaceFileService(generated.hostile)
-    with pytest.raises(WorkspaceError) as hidden:
-        service.grep("HOSTILE_SECRET_TOKEN")
-    assert hidden.value.code == "incomplete_scan"
-    assert "secret.txt" not in _partial_paths(hidden.value)
-    with pytest.raises(WorkspaceError) as shown:
-        service.grep("HOSTILE_SECRET_TOKEN", respect_gitignore=False)
-    assert "secret.txt" in _partial_paths(shown.value)
+    hidden = service.grep("HOSTILE_SECRET_TOKEN")
+    assert hidden["scan_complete"] is False
+    assert "secret.txt" not in [match["path"] for match in hidden["matches"]]
+    shown = service.grep("HOSTILE_SECRET_TOKEN", respect_gitignore=False)
+    assert "secret.txt" in [match["path"] for match in shown["matches"]]
 
     nested_hidden = service.grep("NESTED_IGNORE_TOKEN", root="pkg")
     assert nested_hidden["matches"] == []
@@ -145,20 +137,15 @@ def test_size_limits_are_exceeded(generated: BuiltFixtures) -> None:
     assert huge.stat().st_size >= HUGE_MIN_BYTES
     assert huge.stat().st_size > 512 * 1024
     assert huge.stat().st_size > GREP_MAX_FILE_BYTES
-    with pytest.raises(WorkspaceError) as oversized:
-        service.grep("H", file_glob=HOSTILE_HUGE_NAME)
-    assert oversized.value.code == "incomplete_scan"
-    assert oversized.value.details is not None
-    assert oversized.value.details["files_skipped_oversized"] >= 1
+    oversized = service.grep("H", file_glob=HOSTILE_HUGE_NAME)
+    assert oversized["incomplete"]["files_skipped_oversized"] >= 1
 
     blob = (generated.hostile / HOSTILE_BINARY_NAME).read_bytes()
     assert b"\x00" in blob[:8192]
     assert len(blob) <= GREP_MAX_FILE_BYTES
-    with pytest.raises(WorkspaceError) as binary:
-        service.grep("blob", file_glob=HOSTILE_BINARY_NAME)
-    assert binary.value.code == "incomplete_scan"
-    assert binary.value.details is not None
-    assert binary.value.details["files_skipped_binary"] >= 1
+    binary = service.grep("blob", file_glob=HOSTILE_BINARY_NAME)
+    assert binary["scan_complete"] is True
+    assert binary["matches"] == []
 
     entries = service.list_directory(HOSTILE_CROWD_DIR)
     assert len(entries) == CROWD_ENTRY_COUNT

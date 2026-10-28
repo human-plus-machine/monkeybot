@@ -1,6 +1,6 @@
 id: regression/t2/loop/scenarios/file/grep_gitignore_default
 case: T2-FILE-24
-description: Default grep misses secret.txt; respect_gitignore false finds it inside the incomplete scan; nested pkg/.gitignore is scoped.
+description: Default grep misses secret.txt; respect_gitignore false finds it; nested pkg/.gitignore is scoped. huge.txt is reported as skipped, not raised as an error.
 mode: scripted
 driver: loop
 executor: real
@@ -40,13 +40,14 @@ script:
     text: Gitignore was honored, including the nested file.
   - type: done
 assertions:
+  max_tool_errors: 0
   events_sequence:
   - type: ToolCallResult
-    error:
-      regex: '\A(?![\s\S]*secret\.txt)[\s\S]*incomplete_scan'
+    result:
+      regex: '\A(?![\s\S]*secret\.txt)[\s\S]*"matches": \[\][\s\S]*"scan_complete": false[\s\S]*"skipped_paths": \["huge\.txt"\]'
   - type: ToolCallResult
-    error:
-      regex: secret\.txt
+    result:
+      regex: '"path": "secret\.txt"'
   - type: ToolCallResult
     result:
       regex: '\A(?![\s\S]*hidden\.txt)[\s\S]*"matches": \[\]'

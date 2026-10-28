@@ -37,7 +37,7 @@ Gaps: no T2 runs the real executor for escapes, stale reads, incomplete scans, p
 | T2-FILE-22 | `glob_skips_noise` | `**/*` omits `node_modules`, `.venv`, `build`; `node_modules/**` includes it. |
 | T2-FILE-23 | `glob_cap_incomplete` | Over `WORKSPACE_GLOB_MAX_PATHS`: `ok:false`, `incomplete_scan`, never an empty success. |
 | T2-FILE-24 | `grep_gitignore_default` | Default misses `secret.txt`; `respect_gitignore:false` finds it; nested `pkg/.gitignore` scoped. |
-| T2-FILE-25 | `grep_incomplete_scan` | Oversized file in scope: `incomplete_scan`. |
+| T2-FILE-25 | `grep_incomplete_scan` | Oversized file in scope: ok result, `scan_complete:false`, file listed in `incomplete.skipped_paths`. |
 | T2-FILE-26 | `grep_pagination` | `max_matches` + `offset` page through all matches; `total_match_count` stable. |
 | T2-FILE-27 | `grep_rg_vs_python_parity` | Same results with rg present and absent for an rg-safe pattern; lookaround pattern uses Python. |
 | T2-FILE-28 | `grep_invalid_regex` | `invalid_regex`. |
