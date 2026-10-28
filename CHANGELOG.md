@@ -6,7 +6,16 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Core
+### CLI
+
+### Fixed
+
+- `uv tool install` of the CLI resolves again. browser-harness 0.1.13 pins Pillow 12.3.0, and declaring Pillow 13 as a normal dependency conflicts with that pin. Lock and sync already override it; tool and pip installs now pass the same override.
+- The managed memory runtime installs `monkeybot-browser-mcp` next to `monkeybot[memory]`. A cached runtime that cannot import `browser_mcp` is rebuilt, so a local CLI gateway can start the browser server with its own interpreter.
+- The managed memory runtime also installs the `web-search` extra. DuckDuckGo is the default search backend, and a cached runtime that cannot import `ddgs` is rebuilt.
+- Chat inserts a newline on Shift+Enter, Alt+Enter, and Ctrl+J. Enter still sends the message. Terminals that report those chords as a modified carriage return are recognized too.
+
+## [core v3.11.0] - 2026-10-28
 
 ### Added
 
@@ -31,15 +40,6 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - OpenAI-compatible providers still import when that tiktoken encoding file cannot be read at startup. Token counting raises the same error on the turn that needs the encoder, and a later successful read is cached as usual.
 - Cancelling gateway, harness, or subagent startup while an `autoConnect` server is still connecting closes that server instead of leaving its process behind.
 - `mempalace search` from `run_command` no longer fails with `Operation not permitted (os error 1)` on a palace using the `minilm` embedder. The command jail now lets `mempalace`, and only `mempalace`, read Chroma's installed MiniLM model under `~/.cache/chroma/onnx_models`.
-
-### CLI
-
-### Fixed
-
-- `uv tool install` of the CLI resolves again. browser-harness 0.1.13 pins Pillow 12.3.0, and declaring Pillow 13 as a normal dependency conflicts with that pin. Lock and sync already override it; tool and pip installs now pass the same override.
-- The managed memory runtime installs `monkeybot-browser-mcp` next to `monkeybot[memory]`. A cached runtime that cannot import `browser_mcp` is rebuilt, so a local CLI gateway can start the browser server with its own interpreter.
-- The managed memory runtime also installs the `web-search` extra. DuckDuckGo is the default search backend, and a cached runtime that cannot import `ddgs` is rebuilt.
-- Chat inserts a newline on Shift+Enter, Alt+Enter, and Ctrl+J. Enter still sends the message. Terminals that report those chords as a modified carriage return are recognized too.
 
 ## [cli v0.11.0] - 2026-10-22
 
