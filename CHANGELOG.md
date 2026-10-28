@@ -6,6 +6,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Core
+
 ### Added
 
 - `POST /api/chat-title` names a chat from its first user message and first assistant reply. The title is null until that reply exists, or when the model call fails, so the caller can retry.
@@ -14,11 +16,9 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - `grep` returns the matches it found when a scan is partial. The result stays `ok: true` with `scan_complete: false`, and `incomplete` says what was not searched and how to finish. An empty match list proves absence only when `scan_complete` is true. Binary files no longer make a scan incomplete. The ripgrep path no longer stops at `WORKSPACE_GREP_MAX_FILES` or re-reads every file to classify it; that cap applies only to the Python walker. A ripgrep timeout is still an `incomplete_scan` error.
-
 - The `memory` extra requires MemPalace 3.11. Installs take 3.11 bug-fix releases but no longer resolve 3.12 or later.
 - Memory uses MemPalace's default `minilm` embedder. `embeddinggemma-300m` was not a MemPalace model name; older builds filed those palaces with MiniLM. Startup rewrites that name to `minilm` and leaves the existing index in place.
 - An unpriced model logs `unknown model for pricing lookup` once per process instead of on every usage event.
-
 - MCP servers marked `autoConnect` connect in parallel. Boot returns after reading `mcp.json` and finishes those connects in the background; the first turn waits only for the time still left and still sees the tools. `MCP_STRICT_LOAD` still waits for them and fails startup on a connect error.
 - The gateway opens the model provider's HTTP connection at startup with a models-list request and keeps that socket for 120 seconds, so the first turn does not wait on a cold connection.
 - The harness prompt tells the model to issue independent `read_file` calls in one response instead of one file per turn. `grep` says to read the matching paths together once they are known.
@@ -27,14 +27,19 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- `uv tool install` of the CLI resolves again. browser-harness 0.1.13 pins Pillow 12.3.0, and declaring Pillow 13 as a normal dependency conflicts with that pin. Lock and sync already override it; tool and pip installs now pass the same override.
 - Jailed headless Chromium can allocate its WebGL backbuffer again. Chrome 145 needs the IOSurface user client, and SwiftShader has to be requested explicitly.
-
 - OpenAI-compatible providers still import when that tiktoken encoding file cannot be read at startup. Token counting raises the same error on the turn that needs the encoder, and a later successful read is cached as usual.
 - Cancelling gateway, harness, or subagent startup while an `autoConnect` server is still connecting closes that server instead of leaving its process behind.
+- `mempalace search` from `run_command` no longer fails with `Operation not permitted (os error 1)` on a palace using the `minilm` embedder. The command jail now lets `mempalace`, and only `mempalace`, read Chroma's installed MiniLM model under `~/.cache/chroma/onnx_models`.
+
+### CLI
+
+### Fixed
+
+- `uv tool install` of the CLI resolves again. browser-harness 0.1.13 pins Pillow 12.3.0, and declaring Pillow 13 as a normal dependency conflicts with that pin. Lock and sync already override it; tool and pip installs now pass the same override.
 - The managed memory runtime installs `monkeybot-browser-mcp` next to `monkeybot[memory]`. A cached runtime that cannot import `browser_mcp` is rebuilt, so a local CLI gateway can start the browser server with its own interpreter.
 - The managed memory runtime also installs the `web-search` extra. DuckDuckGo is the default search backend, and a cached runtime that cannot import `ddgs` is rebuilt.
-- `mempalace search` from `run_command` no longer fails with `Operation not permitted (os error 1)` on a palace using the `minilm` embedder. The command jail now lets `mempalace`, and only `mempalace`, read Chroma's installed MiniLM model under `~/.cache/chroma/onnx_models`.
+- Chat inserts a newline on Shift+Enter, Alt+Enter, and Ctrl+J. Enter still sends the message. Terminals that report those chords as a modified carriage return are recognized too.
 
 ## [cli v0.11.0] - 2026-10-22
 
