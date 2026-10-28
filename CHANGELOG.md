@@ -6,17 +6,17 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Core
-
-### Fixed
-
-- Sandbox volume names stay valid DNS labels and unique per path. The name used to be cut to 63 characters after dashes were stripped, so a cut could leave a trailing `-` and OpenSandbox rejected it with HTTP 422 on long workspace paths. Names now end in an 8-character hash of the path.
-
 ### CLI
 
 ### Changed
 
 - Chat shows thoughts, tool calls, and web sources as one collapsed row. The reply no longer carries an assistant label.
+
+## [core v3.11.1] - 2026-10-28
+
+### Fixed
+
+- Sandbox volume names stay valid DNS labels and unique per path. The name used to be cut to 63 characters after dashes were stripped, so a cut could leave a trailing `-` and OpenSandbox rejected it with HTTP 422 on long workspace paths. Names now end in an 8-character hash of the path.
 
 ## [cli v0.11.1] - 2026-10-28
 
