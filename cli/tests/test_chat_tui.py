@@ -592,6 +592,10 @@ def test_grounding_mounts_markdown_links(tmp_path: Path) -> None:
             await pilot.pause()
             blocks = list(app.query(GroundingBlock))
             assert len(blocks) == 1
+            assert blocks[0].collapsed is True
+            assert "Web" in str(blocks[0].title)
+            assert "monkeys" in str(blocks[0].title)
+            assert "1 source" in str(blocks[0].title)
             assert "https://example.com" in blocks[0].markdown
             assert "[Docs]" in blocks[0].markdown
 
@@ -1212,23 +1216,35 @@ def test_thinking_trace_streams_and_finishes(tmp_path: Path) -> None:
             await pilot.pause()
             assert app._thinking_trace is not None
             assert "The user said hello" in app._thinking_trace._raw
-            header = app._thinking_trace.query_one(".header")
-            assert "Thinking" in str(header.render())
+            assert app._thinking_trace.collapsed is True
+            assert "Thinking" in str(app._thinking_trace.title)
             assert not app._thinking_trace.has_class("-done")
 
             app._ev_thinking_block_delta({"text": " — reply briefly."})
             await pilot.pause()
             assert "reply briefly" in app._thinking_trace._raw
+            assert app._thinking_trace.collapsed is True
 
             app._ev_thinking_block_complete({})
             await pilot.pause()
-            # Finished block stays mounted; pointer kept for late re-entry.
+            # Finished block stays mounted and collapsed; pointer kept for late re-entry.
             assert app._thinking_trace is not None
             assert app._thinking_trace.has_class("-done")
+            assert app._thinking_trace.collapsed is True
+            assert "Thought" in str(app._thinking_trace.title)
+            assert "hello" in str(app._thinking_trace.title)
+            assert app._thinking_trace._title.collapsed_symbol == "▸"
             traces = list(app.query(ThinkingTrace))
             assert len(traces) == 1
             assert traces[0].has_class("-done")
+            assert traces[0].collapsed is True
             assert "The user said hello — reply briefly." in traces[0]._raw
+
+            await pilot.click(traces[0].children[0])
+            await pilot.pause()
+            assert traces[0].collapsed is False
+            body = traces[0].query_one(".thinking-body")
+            assert "The user said hello — reply briefly." in str(body.render())
 
             app._ev_turn_complete({})
             await pilot.pause()
@@ -1272,6 +1288,7 @@ def test_late_thinking_delta_reopens_same_block(tmp_path: Path) -> None:
             assert len(traces) == 1
             assert "ask what they'd like me to build." in traces[0]._raw
             assert traces[0].has_class("-done")
+            assert traces[0].collapsed is True
 
             # Thinking block must still sit above the assistant turn.
             children = list(app._transcript().children)

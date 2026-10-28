@@ -633,7 +633,7 @@ wheels = [
 
 [[package]]
 name = "monkeybot"
-version = "3.10.0"
+version = "3.11.0"
 source = { editable = "../" }
 dependencies = [
     { name = "aiosqlite" },
@@ -725,6 +725,7 @@ provides-extras = ["memory", "gemini", "vertex", "claude", "vertex-claude", "bed
 dev = [
     { name = "anthropic", extras = ["vertex", "bedrock"], specifier = ">=0.40.0" },
     { name = "asgi-lifespan", specifier = ">=2.1.0" },
+    { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "monkeybot", extras = ["memory"] },
     { name = "monkeybot", extras = ["postgres"] },
     { name = "monkeybot-cli", editable = "." },
@@ -773,7 +774,7 @@ dev = [{ name = "pytest", specifier = ">=8.0.0" }]
 
 [[package]]
 name = "monkeybot-cli"
-version = "0.11.0"
+version = "0.11.1"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

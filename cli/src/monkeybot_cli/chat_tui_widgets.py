@@ -39,6 +39,38 @@ def _plain_title(text: str) -> Content:
     return Content.from_text(text, markup=False)
 
 
+_KIND_WIDTH = 7
+_HINT_MAX = 72
+
+
+def activity_label(kind: str, hint: str = "") -> str:
+    """One activity row: kind padded so hints share a column (``Thought  …``)."""
+    kind = " ".join(kind.split())
+    hint = " ".join(hint.split())
+    if len(hint) > _HINT_MAX:
+        hint = hint[:_HINT_MAX] + "…"
+    if not hint:
+        return kind
+    return f"{kind:<{_KIND_WIDTH}}  {hint}"
+
+
+def activity_label_from_title(title: str) -> str:
+    """Align a ``Kind  hint`` title that ``tool_collapsed_title`` already built."""
+    kind, sep, hint = title.partition("  ")
+    if not sep:
+        return activity_label(kind)
+    return activity_label(kind, hint)
+
+
+def _set_collapsed_mark(widget: Collapsible, mark: str) -> None:
+    """The disclosure symbol is the row's only glyph (spinner, ▸, ✓, ✗)."""
+    title = widget._title
+    if title.collapsed_symbol == mark:
+        return
+    title.collapsed_symbol = mark
+    title._update_label()
+
+
 def write_osc52_clipboard(app: App[object], text: str) -> bool:
     """Best-effort OSC 52 clipboard write via the Textual driver."""
     try:
@@ -110,59 +142,105 @@ class ThinkingLine(Static):
             self.update(Text(f"{self._label}  {elapsed}s", style="dim italic"))
 
 
-class ThinkingTrace(Vertical):
-    """OpenCode-style thinking block: ``Thinking...`` / body / ``...done thinking.``"""
+class ThinkingTrace(Collapsible):
+    """Collapsed thinking row. Click it (or focus it and press Enter) to read the trace."""
 
     DEFAULT_CSS = """
     ThinkingTrace {
         width: 1fr;
         height: auto;
-        margin-top: 1;
+        background: transparent;
+        border-top: none;
         padding: 0 1;
-    }
-    ThinkingTrace > .header {
-        height: 1;
+        margin-top: 0;
         color: $muted;
-        text-style: bold dim;
     }
-    ThinkingTrace > .body {
+    ThinkingTrace.-lead {
+        margin-top: 1;
+    }
+    ThinkingTrace > Contents {
+        width: 1fr;
         height: auto;
-        color: $muted;
-        text-style: dim;
+        padding: 0 1 1 3;
+        color: $disabled;
     }
-    ThinkingTrace > .footer {
-        height: 1;
-        color: $muted;
-        text-style: bold dim;
-        display: none;
-    }
-    ThinkingTrace.-done > .footer {
-        display: block;
+    ThinkingTrace .thinking-body {
+        width: 1fr;
+        height: auto;
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        color: $disabled;
     }
     """
 
     def __init__(self, **kwargs: object) -> None:
-        super().__init__(**kwargs)  # type: ignore[arg-type]
         self._raw = ""
+        self._done = False
+        self._spin_i = 0
+        self._spin_timer: Timer | None = None
+        self._body = Static("", classes="thinking-body")
+        super().__init__(
+            self._body,
+            title=_plain_title("Thinking…"),  # type: ignore[arg-type]
+            collapsed=True,
+            collapsed_symbol="▸",
+            expanded_symbol="▾",
+            **kwargs,  # type: ignore[arg-type]
+        )
 
-    def compose(self) -> ComposeResult:
-        yield Static("Thinking...", classes="header")
-        yield Static("", classes="body")
-        yield Static("...done thinking.", classes="footer")
+    def on_mount(self) -> None:
+        self._start_spinner()
+
+    def on_unmount(self) -> None:
+        self._stop_spinner()
 
     def append_delta(self, chunk: str) -> None:
         if not chunk:
             return
         self._raw += chunk
-        with contextlib.suppress(NoMatches):
-            self.query_one(".body", Static).update(Text(self._raw, style="dim"))
+        self._body.update(Text(self._raw, style="dim"))
 
     def finish(self) -> None:
+        self._done = True
+        self._stop_spinner()
         self.add_class("-done")
+        _set_collapsed_mark(self, "▸")
+        self.title = _plain_title(activity_label("Thought", self._preview()))  # type: ignore[assignment]
 
     def reopen(self) -> None:
         """Allow late thinking deltas to continue this block after a premature close."""
+        self._done = False
         self.remove_class("-done")
+        self.title = _plain_title("Thinking…")  # type: ignore[assignment]
+        _set_collapsed_mark(self, "▸")
+        self._start_spinner()
+
+    def _preview(self) -> str:
+        return " ".join(self._raw.split())
+
+    def _start_spinner(self) -> None:
+        if self._done or not self.is_mounted:
+            return
+        self.title = _plain_title("Thinking…")  # type: ignore[assignment]
+        if not bool(getattr(self.app, "animations_enabled", True)):
+            _set_collapsed_mark(self, "▸")
+            return
+        if self._spin_timer is None:
+            self._spin_timer = self.set_interval(0.08, self._tick_spinner)
+        self._tick_spinner()
+
+    def _stop_spinner(self) -> None:
+        if self._spin_timer is not None:
+            self._spin_timer.stop()
+            self._spin_timer = None
+
+    def _tick_spinner(self) -> None:
+        if self._done:
+            return
+        glyph = _SPIN[self._spin_i % len(_SPIN)]
+        self._spin_i += 1
+        _set_collapsed_mark(self, glyph)
 
 
 class SystemLine(Static):
@@ -193,32 +271,50 @@ class SystemLine(Static):
         self.update(Text(self.body, style=style))
 
 
-class GroundingBlock(Vertical):
-    """Grounding sources with clickable markdown links."""
+class GroundingBlock(Collapsible):
+    """Collapsed web-search row. Open it to read the source links."""
 
     DEFAULT_CSS = """
     GroundingBlock {
         width: 1fr;
         height: auto;
-        margin-top: 1;
+        background: transparent;
+        border-top: none;
         padding: 0 1;
+        margin-top: 0;
+        color: $muted;
     }
-    GroundingBlock > Markdown {
+    GroundingBlock.-lead {
+        margin-top: 1;
+    }
+    GroundingBlock > Contents {
+        width: 1fr;
+        height: auto;
+        padding: 0 1 1 3;
+        color: $disabled;
+    }
+    GroundingBlock .grounding-body {
+        width: 1fr;
         height: auto;
         margin: 0;
         padding: 0;
         background: transparent;
-        color: $muted;
+        color: $disabled;
     }
     """
 
-    def __init__(self, markdown: str, **kwargs: object) -> None:
-        super().__init__(**kwargs)  # type: ignore[arg-type]
+    def __init__(self, markdown: str, *, title: str = "Web", **kwargs: object) -> None:
         self.markdown = markdown
         self.mounted_at = datetime.now()
-
-    def compose(self) -> ComposeResult:
-        yield Markdown(self.markdown, open_links=True)
+        body = Markdown(markdown, open_links=True, classes="grounding-body")
+        super().__init__(
+            body,
+            title=_plain_title(title),  # type: ignore[arg-type]
+            collapsed=True,
+            collapsed_symbol="▸",
+            expanded_symbol="▾",
+            **kwargs,  # type: ignore[arg-type]
+        )
 
 
 class EarlierTurns(Collapsible):
@@ -289,7 +385,7 @@ class UserTurn(Static):
         content = Text()
         if self.show_timestamp:
             content.append(self.mounted_at.strftime("%H:%M:%S "), style="dim")
-        content.append("you\n", style="bold")
+        content.append("you\n", style="dim")
         content.append(self.body)
         self.update(content)
 
@@ -304,7 +400,7 @@ class AssistantTurn(Vertical):
         margin-top: 1;
         padding: 0 1;
     }
-    AssistantTurn > .role {
+    AssistantTurn > .stamp {
         height: 1;
         color: $muted;
         text-style: dim;
@@ -335,22 +431,24 @@ class AssistantTurn(Vertical):
         self.show_timestamp = show_timestamp
 
     def compose(self) -> ComposeResult:
-        yield Static(self._role_label(), classes="role")
+        yield Static("", classes="stamp")
         yield Markdown("", open_links=False, classes="body")
         yield Static("▍", classes="cursor")
 
-    def _role_label(self) -> str:
+    def _stamp_text(self) -> str:
         if self.show_timestamp:
-            return f"{self.mounted_at.strftime('%H:%M:%S')}  assistant"
-        return "assistant"
+            return self.mounted_at.strftime("%H:%M:%S")
+        return ""
 
     def refresh_label(self) -> None:
         with contextlib.suppress(NoMatches):
-            self.query_one(".role", Static).update(self._role_label())
+            stamp = self.query_one(".stamp", Static)
+            text = self._stamp_text()
+            stamp.update(text)
+            stamp.display = bool(text)
 
     def on_mount(self) -> None:
-        # Flush timer is started lazily on first delta (and paused when drained).
-        return
+        self.refresh_label()
 
     def append_delta(self, chunk: str) -> None:
         if not chunk:
@@ -403,6 +501,9 @@ class ToolCallBlock(Collapsible):
         margin-top: 0;
         color: $muted;
     }
+    ToolCallBlock.-lead {
+        margin-top: 1;
+    }
     ToolCallBlock > Contents {
         width: 1fr;
         height: auto;
@@ -452,10 +553,10 @@ class ToolCallBlock(Collapsible):
         )
         super().__init__(
             self._detail,
-            title=_plain_title(f"  {title}"),  # type: ignore[arg-type]
+            title=_plain_title(activity_label_from_title(title)),  # type: ignore[arg-type]
             collapsed=True,
-            collapsed_symbol="▶",
-            expanded_symbol="▼",
+            collapsed_symbol="▸",
+            expanded_symbol="▾",
             classes="running",
             **kwargs,  # type: ignore[arg-type]
         )
@@ -466,14 +567,14 @@ class ToolCallBlock(Collapsible):
             self._spin_timer = self.set_interval(0.08, self._tick_spinner)
             self._tick_spinner()
         else:
-            self.title = _plain_title(f"  {self.display_label}")  # type: ignore[assignment]
+            _set_collapsed_mark(self, "▸")
 
     def _tick_spinner(self) -> None:
         if self.status != "running":
             return
         glyph = _SPIN[self._spin_i % len(_SPIN)]
         self._spin_i += 1
-        self.title = _plain_title(f"  {glyph} {self.display_label}")  # type: ignore[assignment]
+        _set_collapsed_mark(self, glyph)
 
     def mark_finished(self, *, error: object = None, result: str = "") -> None:
         self.status = "error" if error else "ok"
@@ -482,8 +583,8 @@ class ToolCallBlock(Collapsible):
         if self._spin_timer is not None:
             self._spin_timer.stop()
             self._spin_timer = None
-        mark = "✗" if error else "✓"
-        self.title = _plain_title(f"  {mark} {self.display_label}")  # type: ignore[assignment]
+        _set_collapsed_mark(self, "✗" if error else "✓")
+        self.title = _plain_title(activity_label_from_title(self.display_label))  # type: ignore[assignment]
         self._detail.update(
             format_tool_expand_body(
                 self.tool_name,
