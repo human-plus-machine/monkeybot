@@ -13,13 +13,14 @@ run this suite. Tests are structured to catch real failure points:
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
+from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor, _volume_name
 from monkeybot.core.tools.terminal import ExecutionResult, SecurityError
 from testkit.sandbox import (
     _make_create_mock,
@@ -433,6 +434,67 @@ class TestSandboxExecutorLayoutMounts:
             executor._remote_requests_mounted_path(["-c", f"cat {workspace}-extra/input.txt"], None)
             is False
         )
+
+
+# ---------------------------------------------------------------------------
+# Volume names — valid DNS labels, unique per path
+# ---------------------------------------------------------------------------
+
+_DNS_LABEL = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+_SF_WORKSPACE = "/tmp/sf-workspaces/routine-06ae18c8-48d8-73b2-8000-411c94a86dc2"
+
+
+class TestVolumeNames:
+    def test_sf_routine_paths_are_valid_dns_labels(self):
+        """The 63rd char of the SF workspace path is the '/' before ``.turns``;
+        it used to survive truncation as a trailing '-' and OpenSandbox 422'd."""
+        run_id = "0f1e2d3c"
+        for path in (
+            _SF_WORKSPACE,
+            f"{_SF_WORKSPACE}/.turns/{run_id}/skills",
+            f"{_SF_WORKSPACE}/.turns/{run_id}/artifacts",
+        ):
+            name = _volume_name(path, "workspace")
+            assert _DNS_LABEL.match(name), name
+            assert len(name) <= 63
+
+    @pytest.mark.asyncio
+    async def test_executor_sends_only_valid_names(self, tmp_path):
+        workspace = tmp_path / ("w" * 40) / "routine-06ae18c8-48d8-73b2-8000-411c94a86dc2"
+        skills = workspace / ".turns" / "run-1" / "skills"
+        artifacts = workspace / ".turns" / "run-1" / "artifacts"
+        skills.mkdir(parents=True)
+        artifacts.mkdir(parents=True)
+        cfg = SandboxConfig(True, "http://localhost:8080", None, "test", 30)
+        executor = SandboxExecutor(cfg, workspace, skills_path=skills, artifacts_path=artifacts)
+        mock_cls, _ = _make_create_mock()
+        osb = _make_opensandbox_module(mock_cls)
+
+        with patch.dict(sys.modules, _opensandbox_sys_modules(osb)):
+            await executor.execute("echo", ["ok"])
+
+        names = [v.name for v in mock_cls.create.call_args.kwargs["volumes"]]
+        assert len(names) == 3
+        assert all(_DNS_LABEL.match(n) and len(n) <= 63 for n in names), names
+        assert len(set(names)) == 3
+
+    def test_paths_sharing_first_63_chars_get_different_names(self):
+        base = "/" + "a" * 70
+        assert _volume_name(f"{base}/skills", "x") != _volume_name(f"{base}/artifacts", "x")
+
+    def test_same_path_gives_same_name(self):
+        assert _volume_name(_SF_WORKSPACE, "x") == _volume_name(_SF_WORKSPACE, "x")
+
+    @pytest.mark.parametrize("path", ["", "///", "+++"])
+    def test_empty_or_all_symbol_path_falls_back(self, path):
+        name = _volume_name(path, "workspace")
+        assert re.fullmatch(r"workspace-[0-9a-f]{8}", name)
+
+    def test_short_path_keeps_readable_prefix(self):
+        assert re.fullmatch(r"a-b-[0-9a-f]{8}", _volume_name("/a/b", "workspace"))
+
+    def test_runs_of_invalid_chars_collapse(self):
+        assert re.fullmatch(r"a-b-[0-9a-f]{8}", _volume_name("/a//..__b", "workspace"))
 
 
 # ---------------------------------------------------------------------------
