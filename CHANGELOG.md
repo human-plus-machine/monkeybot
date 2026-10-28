@@ -13,6 +13,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `grep` returns the matches it found when a scan is partial. The result stays `ok: true` with `scan_complete: false`, and `incomplete` says what was not searched and how to finish. An empty match list proves absence only when `scan_complete` is true. Binary files no longer make a scan incomplete. The ripgrep path no longer stops at `WORKSPACE_GREP_MAX_FILES` or re-reads every file to classify it; that cap applies only to the Python walker. A ripgrep timeout is still an `incomplete_scan` error.
+
 - The `memory` extra requires MemPalace 3.11. Installs take 3.11 bug-fix releases but no longer resolve 3.12 or later.
 - Memory uses MemPalace's default `minilm` embedder. `embeddinggemma-300m` was not a MemPalace model name; older builds filed those palaces with MiniLM. Startup rewrites that name to `minilm` and leaves the existing index in place.
 - An unpriced model logs `unknown model for pricing lookup` once per process instead of on every usage event.

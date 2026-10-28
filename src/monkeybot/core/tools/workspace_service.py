@@ -53,6 +53,7 @@ class _GlobTimeout(Exception):
 
 
 _GREP_MAX_CONTEXT = 3
+_GREP_SKIPPED_PATHS_CAP = 20
 
 # Wall-clock budget for the optional ripgrep accelerator. On expiry we fail closed
 # (incomplete_scan) instead of falling back to an unbounded Python walk.
@@ -121,6 +122,15 @@ class GlobResult(TypedDict):
     skipped_dirs: NotRequired[list[str]]
 
 
+class GrepIncomplete(TypedDict):
+    stop_reason: str
+    files_skipped_oversized: int
+    files_skipped_unreadable: int
+    skipped_paths: list[str]
+    skipped_paths_omitted: int
+    hint: str
+
+
 class GrepResult(TypedDict):
     ok: bool
     root: str
@@ -133,6 +143,7 @@ class GrepResult(TypedDict):
     duration_ms: int
     next_offset: NotRequired[int]
     files: NotRequired[list[str]]
+    incomplete: NotRequired[GrepIncomplete]
 
 
 @dataclass
@@ -316,62 +327,47 @@ def _path_matches_globs(rel_path: str, globs: list[str] | None) -> bool:
     return False
 
 
-def _raise_if_grep_files_skipped(
+def _grep_incomplete(
     *,
-    oversized: int,
-    binary: int,
-    unreadable: int,
-    files_scanned: int,
-    max_file_bytes: int,
-    partial_matches: list[GrepMatch] | None = None,
-) -> None:
-    """Fail closed when candidates were skipped — empty hits must not imply absence."""
-    total = oversized + binary + unreadable
-    if total == 0:
-        return
-    parts: list[str] = []
-    if oversized:
-        parts.append(f"{oversized} oversized (>{max_file_bytes} bytes)")
-    if binary:
-        parts.append(f"{binary} binary")
-    if unreadable:
-        parts.append(f"{unreadable} unreadable")
-    details: dict[str, object] = {
-        "stop_reason": "skipped_files",
-        "files_scanned": files_scanned,
-        "files_skipped_oversized": oversized,
-        "files_skipped_binary": binary,
-        "files_skipped_unreadable": unreadable,
-    }
-    if partial_matches:
-        cap = min(50, len(partial_matches))
-        details["partial_matches"] = partial_matches[:cap]
-        details["partial_matches_omitted"] = len(partial_matches) - cap
-    raise WorkspaceError(
-        f"grep skipped {total} candidate file(s) ({', '.join(parts)}); "
-        "results are incomplete and cannot be used to conclude absence",
-        code="incomplete_scan",
-        details=details,
-    )
-
-
-def _raise_grep_max_files(
-    files_scanned: int,
+    hit_max_files: bool,
     max_files: int,
-    extra_details: dict[str, object] | None = None,
-) -> None:
-    details: dict[str, object] = {
-        "stop_reason": "max_files",
-        "files_scanned": files_scanned,
+    oversized: list[str],
+    unreadable: list[str],
+    max_file_bytes: int,
+) -> GrepIncomplete | None:
+    """Partial-scan notice, or ``None`` when every text candidate was searched.
+
+    Binary files are not counted. A binary file cannot hold a text match, so
+    skipping one hides nothing and must not mark the scan incomplete.
+    """
+    if not hit_max_files and not oversized and not unreadable:
+        return None
+    skipped = sorted([*oversized, *unreadable])
+    shown = skipped[:_GREP_SKIPPED_PATHS_CAP]
+    if hit_max_files:
+        # The walk stopped at the cap. Skip counts are still reported, but the
+        # reason the rest of the tree was not searched is the cap.
+        stop_reason = "max_files"
+        hint = (
+            f"Stopped after {max_files} files. Matches above are real, but an empty "
+            "or short list does not prove absence. Narrow `root` or pass `file_glob` "
+            "to search the rest."
+        )
+    else:
+        stop_reason = "skipped_files"
+        hint = (
+            "Files in skipped_paths were not searched "
+            f"(over {max_file_bytes} bytes or unreadable). Everything else was. "
+            "read_file a skipped path if it could hold the match."
+        )
+    return {
+        "stop_reason": stop_reason,
+        "files_skipped_oversized": len(oversized),
+        "files_skipped_unreadable": len(unreadable),
+        "skipped_paths": shown,
+        "skipped_paths_omitted": len(skipped) - len(shown),
+        "hint": hint,
     }
-    if extra_details:
-        details.update(extra_details)
-    raise WorkspaceError(
-        f"grep scanned {files_scanned} files (limit {max_files}) and stopped early; "
-        "results are incomplete and cannot be used to conclude absence",
-        code="incomplete_scan",
-        details=details,
-    )
 
 
 def _grep_classify(fp: Path, max_file_bytes: int) -> tuple[str, bytes | None]:
@@ -389,14 +385,6 @@ def _grep_classify(fp: Path, max_file_bytes: int) -> tuple[str, bytes | None]:
     if b"\x00" in data[:8192]:
         return "binary", None
     return "ok", data
-
-
-def _tally_grep_skip(kind: str, tallies: dict[str, int]) -> bool:
-    """Bump skip tallies for a non-ok classify result. Returns True when skipped."""
-    if kind == "ok":
-        return False
-    tallies[kind] = tallies.get(kind, 0) + 1
-    return True
 
 
 def _utf8_byte_offsets_to_char_offsets(
@@ -1499,7 +1487,6 @@ class WorkspaceFileService:
                     globs=globs,
                     max_matches=max_m,
                     offset=off,
-                    max_files=max_files,
                     max_file_bytes=max_file_bytes,
                     t0=t0,
                     context=context,
@@ -1537,6 +1524,7 @@ class WorkspaceFileService:
         offset: int,
         t0: float,
         files_only: bool = False,
+        incomplete: GrepIncomplete | None = None,
     ) -> GrepResult:
         duration_ms = int((time.monotonic() - t0) * 1000)
         files: list[str] | None = None
@@ -1550,12 +1538,14 @@ class WorkspaceFileService:
             "match_count": len(matches),
             "total_match_count": total_match_count,
             "files_scanned": files_scanned,
-            "scan_complete": True,
+            "scan_complete": incomplete is None,
             "duration_ms": duration_ms,
         }
         if files is not None:
             payload["files"] = files
             payload["matches"] = []
+        if incomplete is not None:
+            payload["incomplete"] = incomplete
         next_offset = offset + len(matches)
         if next_offset < total_match_count:
             payload["next_offset"] = next_offset
@@ -1636,11 +1626,18 @@ class WorkspaceFileService:
         files_scanned = 0
         total_match_count = 0
         candidates_remaining = False
-        tallies = {"oversized": 0, "binary": 0, "unreadable": 0}
+        oversized: list[str] = []
+        unreadable: list[str] = []
 
         for fp, rel in self._iter_grep_candidates(base, globs, respect_gitignore=respect_gitignore):
             kind, data = _grep_classify(fp, max_file_bytes)
-            if _tally_grep_skip(kind, tallies):
+            if kind == "binary":
+                continue
+            if kind == "oversized":
+                oversized.append(rel)
+                continue
+            if kind == "unreadable":
+                unreadable.append(rel)
                 continue
             if files_scanned >= max_files:
                 candidates_remaining = True
@@ -1670,26 +1667,6 @@ class WorkspaceFileService:
                 if files_only:
                     break  # one hit per file is all a file list needs
 
-        if candidates_remaining:
-            _raise_grep_max_files(
-                files_scanned,
-                max_files,
-                {
-                    "files_skipped_oversized": tallies["oversized"],
-                    "files_skipped_binary": tallies["binary"],
-                    "files_skipped_unreadable": tallies["unreadable"],
-                },
-            )
-
-        _raise_if_grep_files_skipped(
-            oversized=tallies["oversized"],
-            binary=tallies["binary"],
-            unreadable=tallies["unreadable"],
-            files_scanned=files_scanned,
-            max_file_bytes=max_file_bytes,
-            partial_matches=matches or None,
-        )
-
         return self._grep_result(
             pattern=pattern,
             base=base,
@@ -1699,71 +1676,28 @@ class WorkspaceFileService:
             offset=offset,
             t0=t0,
             files_only=files_only,
+            incomplete=_grep_incomplete(
+                hit_max_files=candidates_remaining,
+                max_files=max_files,
+                oversized=oversized,
+                unreadable=unreadable,
+                max_file_bytes=max_file_bytes,
+            ),
         )
 
-    def _grep_with_rg(
+    def _run_rg(
         self,
-        pattern: str,
+        cmd: list[str],
         *,
-        base: Path,
-        ignore_case: bool,
-        globs: list[str] | None,
-        max_matches: int,
-        offset: int,
-        max_files: int,
-        max_file_bytes: int,
-        t0: float,
-        context: int = 0,
-        files_only: bool = False,
-        respect_gitignore: bool = True,
-    ) -> GrepResult:
-        rg_bin = shutil.which("rg")
-        if not rg_bin:
-            raise OSError("rg not found")
-        cmd: list[str] = [
-            rg_bin,
-            "--json",
-            "--no-config",
-            "--hidden",
-            "--max-filesize",
-            str(max_file_bytes),
-        ]
-        if respect_gitignore:
-            # Same rule set as ``GitignoreRules``: only .gitignore files inside the tree.
-            cmd.extend(
-                [
-                    "--no-require-git",
-                    "--no-ignore-global",
-                    "--no-ignore-parent",
-                    "--no-ignore-dot",
-                    "--no-ignore-exclude",
-                ]
-            )
-        else:
-            cmd.append("--no-ignore")
-        if files_only:
-            cmd.extend(["--max-count", "1"])
-        elif context:
-            cmd.extend(["-C", str(context)])
-        if ignore_case:
-            cmd.append("-i")
-        for ignore_dir in sorted(_GREP_IGNORE_DIRS):
-            # ``--no-ignore`` disables gitignore; these globs still apply. Prefer
-            # directory-name forms so nested paths like ``pkg/node_modules`` are skipped.
-            cmd.extend(["--glob", f"!{ignore_dir}"])
-            cmd.extend(["--glob", f"!**/{ignore_dir}/**"])
-        if globs:
-            for g in globs:
-                cmd.extend(["--glob", g])
-        # Search from the workspace root as cwd so path-style --glob patterns
-        # (e.g. src/**/*.py) match the same relative paths as the Python walker.
-        search_root = self._root.resolve()
-        search_path = base.resolve()
-        try:
-            rg_target = search_path.relative_to(search_root).as_posix() or "."
-        except ValueError:
-            rg_target = str(search_path)
-        cmd.extend(["--", pattern, rg_target])
+        cwd: str,
+        pattern: str,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run one ripgrep command.
+
+        Exit codes 0 and 1 are success (matches, or none). Anything else is an
+        ``OSError`` so the caller falls back to the Python walker. A timeout
+        stays ``incomplete_scan`` and does not fall back.
+        """
         try:
             proc = subprocess.run(
                 cmd,
@@ -1771,7 +1705,7 @@ class WorkspaceFileService:
                 text=True,
                 timeout=_RG_TIMEOUT_SEC,
                 check=False,
-                cwd=str(search_root),
+                cwd=cwd,
             )
         except subprocess.TimeoutExpired as exc:
             # Do not fall back to unbounded Python walk after already spending the budget.
@@ -1791,6 +1725,74 @@ class WorkspaceFileService:
         # 0 = matches, 1 = no matches; anything else is a hard failure → caller falls back.
         if proc.returncode not in (0, 1):
             raise OSError(proc.stderr.strip() or f"rg exited {proc.returncode}")
+        return proc
+
+    def _grep_with_rg(
+        self,
+        pattern: str,
+        *,
+        base: Path,
+        ignore_case: bool,
+        globs: list[str] | None,
+        max_matches: int,
+        offset: int,
+        max_file_bytes: int,
+        t0: float,
+        context: int = 0,
+        files_only: bool = False,
+        respect_gitignore: bool = True,
+    ) -> GrepResult:
+        rg_bin = shutil.which("rg")
+        if not rg_bin:
+            raise OSError("rg not found")
+        # Shared by the search and the file listing so both see the same candidates.
+        filter_args: list[str] = ["--no-config", "--hidden"]
+        if respect_gitignore:
+            # Same rule set as ``GitignoreRules``: only .gitignore files inside the tree.
+            filter_args.extend(
+                [
+                    "--no-require-git",
+                    "--no-ignore-global",
+                    "--no-ignore-parent",
+                    "--no-ignore-dot",
+                    "--no-ignore-exclude",
+                ]
+            )
+        else:
+            filter_args.append("--no-ignore")
+        for ignore_dir in sorted(_GREP_IGNORE_DIRS):
+            # ``--no-ignore`` disables gitignore; these globs still apply. Prefer
+            # directory-name forms so nested paths like ``pkg/node_modules`` are skipped.
+            filter_args.extend(["--glob", f"!{ignore_dir}"])
+            filter_args.extend(["--glob", f"!**/{ignore_dir}/**"])
+        if globs:
+            for g in globs:
+                filter_args.extend(["--glob", g])
+        # Search from the workspace root as cwd so path-style --glob patterns
+        # (e.g. src/**/*.py) match the same relative paths as the Python walker.
+        search_root = self._root.resolve()
+        search_path = base.resolve()
+        try:
+            rg_target = search_path.relative_to(search_root).as_posix() or "."
+        except ValueError:
+            rg_target = str(search_path)
+        # ``rg --json`` ignores ``--max-columns``, so ``--max-filesize`` is the only bound
+        # on output size.
+        cmd: list[str] = [
+            rg_bin,
+            "--json",
+            "--max-filesize",
+            str(max_file_bytes),
+            *filter_args,
+        ]
+        if files_only:
+            cmd.extend(["--max-count", "1"])
+        elif context:
+            cmd.extend(["-C", str(context)])
+        if ignore_case:
+            cmd.append("-i")
+        cmd.extend(["--", pattern, rg_target])
+        proc = self._run_rg(cmd, cwd=str(search_root), pattern=pattern)
 
         matches: list[GrepMatch] = []
         total_match_count = 0
@@ -1877,32 +1879,45 @@ class WorkspaceFileService:
                 if isinstance(matched_lines, int):
                     total_match_count = matched_lines
 
-        # Prefer the higher of begin-events vs summary.searches so a missing or
-        # under-counted summary cannot hide an over-cap scan.
-        if files_begun > files_scanned:
-            files_scanned = files_begun
-
-        tallies = {"oversized": 0, "binary": 0, "unreadable": 0}
-        candidate_count = 0
-        for fp, _rel in self._iter_grep_candidates(
-            base, globs, respect_gitignore=respect_gitignore
-        ):
-            candidate_count += 1
-            kind, _data = _grep_classify(fp, max_file_bytes)
-            _tally_grep_skip(kind, tallies)
-        # Candidate walk is authoritative for WORKSPACE_GREP_MAX_FILES: begin
-        # events only cover matches, and some rg builds omit/under-count searches.
-        files_scanned = max(files_scanned, candidate_count)
-        if files_scanned > max_files:
-            _raise_grep_max_files(files_scanned, max_files)
-
-        _raise_if_grep_files_skipped(
-            oversized=tallies["oversized"],
-            binary=tallies["binary"],
-            unreadable=tallies["unreadable"],
-            files_scanned=files_scanned,
-            max_file_bytes=max_file_bytes,
-            partial_matches=matches or None,
+        # rg's summary can under-count on some builds. ``--files`` sees the same
+        # candidates as the search (no ``--max-filesize``), so stat is enough to
+        # name oversized and unreadable files without re-reading them.
+        listed = self._run_rg(
+            [rg_bin, "--files", *filter_args, "--", rg_target],
+            cwd=str(search_root),
+            pattern=pattern,
+        )
+        oversized: list[str] = []
+        unreadable: list[str] = []
+        candidates = 0
+        for raw in listed.stdout.splitlines():
+            if not raw:
+                continue
+            listed_path = Path(raw)
+            if not listed_path.is_absolute():
+                listed_path = search_root / listed_path
+            try:
+                resolved = listed_path.resolve()
+            except OSError:
+                resolved = listed_path
+            if self._is_denied_extra_root_result(resolved):
+                continue
+            try:
+                rel = self._as_repo_rel(resolved)
+            except WorkspaceError:
+                continue
+            candidates += 1
+            try:
+                size = resolved.stat().st_size
+            except OSError:
+                unreadable.append(rel)
+                continue
+            if size > max_file_bytes:
+                oversized.append(rel)
+        files_scanned = max(
+            files_scanned,
+            files_begun,
+            candidates - len(oversized) - len(unreadable),
         )
 
         return self._grep_result(
@@ -1914,6 +1929,13 @@ class WorkspaceFileService:
             offset=offset,
             t0=t0,
             files_only=files_only,
+            incomplete=_grep_incomplete(
+                hit_max_files=False,
+                max_files=self._settings.WORKSPACE_GREP_MAX_FILES,
+                oversized=oversized,
+                unreadable=unreadable,
+                max_file_bytes=max_file_bytes,
+            ),
         )
 
     def repo_rel(self, p: Path) -> str:

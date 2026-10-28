@@ -889,9 +889,9 @@ def _core_tool_defs(
             "Use this for exact identifiers and for conceptual or cross-file questions: pick "
             "distinctive terms, then `read_file` the matching paths in the same "
             "response once you have them. "
-            "An empty match list is evidence of absence only when the payload has "
-            "scan_complete=true (incomplete scans return ok:false / incomplete_scan — narrow "
-            "root or pass file_glob). Capped pages still report total_match_count and next_offset. "
+            "Matches are always returned. An empty match list is evidence of absence only when "
+            "scan_complete=true; when false, `incomplete` lists what was not searched and how to "
+            "finish. Capped pages still report total_match_count and next_offset. "
             "Use `context` to see lines around a match and `files_only` to just list files.",
             grep_schema,
             parallel_safe=True,
