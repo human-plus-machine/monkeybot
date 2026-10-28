@@ -102,6 +102,85 @@ def test_composer_placeholder_and_bindings() -> None:
     assert composer.placeholder == _COMPOSER_PLACEHOLDER
 
 
+def test_shift_enter_inserts_newline_and_does_not_send(tmp_path: Path) -> None:
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app._load_file_index = lambda: None  # type: ignore[method-assign]
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.press("h", "i", "shift+enter", "t")
+            await pilot.pause()
+            composer = app.query_one("#prompt", Composer)
+            assert composer.text == "hi\nt"
+            assert composer.cursor_location == (1, 1)
+            assert not list(app.query(UserTurn))
+
+            await pilot.press("ctrl+j", "x")
+            await pilot.pause()
+            assert composer.text == "hi\nt\nx"
+
+            sent: list[str] = []
+            app._submit_message = lambda value: sent.append(value)  # type: ignore[method-assign]
+            await pilot.press("enter")
+            await pilot.pause()
+            assert sent == ["hi\nt\nx"]
+            assert composer.text == ""
+
+    asyncio.run(_run())
+
+
+def test_misreported_shift_enter_inserts_newline(tmp_path: Path) -> None:
+    """modifyOtherKeys labels Shift+Enter as shift+CR, which used to do nothing."""
+    from textual.events import Key
+
+    async def _run() -> None:
+        app = ChatApp(
+            base="http://127.0.0.1:9",
+            agent_root=tmp_path,
+            provider="fake",
+            model="m",
+            spawned_gateway=False,
+        )
+        app._connect_session = lambda: None  # type: ignore[method-assign]
+        app._load_file_index = lambda: None  # type: ignore[method-assign]
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.press("h", "i")
+            await pilot.pause()
+            event = Key("shift+\r", "\r")
+            event.set_sender(app)
+            app._driver.send_message(event)
+            await pilot.pause()
+            composer = app.query_one("#prompt", Composer)
+            assert composer.text == "hi\n"
+            assert not list(app.query(UserTurn))
+
+    asyncio.run(_run())
+
+
+def test_terminal_enter_chords_parse_as_newline_keys() -> None:
+    import time
+
+    from textual._xterm_parser import XTermParser
+
+    shift = list(XTermParser().feed("\x1b[27;2;13~"))
+    assert [event.key for event in shift] == ["shift+enter"]
+
+    kitty = list(XTermParser().feed("\x1b[13;2u"))
+    assert [event.key for event in kitty] == ["shift+enter"]
+
+    parser = XTermParser()
+    alt = list(parser.feed("\x1b\r"))
+    time.sleep(0.15)
+    alt += list(parser.tick())
+    assert [event.key for event in alt] == ["alt+enter"]
+
+
 def test_composer_prefix_history() -> None:
     composer = Composer(["alpha", "git status", "git commit", "hello"])
     composer.load_text("git")
