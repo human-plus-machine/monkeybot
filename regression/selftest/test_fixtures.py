@@ -51,6 +51,7 @@ from regression.fixtures.build import (
     SKILLS_SOURCE,
     BuiltFixtures,
     build,
+    refresh_seeded_attachment_clocks,
 )
 
 REPO = Path(__file__).resolve().parents[2]
@@ -350,6 +351,26 @@ def test_attachments_match_their_kinds() -> None:
     assert extracted is not None
     assert "Hello fixture" in extracted[0]
     assert _extract_pdf_text_sync(base64.b64encode(without_text).decode(), 1000) is None
+
+
+def test_seeded_attachment_clocks_are_restamped_on_the_copy(tmp_path: Path) -> None:
+    session = tmp_path / ".monkeybot" / "attachments" / "loop-scenario"
+    session.mkdir(parents=True)
+    meta = session / "att-pdf.json"
+    meta.write_text(
+        json.dumps({"attachment_id": "att-pdf", "created_at_ms": 1}),
+        encoding="utf-8",
+    )
+    outside = tmp_path / "outside.json"
+    outside.write_text(json.dumps({"created_at_ms": 1}), encoding="utf-8")
+    (session / "att-link.json").symlink_to(outside)
+    (session / "note.json").write_text(json.dumps({"filename": "x"}), encoding="utf-8")
+
+    refresh_seeded_attachment_clocks(tmp_path, now_ms=1234)
+
+    assert json.loads(meta.read_text(encoding="utf-8"))["created_at_ms"] == 1234
+    assert json.loads(outside.read_text(encoding="utf-8"))["created_at_ms"] == 1
+    assert "created_at_ms" not in json.loads((session / "note.json").read_text(encoding="utf-8"))
 
 
 def test_subagent_tapes_are_present() -> None:

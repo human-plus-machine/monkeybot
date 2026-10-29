@@ -17,6 +17,7 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field
 
+from regression.fixtures.build import refresh_seeded_attachment_clocks
 from regression.schema.scenario import Scenario as SchemaScenario
 from regression.schema.scenario import load_scenario
 from regression.t4.models import Scenario
@@ -217,6 +218,7 @@ def materialize_workspace(
         if not overlay_dir.is_dir():
             raise FileNotFoundError(f"workspace_overlay not found: {overlay_dir}")
         shutil.copytree(overlay_dir, dest, dirs_exist_ok=True)
+    refresh_seeded_attachment_clocks(dest)
 
     def sub(text: str) -> str:
         return text.replace("{workspace_subdir}", subdir)
