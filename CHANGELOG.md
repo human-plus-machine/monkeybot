@@ -6,6 +6,12 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Core
+
+### Added
+
+- Bedrock Converse models (Grok, Nova, Llama, and other non-Claude ids) send prompt-cache checkpoints when `model.cache_retention` is not `none`. Checkpoints land on the system prompt, the tool list, and the last two user turns, up to Bedrock's limit of four. `short` and `long` both use Converse's default 5-minute cache. A model that rejects cache points is retried once without them.
+
 ## [cli v0.12.0] - 2026-10-28
 
 ### Changed
