@@ -179,12 +179,14 @@ class BedrockProvider:
                 "Bedrock dispatch %s",
                 kv(provider="bedrock", model=model, path="converse"),
             )
+            retention = hints.cache_retention if hints is not None else "short"
             kwargs = converse_request_kwargs(
                 model=model,
                 messages=messages,
                 tools=tools,
                 max_tokens=self._max_tokens,
                 temperature=self._temperature,
+                cache_retention=retention,
             )
             client = await self._runtime_client()
             async for event in iter_converse_stream(

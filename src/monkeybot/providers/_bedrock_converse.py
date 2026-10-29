@@ -8,7 +8,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator, Iterator, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from monkeybot.core.llm.provider import (
     Done,
@@ -45,7 +45,11 @@ _log = logging.getLogger(__name__)
 
 _EMPTY_TOOL_RESULT = "(no output)"
 _UNSUPPORTED_FIELD_RE = re.compile(r"doesn't support the (\w+) field", re.IGNORECASE)
+_CACHE_BLAME_RE = re.compile(r"cache\s*point|caching", re.IGNORECASE)
 _SENTINEL = object()
+_MAX_CONVERSE_CACHE_POINTS = 4
+_CACHE_POINT_BLOCK: dict[str, Any] = {"cachePoint": {"type": "default"}}
+_CACHEPOINT_UNSUPPORTED: set[str] = set()
 _DOC_FORMATS = {
     "pdf": "pdf",
     "csv": "csv",
@@ -254,6 +258,118 @@ def messages_to_converse(messages: Sequence[Message]) -> tuple[str, list[dict[st
     return system, out
 
 
+def _copy_content_blocks(blocks: list[Any]) -> list[Any]:
+    return [dict(b) if isinstance(b, dict) else b for b in blocks]
+
+
+def _append_cache_point_to_system(system: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return _copy_content_blocks(system) + [dict(_CACHE_POINT_BLOCK)]
+
+
+def _append_cache_point_to_tools(tool_config: dict[str, Any]) -> dict[str, Any]:
+    tools = tool_config.get("tools")
+    if not isinstance(tools, list) or not tools:
+        return dict(tool_config)
+    return {
+        **tool_config,
+        "tools": _copy_content_blocks(tools) + [dict(_CACHE_POINT_BLOCK)],
+    }
+
+
+def _append_cache_points_to_last_user_messages(
+    messages: list[dict[str, Any]],
+    *,
+    max_points: int,
+) -> list[dict[str, Any]]:
+    if max_points < 1:
+        return [
+            dict(m, content=_copy_content_blocks(list(m.get("content") or []))) for m in messages
+        ]
+    user_indices = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+    targets = set(user_indices[-2:])
+    out: list[dict[str, Any]] = []
+    budget = max_points
+    for i, msg in enumerate(messages):
+        content = _copy_content_blocks(list(msg.get("content") or []))
+        if i in targets and budget > 0:
+            content.append(dict(_CACHE_POINT_BLOCK))
+            budget -= 1
+        out.append({"role": msg["role"], "content": content})
+    return out
+
+
+def _apply_cache_points(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Insert Converse ``cachePoint`` blocks (max 4). Returns a shallow copy of ``kwargs``."""
+    out = dict(kwargs)
+    budget = _MAX_CONVERSE_CACHE_POINTS
+
+    system = out.get("system")
+    if isinstance(system, list) and system and budget > 0:
+        out["system"] = _append_cache_point_to_system(system)
+        budget -= 1
+
+    tool_config = out.get("toolConfig")
+    if isinstance(tool_config, dict) and budget > 0:
+        tools = tool_config.get("tools")
+        if isinstance(tools, list) and tools:
+            out["toolConfig"] = _append_cache_point_to_tools(tool_config)
+            budget -= 1
+
+    messages = out.get("messages")
+    if isinstance(messages, list) and budget > 0:
+        out["messages"] = _append_cache_points_to_last_user_messages(messages, max_points=budget)
+
+    return out
+
+
+def _strip_cache_points(kwargs: dict[str, Any]) -> bool:
+    """Remove every ``cachePoint`` block from kwargs. Returns True if any were removed."""
+    removed = False
+
+    system = kwargs.get("system")
+    if isinstance(system, list):
+        filtered = [b for b in system if not (isinstance(b, dict) and "cachePoint" in b)]
+        if len(filtered) != len(system):
+            removed = True
+            kwargs["system"] = filtered
+
+    tool_config = kwargs.get("toolConfig")
+    if isinstance(tool_config, dict):
+        tools = tool_config.get("tools")
+        if isinstance(tools, list):
+            filtered_tools = [t for t in tools if not (isinstance(t, dict) and "cachePoint" in t)]
+            if len(filtered_tools) != len(tools):
+                removed = True
+                kwargs["toolConfig"] = {**tool_config, "tools": filtered_tools}
+
+    messages = kwargs.get("messages")
+    if isinstance(messages, list):
+        new_messages: list[dict[str, Any]] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                new_messages.append(msg)
+                continue
+            content = msg.get("content")
+            if isinstance(content, list):
+                filtered_content = [
+                    b for b in content if not (isinstance(b, dict) and "cachePoint" in b)
+                ]
+                if len(filtered_content) != len(content):
+                    removed = True
+                    new_messages.append({**msg, "content": filtered_content})
+                    continue
+            new_messages.append(dict(msg))
+        kwargs["messages"] = new_messages
+
+    return removed
+
+
+def _exc_blames_cache(exc: BaseException) -> bool:
+    if "validation" not in type(exc).__name__.lower():
+        return False
+    return _CACHE_BLAME_RE.search(str(exc)) is not None
+
+
 def converse_request_kwargs(
     *,
     model: str,
@@ -261,13 +377,13 @@ def converse_request_kwargs(
     tools: Sequence[ToolDef],
     max_tokens: int,
     temperature: float,
+    cache_retention: Literal["none", "short", "long"] = "short",
 ) -> dict[str, Any]:
     """Build ``converse_stream`` kwargs. Always sets ``inferenceConfig.maxTokens``.
 
-    ``hints.cache_retention`` / Converse ``cachePoint`` blocks are not wired on
-    this path. Claude still uses ``prepare_anthropic_cached_payload``; Nova/Llama
-    cache points are a follow-up. ``UsageEvent.cache_read_tokens`` staying 0
-    means caching was never requested, not that the model refused a cache hit.
+    When ``cache_retention`` is not ``none``, inserts Converse ``cachePoint`` blocks
+    on system, tools, and the last two user turns (Bedrock max 4). ``short`` and
+    ``long`` both use the default 5-minute Converse cache tier.
 
     ``thinking_budget`` is not forwarded on this path — Converse reasoning is not
     requested via ``additionalModelRequestFields`` yet; the mapper only round-trips
@@ -287,6 +403,8 @@ def converse_request_kwargs(
     tool_config = converse_tools(tools)
     if tool_config is not None:
         kwargs["toolConfig"] = tool_config
+    if cache_retention != "none":
+        kwargs = _apply_cache_points(kwargs)
     return kwargs
 
 
@@ -549,19 +667,44 @@ async def iter_converse_stream(
 ) -> AsyncIterator[ProviderEvent]:
     """Stream ``converse_stream``, retrying once a rejected inference field is stripped."""
     kwargs = _copy_stream_kwargs(stream_kwargs)
-    async for event in iter_stream_with_param_retry(
-        lambda kw: _stream_converse_once(client, kw, provider=provider),
-        kwargs,
-        strip_rejected=_strip_unsupported_inference,
-        max_attempts=2,
-        provider=provider,
-        error_message=error_message,
-        model=kwargs.get("modelId"),
-        n_messages=n_messages,
-        n_tools=n_tools,
-        retry_message="converse stream rejected params, retrying without them %s",
-    ):
-        yield event
+    model_id = str(kwargs.get("modelId") or "")
+    if model_id in _CACHEPOINT_UNSUPPORTED:
+        _strip_cache_points(kwargs)
+
+    async def _run_param_retry() -> AsyncIterator[ProviderEvent]:
+        async for event in iter_stream_with_param_retry(
+            lambda kw: _stream_converse_once(client, kw, provider=provider),
+            kwargs,
+            strip_rejected=_strip_unsupported_inference,
+            max_attempts=2,
+            provider=provider,
+            error_message=error_message,
+            model=kwargs.get("modelId"),
+            n_messages=n_messages,
+            n_tools=n_tools,
+            retry_message="converse stream rejected params, retrying without them %s",
+        ):
+            yield event
+
+    started = False
+    try:
+        async for event in _run_param_retry():
+            started = True
+            yield event
+    except Exception as exc:
+        if started or not _exc_blames_cache(exc):
+            raise
+        if not _strip_cache_points(kwargs):
+            raise
+        if model_id and model_id not in _CACHEPOINT_UNSUPPORTED:
+            _log.warning(
+                "converse cachePoint rejected, retrying without caching %s",
+                kv(provider=provider, model=model_id),
+            )
+        if model_id:
+            _CACHEPOINT_UNSUPPORTED.add(model_id)
+        async for event in _run_param_retry():
+            yield event
 
 
 def _estimate_block(block: ContentBlock) -> dict[str, Any]:
