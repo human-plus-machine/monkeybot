@@ -10,7 +10,11 @@ from pathlib import Path
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from regression.drivers.bundles.protocol import Bundle, LoopDriverError, RunCtx
 from regression.drivers.support.paths import _FIXTURE_PREFIXES, _WORKSPACE_ROOTS
-from regression.fixtures.build import HOSTILE_SOURCE, overlay_hostile
+from regression.fixtures.build import (
+    HOSTILE_SOURCE,
+    overlay_hostile,
+    refresh_seeded_attachment_clocks,
+)
 from regression.schema.scenario import Scenario
 from regression.schema.steps import TouchFileStep
 
@@ -114,6 +118,9 @@ def _materialize_workspace(scenario: Scenario, workdir: Path) -> tuple[Path | No
         hostile = hostile or _is_hostile_source(source)
     if hostile:
         _overlay_hostile_workspace(workspace, workdir)
+    # Seeded attachments carry a committed created_at_ms. Refresh after the
+    # copy so the store's wall-clock TTL does not expire the fixture.
+    refresh_seeded_attachment_clocks(workspace)
     if not wants_tree:
         return workspace, None
     pristine = workdir / "pristine"
