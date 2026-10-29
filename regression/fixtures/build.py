@@ -16,8 +16,10 @@ copying the committed tree (for example when ``workspace_fixture`` is
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -131,3 +133,33 @@ def build(dest: Path) -> BuiltFixtures:
         link_target=link_target.resolve(),
         skill_target=skill_target.resolve(),
     )
+
+
+def refresh_seeded_attachment_clocks(workspace: Path, *, now_ms: int | None = None) -> None:
+    """Stamp copied attachment sidecars as just stored.
+
+    TTL is wall-clock (``ATTACHMENT_TTL_HOURS``, default 48). A committed
+    ``created_at_ms`` expires the fixture even though the bytes are still the
+    scenario's input. Symlinked sidecars are left alone so a leaf that points
+    outside the workspace is not rewritten.
+    """
+    root = workspace / ".monkeybot" / "attachments"
+    if not root.is_dir() or root.is_symlink():
+        return
+    stamped = int(time.time() * 1000) if now_ms is None else now_ms
+    root_resolved = root.resolve()
+    for meta_path in root.rglob("*.json"):
+        if meta_path.is_symlink() or not meta_path.is_file():
+            continue
+        try:
+            meta_path.resolve().relative_to(root_resolved)
+        except ValueError:
+            continue
+        try:
+            raw = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(raw, dict) or "created_at_ms" not in raw:
+            continue
+        raw["created_at_ms"] = stamped
+        meta_path.write_text(json.dumps(raw), encoding="utf-8")
