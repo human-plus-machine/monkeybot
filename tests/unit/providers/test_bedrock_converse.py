@@ -51,6 +51,28 @@ _NOVA = "us.amazon.nova-pro-v1:0"
 _CLAUDE = "us.anthropic.claude-sonnet-4-6"
 
 
+def _count_cache_points(obj: object) -> int:
+    n = 0
+    if isinstance(obj, dict):
+        if "cachePoint" in obj:
+            n += 1
+        for value in obj.values():
+            n += _count_cache_points(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            n += _count_cache_points(item)
+    return n
+
+
+def _long_user_history(n_user_turns: int) -> list[Message]:
+    messages: list[Message] = [Message.text("system", "You are helpful.")]
+    for i in range(n_user_turns):
+        messages.append(Message.text("user", f"turn-{i}"))
+        messages.append(Message.text("assistant", f"reply-{i}"))
+    messages.append(Message.text("user", "latest"))
+    return messages
+
+
 @pytest.mark.parametrize(
     ("model_id", "vendor"),
     [
@@ -109,6 +131,72 @@ def test_grok_kwargs_omit_temperature_nova_keeps_it() -> None:
     assert nova["inferenceConfig"]["maxTokens"] == 2048
     assert nova["inferenceConfig"]["temperature"] == 0.2
     assert supports_param(_NOVA, "temperature") is True
+
+
+def test_converse_cache_points_default_retention() -> None:
+    messages = [
+        Message.text("system", "You are helpful."),
+        Message.text("user", "first"),
+        Message.text("assistant", "ok"),
+        Message.text("user", "second"),
+    ]
+    kwargs = converse_request_kwargs(
+        model=_NOVA,
+        messages=messages,
+        tools=[_ECHO],
+        max_tokens=256,
+        temperature=0.2,
+    )
+    assert kwargs["system"][-1] == {"cachePoint": {"type": "default"}}
+    assert kwargs["toolConfig"]["tools"][-1] == {"cachePoint": {"type": "default"}}
+    user_msgs = [m for m in kwargs["messages"] if m["role"] == "user"]
+    assert user_msgs[-2]["content"][-1] == {"cachePoint": {"type": "default"}}
+    assert user_msgs[-1]["content"][-1] == {"cachePoint": {"type": "default"}}
+    assert _count_cache_points(kwargs) == 4
+
+
+def test_converse_cache_points_cap_with_long_history() -> None:
+    kwargs = converse_request_kwargs(
+        model=_GROK,
+        messages=_long_user_history(20),
+        tools=[_ECHO],
+        max_tokens=256,
+        temperature=0.2,
+    )
+    assert _count_cache_points(kwargs) == 4
+
+
+def test_converse_cache_retention_none() -> None:
+    kwargs = converse_request_kwargs(
+        model=_NOVA,
+        messages=[
+            Message.text("system", "sys"),
+            Message.text("user", "hi"),
+        ],
+        tools=[_ECHO],
+        max_tokens=64,
+        temperature=0.2,
+        cache_retention="none",
+    )
+    assert _count_cache_points(kwargs) == 0
+
+
+def test_converse_request_kwargs_does_not_mutate_messages() -> None:
+    messages = [
+        Message.text("system", "sys"),
+        Message.text("user", "one"),
+        Message.text("assistant", "two"),
+        Message.text("user", "three"),
+    ]
+    before = repr(messages)
+    converse_request_kwargs(
+        model=_NOVA,
+        messages=messages,
+        tools=[_ECHO],
+        max_tokens=64,
+        temperature=0.2,
+    )
+    assert repr(messages) == before
 
 
 def test_tool_round_trip_tooluse_and_toolresult() -> None:
@@ -474,6 +562,131 @@ async def test_retry_strips_temperature_after_validation_exception() -> None:
     assert calls[0]["inferenceConfig"] == {"maxTokens": 32, "temperature": 0.2}
     assert calls[1]["inferenceConfig"] == {"maxTokens": 32}
     assert any(isinstance(e, TextDelta) and e.text == "ok" for e in events)
+
+
+class CacheValidationError(Exception):
+    """Stand-in for Bedrock ValidationException naming."""
+
+
+@pytest.mark.asyncio
+async def test_iter_converse_stream_retries_without_cache_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "monkeybot.providers._bedrock_converse._CACHEPOINT_UNSUPPORTED",
+        set(),
+    )
+    calls: list[dict[str, object]] = []
+
+    def converse_stream(**kwargs: object) -> dict[str, object]:
+        calls.append(dict(kwargs))
+        if _count_cache_points(kwargs) > 0:
+            raise CacheValidationError("cachePoint is not supported for this model")
+        return {"stream": iter(_text_stream())}
+
+    client = MagicMock()
+    client.converse_stream.side_effect = converse_stream
+    stream_kwargs = converse_request_kwargs(
+        model=_GROK,
+        messages=[Message.text("system", "sys"), Message.text("user", "hi")],
+        tools=[_ECHO],
+        max_tokens=32,
+        temperature=0.2,
+    )
+    assert _count_cache_points(stream_kwargs) > 0
+    events = [
+        e
+        async for e in iter_converse_stream(
+            client,
+            stream_kwargs,
+            provider="bedrock",
+            error_message="err %s",
+        )
+    ]
+    assert len(calls) == 2
+    assert _count_cache_points(calls[0]) > 0
+    assert _count_cache_points(calls[1]) == 0
+    assert any(isinstance(e, TextDelta) and e.text == "ok" for e in events)
+
+    calls.clear()
+    async for _ in iter_converse_stream(
+        client,
+        stream_kwargs,
+        provider="bedrock",
+        error_message="err %s",
+    ):
+        pass
+    assert len(calls) == 1
+    assert _count_cache_points(calls[0]) == 0
+
+
+@pytest.mark.asyncio
+async def test_iter_converse_stream_reraises_cache_error_mid_stream() -> None:
+    class _Stream:
+        def __init__(self) -> None:
+            self._events = iter(
+                [
+                    {"contentBlockDelta": {"delta": {"text": "partial"}}},
+                ]
+            )
+
+        def __iter__(self) -> _Stream:
+            return self
+
+        def __next__(self) -> dict[str, object]:
+            try:
+                return next(self._events)
+            except StopIteration as exc:
+                raise CacheValidationError("invalid cachePoint block") from exc
+
+    client = MagicMock()
+    client.converse_stream.return_value = {"stream": _Stream()}
+    with pytest.raises(CacheValidationError, match="cachePoint"):
+        async for _ in iter_converse_stream(
+            client,
+            converse_request_kwargs(
+                model=_GROK,
+                messages=[Message.text("user", "hi")],
+                tools=[],
+                max_tokens=8,
+                temperature=0.2,
+            ),
+            provider="bedrock",
+            error_message="err %s",
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_converse_usage_maps_cache_token_fields() -> None:
+    stream_events: list[dict[str, object]] = [
+        {"messageStop": {"stopReason": "end_turn"}},
+        {
+            "metadata": {
+                "usage": {
+                    "inputTokens": 10,
+                    "outputTokens": 3,
+                    "cacheReadInputTokens": 80,
+                    "cacheWriteInputTokens": 20,
+                }
+            }
+        },
+    ]
+    client = MagicMock()
+    client.converse_stream.return_value = {"stream": iter(stream_events)}
+    events = [
+        e
+        async for e in iter_converse_stream(
+            client,
+            {"modelId": _GROK, "messages": [], "inferenceConfig": {"maxTokens": 8}},
+            provider="bedrock",
+            error_message="err %s",
+        )
+    ]
+    usage = next(e for e in events if isinstance(e, UsageEvent))
+    assert usage.cache_read_tokens == 80
+    assert usage.cache_creation_tokens == 20
+    assert usage.cached_tokens == 100
 
 
 @pytest.mark.asyncio
