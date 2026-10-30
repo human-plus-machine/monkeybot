@@ -149,7 +149,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Consecutive `task` tools and consecutive `parallel_safe` tools in one batch run **in parallel** (capped; default 10); mutating / unmarked tools run as **serial chunks**.
 - One user `Message` per model tool-call turn — all `ToolResponse` blocks grouped together (required for Gemini replay).
 - Final assistant history write is backgrounded but **awaited at turn tail** before freeze/reset.
-- `transform_context()` (tool-integrity repair + UI-block strip) runs on every `history.load()` (in-memory only, never persisted); `convert_to_provider()` resolves attachments / pressure-shapes for the provider view.
+- `transform_context()` strips UI-only blocks, then repairs tool pairs, on every `history.load()` (in-memory only, never persisted); `convert_to_provider()` resolves attachments / pressure-shapes for the provider view.
 
 **Depends on:** Provider, HistoryStore, ToolExecutorPort, inspectors, optional hooks/curator/attachments.
 
@@ -164,7 +164,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - **Settlement barrier:** `PRE_TOOL` is awaited before execute; fire-and-forget hooks are drained (bounded by `MONKEYBOT_HOOK_SETTLEMENT_TIMEOUT_S`, default 2s) before the next provider call and before `TurnComplete` (`run()` finally). Settlement does **not** wait on SSE client ACKs (avoids deadlock).
 - **Parallel-safe tools:** `ToolDef.parallel_safe=True` for read-only core tools (`read_file`, `glob`, `grep`, `search_memory`, `list_skills`, `loop_status`, `load_file`). Mutating tools (`write_file`, `replace_in_file`, `apply_patch`, …) stay serial. MCP tools default serial. Results always append in `call_id` order.
 - **Context Epoch:** At each safe provider-turn boundary the harness reconciles stable vs volatile system-context sources. The leading system message keeps an immutable epoch baseline (cache prefix). Volatile changes emit a chronological mid-conversation update (user-role, not persisted) and a `SystemContextUpdated` event. Compaction / stable-source change opens a new epoch (`ContextEpochStarted`).
-- **Message pipeline:** `history → transform_context() → convert_to_provider() → Provider.stream`. Transform repairs tool integrity and strips UI-only blocks; convert resolves attachments and applies pressure shaping without mutating persisted history.
+- **Message pipeline:** `history → transform_context() → convert_to_provider() → Provider.stream`. Transform strips UI-only blocks, then repairs tool pairs on that provider-shaped list; convert resolves attachments and applies pressure shaping without mutating persisted history.
 - **Streaming grammar (additive):** `AssistantTextStarted` / `AssistantTextEnded`, `ThinkingBlockStarted`, and `ToolInputDelta` supplement existing `AssistantDelta` / `ThinkingBlockDelta` / `ToolCallStarted`. Clients may ignore the new events.
 
 ---

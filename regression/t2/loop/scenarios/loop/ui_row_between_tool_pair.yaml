@@ -1,0 +1,58 @@
+id: regression/t2/loop/scenarios/loop/ui_row_between_tool_pair
+case: T2-LOOP-41
+description: A UI-only row between a tool call and its result stays in storage and does not duplicate the result on the provider view.
+mode: scripted
+driver: loop
+regression_of: duplicate-tool-result
+messages:
+- answer the stored result
+history:
+- role: user
+  content:
+  - type: text
+    text: hi
+- role: assistant
+  content:
+  - type: toolRequest
+    id: confirm-41
+    name: run_command
+    args: {}
+- role: assistant
+  content:
+  - type: toolConfirmationRequest
+    id: confirm-41
+    toolName: run_command
+    arguments: {}
+- role: user
+  content:
+  - type: toolResponse
+    id: confirm-41
+    toolName: run_command
+    isError: false
+    result:
+    - type: text
+      text: real-body-41
+script:
+- - type: text
+    text: stored stays
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  history:
+    row_count: 6
+    roles:
+    - user
+    - assistant
+    - assistant
+    - user
+    - user
+    - assistant
+    no_repaired_rows: true
+  provider_request:
+  - n: 1
+    messages_contain: real-body-41
+  - n: 1
+    messages_contain: toolResponse confirm-41 run_command
+  - n: 1
+    messages_not_contain: was interrupted or its result is missing
