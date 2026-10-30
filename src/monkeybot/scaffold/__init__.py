@@ -18,7 +18,9 @@ try:
 except ImportError as exc:  # pragma: no cover - clearer error when CLI not installed
     raise ImportError(
         "Scaffolding moved to the monkeybot-cli package. "
-        "Install monkeybot-cli (e.g. `uv tool install monkeybot-cli` or `pip install ./cli`)."
+        "Install monkeybot-cli with the Pillow override "
+        "(e.g. `uv tool install --overrides /tmp/monkeybot-overrides.txt monkeybot-cli` "
+        "after writing `pillow>=13` to that file, or `pip install ./cli`)."
     ) from exc
 
 __all__ = [

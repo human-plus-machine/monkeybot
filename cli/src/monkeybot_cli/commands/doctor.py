@@ -70,6 +70,16 @@ def _agent_defines_project_extra(agent_root: Path, extra: str) -> bool:
     return isinstance(optional, dict) and extra in optional
 
 
+def _cli_overrides_file() -> Path:
+    """Pillow floor shipped next to this package.
+
+    ``uv tool install`` does not read ``[tool.uv] override-dependencies``.
+    browser-harness pins Pillow 12, so a bare install resolves core 3.10
+    instead of a core that requires Pillow 13.
+    """
+    return Path(__file__).resolve().parents[1] / "overrides.txt"
+
+
 def _extra_remediation(extra: str, agent_root: Path, runtime) -> str:
     """Remediation text pointing at the agent project, not the CLI env."""
     if runtime.source in {"cli", MANAGED_RUNTIME_SOURCE}:
@@ -78,9 +88,11 @@ def _extra_remediation(extra: str, agent_root: Path, runtime) -> str:
             if runtime.source == MANAGED_RUNTIME_SOURCE
             else ""
         )
+        overrides = _cli_overrides_file()
         return (
             "Config-only tree: install in the CLI env — "
-            f"uv tool install --with 'monkeybot[{extra}]' monkeybot-cli"
+            f"uv tool install --reinstall --overrides {overrides} "
+            f"--with 'monkeybot[{extra}]' monkeybot-cli"
             f"{refresh}"
         )
     if _agent_defines_project_extra(agent_root, extra):

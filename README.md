@@ -23,7 +23,11 @@ Docs and examples are **GCP-first** (Vertex, GCS, Cloud Run); AWS paths ship in 
 Install [uv](https://docs.astral.sh/uv/), then:
 
 ```bash
-uv tool install monkeybot-cli
+# browser-harness pins Pillow 12. Core 3.12 needs Pillow 13, and
+# `uv tool install` ignores the package override unless this file is passed.
+# Without it the resolver stays on core 3.10.0.
+printf 'pillow>=13\n' > /tmp/monkeybot-overrides.txt
+uv tool install --overrides /tmp/monkeybot-overrides.txt monkeybot-cli
 
 monkeybot new --dest ./my-agent --provider openai --yes
 cd my-agent
@@ -33,7 +37,7 @@ monkeybot doctor
 monkeybot chat
 ```
 
-Upgrade the CLI with `uv tool upgrade monkeybot-cli`. Full walkthrough: **[Getting Started](docs/getting-started.md)**.
+Upgrade the CLI with the same override: `uv tool install --reinstall --overrides /tmp/monkeybot-overrides.txt monkeybot-cli`. Full walkthrough: **[Getting Started](docs/getting-started.md)**.
 
 ## What you get
 

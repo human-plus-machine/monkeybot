@@ -46,14 +46,18 @@ def test_extra_remediation_keeps_extra_for_project_optionals(tmp_path: Path) -> 
 def test_extra_remediation_config_only_cli_env(tmp_path: Path) -> None:
     runtime = SimpleNamespace(source="cli")
     text = _extra_remediation("bedrock", tmp_path, runtime)
-    assert "uv tool install --with 'monkeybot[bedrock]' monkeybot-cli" in text
+    assert "--overrides " in text
+    assert "overrides.txt" in text
+    assert "--with 'monkeybot[bedrock]' monkeybot-cli" in text
     assert "refresh the managed runtime" not in text
 
 
 def test_extra_remediation_config_only_managed_runtime(tmp_path: Path) -> None:
     runtime = SimpleNamespace(source="cli-managed")
     text = _extra_remediation("openai", tmp_path, runtime)
-    assert "uv tool install --with 'monkeybot[openai]' monkeybot-cli" in text
+    assert "--overrides " in text
+    assert "overrides.txt" in text
+    assert "--with 'monkeybot[openai]' monkeybot-cli" in text
     assert "refresh the managed runtime" in text
 
 

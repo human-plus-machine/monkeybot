@@ -31,11 +31,15 @@ Tell the user what you're installing and why. On macOS/Linux you can run these y
 ### 2. Install the global CLI
 
 ```bash
-uv tool install monkeybot-cli
+# browser-harness pins Pillow 12. Core 3.12 needs Pillow 13, and
+# `uv tool install` ignores the package override unless this file is passed.
+# Without it the resolver stays on core 3.10.0.
+printf 'pillow>=13\n' > /tmp/monkeybot-overrides.txt
+uv tool install --overrides /tmp/monkeybot-overrides.txt monkeybot-cli
 monkeybot --help
 ```
 
-Upgrade later with `uv tool upgrade monkeybot-cli`.
+Upgrade later with `uv tool install --reinstall --overrides /tmp/monkeybot-overrides.txt monkeybot-cli`.
 
 **Do not** tell day-1 users to clone `human-plus-machine/monkeybot` unless they are contributing to the harness itself (see Contributing below).
 
@@ -47,7 +51,7 @@ If the user arrived via skills.sh:
 npx skills add human-plus-machine/monkeybot --skill monkeybot
 ```
 
-…they have **this skill only**. Walk them through Tier 0: install `uv` → `uv tool install monkeybot-cli` → verify `monkeybot --help`. Then continue to Tier 1.
+…they have **this skill only**. Walk them through Tier 0: install `uv` → `uv tool install --overrides /tmp/monkeybot-overrides.txt monkeybot-cli` (write `pillow>=13` into that file first) → verify `monkeybot --help`. Then continue to Tier 1.
 
 ## How config works (tell the user this first)
 
@@ -115,7 +119,7 @@ uv sync
 | `ollama-local` | None required — `OLLAMA_BASE_URL` (default `http://localhost:11434`). Requests send `keep_alive` 24h so prefix KV cache survives idle. | `monkeybot[ollama]` |
 | `ollama` | Legacy auto-route (key + blank URL = cloud; explicit URL wins) | `monkeybot[ollama]` |
 
-**Agent-first dependencies.** The CLI is thin — it does **not** install provider/storage extras globally. `monkeybot new` scaffolds a `pyproject.toml` with the selected provider (and any `--with` extras). Run plain `uv sync` in the agent directory. `monkeybot run` / `chat` spawn the gateway from that project's interpreter (`.venv/bin/python`, else `uv run python`), and `doctor` checks extras in that same interpreter. For a config-only tree (just `monkeybot_config/`, no `pyproject.toml`) the gateway uses the CLI's interpreter when it already has MonkeyBot 3.x (and MemPalace if memory is on). If memory is enabled and that interpreter cannot import MemPalace, `run` / `chat` provision a cached CLI-managed venv under `~/.cache/monkeybot/runtimes/` holding `monkeybot[memory]` pinned to the running core (never rewrites a `pyproject.toml`). `doctor` reuses that cache when it is already present. Otherwise extras must be installed in the CLI env (`uv tool install --with 'monkeybot[<extra>]' monkeybot-cli`).
+**Agent-first dependencies.** The CLI is thin — it does **not** install provider/storage extras globally. `monkeybot new` scaffolds a `pyproject.toml` with the selected provider (and any `--with` extras). Run plain `uv sync` in the agent directory. `monkeybot run` / `chat` spawn the gateway from that project's interpreter (`.venv/bin/python`, else `uv run python`), and `doctor` checks extras in that same interpreter. For a config-only tree (just `monkeybot_config/`, no `pyproject.toml`) the gateway uses the CLI's interpreter when it already has MonkeyBot 3.x (and MemPalace if memory is on). If memory is enabled and that interpreter cannot import MemPalace, `run` / `chat` provision a cached CLI-managed venv under `~/.cache/monkeybot/runtimes/` holding `monkeybot[memory]` pinned to the running core (never rewrites a `pyproject.toml`). `doctor` reuses that cache when it is already present. Otherwise extras must be installed in the CLI env (`uv tool install --reinstall --overrides /tmp/monkeybot-overrides.txt --with 'monkeybot[<extra>]' monkeybot-cli`, with `pillow>=13` in that file). A bare `uv tool install` resolves core 3.10.0.
 
 `doctor` is the source of truth for credentials and extras — when in doubt, run it and read the `remediation` field (add `monkeybot[<extra>]` to agent deps + `uv sync`).
 
