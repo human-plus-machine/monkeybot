@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A UI-only row between a tool call and its result no longer makes the provider see two results for that call. Bedrock rejected the turn when the counts did not match. Stored history is unchanged.
+
 ## [core v3.12.0] - 2026-10-29
 
 ### Added

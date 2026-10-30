@@ -184,6 +184,45 @@ async def test_repaired_orphan_history_converts_for_openai() -> None:
     assert len(converted) == 2
 
 
+def test_repair_drops_duplicate_tool_result_in_the_same_user_message() -> None:
+    messages = [
+        Message(role="assistant", content=[ToolRequest(id="c1", name="echo", args={})]),
+        Message(
+            role="user",
+            content=[
+                ToolResponse(id="c1", tool_name="echo", result=[Text(text="ok")]),
+                ToolResponse(id="c1", tool_name="echo", result=[Text(text="again")]),
+            ],
+        ),
+    ]
+    repaired = repair_tool_turn_integrity(messages)
+    responses = [b for m in repaired for b in m.content if isinstance(b, ToolResponse)]
+    assert len(responses) == 1
+    assert isinstance(responses[0].result[0], Text)
+    assert responses[0].result[0].text == "ok"
+
+
+def test_repair_drops_tool_result_whose_request_is_not_immediately_previous() -> None:
+    """A later copy is not a second result once the request already has one."""
+    messages = [
+        Message(role="assistant", content=[ToolRequest(id="c1", name="echo", args={})]),
+        Message(role="user", content=[Text(text="wait")]),
+        Message(role="assistant", content=[Text(text="still going")]),
+        Message(
+            role="user",
+            content=[ToolResponse(id="c1", tool_name="echo", result=[Text(text="real")])],
+        ),
+    ]
+    repaired = repair_tool_turn_integrity(messages)
+    responses = [b for m in repaired for b in m.content if isinstance(b, ToolResponse)]
+    assert len(responses) == 1
+    assert responses[0].is_error is True
+    assert isinstance(responses[0].result[0], Text)
+    assert "real" not in responses[0].result[0].text
+    requests = [b for m in repaired for b in m.content if isinstance(b, ToolRequest)]
+    assert [b.id for b in requests] == ["c1"]
+
+
 def test_repair_logs_synthetic_tool_result(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

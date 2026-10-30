@@ -154,10 +154,9 @@ Keep the `## 8.` and `## 9.` headings, and the pipe-delimited columns `ID`, `Cas
 
 A bug-fix change adds a case that fails before the fix and passes after, at the lowest tier that can express it. The scenario sets `regression_of` to the commit or pull request. This section lists that value and the case that now guards it. When a regression can no longer be expressed at the current HEAD, the row says why.
 
-No scenario in the tree sets `regression_of` yet.
-
 | regression_of | Case or reason |
 | --- | --- |
+| duplicate-tool-result | T2-LOOP-41. A UI-only row between a tool call and its result used to make the provider see two results for one call. |
 
 ## 8. Case catalog
 
@@ -209,6 +208,7 @@ Existing unit coverage: `tests/unit/core/messages`, `tests/unit/core/runtime`, `
 | T2-LOOP-38 | Tool input delta passthrough | `tool_input_delta` events are forwarded and do not execute anything before `ToolCall`. | T2 | P0 | `core/runtime/loop.py`, `turn_loop.py`, `tool_dispatch.py`, `tool_batch.py`, `doom_loop.py`, `loop_usage.py`, `input_admission.py`, `provider_stream_mapper.py`, `tool_integrity.py`. | regression/t2/loop/scenarios/loop/tool_input_delta_passthrough.yaml |
 | T2-LOOP-39 | Grounding event passthrough | `grounding` event yields `GroundingEvent` with sources unchanged. | T2 | P0 | `core/runtime/loop.py`, `turn_loop.py`, `tool_dispatch.py`, `tool_batch.py`, `doom_loop.py`, `loop_usage.py`, `input_admission.py`, `provider_stream_mapper.py`, `tool_integrity.py`. | regression/t2/loop/scenarios/loop/grounding_event_passthrough.yaml |
 | T2-LOOP-40 | Resume thinking budget routine | `MONKEYBOT_RUN_KIND=routine` resume turn on gemini/claude/ollama sets the resume thinking budget; other providers untouched. | T2 | P0 | `core/runtime/loop.py`, `turn_loop.py`, `tool_dispatch.py`, `tool_batch.py`, `doom_loop.py`, `loop_usage.py`, `input_admission.py`, `provider_stream_mapper.py`, `tool_integrity.py`. | regression/t2/loop/scenarios/loop/resume_thinking_budget_routine.yaml |
+| T2-LOOP-41 | UI row between tool pair | Preloaded tool call, UI-only confirmation row, then the real result: the provider sees that result once and no interrupted-result stand-in. Stored rows stay unchanged. | T2 | P0 | `core/messages/transform_context.py`, `core/messages/tool_integrity.py`. | regression/t2/loop/scenarios/loop/ui_row_between_tool_pair.yaml |
 | T3-LOOP-01 | Replay live doom loop | A recorded live run that tripped the doom loop still trips it at the same call index. | T3 | P0 | `core/runtime/loop.py`, `turn_loop.py`, `tool_dispatch.py`, `tool_batch.py`, `doom_loop.py`, `loop_usage.py`, `input_admission.py`, `provider_stream_mapper.py`, `tool_integrity.py`. | regression/t3/trajectories/loop/replay_live_doom_loop.yaml |
 | T3-LOOP-02 | Replay live truncation | A recorded `gemma4:31b` `finish=length` `write_file` is rejected (`truncated_batch` / `stream_truncated`); `max_turns: 1` then ends the turn. | T3 | P0 | `core/runtime/loop.py`, `turn_loop.py`, `tool_dispatch.py`, `tool_batch.py`, `doom_loop.py`, `loop_usage.py`, `input_admission.py`, `provider_stream_mapper.py`, `tool_integrity.py`. | regression/t3/trajectories/loop/replay_live_truncation.yaml |
 
