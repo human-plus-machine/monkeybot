@@ -1,0 +1,52 @@
+id: regression/t2/loop/scenarios/file/file_change_review
+case: T2-FILE-34
+description: A write and a replace each emit a FileChange with before/after stats.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Create review.txt, then change alpha to beta.
+script:
+- - type: tool_call
+    call_id: c1
+    name: write_file
+    args:
+      path: review.txt
+      content: "alpha\n"
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: review.txt
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: replace_in_file
+    args:
+      path: review.txt
+      old_string: alpha
+      new_string: beta
+  - type: done
+- - type: text
+    text: Updated review.txt.
+  - type: done
+assertions:
+  workspace_file_contains:
+    review.txt: beta
+  events_sequence:
+  - type: FileChange
+    path: review.txt
+    action: create
+    additions: 1
+    deletions: 0
+    is_text: true
+    too_large: false
+  - type: FileChange
+    path: review.txt
+    action: modify
+    additions: 1
+    deletions: 1
+    is_text: true
+  turn_completed: true

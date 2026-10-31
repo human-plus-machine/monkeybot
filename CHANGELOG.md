@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `write_file`, `replace_in_file`, and `apply_patch` emit a `FileChange` and keep a before/after snapshot under `.monkeybot/changes/{session}` so a client can review the diff and undo. Undo refuses a file that changed since the edit or a snapshot that was too large to keep, and the next turn is told which paths were restored.
+
 ### Fixed
 
 - A UI-only row between a tool call and its result no longer makes the provider see two results for that call. Bedrock rejected the turn when the counts did not match. Stored history is unchanged.

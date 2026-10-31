@@ -235,6 +235,73 @@ def test_transform_keeps_one_tool_result_when_ui_row_splits_the_pair(gap: Messag
     assert "status" not in tool_results[0]["toolResult"]
 
 
+def test_transform_keeps_both_results_when_confirmation_splits_their_arrival() -> None:
+    """One call in a batch returns immediately; the other waits on a confirmation row."""
+    out = transform_context(
+        [
+            Message(role="user", content=[Text(text="hi")]),
+            Message(
+                role="assistant",
+                content=[
+                    ToolRequest(id="t1", name="run_command", args={}),
+                    ToolRequest(id="t2", name="read_file", args={}),
+                ],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(id="t1", tool_name="run_command", result=[Text(text="real-a")]),
+                ],
+            ),
+            Message(
+                role="assistant",
+                content=[
+                    ToolConfirmationRequest(id="t2", tool_name="read_file", arguments={}),
+                ],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(id="t2", tool_name="read_file", result=[Text(text="real-b")]),
+                ],
+            ),
+        ]
+    )
+    results = [
+        block for message in out for block in message.content if isinstance(block, ToolResponse)
+    ]
+    assert [(block.id, block.is_error) for block in results] == [("t1", False), ("t2", False)]
+    assert isinstance(results[0].result[0], Text)
+    assert isinstance(results[1].result[0], Text)
+    assert results[0].result[0].text == "real-a"
+    assert results[1].result[0].text == "real-b"
+
+
+def test_transform_synthesizes_one_result_when_a_ui_row_has_no_result() -> None:
+    out = transform_context(
+        [
+            Message(role="user", content=[Text(text="hi")]),
+            Message(role="assistant", content=[ToolRequest(id="t1", name="run_command", args={})]),
+            Message(
+                role="assistant",
+                content=[
+                    ToolConfirmationRequest(id="t1", tool_name="run_command", arguments={}),
+                ],
+            ),
+            Message(role="user", content=[Text(text="never mind")]),
+        ]
+    )
+    results = [
+        block for message in out for block in message.content if isinstance(block, ToolResponse)
+    ]
+    assert len(results) == 1
+    assert results[0].id == "t1"
+    assert results[0].is_error is True
+    texts = [block.text for message in out for block in message.content if isinstance(block, Text)]
+    assert "never mind" in texts
+    assert texts.count("never mind") == 1
+
+
 def test_transform_keeps_one_result_per_call_when_ui_row_splits_a_batch() -> None:
     out = transform_context(
         [

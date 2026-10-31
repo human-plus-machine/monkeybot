@@ -55,6 +55,9 @@
           "$ref": "#/$defs/FileBlock"
         },
         {
+          "$ref": "#/$defs/FileChange"
+        },
+        {
           "$ref": "#/$defs/ThinkingBlockStarted"
         },
         {
@@ -575,6 +578,57 @@
         "type",
         "request_id",
         "mime_type"
+      ]
+    },
+    "FileChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "FileChange"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "action": {
+          "type": "string"
+        },
+        "additions": {
+          "type": "integer"
+        },
+        "call_id": {
+          "type": "string"
+        },
+        "change_id": {
+          "type": "string"
+        },
+        "deletions": {
+          "type": "integer"
+        },
+        "from_path": {
+          "type": "string"
+        },
+        "is_text": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "too_large": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "action",
+        "additions",
+        "call_id",
+        "change_id",
+        "deletions",
+        "is_text",
+        "path",
+        "too_large"
       ]
     },
     "ThinkingBlockStarted": {

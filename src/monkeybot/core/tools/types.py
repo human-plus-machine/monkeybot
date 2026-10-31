@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from monkeybot.core.types.content_blocks import ContentBlock, Text
+
+if TYPE_CHECKING:
+    from monkeybot.core.tools.change_recorder import FileChangeRecord
 
 
 @dataclass(frozen=True)
 class ToolExecutionResult:
     blocks: list[ContentBlock]
     error: str | None = None
+    file_changes: tuple[FileChangeRecord, ...] = ()
 
     @staticmethod
     def ok_text(text: str) -> ToolExecutionResult:

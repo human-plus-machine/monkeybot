@@ -59,6 +59,7 @@ _KIND_ORDER = (
     "SystemPromptSnapshot",
     "ImageBlock",
     "FileBlock",
+    "FileChange",
     "ThinkingBlockStarted",
     "ThinkingBlockDelta",
     "ThinkingBlockComplete",

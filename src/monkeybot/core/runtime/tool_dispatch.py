@@ -43,6 +43,7 @@ from .events import (
     AgentEvent,
     Error,
     FileBlock,
+    FileChange,
     HarnessIntervention,
     ImageBlock,
     ToolCallResult,
@@ -135,6 +136,27 @@ def _tool_outcome(
         is_error=is_error,
     )
     return event, response
+
+
+def file_change_events(request_id: str, result: ToolExecutionResult) -> list[FileChange]:
+    """SSE notices for workspace writes captured by the change recorder."""
+    events: list[FileChange] = []
+    for record in result.file_changes:
+        events.append(
+            FileChange(
+                request_id=request_id,
+                change_id=record.change_id,
+                call_id=record.call_id,
+                path=record.path,
+                action=record.action,
+                additions=record.additions,
+                deletions=record.deletions,
+                is_text=record.is_text,
+                too_large=record.too_large,
+                from_path=record.from_path,
+            )
+        )
+    return events
 
 
 def _media_events(
@@ -688,6 +710,8 @@ async def _execute_serial_chunk(
     yield event
     for media_evt in _media_events(ctx.request_id, call.call_id, tool_result):
         yield media_evt
+    for change_evt in file_change_events(ctx.request_id, tool_result):
+        yield change_evt
     chunk_responses.append(response)
     mcp_mutated, loops_mutated = _note_registry_mutation(
         call,
@@ -780,6 +804,8 @@ async def _execute_parallel_chunk(
         yield event
         for media_evt in _media_events(ctx.request_id, call.call_id, tool_result):
             yield media_evt
+        for change_evt in file_change_events(ctx.request_id, tool_result):
+            yield change_evt
         chunk_responses.append(response)
         mcp_mutated, loops_mutated = _note_registry_mutation(
             call,
