@@ -1244,3 +1244,51 @@ async def test_memory_configuration_error_aborts_startup() -> None:
         assert _chain_has(exc, MemoryConfigurationError)
     else:
         raise AssertionError("startup did not fail")
+
+
+_CHANGE_REVIEW = """\
+- - type: tool_call
+    call_id: c1
+    name: write_file
+    args:
+      path: review.txt
+      content: "alpha\\n"
+  - type: done
+- - type: text
+    text: wrote it
+  - type: done
+- - type: text
+    text: heard you
+  - type: done
+"""
+
+
+@pytest.mark.case("T2-GW-22")
+async def test_revert_injects_an_undo_note_on_the_next_turn() -> None:
+    async with open_gateway(script=_CHANGE_REVIEW) as gateway:
+        await gateway.create_session("s-chg")
+        async with listening(gateway, "s-chg") as reader:
+            await reader.until("ActiveRequests")
+            first = await _turn(gateway, reader, "s-chg", "r1", "create review.txt")
+        assert any(
+            frame.get("type") == "FileChange" and frame.get("action") == "create" for frame in first
+        )
+        notes = gateway.agent_root / "workspace" / "review.txt"
+        assert notes.read_text(encoding="utf-8") == "alpha\n"
+        listed = await gateway.client.get("/sessions/s-chg/changes")
+        assert listed.status_code == 200
+        changes = listed.json()["changes"]
+        assert [change["path"] for change in changes] == ["review.txt"]
+        reverted = await gateway.client.post(
+            "/sessions/s-chg/changes/revert",
+            json={"request_id": changes[0]["request_id"]},
+        )
+        assert reverted.status_code == 200
+        assert reverted.json()["paths"] == ["review.txt"]
+        assert not notes.exists()
+        async with listening(gateway, "s-chg") as reader:
+            await reader.until("ActiveRequests")
+            second = await _turn(gateway, reader, "s-chg", "r2", "what changed")
+        snapshots = [frame for frame in second if frame.get("type") == "SystemPromptSnapshot"]
+        assert snapshots
+        assert "User undid your changes to review.txt." in snapshots[-1]["text"]

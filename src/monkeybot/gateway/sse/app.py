@@ -101,6 +101,7 @@ from monkeybot.core.runtime.loop_hooks import _fire_hook
 from monkeybot.core.runtime.loop_messages import _user_text_from_content
 from monkeybot.core.testing.mocks_provider import ScriptedFakeProvider, scripted_provider_from_env
 from monkeybot.core.tools.background_jobs import jobs_killed_at_turn_end_error
+from monkeybot.core.tools.change_recorder import UndoNoteHook
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.grant_store import build_grants_persist_hook
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
@@ -481,6 +482,7 @@ class GatewayRuntime:
         if self.nudge_actuator is not None:
             self.nudge_actuator.register(mgr)
         GitContextHook().register(mgr)
+        UndoNoteHook().register(mgr)
         ReadLedgerCompactionHook().register(mgr)
         if cfg is not None and cfg.coding.verification_gate.enabled:
             VerificationGate(cfg.coding.verification_gate).register(mgr)

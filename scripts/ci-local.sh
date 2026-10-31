@@ -45,6 +45,9 @@ cp uv.lock "$lock_backup/root.lock"
 cp cli/uv.lock "$lock_backup/cli.lock"
 cp integrations/browser-mcp/uv.lock "$lock_backup/browser.lock"
 restore_locks() {
+  if [[ ! -d "$lock_backup" ]]; then
+    return 0
+  fi
   cp "$lock_backup/root.lock" uv.lock
   cp "$lock_backup/cli.lock" cli/uv.lock
   cp "$lock_backup/browser.lock" integrations/browser-mcp/uv.lock
@@ -77,6 +80,11 @@ fi
   # This package does not install monkeybot. Clear those addopts and keep the ledger.
   PYTHONPATH="$root" uv run pytest -q -o addopts= -p testkit.failure_ledger --ledger-dir "$root/test-runs"
 )
+
+# Sync rewrites cli/uv.lock. Put the backups back before the stamp check,
+# or a green run never records itself and the next pull request repeats CI.
+restore_locks
+trap - EXIT
 
 if [[ -z "$(git status --porcelain)" ]]; then
   printf '%s\n' "$head_sha" >"$stamp_file"

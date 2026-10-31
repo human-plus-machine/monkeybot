@@ -1,0 +1,84 @@
+id: regression/t2/loop/scenarios/file/file_change_patch
+case: T2-FILE-35
+description: One apply_patch emits a FileChange per hunk, including a move.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Add, delete, edit, and move files in one patch.
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: notes.txt
+  - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: pkg/hidden.txt
+  - type: tool_call
+    call_id: c3
+    name: read_file
+    args:
+      path: pkg/visible.txt
+  - type: done
+- - type: tool_call
+    call_id: c4
+    name: apply_patch
+    args:
+      patch_text: |
+        *** Begin Patch
+        *** Add File: src/added.txt
+        +added line
+        *** Delete File: pkg/hidden.txt
+        *** Update File: notes.txt
+        @@
+        -A note inside the hostile workspace.
+        +A note inside the reviewed workspace.
+        *** Update File: pkg/visible.txt
+        *** Move to: moved/visible.txt
+        @@
+        -NESTED_VISIBLE_TOKEN
+        +moved token
+        *** End Patch
+  - type: done
+- - type: text
+    text: Patched four paths.
+  - type: done
+assertions:
+  workspace_file_contains:
+    src/added.txt: added line
+    notes.txt: A note inside the reviewed workspace.
+    moved/visible.txt: moved token
+  workspace_file_absent:
+  - pkg/hidden.txt
+  - pkg/visible.txt
+  events_sequence:
+  - type: FileChange
+    path: src/added.txt
+    action: create
+    additions: 1
+    deletions: 0
+    is_text: true
+    too_large: false
+  - type: FileChange
+    path: pkg/hidden.txt
+    action: delete
+    is_text: true
+    too_large: false
+  - type: FileChange
+    path: notes.txt
+    action: modify
+    additions: 1
+    deletions: 1
+    is_text: true
+    too_large: false
+  - type: FileChange
+    path: moved/visible.txt
+    action: move
+    from_path: pkg/visible.txt
+    is_text: true
+    too_large: false
+  turn_completed: true

@@ -12,7 +12,7 @@ import sys
 import tempfile
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -101,6 +101,7 @@ from monkeybot.core.tools.background_jobs import (
     JobNotFoundError,
     poll_background_job,
 )
+from monkeybot.core.tools.change_recorder import capture_preimages, commit_file_changes
 from monkeybot.core.tools.command_executor import BackgroundCommandExecutor
 from monkeybot.core.tools.fs_isolation import (
     JailRoots,
@@ -117,8 +118,8 @@ from monkeybot.core.tools.inspector import norm_run_command_line, parse_run_comm
 from monkeybot.core.tools.read_ledger import FileReadLedger, WriteProblem, stamp_of
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
 from monkeybot.core.tools.spill_inventory import (
-    partial_output_tail,
     collapse_run_command_streams,
+    partial_output_tail,
     slice_run_command_streams,
     spill_budgets_from_window,
     write_run_command_output_spill,
@@ -1226,6 +1227,11 @@ class CoreToolExecutor(ToolExecutorPort):
             ),
         )
 
+        preimages = (
+            capture_preimages(self._workspace, name, args)
+            if name in ("write_file", "replace_in_file", "apply_patch")
+            else []
+        )
         try:
             if name == "load_file":
                 return self._tool_load_file(args, ctx)
@@ -1402,7 +1408,18 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text = cap_tool_result_text(result_text, max_chars=hard_cap)
         if err_text is not None:
             return ToolExecutionResult.err(err_text)
-        return ToolExecutionResult.ok_text(result_text or "")
+        result = ToolExecutionResult.ok_text(result_text or "")
+        if preimages:
+            records = commit_file_changes(
+                self._workspace,
+                preimages,
+                session_id=ctx.session_id,
+                request_id=ctx.request_id,
+                call_id=call.call_id,
+            )
+            if records:
+                result = replace(result, file_changes=records)
+        return result
 
     def _tool_load_file(self, args: dict[str, Any], ctx: TurnContext) -> ToolExecutionResult:
         attachment_id = _str_arg(args, "attachment_id", "id")

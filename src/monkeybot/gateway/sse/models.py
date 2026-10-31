@@ -23,6 +23,14 @@ class ErrorEnvelope(BaseModel):
     error: ErrorBody
 
 
+class RevertChangesRequest(BaseModel):
+    """POST /sessions/{id}/changes/revert body."""
+
+    change_ids: list[str] | None = None
+    request_id: str | None = None
+    force: bool = False
+
+
 class APIError(Exception):
     """Raised for API failures; maps to JSON error envelope via exception handler."""
 

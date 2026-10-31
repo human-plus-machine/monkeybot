@@ -1,0 +1,32 @@
+id: regression/t2/loop/scenarios/file/file_change_binary
+case: T2-FILE-37
+description: A write that contains a NUL byte is a binary FileChange with no line stats.
+mode: scripted
+driver: loop
+executor: real
+workspace_fixture: hostile_ws
+messages:
+- Write a binary blob.
+script:
+- - type: tool_call
+    call_id: c1
+    name: write_file
+    args:
+      path: fresh.bin
+      content: "a\u0000b"
+  - type: done
+- - type: text
+    text: Wrote blob.bin.
+  - type: done
+assertions:
+  events_sequence:
+  - type: FileChange
+    path: fresh.bin
+    action: create
+    additions: 0
+    deletions: 0
+    is_text: false
+    too_large: false
+  workspace_command_passes:
+  - python -c "from pathlib import Path; raise SystemExit(0 if Path('fresh.bin').read_bytes()==b'a\x00b' else 1)"
+  turn_completed: true

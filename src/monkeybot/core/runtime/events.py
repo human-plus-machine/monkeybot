@@ -175,6 +175,26 @@ class FileBlock:
 
 
 @dataclass(frozen=True)
+class FileChange:
+    """One workspace file the agent just created, edited, moved, or deleted.
+
+    Bodies are not on the wire. Clients load them from the changes API.
+    """
+
+    kind: Literal["FileChange"] = "FileChange"
+    request_id: str = ""
+    change_id: str = ""
+    call_id: str = ""
+    path: str = ""
+    action: str = ""
+    additions: int = 0
+    deletions: int = 0
+    is_text: bool = True
+    too_large: bool = False
+    from_path: str | None = None
+
+
+@dataclass(frozen=True)
 class ThinkingBlockDelta:
     kind: Literal["ThinkingBlockDelta"] = "ThinkingBlockDelta"
     request_id: str = ""
@@ -507,6 +527,7 @@ AgentEvent: TypeAlias = (
     | SystemPromptSnapshot
     | ImageBlock
     | FileBlock
+    | FileChange
     | ThinkingBlockDelta
     | ThinkingBlockComplete
     | RedactedThinkingBlock
@@ -562,6 +583,7 @@ DURABLE_EVENT_KINDS: frozenset[str] = frozenset(
         # SubagentEvent is live-only; durable nested transcript is the child thread.
         "CredentialEgressBlocked",
         "HistoryRewritten",
+        "FileChange",
     }
 )
 
@@ -874,6 +896,20 @@ def event_to_json(event: AgentEvent) -> str:
         payload = {**base, "tool": event.tool, "result": event.result, "error": event.error}
         if event.call_id:
             payload["call_id"] = event.call_id
+    elif isinstance(event, FileChange):
+        payload = {
+            **base,
+            "change_id": event.change_id,
+            "call_id": event.call_id,
+            "path": event.path,
+            "action": event.action,
+            "additions": event.additions,
+            "deletions": event.deletions,
+            "is_text": event.is_text,
+            "too_large": event.too_large,
+        }
+        if event.from_path:
+            payload["from_path"] = event.from_path
     elif isinstance(event, TurnComplete):
         u = event.usage
         payload = {
@@ -1128,6 +1164,25 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
             data=data,
             path=path,
             filename=_str_payload(payload, "filename").strip(),
+        )
+    if t == "FileChange":
+        additions_raw = payload.get("additions", 0)
+        deletions_raw = payload.get("deletions", 0)
+        additions = int(additions_raw) if isinstance(additions_raw, (int, float)) else 0
+        deletions = int(deletions_raw) if isinstance(deletions_raw, (int, float)) else 0
+        from_raw = payload.get("from_path")
+        from_path = from_raw if isinstance(from_raw, str) and from_raw else None
+        return FileChange(
+            request_id=rid,
+            change_id=_str_payload(payload, "change_id"),
+            call_id=_str_payload(payload, "call_id"),
+            path=_str_payload(payload, "path"),
+            action=_str_payload(payload, "action"),
+            additions=additions,
+            deletions=deletions,
+            is_text=payload.get("is_text") is not False,
+            too_large=payload.get("too_large") is True,
+            from_path=from_path,
         )
     if t == "ThinkingBlockDelta":
         text_raw = payload.get("text", "")

@@ -70,6 +70,7 @@ from .tool_batch import (
     _should_reject_tool_batch,
     confirm_wait_stopped_by_user,
 )
+from .tool_dispatch import file_change_events
 
 logger = logging.getLogger("monkeybot.core.runtime.realtime_loop")
 
@@ -667,7 +668,7 @@ async def run_realtime_turn(
                         elif isinstance(item, list):
                             resolved_blocks = item
                     if resolved_blocks is not None:
-                        result = ToolExecutionResult.ok_blocks(resolved_blocks)
+                        result = dataclasses.replace(result, blocks=resolved_blocks)
                 mcp_registry_mutated, loops_registry_mutated = _note_registry_mutation(
                     call,
                     result,
@@ -680,6 +681,8 @@ async def run_realtime_turn(
 
             event, response = _tool_outcome(call, ctx.request_id, result)
             yield event
+            for change_evt in file_change_events(ctx.request_id, result):
+                yield change_evt
             tool_results.append(response)
 
         if mcp_registry_mutated:
