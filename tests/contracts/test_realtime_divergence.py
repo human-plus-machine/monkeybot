@@ -34,6 +34,7 @@ _SIBLINGS: dict[str, frozenset[str]] = {
             "confirm_wait_stopped_by_user",
         }
     ),
+    "tool_dispatch": frozenset({"file_change_events"}),
 }
 
 _FORBIDDEN_MODULES = frozenset(
@@ -68,6 +69,7 @@ _SHARED_CALLS = frozenset(
         "confirm_wait_stopped_by_user",
         "_await_user_response_any",
         "_note_registry_mutation",
+        "file_change_events",
         "refresh_tools_after_mcp_change",
         "refresh_tools_after_loops_change",
     }
