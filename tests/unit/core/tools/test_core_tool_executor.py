@@ -18,6 +18,8 @@ from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.mcp.mcp_client import MCPDiagnosticError, MCPServerNotConnectedError
 from monkeybot.core.tools.core_tool_executor import CoreToolExecutor
 from monkeybot.core.tools.fs_isolation import IsolationSupport, JailRoots, isolation_support
+from monkeybot.core.tools.inspector import InspectorToolCall
+from monkeybot.core.tools.path_grant_inspector import PathGrantInspector
 from monkeybot.core.tools.types import unwrap_tool_execution_result
 from monkeybot.core.types.types_tools import ToolDef
 from testkit.context import _stub_agent_md_for_tasks
@@ -1266,6 +1268,115 @@ async def test_list_skills_returns_descriptions_from_discovered_skill_md(tmp_pat
         }
     ]
     assert payload["skills"][0]["description"] != "# image-generator"
+
+
+def _sibling_skills_agent(tmp_path: Path, *, link: bool) -> tuple[Path, Path]:
+    """``workspace/`` and ``skills/`` as siblings, optionally with ``workspace/skills -> ../skills``."""
+    agent = tmp_path / "agent"
+    ws = agent / "workspace"
+    ws.mkdir(parents=True)
+    skills = agent / "skills"
+    (skills / "pr-ledger").mkdir(parents=True)
+    (skills / "pr-ledger" / "SKILL.md").write_text("# pr-ledger\n\nLEDGER_BODY\n", encoding="utf-8")
+    (agent / ".env").write_text("CANARY_SECRET\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("CANARY_SECRET\n", encoding="utf-8")
+    (skills / "escape").symlink_to(outside, target_is_directory=True)
+    if link:
+        (ws / "skills").symlink_to("../skills", target_is_directory=True)
+    return ws, skills
+
+
+async def _call(
+    ex: CoreToolExecutor, name: str, args: dict[str, object]
+) -> tuple[str | None, str | None]:
+    return unwrap_tool_execution_result(
+        await ex.execute(call=ToolCall(call_id="1", name=name, args=args), ctx=_ctx(skills=[]))
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("link", [False, True])
+async def test_list_skills_advertises_skills_mount_readable_without_approval(
+    tmp_path: Path, link: bool
+) -> None:
+    ws, skills = _sibling_skills_agent(tmp_path, link=link)
+    ex = CoreToolExecutor(workspace_root=ws, memory=None, skills_path=skills, mcp=_NoMCP())
+
+    out, err = await _call(ex, "list_skills", {})
+    assert err is None and out is not None
+    advertised = json.loads(out)["skills_path"]
+    assert advertised == "skills"
+
+    path = f"{advertised}/pr-ledger/SKILL.md"
+    decision = await PathGrantInspector(workspace_root=ws).check(
+        InspectorToolCall("1", "read_file", {"path": path}), _ctx()
+    )
+    assert decision.kind == "allow"
+    out, err = await _call(ex, "read_file", {"path": path})
+    assert err is None and out is not None and "LEDGER_BODY" in out
+
+    out, err = await _call(ex, "run_command", {"argv": ["cat", path]})
+    assert err is None and out is not None and "LEDGER_BODY" in out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("link", [False, True])
+async def test_writes_under_advertised_skills_path_stay_read_only(
+    tmp_path: Path, link: bool
+) -> None:
+    ws, skills = _sibling_skills_agent(tmp_path, link=link)
+    ex = CoreToolExecutor(workspace_root=ws, memory=None, skills_path=skills, mcp=_NoMCP())
+    skill_md = skills / "pr-ledger" / "SKILL.md"
+    before = skill_md.read_bytes()
+
+    for name, args in (
+        ("write_file", {"path": "skills/pr-ledger/new.md", "content": "x"}),
+        (
+            "replace_in_file",
+            {"path": "skills/pr-ledger/SKILL.md", "old_string": "LEDGER", "new_string": "X"},
+        ),
+        (
+            "apply_patch",
+            {
+                "patch_text": "*** Begin Patch\n*** Add File: skills/pr-ledger/p.md\n+x\n*** End Patch\n"
+            },
+        ),
+    ):
+        out, err = await _call(ex, name, args)
+        assert out is None and err is not None, name
+        assert json.loads(err)["details"]["code"] == "skills_read_only", name
+
+    assert skill_md.read_bytes() == before
+    assert sorted(p.name for p in (skills / "pr-ledger").iterdir()) == ["SKILL.md"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("link", [False, True])
+@pytest.mark.parametrize(
+    ("tool", "path", "code"),
+    [
+        ("read_file", "skills/escape/secret.txt", "path_escape"),
+        ("read_file", "skills/../../.env", "invalid_path"),
+        ("run_command", "skills/escape/secret.txt", "path_escape"),
+        ("run_command", "skills/../../.env", "invalid_path"),
+        ("run_command", "skills/../.env", "path_escape"),
+        ("run_command", "./skills/../.env", "path_escape"),
+    ],
+)
+async def test_escapes_from_skills_path_are_rejected(
+    tmp_path: Path, link: bool, tool: str, path: str, code: str
+) -> None:
+    ws, skills = _sibling_skills_agent(tmp_path, link=link)
+    ex = CoreToolExecutor(workspace_root=ws, memory=None, skills_path=skills, mcp=_NoMCP())
+    args: dict[str, object] = {"path": path} if tool == "read_file" else {"argv": ["cat", path]}
+
+    out, err = await _call(ex, tool, args)
+
+    assert out is None and err is not None
+    assert json.loads(err)["details"]["code"] == code
+    assert "CANARY_SECRET" not in err
 
 
 @pytest.mark.asyncio

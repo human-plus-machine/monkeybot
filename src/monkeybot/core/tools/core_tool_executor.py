@@ -1051,8 +1051,8 @@ class CoreToolExecutor(ToolExecutorPort):
             )
             cmds = tuple(cmd for cmd in cmds if cmd != "mempalace")
         if terminal is None:
-            # Allow absolute argv paths under the resolved skills root (list_skills
-            # returns this path; scripts live outside the workspace cwd).
+            # Allow absolute argv paths under the resolved skills root (``skills/...``
+            # argv is mapped onto it; scripts live outside the workspace cwd).
             skills = str(self._skills_path)
             extra = [skills, f"{skills}/"]
             if run_command_allowed_path_prefixes is None:
@@ -1879,12 +1879,34 @@ class CoreToolExecutor(ToolExecutorPort):
             _j(
                 {
                     "ok": True,
-                    "skills_path": str(self._skills_path),
+                    # The read-only ``skills/`` mount, not the host path: an absolute
+                    # path outside the workspace would send file tools to the grant ask.
+                    "skills_path": "skills",
                     "skills": rows,
                 }
             ),
             None,
         )
+
+    def _skills_argv(self, argv: list[str]) -> list[str]:
+        """Point ``skills/...`` arguments at the read-only skills root, as the file tools do.
+
+        Raises ``WorkspaceError`` when one climbs out with ``..`` or links outside the root.
+        """
+        out: list[str] = []
+        for arg in argv:
+            rel = arg.replace("\\", "/").removeprefix("./")
+            if rel != "skills" and not rel.startswith("skills/"):
+                out.append(arg)
+                continue
+            # A shell follows a ``workspace/skills`` symlink before ``..``, so
+            # ``skills/../.env`` would land beside the skills root, not in the workspace.
+            if not self._workspace._is_skills_path(rel):
+                raise WorkspaceError(
+                    f"Invalid argv: {arg} climbs out of skills/", code="path_escape"
+                )
+            out.append(str(self._workspace.resolve_workspace_path(rel, label="argv")))
+        return out
 
     def _ledger_subagent_context(self, ctx: TurnContext) -> str | None:
         ledger = ctx.goal_ledger
@@ -2177,6 +2199,7 @@ class CoreToolExecutor(ToolExecutorPort):
             return None, _run_command_parse_envelope(exc)
         try:
             cwd = self._resolve_run_command_cwd(args)
+            argv = self._skills_argv(argv)
         except WorkspaceError as exc:
             return None, _workspace_error_envelope(exc)
         timeout = _coerce_int(args.get("timeout"), 60) or 60

@@ -39,7 +39,7 @@ workspace-relative.
 }
 ```
 
-Replace `<skills_path>` with the absolute `skills_path` returned by `list_skills`.
+Replace `<skills_path>` with the `skills_path` returned by `list_skills` (`skills`).
 
 Supported `--aspect-ratio` values: `1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`, `9:16`, `16:9`, `21:9`.
 
