@@ -15,7 +15,14 @@ def scheduler_app():
     reg = SessionRegistry()
 
     class _NoopLoop:
-        async def start_turn(self, session_id: str, request_id: str, user_content) -> None:
+        async def start_turn(
+            self,
+            session_id: str,
+            request_id: str,
+            user_content,
+            *,
+            provenance: str = "human",
+        ) -> None:
             del session_id, request_id, user_content
 
     app = create_app(registry=reg, loop_port=_NoopLoop())

@@ -21,6 +21,7 @@ _ERROR_KINDS = frozenset(
         "incomplete_scan",
         "credential_egress_blocked",
         "pending",
+        "background_unavailable",
     }
 )
 _ENVELOPE_HELPERS = frozenset(
