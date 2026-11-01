@@ -38,7 +38,7 @@ export OTEL_TRACES_SAMPLER_ARG=0.1
 
 ## PII and data minimization
 
-- Tool input and output, user messages, completions, and turn I/O are stored whole, capped at 1 MiB per attribute. The repeated history prompt (`gen_ai.prompt`), errors, and other strings stay at 8 KiB.
+- Tool input and output, tool errors, user messages, completions, and turn I/O are stored whole, capped at 1 MiB per attribute. The repeated history prompt (`gen_ai.prompt`) and other strings stay at 8 KiB.
 - OTLP exports have no value-level secret scan, so full tool I/O reaches the collector. Redact at the collector. The SQLite exporter scans values when Spaces is running.
 - Denylist blocks attribute keys containing `api_key`, `secret`, `password`, `token`, `authorization`, etc. (`gen_ai.*` usage keys are exempt).
 - Hook span events record **`tool.name` only** — never tool args or results.
@@ -49,7 +49,7 @@ export OTEL_TRACES_SAMPLER_ARG=0.1
 
 - Lower production volume with sampling (above).
 - Use an OpenTelemetry Collector for fan-out and optional filtering.
-- The OTLP exporter sends 16 spans per request (the SDK default is 512), because each span can carry several MiB of I/O. Set `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` to override. A batch over the SDK's 64 MiB `max_request_size` (measured before compression) is dropped whole and logged; set `OTEL_EXPORTER_OTLP_COMPRESSION=gzip` to help with a collector body limit.
+- The OTLP exporter sends 8 spans per request (the SDK default is 512). A tool span copies each value three times, so input and output both near 1 MiB are about 6 MiB and eight of those stay under the SDK's 64 MiB `max_request_size` (measured before compression). A larger batch is dropped whole and logged. Set `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` to a positive integer to override; any other value keeps 8. Set `OTEL_EXPORTER_OTLP_COMPRESSION=gzip` to help with a collector body limit. The SQLite exporter uses the same batch size.
 - The SQLite trace DB stores each I/O value up to three times per span (`attributes_json` under the tool and `*.value` keys, plus the `input_value` / `output_value` column) and never shrinks on its own. Lower `MONKEYBOT_TRACES_MAX_SPANS` or `MONKEYBOT_TRACES_RETENTION_DAYS` if it grows too large.
 - Tune backend retention (Phoenix / Langfuse) per your compliance budget.
 

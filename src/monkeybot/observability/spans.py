@@ -56,10 +56,12 @@ _ATTR_ALLOWLIST_EXACT = frozenset(
 
 # Once-per-span I/O: capped at ``_ATTR_HARD_MAX_BYTES`` instead of ``_DEFAULT_MAX_BYTES``.
 # ``gen_ai.prompt`` is deliberately absent: it is the repeated history prompt.
+# ``error`` is a failed tool's only stored text; success output uses ``tool.output``.
 _UNCAPPED_IO_KEYS = frozenset(
     {
         "tool.input",
         "tool.output",
+        "error",
         "gen_ai.completion",
         "trace.input",
         "trace.output",
@@ -112,7 +114,11 @@ def is_denied_attribute_key(key: str) -> bool:
 
 
 def is_attr_truncation_exempt(key: str) -> bool:
-    """True when ``key`` skips the 4 KB clip the SQLite exporter applies at persist time."""
+    """True when SQLite persists ``key`` with ``max_bytes_for_attr`` instead of the 4 KiB clip.
+
+    The key is still truncated. Allowlisted names stay here so an 8 KiB value such as
+    ``gen_ai.prompt`` is not cut to 4 KiB. Once-per-span I/O stays here so it keeps the 1 MiB cap.
+    """
     return key in _ATTR_ALLOWLIST_EXACT or key in _UNCAPPED_IO_KEYS
 
 

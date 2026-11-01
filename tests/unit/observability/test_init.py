@@ -95,12 +95,37 @@ def _otlp_batch_size(monkeypatch: pytest.MonkeyPatch) -> object:
 
 def test_otlp_processor_uses_small_batch_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", raising=False)
-    assert _otlp_batch_size(monkeypatch) == 16
+    assert _otlp_batch_size(monkeypatch) == 8
 
 
-def test_otlp_processor_defers_to_batch_size_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_otlp_processor_honors_positive_batch_size_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", "64")
-    assert _otlp_batch_size(monkeypatch) is None
+    assert _otlp_batch_size(monkeypatch) == 64
+
+
+@pytest.mark.parametrize("raw", ["nope", "0", "-1", "   "])
+def test_otlp_processor_keeps_default_batch_on_invalid_env(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    monkeypatch.setenv("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", raw)
+    assert _otlp_batch_size(monkeypatch) == 8
+
+
+def test_sqlite_processor_uses_small_batch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    import opentelemetry.sdk.trace.export as export_mod
+
+    from monkeybot.observability import _create_span_processor
+
+    captured: dict[str, object] = {}
+
+    def _fake_bsp(_exporter: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setenv("MONKEYBOT_TRACES_DB", str(tmp_path / "traces.db"))
+    monkeypatch.setattr(export_mod, "BatchSpanProcessor", _fake_bsp)
+    assert _create_span_processor("sqlite") is not None
+    assert captured["max_export_batch_size"] == 8
 
 
 def test_shutdown_observability_flushes_and_resets(otel_memory_exporter) -> None:

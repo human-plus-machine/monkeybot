@@ -664,6 +664,19 @@ def test_large_tool_io_round_trips_whole(tmp_path: Path) -> None:
     assert not [key for key in attrs if key.startswith("langfuse.")]
 
 
+def test_tool_error_round_trips_whole(tmp_path: Path) -> None:
+    db_path = tmp_path / "traces.db"
+    exporter = SqliteSpanExporter(_config(db_path))
+    _provider(exporter)
+    error = "e" * 100_000
+    with trace.get_tracer("test").start_as_current_span("monkeybot.tool") as span:
+        span.set_attribute("error", error)
+    exporter.shutdown()
+
+    attrs, _input, _output = _persisted_run_span(db_path)
+    assert attrs["error"] == error
+
+
 def test_io_over_hard_backstop_is_clipped(tmp_path: Path) -> None:
     db_path = tmp_path / "traces.db"
     exporter = SqliteSpanExporter(_config(db_path))

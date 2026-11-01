@@ -172,6 +172,22 @@ def test_set_span_attribute_safe_clips_non_io_string_at_default(otel_memory_expo
 
 
 @pytest.mark.asyncio
+async def test_span_tool_keeps_large_error_whole(otel_memory_exporter) -> None:
+    from monkeybot.observability.spans import record_tool_outcome
+
+    error = "e" * 50_000
+    async with span_tool(
+        tool_name="run_command",
+        tool_call_id="c1",
+        thread_id="t1",
+        request_id="r1",
+    ):
+        record_tool_outcome(None, error)
+    tool = next(s for s in otel_memory_exporter.get_finished_spans() if s.name == "monkeybot.tool")
+    assert tool.attributes["error"] == error
+
+
+@pytest.mark.asyncio
 async def test_span_tool_error_sets_error_attr(otel_memory_exporter) -> None:
     with pytest.raises(RuntimeError):
         async with span_tool(

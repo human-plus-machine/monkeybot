@@ -30,8 +30,9 @@ from testkit.history import FakeHistory
 from testkit.mcp import NoMCP
 from testkit.provider import FakeProvider
 
-_SECRET = "sk-live-OPS04-SECRET"
-_LONG = "A" * 8000 + _SECRET
+# Longer than the old 8 KiB clip. A credential-shaped suffix would be stored whenever
+# the Spaces value scanner is off, and withheld when it is on.
+_LONG = "A" * 8000 + "OPS04-TAIL"
 _DELTA_TYPES = frozenset(
     {"AssistantDelta", "ToolInputDelta", "ThinkingDelta", "ThinkingBlockDelta"}
 )
@@ -129,8 +130,8 @@ async def test_otel_span_tree_and_secret_redaction(otel_sqlite: Path) -> None:
     assert len(completes) == 1
     assert completes[0].trace_id == root_trace
     tool_attributes = json.loads(tool_rows[0]["attributes_json"] or "{}")
-    # Tool I/O is stored whole (no 8 KB / 4 KB clip). Credentials are kept out by the key
-    # denylist below and the value scanner, not by truncation.
+    # Tool I/O is stored whole (no 8 KB / 4 KB clip). Secret-looking keys are dropped
+    # below. Value withholding is covered by the sqlite exporter tests.
     assert _LONG in str(tool_attributes["tool.input"])
     assert tool_attributes["tool.output"] == _LONG
     for row in rows:

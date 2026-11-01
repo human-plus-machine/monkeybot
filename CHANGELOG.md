@@ -14,7 +14,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Tool input and output, completions, and turn I/O are no longer clipped at 8 KB in traces or at 4 KB in the SQLite trace DB. Each attribute is capped at 1 MiB instead. The history prompt stays at 8 KB. Full tool I/O now reaches OTLP backends, so redact at the collector. The SQLite DB no longer stores the `langfuse.*` mirror keys, and the OTLP exporter sends 16 spans per request (override with `OTEL_BSP_MAX_EXPORT_BATCH_SIZE`).
+- Tool input and output, tool errors, completions, and turn I/O are no longer clipped at 8 KB in traces or at 4 KB in the SQLite trace DB. Each attribute is capped at 1 MiB instead. The history prompt stays at 8 KB. Full tool I/O now reaches OTLP backends, so redact at the collector. The SQLite DB no longer stores the `langfuse.*` mirror keys. The OTLP and SQLite exporters send 8 spans per request (override OTLP with a positive integer `OTEL_BSP_MAX_EXPORT_BATCH_SIZE`; any other value keeps 8).
 
 ### Fixed
 

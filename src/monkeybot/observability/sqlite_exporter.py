@@ -37,8 +37,8 @@ logger = logging.getLogger(__name__)
 
 # Third-party instrumentation and OTel ``record_exception`` bypass
 # ``set_span_attribute_safe``; re-apply denylist + truncation at persist time.
-# Exempt keys (``is_attr_truncation_exempt``) use ``max_bytes_for_attr`` instead of
-# this clip, so local SQLite stores the same I/O length as the OTLP exporter path.
+# ``is_attr_truncation_exempt`` keys still truncate, at ``max_bytes_for_attr``
+# (1 MiB for once-per-span I/O, 8 KiB for the allowlist) instead of this 4 KiB clip.
 _MAX_PERSISTED_VALUE_BYTES = 4096
 
 # Mirror keys for Langfuse; the same text is already stored under input/output.value.
