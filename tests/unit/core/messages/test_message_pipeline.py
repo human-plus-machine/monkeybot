@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import pytest
+
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.messages import convert_to_provider, transform_context
 from monkeybot.core.types.content_blocks import (
+    ActionRequired,
     AttachmentDescriptor,
+    FrontendToolRequest,
     SystemNotification,
     Text,
     Thinking,
+    ToolConfirmationAction,
+    ToolConfirmationRequest,
     ToolRequest,
     ToolResponse,
 )
+from monkeybot.providers._bedrock_converse import messages_to_converse
 
 
 def test_transform_strips_ui_only_blocks() -> None:
@@ -130,6 +137,198 @@ def test_transform_strips_thinking_from_final_assistant_turns() -> None:
     assert len(thinking) == 1
     assert thinking[0].thinking == " need tool "
     assert thinking[0].signature == "sig-tool"
+
+
+def _tool_pair_with_gap(gap: Message) -> list[Message]:
+    return [
+        Message(role="user", content=[Text(text="hi")]),
+        Message(role="assistant", content=[ToolRequest(id="t1", name="run_command", args={})]),
+        gap,
+        Message(
+            role="user",
+            content=[
+                ToolResponse(id="t1", tool_name="run_command", result=[Text(text="ok")]),
+            ],
+        ),
+    ]
+
+
+def _tool_result_ids(messages: list[Message]) -> list[str]:
+    return [
+        block.id
+        for message in messages
+        for block in message.content
+        if isinstance(block, ToolResponse)
+    ]
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [
+        Message(
+            role="assistant",
+            content=[
+                ToolConfirmationRequest(id="t1", tool_name="run_command", arguments={}),
+            ],
+        ),
+        Message(
+            role="user",
+            content=[SystemNotification(notification_type="inlineMessage", msg="approved")],
+        ),
+        Message(
+            role="system",
+            content=[SystemNotification(notification_type="verifierVerdict", msg="nudge")],
+        ),
+        Message(
+            role="assistant",
+            content=[FrontendToolRequest(id="t1", name="run_command", args={})],
+        ),
+        Message(
+            role="user",
+            content=[
+                ActionRequired(
+                    data=ToolConfirmationAction(
+                        id="t1",
+                        tool_name="run_command",
+                        arguments={},
+                    )
+                )
+            ],
+        ),
+        Message(
+            role="user",
+            content=[
+                AttachmentDescriptor(
+                    attachment_id="a1",
+                    mime_type="image/png",
+                    description="shot",
+                )
+            ],
+        ),
+    ],
+)
+def test_transform_keeps_one_tool_result_when_ui_row_splits_the_pair(gap: Message) -> None:
+    """A UI-only row between a call and its result must not invent a second result.
+
+    Bedrock rejects a user turn whose toolResult count exceeds the previous
+    turn's toolUse count. The real result is the one that survives.
+    """
+    out = transform_context(_tool_pair_with_gap(gap))
+    results = [
+        block for message in out for block in message.content if isinstance(block, ToolResponse)
+    ]
+    assert [block.id for block in results] == ["t1"]
+    assert results[0].is_error is False
+    assert isinstance(results[0].result[0], Text)
+    assert results[0].result[0].text == "ok"
+    _, converse = messages_to_converse(out)
+    tool_results = [block for block in converse[-1]["content"] if "toolResult" in block]
+    tool_uses = [
+        block["toolUse"]["toolUseId"]
+        for message in converse
+        for block in message["content"]
+        if "toolUse" in block
+    ]
+    assert tool_uses == ["t1"]
+    assert len(tool_results) == 1
+    assert tool_results[0]["toolResult"]["toolUseId"] == "t1"
+    assert "status" not in tool_results[0]["toolResult"]
+
+
+def test_transform_keeps_both_results_when_confirmation_splits_their_arrival() -> None:
+    """One call in a batch returns immediately; the other waits on a confirmation row."""
+    out = transform_context(
+        [
+            Message(role="user", content=[Text(text="hi")]),
+            Message(
+                role="assistant",
+                content=[
+                    ToolRequest(id="t1", name="run_command", args={}),
+                    ToolRequest(id="t2", name="read_file", args={}),
+                ],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(id="t1", tool_name="run_command", result=[Text(text="real-a")]),
+                ],
+            ),
+            Message(
+                role="assistant",
+                content=[
+                    ToolConfirmationRequest(id="t2", tool_name="read_file", arguments={}),
+                ],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(id="t2", tool_name="read_file", result=[Text(text="real-b")]),
+                ],
+            ),
+        ]
+    )
+    results = [
+        block for message in out for block in message.content if isinstance(block, ToolResponse)
+    ]
+    assert [(block.id, block.is_error) for block in results] == [("t1", False), ("t2", False)]
+    assert isinstance(results[0].result[0], Text)
+    assert isinstance(results[1].result[0], Text)
+    assert results[0].result[0].text == "real-a"
+    assert results[1].result[0].text == "real-b"
+
+
+def test_transform_synthesizes_one_result_when_a_ui_row_has_no_result() -> None:
+    out = transform_context(
+        [
+            Message(role="user", content=[Text(text="hi")]),
+            Message(role="assistant", content=[ToolRequest(id="t1", name="run_command", args={})]),
+            Message(
+                role="assistant",
+                content=[
+                    ToolConfirmationRequest(id="t1", tool_name="run_command", arguments={}),
+                ],
+            ),
+            Message(role="user", content=[Text(text="never mind")]),
+        ]
+    )
+    results = [
+        block for message in out for block in message.content if isinstance(block, ToolResponse)
+    ]
+    assert len(results) == 1
+    assert results[0].id == "t1"
+    assert results[0].is_error is True
+    texts = [block.text for message in out for block in message.content if isinstance(block, Text)]
+    assert "never mind" in texts
+    assert texts.count("never mind") == 1
+
+
+def test_transform_keeps_one_result_per_call_when_ui_row_splits_a_batch() -> None:
+    out = transform_context(
+        [
+            Message(role="user", content=[Text(text="hi")]),
+            Message(
+                role="assistant",
+                content=[
+                    ToolRequest(id="t1", name="run_command", args={}),
+                    ToolRequest(id="t2", name="read_file", args={}),
+                ],
+            ),
+            Message(
+                role="assistant",
+                content=[
+                    ToolConfirmationRequest(id="t1", tool_name="run_command", arguments={}),
+                ],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(id="t1", tool_name="run_command", result=[Text(text="ok")]),
+                    ToolResponse(id="t2", tool_name="read_file", result=[Text(text="file")]),
+                ],
+            ),
+        ]
+    )
+    assert _tool_result_ids(out) == ["t1", "t2"]
 
 
 def test_convert_to_provider_passthrough_without_store() -> None:

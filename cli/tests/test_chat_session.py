@@ -448,3 +448,27 @@ def test_close_deletes_session_and_captures_report_dir() -> None:
         assert client.delete.await_count == 1
 
     asyncio.run(_run())
+
+
+def test_idle_watch_shows_a_turn_the_user_did_not_send() -> None:
+    async def _run() -> None:
+        events: list[ChatUiEvent] = []
+        controller = ChatSessionController(base="http://localhost:8080", emit=events.append)
+        controller.session_id = "s"
+        controller._client = object()  # type: ignore[assignment]
+        controller._event_queue.put_nowait(
+            '{"type":"AssistantDelta","request_id":"wake-1","delta":"survey"}'
+        )
+        controller._event_queue.put_nowait('{"type":"TurnComplete","request_id":"wake-1"}')
+        controller._start_idle_watch()
+        for _ in range(40):
+            if any(event.kind == "turn_complete" for event in events):
+                break
+            await asyncio.sleep(0.05)
+        await controller._stop_idle_watch()
+        deltas = [event.payload.get("delta") for event in events if event.kind == "assistant_delta"]
+        assert deltas == ["survey"]
+        assert any(event.kind == "turn_complete" for event in events)
+        assert any(event.kind == "turn_started" for event in events)
+
+    asyncio.run(_run())

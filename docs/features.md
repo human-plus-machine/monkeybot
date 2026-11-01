@@ -149,7 +149,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Consecutive `task` tools and consecutive `parallel_safe` tools in one batch run **in parallel** (capped; default 10); mutating / unmarked tools run as **serial chunks**.
 - One user `Message` per model tool-call turn — all `ToolResponse` blocks grouped together (required for Gemini replay).
 - Final assistant history write is backgrounded but **awaited at turn tail** before freeze/reset.
-- `transform_context()` (tool-integrity repair + UI-block strip) runs on every `history.load()` (in-memory only, never persisted); `convert_to_provider()` resolves attachments / pressure-shapes for the provider view.
+- `transform_context()` strips UI-only blocks, then repairs tool pairs, on every `history.load()` (in-memory only, never persisted); `convert_to_provider()` resolves attachments / pressure-shapes for the provider view.
 
 **Depends on:** Provider, HistoryStore, ToolExecutorPort, inspectors, optional hooks/curator/attachments.
 
@@ -164,7 +164,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - **Settlement barrier:** `PRE_TOOL` is awaited before execute; fire-and-forget hooks are drained (bounded by `MONKEYBOT_HOOK_SETTLEMENT_TIMEOUT_S`, default 2s) before the next provider call and before `TurnComplete` (`run()` finally). Settlement does **not** wait on SSE client ACKs (avoids deadlock).
 - **Parallel-safe tools:** `ToolDef.parallel_safe=True` for read-only core tools (`read_file`, `glob`, `grep`, `search_memory`, `list_skills`, `loop_status`, `load_file`). Mutating tools (`write_file`, `replace_in_file`, `apply_patch`, …) stay serial. MCP tools default serial. Results always append in `call_id` order.
 - **Context Epoch:** At each safe provider-turn boundary the harness reconciles stable vs volatile system-context sources. The leading system message keeps an immutable epoch baseline (cache prefix). Volatile changes emit a chronological mid-conversation update (user-role, not persisted) and a `SystemContextUpdated` event. Compaction / stable-source change opens a new epoch (`ContextEpochStarted`).
-- **Message pipeline:** `history → transform_context() → convert_to_provider() → Provider.stream`. Transform repairs tool integrity and strips UI-only blocks; convert resolves attachments and applies pressure shaping without mutating persisted history.
+- **Message pipeline:** `history → transform_context() → convert_to_provider() → Provider.stream`. Transform strips UI-only blocks, then repairs tool pairs on that provider-shaped list; convert resolves attachments and applies pressure shaping without mutating persisted history.
 - **Streaming grammar (additive):** `AssistantTextStarted` / `AssistantTextEnded`, `ThinkingBlockStarted`, and `ToolInputDelta` supplement existing `AssistantDelta` / `ThinkingBlockDelta` / `ToolCallStarted`. Clients may ignore the new events.
 
 ---
@@ -294,6 +294,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - `skills/...` paths resolve only below the read-only skills root; all other relative paths resolve only below `workspace_root`.
 - Writes, edits, and patches reject `skills/...`; real-path checks reject symlink escapes from either root.
 - `apply_patch` validates all hunks before writing; a mid-apply failure rolls back completed ops in reverse order.
+- `write_file`, `replace_in_file`, and `apply_patch` snapshot the before/after bytes under `.monkeybot/changes/{session}/` and emit `FileChange` (path, action, line stats; bodies stay off the wire). Undo restores the earliest pre-image in the selection. It refuses a file that no longer matches the recorded result, and a snapshot that was too large to keep. A parent session lists and deletes the `subagent:{session}:*` copies with its own.
 - Soft spill: large tool results always write the full payload to `.monkeybot/spill/{session_id}/` (and `.monkeybot/spill/subagent:{session_id}:*/` for task subagents) and keep a window-derived inline body in history when headroom allows; cleaned concurrently on session end. Budgets derive from `model.context_window` (no spill YAML/env knobs). Reported `read_file` line metadata is always truthful (`next_offset` when truncated).
 - `run_command` output over the spill threshold is never inlined as a raw-JSON prefix: the result stays valid JSON with `ok`, `exit_code`, `stdout_head`, `stdout_tail`, `stderr_tail`, `stdout_chars`/`stderr_chars` and `output_path` (full streams under `.monkeybot/spill/`). It is in `_SPILL_SKIP_TOOLS` because it self-spills.
 - `run_command` accepts `./…` and workspace-absolute path arguments (the agent's own tree); `../memory` and symlink escapes stay outside. `bash|sh|zsh -c "…"` scripts are split on shell operators and each command is checked against `deny_patterns` (anchored patterns like `^rm\s+-rf` used to miss them).
@@ -475,47 +476,41 @@ pricing:
 
 ### 12. Subagents (`task` tool)
 
-**Purpose:** Delegate work to isolated subprocess with same workspace/memory/MCP.
+**Purpose:** Delegate work to an isolated subprocess with the same workspace, memory, and MCP.
 
-**Key files:** `core/subagents/subagent_proto.py`, `subagent_worker.py`, `monkeybot.yaml` `subagents.personas`
+**Key files:** `core/subagents/subagent_proto.py`, `subagent_worker.py`, `core/subagents/supervisor.py`, `monkeybot.yaml` `subagents.personas`
 
 **How it works:**
 - Parent passes `subagent_type` to select a named persona from `monkeybot.yaml`.
-- Subagent uses separate `AGENT.md` per type.
-- Returns JSON (summary, errors, usage).
+- Omit `background` to wait for the result in this turn.
+- `background: true` returns immediately with `{status: "running", run_id, child_thread_id}`. The child keeps running after the turn ends. Read it back with `await_task`; stop it with `kill_task`.
+- A session may run `subagents.max_background` background children at once (default 4). Stop on a later turn does not kill them. Deleting the session does.
+- A child starts with the folders and commands this session has already approved. It cannot raise its own access prompt. Durable "Always allow" grants in `grants.json` still apply.
+- When a background child finishes while the session is idle, the harness starts one follow-up turn whose text begins with `[harness]`. That turn is not human intent and is not written to memory.
 
 **Invariants:**
 - No nested `task` inside subagents.
-- Max 10 parallel `task` calls per batch.
-- `subagents.max_turns` / `subagents.timeout_sec` YAML limits apply.
-- Parent reads child NDJSON with a raised StreamReader limit (`SUBAGENT_STDOUT_LINE_LIMIT`, 16 MiB) — not asyncio’s default 64 KiB — so large `SystemPromptSnapshot` lines do not fail with `Separator is not found, and chunk exceed the limit`.
-- Subagent workers redact `SystemPromptSnapshot.text` on the NDJSON pipe (parent drain ignores it; full index would otherwise inflate every inner-turn line).
+- Max 10 parallel blocking `task` calls per batch.
+- `subagents.max_turns` / `subagents.timeout_sec` YAML limits apply (timeout default 3600s).
+- Parent reads child NDJSON with a raised StreamReader limit (`SUBAGENT_STDOUT_LINE_LIMIT`, 16 MiB).
+- Subagent workers redact `SystemPromptSnapshot.text` on the NDJSON pipe.
 
 ---
 
-### 13. Durable subagent runs (task queue)
+### 13. Durable subagent runs (RunStore lease)
 
-**Purpose:** Optional async subagent execution via `RunStore`.
+**Purpose:** Remember background runs across turns and gateway restarts.
 
-**Key files:** `core/persistence/durable_runs.py`, `core/persistence/runs.py`, `subagents/worker/`
+**Key files:** `core/persistence/durable_runs.py`, `core/subagents/supervisor.py`
 
 **How it works:**
-- `MONKEYBOT_TASK_QUEUE=1` enqueues via `record_pending`; workers run `python -m monkeybot.subagents.worker`.
-- Requires `DB_URL` / storage — queue mode without storage raises at enqueue time.
-- Production: standalone `python -m monkeybot.subagents.worker`. Development only: `MONKEYBOT_WORKER_POOL=1` on the gateway (same event loop as SSE — do not use in production). See [Cloud deployment](cloud-deployment-design.md) for multi-process notes.
-
-**Worker tuning:**
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `MONKEYBOT_WORKER_STALE_CLAIM_MS` | `600000` (10 min) | Reclaim `running` rows with no heartbeat after this window; another worker may re-execute the run |
-| `MONKEYBOT_WORKER_POLL_INTERVAL_S` | `2` | Poll interval for `pending_runs()` |
-| `MONKEYBOT_WORKER_CONCURRENCY` | `1` | Max concurrent claimed runs per worker |
-| `MONKEYBOT_WORKER_ID` | auto | Worker identity for claim attribution |
+- A background spawn writes a `running` row with `worker_id` (this process) and `claimed_at`. A heartbeat renews the lease (`subagents.lease_ms`, default 60s).
+- `await_task` reads the in-memory run, or the stored payload after a restart.
+- On startup, `running` rows owned by a dead process on this host are marked failed. A row owned by another host is left alone.
 
 **Invariants:**
-- No claim heartbeat yet — subagent runs longer than `MONKEYBOT_WORKER_STALE_CLAIM_MS` risk duplicate execution. Increase the limit for long LLM workloads or keep runs under the window.
-- Queue mode without storage raises at enqueue time.
+- There is no worker pool and no `MONKEYBOT_TASK_QUEUE`. A `running` result is not completion.
+- Without a storage backend, background runs live only in the gateway process.
 
 ---
 

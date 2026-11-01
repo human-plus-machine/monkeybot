@@ -99,6 +99,7 @@ _ASSERTION_MODES: dict[str, frozenset[str] | None] = {
     "verifier_off": frozenset({"live"}),
     "tool_args": frozenset({"live"}),
     "per_session": frozenset({"live"}),
+    "per_turn": frozenset({"live"}),
     "evidence_paths": frozenset({"live"}),
     "subagent_manifest": frozenset({"live"}),
     "system_prompt": frozenset({"live"}),
@@ -106,7 +107,7 @@ _ASSERTION_MODES: dict[str, frozenset[str] | None] = {
 }
 # Keys a ``per_session`` block cannot hold: the judge scores the whole run, not one session.
 _PER_SESSION_BANNED = frozenset(
-    {"per_session", "verifier_on", "verifier_off", "metrics", "min_score"}
+    {"per_session", "per_turn", "verifier_on", "verifier_off", "metrics", "min_score"}
 )
 
 _HISTORY_KEYS = frozenset(
@@ -320,6 +321,9 @@ def validate_assertions(
         if key == "per_session" and _key_allowed(key, mode=mode, driver=driver):
             problems.extend(_per_session_problems(value, mode=mode, driver=driver))
             continue
+        if key == "per_turn" and _key_allowed(key, mode=mode, driver=driver):
+            problems.extend(_per_group_problems(value, label="per_turn", mode=mode, driver=driver))
+            continue
         if key not in _VERIFIER_KEYS:
             if (
                 key == "memory_injected"
@@ -456,14 +460,19 @@ def _key_problems(key: str, *, mode: str, driver: str | None, where: str) -> lis
 
 def _per_session_problems(value: object, *, mode: str, driver: str | None) -> list[str]:
     """``per_session`` maps a 1-based session number to that session's assertion keys."""
+    return _per_group_problems(value, label="per_session", mode=mode, driver=driver)
+
+
+def _per_group_problems(value: object, *, label: str, mode: str, driver: str | None) -> list[str]:
+    """A 1-based turn or session number mapped to that slice's assertion keys."""
     if not isinstance(value, dict) or not value:
-        return ["per_session must map session numbers to assertion mappings"]
+        return [f"{label} must map numbers to assertion mappings"]
     problems: list[str] = []
     for number, block in value.items():
         if isinstance(number, bool) or not isinstance(number, int) or number < 1:
-            problems.append(f"per_session key {number!r} must be a session number from 1")
+            problems.append(f"{label} key {number!r} must be a number from 1")
             continue
-        where = f"per_session.{number}"
+        where = f"{label}.{number}"
         if not isinstance(block, dict) or not block:
             problems.append(f"{where} must be a non-empty mapping")
             continue

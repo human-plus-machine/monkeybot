@@ -31,7 +31,12 @@ class _ThreadWritingLoop:
         self.turns: list[tuple[str, list[ContentBlock]]] = []
 
     async def start_turn(
-        self, session_id: str, request_id: str, user_content: list[ContentBlock]
+        self,
+        session_id: str,
+        request_id: str,
+        user_content: list[ContentBlock],
+        *,
+        provenance: str = "human",
     ) -> None:
         thread = await resolve_active_thread_id(self._backend, session_id)
         self.turns.append((thread, user_content))

@@ -4,7 +4,7 @@ Thanks for helping improve monkeybot. Report bugs and doc gaps via [issues](http
 
 ## Developing the harness
 
-Clone only if you are changing monkeybot itself (end users should use `uv tool install monkeybot-cli` — see the [README](README.md)):
+Clone only if you are changing monkeybot itself (end users should install with the Pillow override — see the [README](README.md)):
 
 ```bash
 git clone https://github.com/human-plus-machine/monkeybot.git

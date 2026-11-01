@@ -103,9 +103,14 @@ def transform_context(messages: Sequence[Message]) -> list[Message]:
     """Agent-facing history → cleaned message list for conversion.
 
     Steps:
-    1. Repair broken tool-call / tool-result pairing (in-memory only).
-    2. Strip UI-only blocks and completed-reply Thinking (see ``provider_visible_blocks``).
-    3. Coalesce adjacent same-role messages left by dropped UI-only turns.
+    1. Strip UI-only blocks and completed-reply Thinking (see ``provider_visible_blocks``).
+    2. Coalesce adjacent same-role messages left by dropped UI-only turns.
+    3. Repair tool-call / tool-result pairing on that provider-shaped list.
+    4. Coalesce again so a synthetic repair row is not left beside the same role.
+
+    Repair runs after the strip. A UI-only row between a tool call and its
+    result used to look like a missing result, so repair invented a second
+    ``ToolResponse`` and the later coalesce merged it with the real one.
     """
-    repaired = repair_tool_turn_integrity(list(messages))
-    return _coalesce_adjacent_same_role(_strip_non_provider_blocks(repaired))
+    visible = _coalesce_adjacent_same_role(_strip_non_provider_blocks(list(messages)))
+    return _coalesce_adjacent_same_role(repair_tool_turn_integrity(visible))

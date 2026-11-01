@@ -338,7 +338,7 @@ async def test_usage_breakdown_buckets(open_backend: Any) -> None:
 
 
 @pytest.mark.case("T1-STORE-09")
-async def test_run_claim_single_winner_stale_reset(open_backend: Any, tmp_path: Path) -> None:
+async def test_run_lease_owner_renew_and_failed_payload(open_backend: Any, tmp_path: Path) -> None:
     backend = await open_backend(agent_scope="scope-a")
     store = backend.runs()
     run_id = _id("run")
@@ -348,12 +348,21 @@ async def test_run_claim_single_winner_stale_reset(open_backend: Any, tmp_path: 
         memory_storage_uri="local:///mem",
         parent_run_id="parent",
     )
-    await store.record_pending(run_id, "parent", "worker.py", envelope, tmp_path / "scratch")
-    won = await asyncio.gather(store.claim(run_id, "worker-a"), store.claim(run_id, "worker-b"))
-    assert won.count(True) == 1
-    later = int(time.time() * 1000) + 60_000
-    assert await store.reset_stale_claim(run_id, 1, now_ms=later)
-    assert await store.claim(run_id, "worker-c")
+    await store.record_started(
+        run_id, "parent", "worker.py", envelope, tmp_path / "scratch", owner_id="host:1:live"
+    )
+    assert await store.renew_claim(run_id, "host:1:live") is True
+    assert await store.renew_claim(run_id, "host:1:other") is False
+    stale = await store.list_stale_claims(1, now_ms=int(time.time() * 1000) + 120_000)
+    assert run_id in {row.run_id for row in stale}
+    payload = '{"ok": false, "exit_reason": "error"}'
+    assert await store.record_failed(
+        run_id, "orphaned", worker_id="host:1:live", result_json=payload
+    )
+    row = await store.get_run(run_id)
+    assert row is not None
+    assert row.status == "failed"
+    assert row.result_json == payload
 
 
 @pytest.mark.case("T1-STORE-10")
@@ -472,7 +481,7 @@ async def test_known_unscoped_tables(open_backend: Any, tmp_path: Path) -> None:
     assert (await scope_b.usage().summary(thread)).turns == 1
 
     run_id = _id("run")
-    await scope_a.runs().record_pending(
+    await scope_a.runs().record_started(
         run_id,
         None,
         "worker.py",

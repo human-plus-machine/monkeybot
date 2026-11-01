@@ -636,6 +636,124 @@ def test_denied_keys_dropped_and_values_clipped(tmp_path: Path) -> None:
     assert len(events[0]["attributes"]["exception.stacktrace"]) < 5_000
 
 
+def _persisted_run_span(db_path: Path) -> tuple[dict[str, Any], str | None, str | None]:
+    conn = sqlite3.connect(db_path)
+    attrs_json, input_value, output_value = conn.execute(
+        "select attributes_json, input_value, output_value from spans"
+    ).fetchone()
+    conn.close()
+    return json.loads(attrs_json), input_value, output_value
+
+
+def test_large_tool_io_round_trips_whole(tmp_path: Path) -> None:
+    db_path = tmp_path / "traces.db"
+    exporter = SqliteSpanExporter(_config(db_path))
+    _provider(exporter)
+    big = "o" * 100_000
+    with trace.get_tracer("test").start_as_current_span("monkeybot.run") as span:
+        span.set_attribute("tool.output", big)
+        span.set_attribute("output.value", big)
+        span.set_attribute("langfuse.observation.output", big)
+    exporter.shutdown()
+
+    attrs, _input, output_value = _persisted_run_span(db_path)
+    assert attrs["tool.output"] == big
+    assert attrs["output.value"] == big
+    assert output_value == big
+    # Mirror keys for Langfuse are not stored locally.
+    assert not [key for key in attrs if key.startswith("langfuse.")]
+
+
+def test_tool_error_round_trips_whole(tmp_path: Path) -> None:
+    db_path = tmp_path / "traces.db"
+    exporter = SqliteSpanExporter(_config(db_path))
+    _provider(exporter)
+    error = "e" * 100_000
+    with trace.get_tracer("test").start_as_current_span("monkeybot.tool") as span:
+        span.set_attribute("error", error)
+    exporter.shutdown()
+
+    attrs, _input, _output = _persisted_run_span(db_path)
+    assert attrs["error"] == error
+
+
+def test_io_over_hard_backstop_is_clipped(tmp_path: Path) -> None:
+    db_path = tmp_path / "traces.db"
+    exporter = SqliteSpanExporter(_config(db_path))
+    _provider(exporter)
+    with trace.get_tracer("test").start_as_current_span("monkeybot.run") as span:
+        span.set_attribute("tool.output", "z" * (2 * 1024 * 1024))
+    exporter.shutdown()
+
+    attrs, _input, output_value = _persisted_run_span(db_path)
+    assert attrs["tool.output"].endswith("…[truncated]")
+    assert len(attrs["tool.output"].encode("utf-8")) <= 1024 * 1024 + 32
+    assert output_value == attrs["tool.output"]
+
+
+def test_value_scan_withholds_every_copy_and_scans_each_text_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import monkeybot.observability.sqlite_exporter as sqlite_exporter_module
+
+    marker = "the-secret-value"
+    scanned: list[list[str]] = []
+
+    class _MarkerScanner:
+        def scan(self, texts: list[str]) -> list[object]:
+            from monkeybot.core.context.secret_egress import Hit
+
+            scanned.append(list(texts))
+            return [Hit(index=i, kind="secret") for i, t in enumerate(texts) if marker in t]
+
+    monkeypatch.setattr(sqlite_exporter_module, "get_scanner", lambda: _MarkerScanner())
+
+    db_path = tmp_path / "traces.db"
+    exporter = SqliteSpanExporter(_config(db_path))
+    _provider(exporter)
+    # Secret sits past the old 8 KB clip.
+    secret_output = "a" * 20_000 + marker
+    with trace.get_tracer("test").start_as_current_span("monkeybot.run") as span:
+        span.set_attribute("tool.output", secret_output)
+        span.set_attribute("output.value", secret_output)
+        span.set_attribute("tool.name", "read_file")
+    exporter.shutdown()
+
+    attrs, _input, output_value = _persisted_run_span(db_path)
+    assert attrs["tool.output"] == "[withheld: credential detected]"
+    assert attrs["output.value"] == "[withheld: credential detected]"
+    assert output_value == "[withheld: credential detected]"
+    assert attrs["tool.name"] == "read_file"
+    span_scans = [texts for texts in scanned if secret_output in texts]
+    assert span_scans
+    assert span_scans[0].count(secret_output) == 1
+
+
+def test_value_scan_runs_before_the_write_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scanner does network I/O; it must not run while a write transaction is open."""
+    import monkeybot.observability.sqlite_exporter as sqlite_exporter_module
+
+    in_transaction: list[bool] = []
+    exporter = SqliteSpanExporter(_config(tmp_path / "traces.db"))
+
+    class _ProbeScanner:
+        def scan(self, texts: list[str]) -> list[object]:
+            conn = exporter._conn
+            in_transaction.append(conn is not None and conn.in_transaction)
+            return []
+
+    monkeypatch.setattr(sqlite_exporter_module, "get_scanner", lambda: _ProbeScanner())
+    _provider(exporter)
+    with trace.get_tracer("test").start_as_current_span("monkeybot.run") as span:
+        span.set_attribute("tool.output", "hello")
+    exporter.shutdown()
+
+    assert in_transaction
+    assert not any(in_transaction)
+
+
 def test_value_scan_redacts_secret_under_an_unsuspicious_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

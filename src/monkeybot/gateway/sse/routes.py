@@ -40,6 +40,7 @@ from monkeybot.core.runtime.input_admission import (
     FollowUpItem,
     FollowUpNotFoundError,
 )
+from monkeybot.core.tools.change_recorder import ChangeRevertError, ChangeStore
 from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
 from monkeybot.core.types.content_blocks import ContentBlock
 from monkeybot.core.verifier.rewrite_effects import VerifierRewriteEffects
@@ -64,6 +65,7 @@ from .models import (
     ReplyBodyFields,
     ReplyRequest,
     ReplyResponse,
+    RevertChangesRequest,
     SessionUsageResponse,
     SteerRequest,
     ToolConfirmationPOST,
@@ -106,8 +108,10 @@ def _default_loop_port(registry: SessionRegistry) -> LoopPort:
             session_id: str,
             request_id: str,
             user_content: list[ContentBlock],
+            *,
+            provenance: str = "human",
         ) -> None:
-            _ = (request_id, user_content)
+            _ = (request_id, user_content, provenance)
             bus = registry.get(session_id)
             if bus is not None:
                 bus.current_request_id = None
@@ -212,17 +216,21 @@ def _schedule_turn(
     session_id: str,
     request_id: str,
     user_content: list[ContentBlock],
+    provenance: str = "human",
 ) -> None:
     """Background a turn and drain follow-up queue when it finishes."""
 
     async def _turn() -> None:
         try:
-            await loop_ref.start_turn(session_id, request_id, user_content)
+            await loop_ref.start_turn(session_id, request_id, user_content, provenance=provenance)
         finally:
             if storage is not None:
                 await storage.session_turns().release(session_id, request_id)
             if bus.current_request_id == request_id:
                 bus.current_request_id = None
+            supervisor = getattr(bus, "subagent_supervisor", None)
+            if supervisor is not None:
+                await supervisor.wake_if_idle()
             # Steers drain only at the top of each inner turn. A promote during
             # the final inner turn would otherwise sit in `_steer` until a later
             # turn (or vanish on cancel). Put those items back on the follow-up
@@ -337,11 +345,26 @@ async def _drain_follow_up(
             session_id=session_id,
         )
         return
+    supervisor = getattr(bus, "subagent_supervisor", None)
+    if (
+        item.provenance == "harness"
+        and supervisor is not None
+        and not supervisor.runs_still_need_wake(item.harness_run_ids)
+    ):
+        if storage is not None:
+            await storage.session_turns().release(session_id, item.request_id)
+        await _drain_follow_up(
+            bus=bus,
+            loop_ref=loop_ref,
+            storage=storage,
+            session_id=session_id,
+        )
+        return
     bus.cancel_follow_up_retry()
     bus.current_request_id = item.request_id
     logger.info(
         "follow-up promoted %s",
-        kv(session_id=session_id, request_id=item.request_id),
+        kv(session_id=session_id, request_id=item.request_id, provenance=item.provenance),
     )
     _schedule_turn(
         bus=bus,
@@ -350,6 +373,7 @@ async def _drain_follow_up(
         session_id=session_id,
         request_id=item.request_id,
         user_content=item.content,
+        provenance=item.provenance,
     )
 
 
@@ -706,6 +730,7 @@ def create_app(
         ``transcript_dir`` (the folder containing ``transcript.ndjson``).
         """
         result = await reg_dep.remove_async(session_id)
+        ChangeStore(_api_workspace_root()).delete_session(session_id)
         return DeleteSessionResponse(
             deleted=result.deleted,
             transcript_dir=result.transcript_dir,
@@ -1241,6 +1266,78 @@ def create_app(
             )
         return {"ok": True}
 
+    @api.get("/sessions/{session_id}/changes")
+    async def list_changes(session_id: str) -> dict[str, Any]:
+        """Recorded workspace writes for this session, oldest first."""
+        try:
+            changes = ChangeStore(_api_workspace_root()).list_changes(session_id)
+        except ValueError as exc:
+            raise APIError(400, "BAD_REQUEST", str(exc), uuid.uuid4().hex) from exc
+        return {"changes": changes}
+
+    @api.get("/sessions/{session_id}/changes/{change_id}/content")
+    async def change_content(session_id: str, change_id: str) -> dict[str, Any]:
+        """Before/after text for one change. Binary and oversized files omit bodies."""
+        try:
+            payload = ChangeStore(_api_workspace_root()).content(session_id, change_id)
+        except ValueError as exc:
+            raise APIError(400, "BAD_REQUEST", str(exc), uuid.uuid4().hex) from exc
+        if payload is None:
+            raise APIError(404, "NOT_FOUND", "Unknown change", uuid.uuid4().hex)
+        return payload
+
+    @api.post("/sessions/{session_id}/changes/revert")
+    async def revert_changes(
+        session_id: str,
+        body: RevertChangesRequest,
+        request: Request,
+        reg_dep: SessionRegistry = Depends(get_registry),
+    ) -> dict[str, Any]:
+        """Restore files to their pre-image. 409 when the file changed since the edit."""
+        rid = uuid.uuid4().hex
+        if not body.change_ids and not body.request_id:
+            raise APIError(
+                400,
+                "BAD_REQUEST",
+                "Pass change_ids or request_id",
+                rid,
+            )
+        bus = reg_dep.get(session_id)
+        storage = getattr(request.app.state, "storage", None)
+        held = False
+        if bus is not None:
+            await _try_acquire_turn(
+                bus=bus,
+                storage=storage,
+                session_id=session_id,
+                request_id=rid,
+                busy_is_error=True,
+            )
+            held = storage is not None
+        try:
+            try:
+                paths = ChangeStore(_api_workspace_root()).revert(
+                    session_id,
+                    change_ids=body.change_ids,
+                    request_id=body.request_id,
+                    force=body.force,
+                )
+            except ValueError as exc:
+                raise APIError(400, "BAD_REQUEST", str(exc), rid) from exc
+            except ChangeRevertError as exc:
+                names = ", ".join(exc.paths)
+                if exc.code == "too_large":
+                    raise APIError(
+                        409, "CHANGE_TOO_LARGE", f"too large to undo: {names}", rid
+                    ) from exc
+                raise APIError(
+                    409, "CHANGE_CONFLICT", f"changed since the edit: {names}", rid
+                ) from exc
+        finally:
+            if held and storage is not None:
+                await storage.session_turns().release(session_id, rid)
+        return {"ok": True, "paths": paths}
+
     @api.get("/sessions/{session_id}/usage", response_model=SessionUsageResponse)
     async def get_usage(
         session_id: str,
@@ -1477,6 +1574,7 @@ def create_app(
                 await purge_session_branches(
                     backend.history(), backend.branches(), thread_id, effects=_rewrite_effects()
                 )
+                ChangeStore(_api_workspace_root()).delete_session(thread_id)
             except Exception:
                 logger.exception(
                     "chat history delete failed %s",

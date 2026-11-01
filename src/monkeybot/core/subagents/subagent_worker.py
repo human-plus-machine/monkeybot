@@ -449,6 +449,8 @@ async def _async_main() -> None:
             config=cfg,
             read_ledger=read_ledger,
         )
+        ctx.turn_path_grants.update(envelope.path_grants)
+        ctx.turn_command_grants.update(envelope.command_grants)
 
         executor = CoreToolExecutor(
             workspace_root=ws,

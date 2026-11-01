@@ -34,7 +34,11 @@ from monkeybot.core.path_safety import path_contained_under
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.runtime.context_budget import ContextBudgeter
 from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector, format_denial
-from monkeybot.core.tools.permission import remember_always_approval, resource_for_call
+from monkeybot.core.tools.permission import (
+    grant_session_access,
+    remember_always_approval,
+    resource_for_call,
+)
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import ContentBlock, File, Image, Text, ToolResponse
 
@@ -43,6 +47,7 @@ from .events import (
     AgentEvent,
     Error,
     FileBlock,
+    FileChange,
     HarnessIntervention,
     ImageBlock,
     ToolCallResult,
@@ -135,6 +140,27 @@ def _tool_outcome(
         is_error=is_error,
     )
     return event, response
+
+
+def file_change_events(request_id: str, result: ToolExecutionResult) -> list[FileChange]:
+    """SSE notices for workspace writes captured by the change recorder."""
+    events: list[FileChange] = []
+    for record in result.file_changes:
+        events.append(
+            FileChange(
+                request_id=request_id,
+                change_id=record.change_id,
+                call_id=record.call_id,
+                path=record.path,
+                action=record.action,
+                additions=record.additions,
+                deletions=record.deletions,
+                is_text=record.is_text,
+                too_large=record.too_large,
+                from_path=record.from_path,
+            )
+        )
+    return events
 
 
 def _media_events(
@@ -418,10 +444,7 @@ async def _resolve_inspector_decision(
                         "confirm_always" if payload.get("always") else "confirm_approved"
                     )
                     grant_resource = decision.grant_key or resource_for_call(inspector_call)
-                    if decision.grant_kind == "command":
-                        ctx.turn_command_grants.add(grant_resource)
-                    elif decision.grant_kind == "path":
-                        ctx.turn_path_grants.add(grant_resource)
+                    grant_session_access(ctx, kind=decision.grant_kind, resource=grant_resource)
                     if payload.get("always"):
                         grant_persist = (
                             ctx.grants_persist
@@ -688,6 +711,8 @@ async def _execute_serial_chunk(
     yield event
     for media_evt in _media_events(ctx.request_id, call.call_id, tool_result):
         yield media_evt
+    for change_evt in file_change_events(ctx.request_id, tool_result):
+        yield change_evt
     chunk_responses.append(response)
     mcp_mutated, loops_mutated = _note_registry_mutation(
         call,
@@ -780,6 +805,8 @@ async def _execute_parallel_chunk(
         yield event
         for media_evt in _media_events(ctx.request_id, call.call_id, tool_result):
             yield media_evt
+        for change_evt in file_change_events(ctx.request_id, tool_result):
+            yield change_evt
         chunk_responses.append(response)
         mcp_mutated, loops_mutated = _note_registry_mutation(
             call,

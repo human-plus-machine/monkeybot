@@ -207,6 +207,7 @@ async def _run_inner(
     transcript_writer: TranscriptWriter | None = None,
     vertex_google_search: bool = False,
     input_admission: InputAdmission | None = None,
+    input_provenance: str = "human",
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import set_run_output, span_run
 
@@ -232,6 +233,7 @@ async def _run_inner(
                 transcript_writer=transcript_writer,
                 vertex_google_search=vertex_google_search,
                 input_admission=input_admission,
+                input_provenance=input_provenance,
                 summary_token=summary_token,
             ):
                 yield evt
@@ -1952,6 +1954,7 @@ async def _run_inner_core(
     transcript_writer: TranscriptWriter | None = None,
     vertex_google_search: bool = False,
     input_admission: InputAdmission | None = None,
+    input_provenance: str = "human",
     summary_token: list[Any] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     from monkeybot.observability.spans import (
@@ -1971,23 +1974,43 @@ async def _run_inner_core(
         ),
     )
     user_row_id = new_row_id()
+    harness_turn = input_provenance == "harness"
     await persist_message(
         history,
         Message(role="user", content=list(user_content), row_id=user_row_id),
         thread_id=state.ctx.thread_id,
         turn_id=state.ctx.request_id,
         memory=state.ctx.memory,
-        ingest=True,
+        ingest=not harness_turn,
     )
+    if harness_turn:
+        ledger = state.ctx.goal_ledger
+        if ledger is not None and state.user_text:
+            from monkeybot.core.persistence.goal_ledger import Channel, Provenance
 
-    await _fire_hook(
-        hook_manager,
-        event=HookEvent.USER_MESSAGE,
-        ctx=state.ctx,
-        timeout_s=0,
-        user_message=state.user_text,
-        user_row_id=user_row_id,
-    )
+            try:
+                ledger.admit(
+                    state.ctx.thread_id,
+                    state.user_text,
+                    provenance=Provenance.HARNESS,
+                    channel=Channel.FOLLOW_UP,
+                    source_row_id=user_row_id,
+                )
+            except Exception:
+                logger.warning(
+                    "goal_ledger harness admit failed %s",
+                    kv(thread_id=state.ctx.thread_id, request_id=state.ctx.request_id),
+                    exc_info=True,
+                )
+    else:
+        await _fire_hook(
+            hook_manager,
+            event=HookEvent.USER_MESSAGE,
+            ctx=state.ctx,
+            timeout_s=0,
+            user_message=state.user_text,
+            user_row_id=user_row_id,
+        )
 
     while state.turn_index < state.effective_max:
         if cancelled is not None and cancelled.is_set():

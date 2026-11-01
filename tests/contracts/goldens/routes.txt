@@ -18,6 +18,8 @@ GET /redoc
 GET /scheduler/loops
 GET /scheduler/loops/{loop_id}
 GET /sessions/{session_id}/branches
+GET /sessions/{session_id}/changes
+GET /sessions/{session_id}/changes/{change_id}/content
 GET /sessions/{session_id}/events
 GET /sessions/{session_id}/usage
 GET /usage
@@ -40,6 +42,7 @@ POST /sessions/{session_id}/ask-user/{tool_call_id}
 POST /sessions/{session_id}/attachments
 POST /sessions/{session_id}/branches
 POST /sessions/{session_id}/cancel
+POST /sessions/{session_id}/changes/revert
 POST /sessions/{session_id}/elicitations/{elicitation_id}
 POST /sessions/{session_id}/fork
 POST /sessions/{session_id}/frontend-tool-results/{tool_call_id}

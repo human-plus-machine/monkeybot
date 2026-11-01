@@ -1781,11 +1781,18 @@ def _short(role: str) -> Message:
 
 # Raw rows viable, coalesced view (user + assistant) is not.
 _RAW_ONLY_VIABLE = [_short("user")] * 4 + [_short("assistant")]
-# Coalesced view viable (synthetic repair adds a row), raw rows are not.
+# Raw rows are under the compaction minimum. Each orphan result makes repair
+# insert a synthetic request, so the provider view is long enough to compact.
 _VIEW_ONLY_VIABLE = [
-    _short("user"),
-    Message(role="assistant", content=[ToolRequest(id="orphan", name="echo", args={})]),
+    Message(
+        role="user",
+        content=[ToolResponse(id="o1", tool_name="echo", result=[Text(text="z" * 40)])],
+    ),
     _short("assistant"),
+    Message(
+        role="user",
+        content=[ToolResponse(id="o2", tool_name="echo", result=[Text(text="z" * 40)])],
+    ),
 ]
 
 

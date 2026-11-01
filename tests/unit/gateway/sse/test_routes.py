@@ -38,6 +38,8 @@ class HoldingLoopPort:
         session_id: str,
         request_id: str,
         user_content: list[Text],
+        *,
+        provenance: str = "human",
     ) -> None:
         _ = (session_id, request_id, user_content)
         await self._hold.wait()
@@ -684,3 +686,166 @@ async def test_chat_history_disabled_returns_404(
             r = await method(path)
             assert r.status_code == 404
             assert r.json()["error"]["code"] == "NOT_FOUND"
+
+
+def _pin_workspace(monkeypatch: pytest.MonkeyPatch, root) -> None:
+    monkeypatch.setattr("monkeybot.gateway.sse.routes._api_workspace_root", lambda: root)
+
+
+def _record_create(root, session_id: str, name: str, content: str, request_id: str) -> str:
+    from monkeybot.core.tools.change_recorder import capture_preimages, commit_file_changes
+    from monkeybot.core.tools.workspace_service import WorkspaceFileService
+
+    workspace = WorkspaceFileService(root)
+    pre = capture_preimages(workspace, "write_file", {"path": name, "content": content})
+    workspace.write_file(name, content)
+    records = commit_file_changes(
+        workspace, pre, session_id=session_id, request_id=request_id, call_id="c1"
+    )
+    return records[0].change_id
+
+
+@pytest.mark.asyncio
+async def test_change_routes_list_content_and_revert(
+    registry: SessionRegistry, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _pin_workspace(monkeypatch, tmp_path)
+    change_id = _record_create(tmp_path, "sess-1", "notes.txt", "hello\n", "req-1")
+    app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        listed = await client.get("/sessions/sess-1/changes")
+        assert listed.status_code == 200
+        body = listed.json()["changes"]
+        assert len(body) == 1
+        assert body[0]["change_id"] == change_id
+        assert body[0]["path"] == "notes.txt"
+        assert body[0]["reverted"] is False
+
+        content = await client.get(f"/sessions/sess-1/changes/{change_id}/content")
+        assert content.status_code == 200
+        assert content.json()["before"] is None
+        assert content.json()["after"] == "hello\n"
+
+        missing = await client.get("/sessions/sess-1/changes/missing/content")
+        assert missing.status_code == 404
+        assert missing.json()["error"]["code"] == "NOT_FOUND"
+
+        empty = await client.post("/sessions/sess-1/changes/revert", json={})
+        assert empty.status_code == 400
+        assert empty.json()["error"]["code"] == "BAD_REQUEST"
+
+        reverted = await client.post(
+            "/sessions/sess-1/changes/revert", json={"request_id": "req-1"}
+        )
+        assert reverted.status_code == 200
+        assert reverted.json()["paths"] == ["notes.txt"]
+        assert not (tmp_path / "notes.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_change_revert_conflict_and_too_large(
+    registry: SessionRegistry, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _pin_workspace(monkeypatch, tmp_path)
+    _record_create(tmp_path, "sess-1", "notes.txt", "hello\n", "req-1")
+    (tmp_path / "notes.txt").write_text("edited by hand\n", encoding="utf-8")
+    monkeypatch.setattr("monkeybot.core.tools.change_recorder.BLOB_CAP_BYTES", 8)
+    _record_create(tmp_path, "sess-1", "big.txt", "x" * 32, "req-big")
+    app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        conflict = await client.post(
+            "/sessions/sess-1/changes/revert", json={"request_id": "req-1"}
+        )
+        assert conflict.status_code == 409
+        assert conflict.json()["error"]["code"] == "CHANGE_CONFLICT"
+        assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "edited by hand\n"
+
+        too_large = await client.post(
+            "/sessions/sess-1/changes/revert", json={"request_id": "req-big"}
+        )
+        assert too_large.status_code == 409
+        assert too_large.json()["error"]["code"] == "CHANGE_TOO_LARGE"
+
+
+@pytest.mark.asyncio
+async def test_change_routes_reject_an_unsafe_session_id(
+    registry: SessionRegistry, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _pin_workspace(monkeypatch, tmp_path)
+    app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        listed = await client.get("/sessions/bad%20id/changes")
+        assert listed.status_code == 200
+        assert listed.json()["changes"] == []
+        content = await client.get("/sessions/bad%20id/changes/anything/content")
+        assert content.status_code == 400
+        assert content.json()["error"]["code"] == "BAD_REQUEST"
+        reverted = await client.post(
+            "/sessions/bad%20id/changes/revert", json={"request_id": "req-1"}
+        )
+        assert reverted.status_code == 400
+        assert reverted.json()["error"]["code"] == "BAD_REQUEST"
+
+
+@pytest.mark.asyncio
+async def test_delete_session_removes_change_records(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _pin_workspace(monkeypatch, tmp_path)
+    created = await client.post("/sessions", json={"session_id": "sess-1"})
+    assert created.status_code == 201
+    _record_create(tmp_path, "sess-1", "notes.txt", "hello\n", "req-1")
+    deleted = await client.delete("/sessions/sess-1")
+    assert deleted.status_code == 200
+    assert not (tmp_path / ".monkeybot" / "changes" / "sess-1").exists()
+
+
+@pytest.mark.asyncio
+async def test_revert_while_a_turn_is_running_is_busy(
+    registry: SessionRegistry, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    _pin_workspace(monkeypatch, tmp_path)
+    app = create_app(loop_port=HoldingLoopPort(), registry=registry)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        created = await client.post("/sessions", json={"session_id": "sess-1"})
+        assert created.status_code == 201
+        _record_create(tmp_path, "sess-1", "notes.txt", "hello\n", "req-1")
+        started = await client.post(
+            "/sessions/sess-1/reply",
+            json={"request_id": "running", "message": "hold"},
+        )
+        assert started.status_code == 200
+        reverted = await client.post(
+            "/sessions/sess-1/changes/revert", json={"request_id": "req-1"}
+        )
+        assert reverted.status_code == 409
+        assert reverted.json()["error"]["code"] == "SESSION_BUSY"
+        assert (tmp_path / "notes.txt").read_text(encoding="utf-8") == "hello\n"
+
+
+@pytest.mark.asyncio
+async def test_chat_history_delete_removes_change_records(
+    registry: SessionRegistry, monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    from monkeybot.core.llm.provider import Message
+    from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
+    from monkeybot.core.types.content_blocks import Text
+
+    _pin_workspace(monkeypatch, tmp_path)
+    backend = SQLiteStorageBackend("sqlite:///:memory:")
+    await backend.open()
+    try:
+        await backend.history().append(
+            "sess-1",
+            Message(role="user", content=[Text(text="hello")]),
+        )
+        _record_create(tmp_path, "sess-1", "notes.txt", "hello\n", "req-1")
+        app = create_app(loop_port=FakeLoopPort(registry), registry=registry)
+        app.state.storage = backend
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            deleted = await client.delete("/api/chat-history/sess-1")
+            assert deleted.status_code == 200
+            assert deleted.json() == {"deleted": True}
+        assert not (tmp_path / ".monkeybot" / "changes" / "sess-1").exists()
+    finally:
+        await backend.close()

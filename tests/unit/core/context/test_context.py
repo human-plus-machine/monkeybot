@@ -128,7 +128,9 @@ def test_core_tool_defs_keep_hot_path_and_moved_policy() -> None:
     assert "bash" not in tools["run_command"].description.lower()
     assert "cwd" in tools["run_command"].input_schema.get("properties", {})
     assert "writable workspace" in tools["write_file"].description
-    assert "queued:true" in tools["task"].description
+    assert "background true" in tools["task"].description
+    assert "status running" in tools["task"].description
+    assert "queued:true" not in tools["task"].description
 
 
 def test_core_tool_defs_enable_mcp_enums_catalog_names() -> None:

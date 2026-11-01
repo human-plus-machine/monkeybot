@@ -50,7 +50,11 @@ from monkeybot.core.runtime.events import (
     UsageTotals,
 )
 from monkeybot.core.tools.inspector import InspectorToolCall, format_denial
-from monkeybot.core.tools.permission import remember_always_approval, resource_for_call
+from monkeybot.core.tools.permission import (
+    grant_session_access,
+    remember_always_approval,
+    resource_for_call,
+)
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import (
     ActionRequired,
@@ -70,6 +74,7 @@ from .tool_batch import (
     _should_reject_tool_batch,
     confirm_wait_stopped_by_user,
 )
+from .tool_dispatch import file_change_events
 
 logger = logging.getLogger("monkeybot.core.runtime.realtime_loop")
 
@@ -337,10 +342,7 @@ async def _resolve_realtime_inspector_decision(
         if payload.get("approved"):
             outcome.allowed = True
             grant_resource = decision.grant_key or resource_for_call(inspector_call)
-            if decision.grant_kind == "command":
-                ctx.turn_command_grants.add(grant_resource)
-            elif decision.grant_kind == "path":
-                ctx.turn_path_grants.add(grant_resource)
+            grant_session_access(ctx, kind=decision.grant_kind, resource=grant_resource)
             if payload.get("always"):
                 grant_persist = (
                     ctx.grants_persist if decision.grant_kind is not None else ctx.approvals_persist
@@ -667,7 +669,7 @@ async def run_realtime_turn(
                         elif isinstance(item, list):
                             resolved_blocks = item
                     if resolved_blocks is not None:
-                        result = ToolExecutionResult.ok_blocks(resolved_blocks)
+                        result = dataclasses.replace(result, blocks=resolved_blocks)
                 mcp_registry_mutated, loops_registry_mutated = _note_registry_mutation(
                     call,
                     result,
@@ -680,6 +682,8 @@ async def run_realtime_turn(
 
             event, response = _tool_outcome(call, ctx.request_id, result)
             yield event
+            for change_evt in file_change_events(ctx.request_id, result):
+                yield change_evt
             tool_results.append(response)
 
         if mcp_registry_mutated:

@@ -22,6 +22,8 @@ class _CaptureLoopPort:
         session_id: str,
         request_id: str,
         user_content: list[ContentBlock],
+        *,
+        provenance: str = "human",
     ) -> None:
         _ = (session_id, request_id)
         self.last_user_content = list(user_content)

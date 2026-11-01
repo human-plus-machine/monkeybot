@@ -169,12 +169,77 @@ def _synthetic_tool_requests(
     return out
 
 
+def _append_synthetic_requests(out: list[Message], requests: Sequence[ToolRequest]) -> None:
+    if not requests:
+        return
+    out.append(Message(role="assistant", content=cast(list[ContentBlock], list(requests))))
+
+
+def _settle_user_message(
+    user_msg: Message,
+    *,
+    request_by_id: dict[str, ToolRequest],
+    answered: set[str],
+) -> tuple[Message | None, list[ToolResponse]]:
+    """Pair ``user_msg`` with the immediately previous assistant's tool requests.
+
+    A response matches only when its id is in ``request_by_id``. A repeated id in
+    this message is dropped. A response whose id was already answered by an
+    earlier turn, and is not one of these requests, is dropped. Anything else
+    is an orphan and is returned so the caller can synthesize a request.
+
+    Missing request ids get a synthetic error result. Returns ``None`` when the
+    message would be empty.
+    """
+    kept: list[ContentBlock] = []
+    orphans: list[ToolResponse] = []
+    seen: set[str] = set()
+    changed = False
+    request_ids = set(request_by_id)
+
+    for block in user_msg.content:
+        if not isinstance(block, ToolResponse):
+            kept.append(block)
+            continue
+        duplicate = block.id in seen or (block.id in answered and block.id not in request_ids)
+        if duplicate:
+            changed = True
+            _log_repair(
+                "drop_duplicate_tool_result",
+                call_id=block.id,
+                tool_name=block.tool_name,
+            )
+            continue
+        fixed = _repair_tool_response(block, request_by_id)
+        if fixed is not block:
+            changed = True
+        if block.id not in request_ids:
+            orphans.append(fixed)
+        seen.add(block.id)
+        kept.append(fixed)
+
+    for req_id in sorted(request_ids - seen):
+        kept.append(_synthetic_error_response(request_by_id[req_id]))
+        seen.add(req_id)
+        changed = True
+
+    answered.update(seen)
+    if not kept:
+        return None, []
+    return (replace(user_msg, content=kept) if changed else user_msg), orphans
+
+
 def repair_tool_turn_integrity(messages: Sequence[Message]) -> list[Message]:
-    """Return a copy of ``messages`` with tool-turn structural issues synthesized away."""
+    """Return a copy of ``messages`` with tool-turn structural issues synthesized away.
+
+    A tool result pairs only with a request in the immediately previous assistant
+    message. A second result for an id that already has one is dropped.
+    """
     if not messages:
         return []
 
     out: list[Message] = []
+    answered: set[str] = set()
     i = 0
     while i < len(messages):
         msg = messages[i]
@@ -184,42 +249,19 @@ def repair_tool_turn_integrity(messages: Sequence[Message]) -> list[Message]:
             requests = _tool_requests(repaired)
             if requests:
                 request_map = {r.id: r for r in requests}
-                request_ids = set(request_map)
 
                 if i + 1 < len(messages) and messages[i + 1].role == "user":
-                    user_msg = messages[i + 1]
-                    user_responses = _tool_responses(user_msg)
-                    orphan_responses = [b for b in user_responses if b.id not in request_ids]
-
-                    repaired_blocks: list[ContentBlock] = []
-                    user_changed = False
-                    for block in user_msg.content:
-                        if isinstance(block, ToolResponse):
-                            fixed = _repair_tool_response(block, request_map)
-                            if fixed is not block:
-                                user_changed = True
-                            repaired_blocks.append(fixed)
-                        else:
-                            repaired_blocks.append(block)
-
-                    response_ids = {b.id for b in repaired_blocks if isinstance(b, ToolResponse)}
-                    missing_ids = sorted(request_ids - response_ids)
-                    if missing_ids:
-                        for req_id in missing_ids:
-                            repaired_blocks.append(_synthetic_error_response(request_map[req_id]))
-                        user_changed = True
-
-                    repaired_user = replace(user_msg, content=repaired_blocks)
+                    repaired_user, orphan_responses = _settle_user_message(
+                        messages[i + 1],
+                        request_by_id=request_map,
+                        answered=answered,
+                    )
                     out.append(repaired)
-                    synthetic_orphans = _synthetic_tool_requests(orphan_responses, request_map)
-                    if synthetic_orphans:
-                        out.append(
-                            Message(
-                                role="assistant",
-                                content=cast(list[ContentBlock], synthetic_orphans),
-                            )
-                        )
-                    out.append(repaired_user if user_changed else user_msg)
+                    _append_synthetic_requests(
+                        out, _synthetic_tool_requests(orphan_responses, request_map)
+                    )
+                    if repaired_user is not None:
+                        out.append(repaired_user)
                     i += 2
                     continue
 
@@ -230,6 +272,7 @@ def repair_tool_turn_integrity(messages: Sequence[Message]) -> list[Message]:
                         content=[_synthetic_error_response(r) for r in requests],
                     )
                 )
+                answered.update(request_map)
                 i += 1
                 continue
 
@@ -237,40 +280,23 @@ def repair_tool_turn_integrity(messages: Sequence[Message]) -> list[Message]:
             i += 1
             continue
 
-        if msg.role == "user":
-            user_responses = _tool_responses(msg)
-            if user_responses:
-                prior_requests = {
-                    b.id: b
-                    for m in reversed(out)
-                    if m.role == "assistant"
-                    for b in m.content
-                    if isinstance(b, ToolRequest)
-                }
-                orphan_responses = [b for b in user_responses if b.id not in prior_requests]
-                synthetic_orphans = _synthetic_tool_requests(orphan_responses, prior_requests)
-                if synthetic_orphans:
-                    out.append(
-                        Message(
-                            role="assistant",
-                            content=cast(list[ContentBlock], synthetic_orphans),
-                        )
-                    )
-
-                user_blocks: list[ContentBlock] = []
-                changed = False
-                for block in msg.content:
-                    if isinstance(block, ToolResponse):
-                        fixed = _repair_tool_response(block, prior_requests)
-                        if fixed is not block:
-                            changed = True
-                        user_blocks.append(fixed)
-                    else:
-                        user_blocks.append(block)
-
-                out.append(replace(msg, content=user_blocks) if changed else msg)
-                i += 1
-                continue
+        if msg.role == "user" and _tool_responses(msg):
+            previous = out[-1] if out else None
+            request_map = (
+                {b.id: b for b in _tool_requests(previous)}
+                if previous is not None and previous.role == "assistant"
+                else {}
+            )
+            repaired_user, orphan_responses = _settle_user_message(
+                msg,
+                request_by_id=request_map,
+                answered=answered,
+            )
+            _append_synthetic_requests(out, _synthetic_tool_requests(orphan_responses, request_map))
+            if repaired_user is not None:
+                out.append(repaired_user)
+            i += 1
+            continue
 
         out.append(msg)
         i += 1

@@ -6,6 +6,22 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [core v3.13.0] - 2026-11-01
+
+### Added
+
+- `task` accepts `background: true`. The child keeps running after the turn ends. `await_task` and `kill_task` read or stop it. A finished child wakes the parent with a `[harness]` follow-up while the session is idle. `MONKEYBOT_TASK_QUEUE` and the subagent worker pool are removed.
+- `write_file`, `replace_in_file`, and `apply_patch` emit a `FileChange` and keep a before/after snapshot under `.monkeybot/changes/{session}` so a client can review the diff and undo. Undo refuses a file that changed since the edit or a snapshot that was too large to keep, and the next turn is told which paths were restored.
+
+### Changed
+
+- Tool input and output, tool errors, completions, and turn I/O are no longer clipped at 8 KB in traces or at 4 KB in the SQLite trace DB. Each attribute is capped at 1 MiB instead. The history prompt stays at 8 KB. Full tool I/O now reaches OTLP backends, so redact at the collector. The SQLite DB no longer stores the `langfuse.*` mirror keys. The OTLP and SQLite exporters send 8 spans per request (override OTLP with a positive integer `OTEL_BSP_MAX_EXPORT_BATCH_SIZE`; any other value keeps 8).
+
+### Fixed
+
+- A UI-only row between a tool call and its result no longer makes the provider see two results for that call. Bedrock rejected the turn when the counts did not match. Stored history is unchanged.
+- `list_skills` advertises the workspace `skills/` mount instead of the host skills directory. `run_command` paths under `skills/` stay inside that root, so opening a skill file no longer asks for approval.
+
 ## [core v3.12.0] - 2026-10-29
 
 ### Added

@@ -99,7 +99,8 @@ Install the unified CLI (`monkeybot-cli` in `cli/`) plus harness extras for talk
 #   monkeybot[cli-realtime]   — audio talk (requires PortAudio)
 
 # Global CLI on PATH
-uv tool install monkeybot-cli
+printf 'pillow>=13\n' > /tmp/monkeybot-overrides.txt
+uv tool install --overrides /tmp/monkeybot-overrides.txt monkeybot-cli
 
 # Harness contributors only (editable checkout):
 #   uv sync --extra cli            # or cli-realtime

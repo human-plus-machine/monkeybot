@@ -166,7 +166,7 @@ async def test_loop_trace_io_on_run_span(otel_memory_exporter) -> None:
 
 
 @pytest.mark.asyncio
-async def test_loop_long_user_message_truncated_on_span(otel_memory_exporter) -> None:
+async def test_loop_long_user_message_kept_whole_on_span(otel_memory_exporter) -> None:
     long_msg = "x" * 9000
     prov = FakeProvider([[TextDelta(text="ok"), Done()]])
     async for _ in run(
@@ -182,7 +182,7 @@ async def test_loop_long_user_message_truncated_on_span(otel_memory_exporter) ->
     run_span = next(
         s for s in otel_memory_exporter.get_finished_spans() if s.name == "monkeybot.run"
     )
-    assert str(run_span.attributes.get("trace.input", "")).endswith("…[truncated]")
+    assert run_span.attributes.get("trace.input") == long_msg
 
 
 def test_provider_messages_prompt_summary_tool_response_uses_tool_name() -> None:

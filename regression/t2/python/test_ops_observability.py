@@ -30,8 +30,9 @@ from testkit.history import FakeHistory
 from testkit.mcp import NoMCP
 from testkit.provider import FakeProvider
 
-_SECRET = "sk-live-OPS04-SECRET"
-_LONG = "A" * 8000 + _SECRET
+# Longer than the old 8 KiB clip. A credential-shaped suffix would be stored whenever
+# the Spaces value scanner is off, and withheld when it is on.
+_LONG = "A" * 8000 + "OPS04-TAIL"
 _DELTA_TYPES = frozenset(
     {"AssistantDelta", "ToolInputDelta", "ThinkingDelta", "ThinkingBlockDelta"}
 )
@@ -81,7 +82,7 @@ def _trace_id(db: Path, name: str) -> str:
 
 @pytest.mark.case("T2-OPS-04")
 async def test_otel_span_tree_and_secret_redaction(otel_sqlite: Path) -> None:
-    """Scripted tool turn: run → turn → llm and tool; trace id matches; secrets truncated or denylisted."""
+    """Scripted tool turn: run → turn → llm and tool; trace id matches; tool I/O stored whole; secret keys denylisted."""
     ctx = _ctx()
     history = FakeHistory()
     provider = FakeProvider(
@@ -129,10 +130,10 @@ async def test_otel_span_tree_and_secret_redaction(otel_sqlite: Path) -> None:
     assert len(completes) == 1
     assert completes[0].trace_id == root_trace
     tool_attributes = json.loads(tool_rows[0]["attributes_json"] or "{}")
-    for key in ("tool.input", "tool.output"):
-        value = str(tool_attributes[key])
-        assert value.endswith("…[truncated]")
-        assert _SECRET not in value
+    # Tool I/O is stored whole (no 8 KB / 4 KB clip). Secret-looking keys are dropped
+    # below. Value withholding is covered by the sqlite exporter tests.
+    assert _LONG in str(tool_attributes["tool.input"])
+    assert tool_attributes["tool.output"] == _LONG
     for row in rows:
         attributes = json.loads(row["attributes_json"] or "{}")
         denied = [key for key in attributes if is_denied_attribute_key(str(key))]

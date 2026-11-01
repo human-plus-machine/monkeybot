@@ -819,16 +819,6 @@ class PostgresRunStore:
     def __init__(self, pool: asyncpg.Pool) -> None:
         self._pool = pool
 
-    async def record_pending(
-        self,
-        run_id: str,
-        parent_run_id: str | None,
-        script: str,
-        envelope: SubagentEnvelope,
-        scratch_dir: object,
-    ) -> None:
-        await self._record_run("pending", run_id, parent_run_id, script, envelope, scratch_dir)
-
     async def record_started(
         self,
         run_id: str,
@@ -836,8 +826,12 @@ class PostgresRunStore:
         script: str,
         envelope: SubagentEnvelope,
         scratch_dir: object,
+        *,
+        owner_id: str | None = None,
     ) -> None:
-        await self._record_run("running", run_id, parent_run_id, script, envelope, scratch_dir)
+        await self._record_run(
+            "running", run_id, parent_run_id, script, envelope, scratch_dir, owner_id=owner_id
+        )
 
     async def _record_run(
         self,
@@ -847,8 +841,11 @@ class PostgresRunStore:
         script: str,
         envelope: SubagentEnvelope,
         scratch_dir: object,
+        *,
+        owner_id: str | None = None,
     ) -> None:
         now_ms = int(time.time() * 1000)
+        claimed_at = now_ms if owner_id else None
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
@@ -857,7 +854,7 @@ class PostgresRunStore:
                     status, result_json, error_json, started_at, finished_at, scratch_dir,
                     worker_id, claimed_at
                 )
-                VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, NULL, $7, NULL, NULL)
+                VALUES ($1, $2, $3, $4, $5, NULL, NULL, $6, NULL, $7, $8, $9)
                 """,
                 run_id,
                 parent_run_id,
@@ -866,25 +863,9 @@ class PostgresRunStore:
                 status,
                 now_ms,
                 str(scratch_dir),
+                owner_id,
+                claimed_at,
             )
-
-    async def claim(self, run_id: str, worker_id: str) -> bool:
-        now_ms = int(time.time() * 1000)
-        async with self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                UPDATE subagent_runs
-                SET status = 'running',
-                    worker_id = $2,
-                    claimed_at = $3
-                WHERE run_id = $1 AND status = 'pending'
-                RETURNING run_id
-                """,
-                run_id,
-                worker_id,
-                now_ms,
-            )
-        return row is not None
 
     async def renew_claim(self, run_id: str, worker_id: str) -> bool:
         now_ms = int(time.time() * 1000)
@@ -922,73 +903,6 @@ class PostgresRunStore:
                 cutoff,
             )
         return [_tuple_to_run_row(tuple(r)) for r in rows]
-
-    async def reset_stale_claim(
-        self,
-        run_id: str,
-        stale_after_ms: int,
-        *,
-        worker_id: str | None = None,
-        now_ms: int | None = None,
-    ) -> bool:
-        cutoff = resolve_now_ms(now_ms) - stale_after_ms
-        async with self._pool.acquire() as conn:
-            if worker_id is None:
-                result = await conn.execute(
-                    """
-                    UPDATE subagent_runs
-                    SET status = 'pending',
-                        worker_id = NULL,
-                        claimed_at = NULL
-                    WHERE run_id = $1
-                      AND status = 'running'
-                      AND claimed_at IS NOT NULL
-                      AND claimed_at < $2
-                    """,
-                    run_id,
-                    cutoff,
-                )
-            else:
-                result = await conn.execute(
-                    """
-                    UPDATE subagent_runs
-                    SET status = 'pending',
-                        worker_id = NULL,
-                        claimed_at = NULL
-                    WHERE run_id = $1
-                      AND status = 'running'
-                      AND worker_id = $2
-                      AND claimed_at IS NOT NULL
-                      AND claimed_at < $3
-                    """,
-                    run_id,
-                    worker_id,
-                    cutoff,
-                )
-        try:
-            return int(result.split()[-1]) == 1
-        except (ValueError, IndexError):
-            return False
-
-    async def reset_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int:
-        cutoff = resolve_now_ms(now_ms) - stale_after_ms
-        async with self._pool.acquire() as conn:
-            result = await conn.execute(
-                """
-                UPDATE subagent_runs
-                SET status = 'pending',
-                    worker_id = NULL,
-                    claimed_at = NULL
-                WHERE status = 'running'
-                  AND claimed_at IS NOT NULL
-                  AND claimed_at < $1
-                """,
-                cutoff,
-            )
-        try:
-            return int(result.split()[-1])
-        except (ValueError, IndexError):
-            return 0
 
     async def record_completed(
         self,
@@ -1041,6 +955,7 @@ class PostgresRunStore:
         error: str,
         *,
         worker_id: str | None = None,
+        result_json: str | None = None,
     ) -> bool:
         now_ms = int(time.time() * 1000)
         err_payload = json.dumps({"message": error})
@@ -1051,10 +966,12 @@ class PostgresRunStore:
                     UPDATE subagent_runs
                     SET status = 'failed',
                         error_json = $1,
-                        finished_at = $2
-                    WHERE run_id = $3
+                        result_json = COALESCE($2, result_json),
+                        finished_at = $3
+                    WHERE run_id = $4
                     """,
                     err_payload,
+                    result_json,
                     now_ms,
                     run_id,
                 )
@@ -1064,12 +981,14 @@ class PostgresRunStore:
                     UPDATE subagent_runs
                     SET status = 'failed',
                         error_json = $1,
-                        finished_at = $2
-                    WHERE run_id = $3
+                        result_json = COALESCE($2, result_json),
+                        finished_at = $3
+                    WHERE run_id = $4
                       AND status = 'running'
-                      AND worker_id = $4
+                      AND worker_id = $5
                     """,
                     err_payload,
+                    result_json,
                     now_ms,
                     run_id,
                     worker_id,
@@ -1079,13 +998,13 @@ class PostgresRunStore:
         except (ValueError, IndexError):
             return False
 
-    async def pending_runs(self) -> list[SubagentRunRow]:
+    async def list_running(self) -> list[SubagentRunRow]:
         columns = ", ".join(_SUBAGENT_COLUMNS)
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
                 SELECT {columns} FROM subagent_runs
-                WHERE status = 'pending'
+                WHERE status = 'running'
                 ORDER BY started_at ASC
                 """
             )

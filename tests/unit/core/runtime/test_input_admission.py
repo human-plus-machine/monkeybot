@@ -287,6 +287,8 @@ async def test_steer_accepted_while_busy(registry: SessionRegistry) -> None:
             session_id: str,
             request_id: str,
             user_content: list[Text],
+            *,
+            provenance: str = "human",
         ) -> None:
             _ = (session_id, request_id, user_content)
             await hold.wait()
@@ -327,6 +329,8 @@ async def test_queue_drains_only_when_idle(registry: SessionRegistry) -> None:
             session_id: str,
             request_id: str,
             user_content: list[Text],
+            *,
+            provenance: str = "human",
         ) -> None:
             _ = (session_id, user_content)
             started.append(request_id)
@@ -372,6 +376,8 @@ async def test_queue_while_idle_starts_immediately(registry: SessionRegistry) ->
             session_id: str,
             request_id: str,
             user_content: list[Text],
+            *,
+            provenance: str = "human",
         ) -> None:
             _ = (session_id, user_content)
             started.append(request_id)
@@ -444,6 +450,8 @@ async def test_follow_up_retries_after_transient_lock_hold(
             session_id: str,
             request_id: str,
             user_content: list[Text],
+            *,
+            provenance: str = "human",
         ) -> None:
             _ = (session_id, user_content)
             started.append(request_id)
@@ -484,6 +492,8 @@ async def test_follow_up_dropped_after_lock_wait_budget(
             session_id: str,
             request_id: str,
             user_content: list[Text],
+            *,
+            provenance: str = "human",
         ) -> None:
             _ = (session_id, user_content)
             started.append(request_id)
@@ -524,6 +534,8 @@ async def test_promote_queue_to_steer_while_busy(registry: SessionRegistry) -> N
             session_id: str,
             request_id: str,
             user_content: list[Text],
+            *,
+            provenance: str = "human",
         ) -> None:
             _ = (session_id, request_id, user_content)
             await hold.wait()
@@ -579,6 +591,8 @@ async def test_promote_unknown_follow_up_while_busy(registry: SessionRegistry) -
             session_id: str,
             request_id: str,
             user_content: list[Text],
+            *,
+            provenance: str = "human",
         ) -> None:
             _ = (session_id, request_id, user_content)
             await hold.wait()
@@ -609,6 +623,8 @@ async def test_promote_steer_full_does_not_drop_follow_up(registry: SessionRegis
             session_id: str,
             request_id: str,
             user_content: list[Text],
+            *,
+            provenance: str = "human",
         ) -> None:
             _ = (session_id, request_id, user_content)
             await hold.wait()
@@ -649,6 +665,8 @@ async def test_drop_queued_follow_up_while_busy(registry: SessionRegistry) -> No
             session_id: str,
             request_id: str,
             user_content: list[Text],
+            *,
+            provenance: str = "human",
         ) -> None:
             _ = (session_id, request_id, user_content)
             await hold.wait()
@@ -702,6 +720,8 @@ async def test_promote_during_last_inner_turn_drains_as_follow_up(
             session_id: str,
             request_id: str,
             user_content: list[Text],
+            *,
+            provenance: str = "human",
         ) -> None:
             _ = (session_id, user_content)
             started.append(request_id)
@@ -814,6 +834,8 @@ async def test_cancel_restores_promoted_follow_up(registry: SessionRegistry) -> 
             session_id: str,
             request_id: str,
             user_content: list[Text],
+            *,
+            provenance: str = "human",
         ) -> None:
             _ = (session_id, user_content)
             started.append(request_id)
@@ -866,6 +888,8 @@ async def test_delete_while_draining_does_not_start_follow_up(
             session_id: str,
             request_id: str,
             user_content: list[Text],
+            *,
+            provenance: str = "human",
         ) -> None:
             _ = (session_id, user_content)
             started.append(request_id)

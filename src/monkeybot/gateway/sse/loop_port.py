@@ -16,6 +16,8 @@ class LoopPort(Protocol):
         session_id: str,
         request_id: str,
         user_content: list[ContentBlock],
+        *,
+        provenance: str = "human",
     ) -> None:
         """Schedule background work; events MUST be published to that session's bus."""
 

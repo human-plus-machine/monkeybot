@@ -69,6 +69,35 @@ def test_subagent_lifecycle_durable_classification() -> None:
     assert "SubagentEvent" not in DURABLE_EVENT_KINDS
 
 
+def test_file_change_round_trip_keeps_from_path() -> None:
+    from monkeybot.core.runtime.events import FileChange
+
+    moved = FileChange(
+        request_id="r1",
+        change_id="chg",
+        call_id="c1",
+        path="b.txt",
+        action="move",
+        additions=1,
+        deletions=1,
+        is_text=True,
+        too_large=False,
+        from_path="a.txt",
+    )
+    created = FileChange(
+        request_id="r1",
+        change_id="chg2",
+        call_id="c2",
+        path="n.txt",
+        action="create",
+    )
+    assert is_durable_event(moved)
+    assert "FileChange" in DURABLE_EVENT_KINDS
+    assert event_from_json(event_to_json(moved)) == moved
+    assert event_from_json(event_to_json(created)) == created
+    assert "from_path" not in json.loads(event_to_json(created))
+
+
 def test_assistant_text_ended_roundtrip_with_text() -> None:
     ev = AssistantTextEnded(request_id="r1", text="hello world")
     assert is_durable_event(ev)

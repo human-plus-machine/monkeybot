@@ -7,6 +7,7 @@ import logging
 import pytest
 
 from monkeybot.core.llm.provider import Message
+from monkeybot.core.messages import transform_context
 from monkeybot.core.messages.tool_integrity import repair_tool_turn_integrity
 from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
 from monkeybot.providers._openai_compat import messages_to_openai
@@ -182,6 +183,79 @@ async def test_repaired_orphan_history_converts_for_openai() -> None:
     repaired = repair_tool_turn_integrity(messages)
     _system, converted = await messages_to_openai(repaired)
     assert len(converted) == 2
+
+
+def test_repair_drops_duplicate_tool_result_in_the_same_user_message() -> None:
+    messages = [
+        Message(role="assistant", content=[ToolRequest(id="c1", name="echo", args={})]),
+        Message(
+            role="user",
+            content=[
+                ToolResponse(id="c1", tool_name="echo", result=[Text(text="ok")]),
+                ToolResponse(id="c1", tool_name="echo", result=[Text(text="again")]),
+            ],
+        ),
+    ]
+    repaired = repair_tool_turn_integrity(messages)
+    responses = [b for m in repaired for b in m.content if isinstance(b, ToolResponse)]
+    assert len(responses) == 1
+    assert isinstance(responses[0].result[0], Text)
+    assert responses[0].result[0].text == "ok"
+
+
+def test_repair_drops_tool_result_whose_request_is_not_immediately_previous() -> None:
+    """A later copy is not a second result once the request already has one."""
+    messages = [
+        Message(role="assistant", content=[ToolRequest(id="c1", name="echo", args={})]),
+        Message(role="user", content=[Text(text="wait")]),
+        Message(role="assistant", content=[Text(text="still going")]),
+        Message(
+            role="user",
+            content=[ToolResponse(id="c1", tool_name="echo", result=[Text(text="real")])],
+        ),
+    ]
+    repaired = repair_tool_turn_integrity(messages)
+    responses = [b for m in repaired for b in m.content if isinstance(b, ToolResponse)]
+    assert len(responses) == 1
+    assert responses[0].is_error is True
+    assert isinstance(responses[0].result[0], Text)
+    assert "real" not in responses[0].result[0].text
+    requests = [b for m in repaired for b in m.content if isinstance(b, ToolRequest)]
+    assert [b.id for b in requests] == ["c1"]
+
+
+def test_repair_keeps_a_reused_call_id_on_a_later_turn() -> None:
+    """Provider-issued ids such as ``anon:echo:0`` repeat across turns."""
+    messages = [
+        Message(role="assistant", content=[ToolRequest(id="anon:echo:0", name="echo", args={})]),
+        Message(
+            role="user",
+            content=[ToolResponse(id="anon:echo:0", tool_name="echo", result=[Text(text="first")])],
+        ),
+        Message(role="user", content=[Text(text="again")]),
+        Message(role="assistant", content=[ToolRequest(id="anon:echo:0", name="echo", args={})]),
+        Message(
+            role="user",
+            content=[
+                ToolResponse(id="anon:echo:0", tool_name="echo", result=[Text(text="second")]),
+            ],
+        ),
+    ]
+    repaired = repair_tool_turn_integrity(messages)
+    texts = [
+        block.result[0].text
+        for message in repaired
+        for block in message.content
+        if isinstance(block, ToolResponse) and isinstance(block.result[0], Text)
+    ]
+    assert texts == ["first", "second"]
+    transformed = [
+        block.result[0].text
+        for message in transform_context(messages)
+        for block in message.content
+        if isinstance(block, ToolResponse) and isinstance(block.result[0], Text)
+    ]
+    assert transformed == ["first", "second"]
 
 
 def test_repair_logs_synthetic_tool_result(

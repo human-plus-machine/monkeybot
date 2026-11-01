@@ -1,0 +1,76 @@
+id: regression/t2/loop/scenarios/loop/ui_row_splits_a_batch
+case: T2-LOOP-42
+description: A confirmation row between the two results of one batch does not drop or duplicate either result.
+mode: scripted
+driver: loop
+regression_of: duplicate-tool-result
+messages:
+- answer both stored results
+history:
+- role: user
+  content:
+  - type: text
+    text: hi
+- role: assistant
+  content:
+  - type: toolRequest
+    id: batch-1
+    name: run_command
+    args: {}
+  - type: toolRequest
+    id: batch-2
+    name: read_file
+    args: {}
+- role: user
+  content:
+  - type: toolResponse
+    id: batch-1
+    toolName: run_command
+    isError: false
+    result:
+    - type: text
+      text: real-body-a
+- role: assistant
+  content:
+  - type: toolConfirmationRequest
+    id: batch-2
+    toolName: read_file
+    arguments: {}
+- role: user
+  content:
+  - type: toolResponse
+    id: batch-2
+    toolName: read_file
+    isError: false
+    result:
+    - type: text
+      text: real-body-b
+script:
+- - type: text
+    text: both stored
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  history:
+    row_count: 7
+    roles:
+    - user
+    - assistant
+    - user
+    - assistant
+    - user
+    - user
+    - assistant
+    no_repaired_rows: true
+  provider_request:
+  - n: 1
+    messages_contain: real-body-a
+  - n: 1
+    messages_contain: real-body-b
+  - n: 1
+    messages_contain: toolResponse batch-1 run_command
+  - n: 1
+    messages_contain: toolResponse batch-2 read_file
+  - n: 1
+    messages_not_contain: was interrupted or its result is missing

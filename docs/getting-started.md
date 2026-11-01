@@ -21,11 +21,15 @@ Session routes are **not** authenticated; do not expose the gateway to the publi
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh   # if needed
-uv tool install monkeybot-cli
+# browser-harness pins Pillow 12. Core 3.12 needs Pillow 13, and
+# `uv tool install` ignores the package override unless this file is passed.
+# Without it the resolver stays on core 3.10.0.
+printf 'pillow>=13\n' > /tmp/monkeybot-overrides.txt
+uv tool install --overrides /tmp/monkeybot-overrides.txt monkeybot-cli
 monkeybot --help
 ```
 
-Upgrade later with `uv tool upgrade monkeybot-cli`.
+Upgrade later with `uv tool install --reinstall --overrides /tmp/monkeybot-overrides.txt monkeybot-cli`.
 
 ---
 
