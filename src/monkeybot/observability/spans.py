@@ -14,6 +14,8 @@ from monkeybot.observability._state import is_observability_enabled
 
 _TRUNC_SUFFIX = "…[truncated]"
 _DEFAULT_MAX_BYTES = 8192
+# Backstop for once-per-span I/O so a runaway value cannot blow up a span or OTLP request.
+_ATTR_HARD_MAX_BYTES = 1024 * 1024
 
 _DENYLIST_SUBSTRINGS = (
     "api_key",
@@ -49,6 +51,27 @@ _ATTR_ALLOWLIST_EXACT = frozenset(
         "input.value",
         "output.value",
         "openinference.span.kind",
+    }
+)
+
+# Once-per-span I/O: capped at ``_ATTR_HARD_MAX_BYTES`` instead of ``_DEFAULT_MAX_BYTES``.
+# ``gen_ai.prompt`` is deliberately absent: it is the repeated history prompt.
+# ``error`` is a failed tool's only stored text; success output uses ``tool.output``.
+_UNCAPPED_IO_KEYS = frozenset(
+    {
+        "tool.input",
+        "tool.output",
+        "error",
+        "gen_ai.completion",
+        "trace.input",
+        "trace.output",
+        "user.message",
+        "input.value",
+        "output.value",
+        "langfuse.observation.input",
+        "langfuse.observation.output",
+        "langfuse.trace.input",
+        "langfuse.trace.output",
     }
 )
 
@@ -91,8 +114,17 @@ def is_denied_attribute_key(key: str) -> bool:
 
 
 def is_attr_truncation_exempt(key: str) -> bool:
-    """True when ``key`` keeps full length at set time and SQLite persist time."""
-    return key in _ATTR_ALLOWLIST_EXACT
+    """True when SQLite persists ``key`` with ``max_bytes_for_attr`` instead of the 4 KiB clip.
+
+    The key is still truncated. Allowlisted names stay here so an 8 KiB value such as
+    ``gen_ai.prompt`` is not cut to 4 KiB. Once-per-span I/O stays here so it keeps the 1 MiB cap.
+    """
+    return key in _ATTR_ALLOWLIST_EXACT or key in _UNCAPPED_IO_KEYS
+
+
+def max_bytes_for_attr(key: str) -> int:
+    """Byte cap for a string attribute: 1 MiB for once-per-span I/O, 8 KiB otherwise."""
+    return _ATTR_HARD_MAX_BYTES if key in _UNCAPPED_IO_KEYS else _DEFAULT_MAX_BYTES
 
 
 def set_span_attribute_safe(
@@ -102,8 +134,8 @@ def set_span_attribute_safe(
 ) -> None:
     if is_denied_attribute_key(key):
         return
-    if isinstance(value, str) and not is_attr_truncation_exempt(key):
-        value = truncate(value)
+    if isinstance(value, str):
+        value = truncate(value, max_bytes=max_bytes_for_attr(key))
     span.set_attribute(key, value)
 
 
@@ -131,38 +163,38 @@ def _mirror_observation_io(
 ) -> None:
     """Mirror I/O for Langfuse (langfuse.*) and Phoenix (input.value / output.value)."""
     if input_value is not None:
-        msg = truncate(input_value)
-        set_span_attribute_safe(span, "langfuse.observation.input", msg)
-        set_span_attribute_safe(span, "input.value", msg)
+        set_span_attribute_safe(span, "langfuse.observation.input", input_value)
+        set_span_attribute_safe(span, "input.value", input_value)
         if trace_level:
-            set_span_attribute_safe(span, "langfuse.trace.input", msg)
+            set_span_attribute_safe(span, "langfuse.trace.input", input_value)
     if output_value is not None:
-        msg = truncate(output_value)
-        set_span_attribute_safe(span, "langfuse.observation.output", msg)
-        set_span_attribute_safe(span, "output.value", msg)
+        set_span_attribute_safe(span, "langfuse.observation.output", output_value)
+        set_span_attribute_safe(span, "output.value", output_value)
         if trace_level:
-            set_span_attribute_safe(span, "langfuse.trace.output", msg)
+            set_span_attribute_safe(span, "langfuse.trace.output", output_value)
 
 
 def set_run_output(text: str) -> None:
     span = _current_span()
     if span is None:
         return
-    out = truncate(text)
-    set_span_attribute_safe(span, "trace.output", out)
+    set_span_attribute_safe(span, "trace.output", text)
     _mirror_observation_io(span, output_value=text, trace_level=True)
 
 
 def set_llm_io(*, prompt: str, completion: str) -> None:
-    """Set LLM span I/O for Langfuse generations (call inside ``span_llm``)."""
+    """Set LLM span I/O for Langfuse generations (call inside ``span_llm``).
+
+    The prompt is the repeated history, so it stays at the 8 KiB default; the
+    completion is once-per-span and keeps the 1 MiB backstop.
+    """
     span = _current_span()
     if span is None:
         return
     prompt_t = truncate(prompt)
-    completion_t = truncate(completion)
     set_span_attribute_safe(span, "gen_ai.prompt", prompt_t)
-    set_span_attribute_safe(span, "gen_ai.completion", completion_t)
-    _mirror_observation_io(span, input_value=prompt, output_value=completion)
+    set_span_attribute_safe(span, "gen_ai.completion", completion)
+    _mirror_observation_io(span, input_value=prompt_t, output_value=completion)
 
 
 def set_turn_io(
@@ -175,7 +207,7 @@ def set_turn_io(
     if span is None:
         return
     if input_value is not None:
-        set_span_attribute_safe(span, "trace.input", truncate(input_value))
+        set_span_attribute_safe(span, "trace.input", input_value)
     _mirror_observation_io(span, input_value=input_value, output_value=output_value)
 
 
@@ -239,13 +271,12 @@ async def span_run(
     from monkeybot.observability import get_tracer
 
     tracer = get_tracer()
-    msg = truncate(user_message)
     with tracer.start_as_current_span("monkeybot.run") as span:
         _set_openinference_span_kind(span, _OI_KIND_AGENT)
         set_span_attribute_safe(span, "thread.id", ctx.thread_id)
         set_span_attribute_safe(span, "request.id", ctx.request_id)
-        set_span_attribute_safe(span, "user.message", msg)
-        set_span_attribute_safe(span, "trace.input", msg)
+        set_span_attribute_safe(span, "user.message", user_message)
+        set_span_attribute_safe(span, "trace.input", user_message)
         _mirror_observation_io(span, input_value=user_message, trace_level=True)
         set_span_attribute_safe(span, "agent.name", agent_name or _agent_name())
         try:
@@ -381,7 +412,7 @@ async def span_tool(
                 if len(argv) > 1 and not str(argv[1]).startswith("-"):
                     set_span_attribute_safe(span, "memory.cli.subcommand", str(argv[1]))
         if args is not None:
-            args_json = truncate(json.dumps(args, default=str))
+            args_json = json.dumps(args, default=str)
             set_span_attribute_safe(span, "tool.input", args_json)
             _mirror_observation_io(span, input_value=args_json)
         try:
@@ -394,11 +425,10 @@ async def span_tool(
                     trace_api = __import__("opentelemetry.trace", fromlist=["Status", "StatusCode"])
                     span.set_status(trace_api.Status(trace_api.StatusCode.ERROR, error_text))
                 elif result_text is not None:
-                    out = truncate(result_text)
-                    set_span_attribute_safe(span, "tool.output", out)
-                    _mirror_observation_io(span, output_value=out)
+                    set_span_attribute_safe(span, "tool.output", result_text)
+                    _mirror_observation_io(span, output_value=result_text)
         except Exception as exc:
-            set_span_attribute_safe(span, "error", truncate(str(exc)))
+            set_span_attribute_safe(span, "error", str(exc))
             span.record_exception(exc)
             trace_api = __import__("opentelemetry.trace", fromlist=["Status", "StatusCode"])
             span.set_status(trace_api.Status(trace_api.StatusCode.ERROR, str(exc)))

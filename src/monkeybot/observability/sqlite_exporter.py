@@ -4,7 +4,9 @@ Persists completed OTel spans to ``MONKEYBOT_TRACES_DB``. Attribute sanitization
 re-applies the secret denylist at write time, but ``gen_ai.*`` keys (including
 ``gen_ai.prompt`` / ``gen_ai.completion``) are intentionally kept so local
 trace UIs can show LLM I/O — this is a local file, not a redacted remote sink.
-Allowlisted I/O keys are not re-truncated at persist (parity with OTLP).
+Once-per-span I/O keys keep the same 1 MiB cap as the OTLP path instead of the
+4 KB persist clip. ``langfuse.*`` mirror keys are not persisted: they only
+duplicate ``input.value`` / ``output.value`` for a Langfuse backend.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from monkeybot.core.context.secret_egress import SecretScanner, WITHHELD_TEXT, g
 from monkeybot.observability.spans import (
     is_attr_truncation_exempt,
     is_denied_attribute_key,
+    max_bytes_for_attr,
     truncate,
 )
 
@@ -34,9 +37,12 @@ logger = logging.getLogger(__name__)
 
 # Third-party instrumentation and OTel ``record_exception`` bypass
 # ``set_span_attribute_safe``; re-apply denylist + truncation at persist time.
-# Allowlisted keys (``is_attr_truncation_exempt``) skip the byte clip so local
-# SQLite stores the same prompt/output length as the OTLP exporter path.
+# ``is_attr_truncation_exempt`` keys still truncate, at ``max_bytes_for_attr``
+# (1 MiB for once-per-span I/O, 8 KiB for the allowlist) instead of this 4 KiB clip.
 _MAX_PERSISTED_VALUE_BYTES = 4096
+
+# Mirror keys for Langfuse; the same text is already stored under input/output.value.
+_SKIPPED_ATTR_PREFIX = "langfuse."
 
 _SCHEMA_VERSION = "1"
 _RETENTION_INTERVAL_SEC = 60.0
@@ -194,7 +200,7 @@ def _first_attr(attrs: Mapping[str, Any], keys: Sequence[str]) -> str | None:
 def _coerce_json_value(value: Any, *, key: str | None = None) -> Any:
     if isinstance(value, str):
         if key is not None and is_attr_truncation_exempt(key):
-            return value
+            return truncate(value, max_bytes=max_bytes_for_attr(key))
         return truncate(value, max_bytes=_MAX_PERSISTED_VALUE_BYTES)
     if isinstance(value, (int, float, bool)) or value is None:
         return value
@@ -215,14 +221,16 @@ def _scan_trace_values(attrs: dict[str, Any], *, scanner: SecretScanner) -> dict
     `BatchSpanProcessor`'s own background thread, not the gateway's asyncio
     event loop, so it is not on the hot path a slow scan could stall.
     """
-    string_keys = [k for k, v in attrs.items() if isinstance(v, str) and v]
-    if not string_keys:
+    # Mirrored I/O keys carry identical text; scan each distinct text once so the
+    # scanner's request body is not spent on copies.
+    texts = list(dict.fromkeys(v for v in attrs.values() if isinstance(v, str) and v))
+    if not texts:
         return attrs
-    hits = scanner.scan([attrs[k] for k in string_keys])
+    hits = scanner.scan(texts)
     if not hits:
         return attrs
-    hit_keys = {string_keys[h.index] for h in hits}
-    return {k: (WITHHELD_TEXT if k in hit_keys else v) for k, v in attrs.items()}
+    hit_texts = {texts[h.index] for h in hits}
+    return {k: (WITHHELD_TEXT if v in hit_texts else v) for k, v in attrs.items()}
 
 
 def _sanitize_attributes(
@@ -233,7 +241,7 @@ def _sanitize_attributes(
     coerced = {
         key: _coerce_json_value(val, key=key)
         for key, val in attrs.items()
-        if not is_denied_attribute_key(key)
+        if not is_denied_attribute_key(key) and not key.startswith(_SKIPPED_ATTR_PREFIX)
     }
     return _scan_trace_values(coerced, scanner=scanner or get_scanner())
 
@@ -600,10 +608,12 @@ class SqliteSpanExporter(SpanExporter):
         conn = self._ensure_connection()
         self._ensure_schema(conn)
         now_ms = int(time.time() * 1000)
+        # Build rows before taking the write lock: the secret scan makes loopback HTTP
+        # calls, which at 1 MiB per value could hold the lock past other writers' busy_timeout.
+        rows = [_span_row(span, self._config, now_ms) for span in spans]
         self._begin_immediate(conn)
         try:
-            for span in spans:
-                row = _span_row(span, self._config, now_ms)
+            for row in rows:
                 existing = conn.execute(
                     "select span_id from spans where span_id = ?", (row["span_id"],)
                 ).fetchone()

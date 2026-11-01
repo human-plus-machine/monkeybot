@@ -41,6 +41,12 @@ logger = logging.getLogger(__name__)
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
+# A tool span mirrors input and output three times (raw key, Phoenix, Langfuse), so a
+# span near the 1 MiB cap is about 6 MiB. Eight of those stay under the OTLP exporter's
+# 64 MiB request limit; the SDK default of 512 does not, and a batch over that limit is
+# dropped whole. SQLite uses the same count so one export does not hold a hundred MiB.
+_EXPORT_BATCH_SIZE = 8
+
 
 def _env_truthy(name: str) -> bool:
     raw = os.environ.get(name)
@@ -51,6 +57,29 @@ def _env_truthy(name: str) -> bool:
 
 def _env_sdk_disabled() -> bool:
     return os.environ.get("OTEL_SDK_DISABLED", "").strip().lower() in _TRUTHY
+
+
+def _otlp_export_batch_size() -> int:
+    """Spans per OTLP request. A missing or invalid override stays at ``_EXPORT_BATCH_SIZE``.
+
+    Passing ``None`` would let the SDK read ``OTEL_BSP_MAX_EXPORT_BATCH_SIZE`` and, on a
+    value it cannot parse, fall back to 512.
+    """
+    raw = os.environ.get("OTEL_BSP_MAX_EXPORT_BATCH_SIZE")
+    if raw is None or not raw.strip():
+        return _EXPORT_BATCH_SIZE
+    try:
+        size = int(raw.strip())
+    except ValueError:
+        size = 0
+    if size <= 0:
+        logger.warning(
+            "OTEL_BSP_MAX_EXPORT_BATCH_SIZE=%r is not a positive integer; using %d",
+            raw,
+            _EXPORT_BATCH_SIZE,
+        )
+        return _EXPORT_BATCH_SIZE
+    return size
 
 
 def is_observability_enabled() -> bool:
@@ -64,7 +93,10 @@ def _create_span_processor(exporter: str) -> Any:
     if exporter == "otlp":
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
-        return BatchSpanProcessor(OTLPSpanExporter())
+        return BatchSpanProcessor(
+            OTLPSpanExporter(),
+            max_export_batch_size=_otlp_export_batch_size(),
+        )
     if exporter == "console":
         from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 
@@ -85,7 +117,7 @@ def _create_span_processor(exporter: str) -> Any:
         return BatchSpanProcessor(
             SqliteSpanExporter(config),
             schedule_delay_millis=500,
-            max_export_batch_size=64,
+            max_export_batch_size=_EXPORT_BATCH_SIZE,
         )
     return None
 
