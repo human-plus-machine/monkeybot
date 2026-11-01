@@ -20,6 +20,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - A UI-only row between a tool call and its result no longer makes the provider see two results for that call. Bedrock rejected the turn when the counts did not match. Stored history is unchanged.
+- `list_skills` advertises the workspace `skills/` mount instead of the host skills directory. `run_command` paths under `skills/` stay inside that root, so opening a skill file no longer asks for approval.
 
 ## [core v3.12.0] - 2026-10-29
 
