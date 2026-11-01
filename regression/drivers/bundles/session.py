@@ -297,6 +297,18 @@ class _SessionBundle(Bundle):
         if policy is not None and policy.allowed_commands is not None:
             policy_kwargs["run_command_allowed_commands"] = policy.allowed_commands
             policy_kwargs["run_command_allowed_path_prefixes"] = policy.allowed_path_prefixes
+        from monkeybot.core.subagents.supervisor import SubagentSupervisor
+        from monkeybot.core.tools.core_tool_executor import _run_inline_subagent_with_progress
+        from monkeybot.core.config.settings import get_subagent_settings
+
+        settings = get_subagent_settings(config=ctx.cfg)
+        supervisor = SubagentSupervisor(
+            session_id=ctx.session_id,
+            run_store=ctx.backend.runs() if ctx.backend is not None else None,
+            max_background=settings.max_background,
+            lease_ms=settings.lease_ms,
+            run_inline=_run_inline_subagent_with_progress,
+        )
         tool_executor = CoreToolExecutor(
             workspace_root=ctx.workspace,
             memory=tool_memory,
@@ -307,6 +319,7 @@ class _SessionBundle(Bundle):
             scheduled_loop_store=ctx.loop_store,
             run_store=ctx.backend.runs() if ctx.backend is not None else None,
             subagent_registry=get_subagent_registry(config=ctx.cfg),
+            subagent_supervisor=supervisor,
             read_ledger=ctx.read_ledger,
             config=ctx.cfg,
             **policy_kwargs,

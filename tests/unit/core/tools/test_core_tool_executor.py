@@ -3545,11 +3545,10 @@ class TestCoreToolExecutorRunCommandWithSandbox:
 
 
 @pytest.mark.asyncio
-async def test_task_tool_queue_mode_requires_run_store(
+async def test_task_background_requires_supervisor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("MONKEYBOT_TASK_QUEUE", "1")
     root = tmp_path
     _stub_agent_md_for_tasks(root, monkeypatch)
     mem = tmp_path / "mem"
@@ -3569,26 +3568,26 @@ async def test_task_tool_queue_mode_requires_run_store(
     out, err = unwrap_tool_execution_result(
         await ex.execute(
             call=ToolCall(
-                call_id="c-queue",
+                call_id="c-bg",
                 name="task",
-                args={"task": "do work", "context": "ctx"},
+                args={"task": "do work", "context": "ctx", "background": True},
             ),
             ctx=_ctx(),
         )
     )
     assert out is None and err is not None
-    assert "requires a configured storage backend" in err
+    payload = json.loads(err)
+    assert payload["error_kind"] == "background_unavailable"
 
 
 @pytest.mark.asyncio
-async def test_task_tool_queue_mode_enqueues_pending_run(
+async def test_task_background_returns_running_and_records_owner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from monkeybot.core.persistence.durable_runs import SubagentEnvelope as StoredEnvelope
     from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
+    from monkeybot.core.subagents.supervisor import SubagentSupervisor
 
-    monkeypatch.setenv("MONKEYBOT_TASK_QUEUE", "1")
     root = tmp_path
     _stub_agent_md_for_tasks(root, monkeypatch)
     mem = tmp_path / "mem"
@@ -3596,43 +3595,56 @@ async def test_task_tool_queue_mode_enqueues_pending_run(
     skills = tmp_path / "skills"
     skills.mkdir()
     worker = root / "subagent_worker.py"
-    worker.write_text("# placeholder for existence check\n", encoding="utf-8")
+    worker.write_text("# placeholder\n", encoding="utf-8")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
-    monkeypatch.setattr(
-        "monkeybot.core.tools.core_tool_executor._inject_subagent_traceparent",
-        lambda: "00-" + "a" * 32 + "-" + "b" * 16 + "-01",
-    )
+
+    async def _inline(**kwargs: object) -> dict[str, object]:
+        return {
+            "ok": True,
+            "exit_reason": "completed",
+            "errors": [],
+            "final_message": "done",
+            "run_id": kwargs["run_id"],
+            "child_thread_id": kwargs["child_thread_id"],
+            "subagent_type": kwargs["subagent_type"],
+        }
 
     backend = SQLiteStorageBackend("sqlite:///:memory:")
     await backend.open()
     try:
+        supervisor = SubagentSupervisor(
+            session_id="t",
+            run_store=backend.runs(),
+            run_inline=_inline,
+            max_background=2,
+        )
         ex = CoreToolExecutor(
             workspace_root=root,
             memory=_mem_sub(mem),
             skills_path=skills,
             mcp=_NoMCP(),
             run_store=backend.runs(),
+            subagent_supervisor=supervisor,
         )
         out, err = unwrap_tool_execution_result(
             await ex.execute(
                 call=ToolCall(
                     call_id="c-enq",
                     name="task",
-                    args={"task": "queued task", "context": "ctx"},
+                    args={"task": "queued task", "context": "ctx", "background": True},
                 ),
                 ctx=_ctx(),
             )
         )
-        assert err is not None and out is None
-        payload = json.loads(err)
-        assert payload["ok"] is False
-        assert payload["error_kind"] == "pending"
-        assert payload["details"]["queued"] is True
-        row = await backend.runs().get_run(payload["details"]["run_id"])
+        assert err is None and out is not None
+        payload = json.loads(out)
+        assert payload["status"] == "running"
+        assert payload["ok"] is True
+        row = await backend.runs().get_run(payload["run_id"])
         assert row is not None
-        assert row.status == "pending"
-        stored = StoredEnvelope.from_json(row.envelope_json)
-        assert stored.traceparent == "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+        assert row.status == "running"
+        assert row.worker_id == supervisor.owner_id
+        await supervisor.aclose("test")
     finally:
         await backend.close()
 
@@ -4827,13 +4839,14 @@ async def test_task_tool_sets_child_thread_id_on_envelope(
 
 
 @pytest.mark.asyncio
-async def test_task_tool_queue_mode_includes_linkage_fields(
+async def test_task_background_returns_linkage_fields(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from monkeybot.core.config.settings import SubagentConfig
     from monkeybot.core.persistence.durable_runs import SubagentEnvelope as StoredEnvelope
     from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
+    from monkeybot.core.subagents.supervisor import SubagentSupervisor
 
-    monkeypatch.setenv("MONKEYBOT_TASK_QUEUE", "1")
     root = tmp_path
     _stub_agent_md_for_tasks(root, monkeypatch)
     mem = tmp_path / "mem"
@@ -4843,32 +4856,39 @@ async def test_task_tool_queue_mode_includes_linkage_fields(
     worker = root / "subagent_worker.py"
     worker.write_text("# placeholder\n", encoding="utf-8")
     monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
-    monkeypatch.setenv("MONKEYBOT_AGENT_ROOT", str(tmp_path))
 
-    agents = tmp_path / "monkeybot_config" / "agents"
-    agents.mkdir(parents=True)
-    (agents / "researcher.md").write_text("# researcher\n", encoding="utf-8")
-    (tmp_path / "monkeybot_config" / "AGENT.md").write_text("# parent\n", encoding="utf-8")
-
-    registry = {
-        "researcher": SubagentConfig(
-            name="researcher",
-            description="research",
-            skills=[],
-            agent_md="./monkeybot_config/agents/researcher.md",
-        )
-    }
+    async def _inline(**kwargs: object) -> dict[str, object]:
+        return {
+            "ok": True,
+            "exit_reason": "completed",
+            "errors": [],
+            "final_message": "done",
+            "run_id": kwargs["run_id"],
+            "child_thread_id": kwargs["child_thread_id"],
+            "subagent_type": kwargs["subagent_type"],
+        }
 
     backend = SQLiteStorageBackend("sqlite:///:memory:")
     await backend.open()
     try:
+        supervisor = SubagentSupervisor(
+            session_id="t", run_store=backend.runs(), run_inline=_inline
+        )
         ex = CoreToolExecutor(
             workspace_root=root,
             memory=_mem_sub(mem),
             skills_path=skills,
             mcp=_NoMCP(),
             run_store=backend.runs(),
-            subagent_registry=registry,
+            subagent_supervisor=supervisor,
+            subagent_registry={
+                "researcher": SubagentConfig(
+                    name="researcher",
+                    description="r",
+                    skills=[],
+                    agent_md=str(root / "AGENT.md"),
+                )
+            },
         )
         out, err = unwrap_tool_execution_result(
             await ex.execute(
@@ -4879,71 +4899,22 @@ async def test_task_tool_queue_mode_includes_linkage_fields(
                         "task": "queued task",
                         "context": "ctx",
                         "subagent_type": "researcher",
+                        "background": True,
                     },
                 ),
                 ctx=_ctx(),
             )
         )
-        assert err is not None and out is None
-        payload = json.loads(err)
-        assert payload["ok"] is False
-        assert payload["error_kind"] == "pending"
-        details = payload["details"]
-        assert details["queued"] is True
-        assert isinstance(details["child_thread_id"], str)
-        assert details["child_thread_id"].startswith("subagent:t:")
-        assert details["subagent_type"] == "researcher"
-        assert "Do not treat this as task completion" in payload["hint"]
-        row = await backend.runs().get_run(details["run_id"])
+        assert err is None and out is not None
+        payload = json.loads(out)
+        assert payload["status"] == "running"
+        assert payload["child_thread_id"].startswith("subagent:t:")
+        assert payload["subagent_type"] == "researcher"
+        row = await backend.runs().get_run(payload["run_id"])
         assert row is not None
         stored = StoredEnvelope.from_json(row.envelope_json)
-        assert stored.child_thread_id == details["child_thread_id"]
-    finally:
-        await backend.close()
-
-
-@pytest.mark.asyncio
-async def test_task_tool_queue_mode_skips_nested_sse(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Queue mode returns before SubagentStarted/Completed (no parent publisher reachability)."""
-    from monkeybot.core.persistence.sqlite_backend import SQLiteStorageBackend
-
-    monkeypatch.setenv("MONKEYBOT_TASK_QUEUE", "1")
-    root = tmp_path
-    _stub_agent_md_for_tasks(root, monkeypatch)
-    mem = tmp_path / "mem"
-    mem.mkdir()
-    skills = tmp_path / "skills"
-    skills.mkdir()
-    worker = root / "subagent_worker.py"
-    worker.write_text("# placeholder\n", encoding="utf-8")
-    monkeypatch.setenv("MONKEYBOT_SUBAGENT_SCRIPT", str(worker))
-
-    backend = SQLiteStorageBackend("sqlite:///:memory:")
-    await backend.open()
-    try:
-        pub = _FakeEventPublisher()
-        ex = CoreToolExecutor(
-            workspace_root=root,
-            memory=_mem_sub(mem),
-            skills_path=skills,
-            mcp=_NoMCP(),
-            run_store=backend.runs(),
-        )
-        out, err = unwrap_tool_execution_result(
-            await ex.execute(
-                call=ToolCall(
-                    call_id="c-q-sse",
-                    name="task",
-                    args={"task": "queued task", "context": "ctx"},
-                ),
-                ctx=_ctx(event_publisher=pub),
-            )
-        )
-        assert err is not None and out is None
-        assert json.loads(err)["error_kind"] == "pending"
-        assert pub.events == []
+        assert stored.child_thread_id == payload["child_thread_id"]
+        await supervisor.aclose("test")
     finally:
         await backend.close()
 

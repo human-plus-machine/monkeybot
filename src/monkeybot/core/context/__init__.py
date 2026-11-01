@@ -175,6 +175,8 @@ class TurnContext:
     ``None`` only for tests and embedded executors that skip the check."""
     invoked_skill: SkillRef | None = None
     """Installed skill the user explicitly invoked with a leading `/slug` this turn."""
+    background_runs_view: Callable[[], str] | None = None
+    """Optional text for the volatile Background subagents section. None when unused."""
     session: str | None = None
     """Chat session when it differs from ``thread_id`` (a conversation branch's
     history thread); read it through :attr:`session_id`."""
@@ -483,6 +485,7 @@ def _core_tool_defs(
     include_task_tool: bool = True,
     subagent_type_names: Sequence[str] | None = None,
     catalog_mcp_servers: Sequence[str] | None = None,
+    background_tasks_available: bool = False,
 ) -> list[ToolDef]:
     """Static core tools always available before MCP extensions."""
     default_lines = AGENT_READ_DEFAULT_LINES
@@ -747,7 +750,18 @@ def _core_tool_defs(
             "description": (
                 "Workspace-relative files the subagent is expected to create or update. "
                 "The result reports artifact_exists plus a per-path artifacts list, so you "
-                "do not need to check with a follow-up read_file or glob."
+                "do not need to check with a follow-up read_file or glob. "
+                "Do not edit these files yourself while a background child that owns them is running."
+            ),
+        },
+        "background": {
+            "type": "boolean",
+            "description": (
+                "When true, start the subagent and return immediately with status running, "
+                "run_id, and child_thread_id. Use this for long independent work when the user "
+                "may want to keep talking. After it returns, tell the user it is running and "
+                "end this turn. Do not call await_task in the same turn. A later turn will "
+                "bring the result; call await_task then, before reporting it. Do not spin-poll."
             ),
         },
     }
@@ -924,15 +938,68 @@ def _core_tool_defs(
         tools.append(
             ToolDef(
                 "task",
-                "Spawn a subprocess subagent with the same workspace, memory, and MCP configuration "
-                "to work on a delegated objective. Pass subagent_type to select a named persona "
-                "(see harness Subagent personas). Returns JSON with the subagent's streamed answer "
-                "summary, errors, and usage. When queue mode returns ok:false / error_kind:pending "
-                "/ queued:true, the child has not finished — do not treat that as completion. "
-                "Nested task calls are disabled inside the subagent.",
+                (
+                    "Spawn a subprocess subagent with the same workspace, memory, and MCP configuration "
+                    "to work on a delegated objective. Pass subagent_type to select a named persona "
+                    "(see harness Subagent personas). Omit background (or pass false) to wait for the "
+                    "result in this turn. Pass background true for long independent work when the user "
+                    "may want to keep talking: the call returns immediately with status running. "
+                    "Tell the user it is running and end the turn. Do not call await_task until "
+                    "a later turn. Do not edit files a running child owns (expect_files). "
+                    "Nested task calls are disabled inside the subagent."
+                ),
                 task_schema,
             ),
         )
+        if background_tasks_available:
+            tools.extend(
+                [
+                    ToolDef(
+                        "await_task",
+                        (
+                            "Wait for a background subagent started with task background true. "
+                            "Blocks until the child finishes or wait_seconds elapses (default 300, max 600) "
+                            "and returns status running, completed, failed, or timeout. A terminal status "
+                            "includes the normal task payload. Repeating await_task on a child that is "
+                            "still running is expected. Do not spin-poll. Call this before reporting results."
+                        ),
+                        {
+                            "type": "object",
+                            "properties": {
+                                "run_id": {
+                                    "type": "string",
+                                    "description": "run_id returned by task with background true.",
+                                },
+                                "wait_seconds": {
+                                    "type": "integer",
+                                    "description": (
+                                        "Block until the child finishes or this many seconds pass. "
+                                        "Default 300, maximum 600."
+                                    ),
+                                },
+                            },
+                            "required": ["run_id"],
+                        },
+                        parallel_safe=True,
+                        read_only=True,
+                        doom_loop_exempt=True,
+                    ),
+                    ToolDef(
+                        "kill_task",
+                        "Stop a background subagent started with task background true.",
+                        {
+                            "type": "object",
+                            "properties": {
+                                "run_id": {
+                                    "type": "string",
+                                    "description": "run_id returned by task with background true.",
+                                },
+                            },
+                            "required": ["run_id"],
+                        },
+                    ),
+                ]
+            )
     catalog_names = list(normalize_catalog_mcp_names(catalog_mcp_servers))
     if catalog_names:
         tools.extend(
@@ -1073,6 +1140,7 @@ async def build_context(
     model: str = "gemini-2.5-flash",
     summarization_model: str | None = None,
     include_task_tool: bool = True,
+    background_tasks_available: bool = False,
     cancelled: asyncio.Event | None = None,
     context_window_tokens: int = 200_000,
     workspace_root: Path | None = None,
@@ -1091,6 +1159,7 @@ async def build_context(
     session_id: str | None = None,
     read_ledger: FileReadLedger | None = None,
     skill_names: Sequence[str] | None = None,
+    background_runs_view: Callable[[], str] | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -1158,6 +1227,7 @@ async def build_context(
             include_task_tool=include_task_tool,
             subagent_type_names=type_names,
             catalog_mcp_servers=catalog_names,
+            background_tasks_available=background_tasks_available,
         )
     )
     if attachments_enabled_from_env():
@@ -1205,6 +1275,7 @@ async def build_context(
         repo_overview=overview,
         read_ledger=read_ledger,
         session=session_id,
+        background_runs_view=background_runs_view,
     )
 
 

@@ -12,6 +12,7 @@ import copy
 import json
 import logging
 import os
+import uuid
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -107,7 +108,7 @@ from monkeybot.core.tools.grant_store import build_grants_persist_hook
 from monkeybot.core.tools.inspector import CommandTierInspector, RulesInspector, ToolInspector
 from monkeybot.core.tools.loop_inspector import LoopStartInspector
 from monkeybot.core.tools.path_grant_inspector import PathGrantInspector
-from monkeybot.core.tools.permission import try_load_permission_inspector
+from monkeybot.core.tools.permission import seed_turn_grants, try_load_permission_inspector
 from monkeybot.core.tools.read_ledger import FileReadLedger
 from monkeybot.core.types.content_blocks import ContentBlock, Text
 from monkeybot.core.verifier.actuator import NudgeActuator
@@ -122,7 +123,7 @@ from monkeybot.core.verifier.ledger import GoalLedger
 from monkeybot.core.verifier.mailbox import VerdictMailbox
 from monkeybot.core.verifier.tracker import ProgressTracker
 from monkeybot.gateway.bootstrap import ensure_gateway_runtime_env, log_gateway_startup
-from monkeybot.gateway.sse.loop_port import UsagePort
+from monkeybot.gateway.sse.loop_port import LoopPort, UsagePort
 from monkeybot.gateway.sse.models import AgentUsageResponse, SessionUsageResponse
 from monkeybot.gateway.sse.reload import (
     begin_in_flight_turn,
@@ -1010,6 +1011,61 @@ def _resolve_provider(cfg: RuntimeConfig | None = None) -> Provider:
     return get_provider_config(provider=mode, config=snap).provider
 
 
+def _ensure_subagent_supervisor(
+    bus: SessionBus,
+    session_id: str,
+    storage: StorageBackend | None,
+    loop_port: LoopPort,
+) -> Any:
+    """One supervisor per session bus. Later turns reuse it."""
+    existing = getattr(bus, "subagent_supervisor", None)
+    if existing is not None:
+        return existing
+    from monkeybot.core.config.settings import get_subagent_settings
+    from monkeybot.core.subagents.supervisor import SubagentSupervisor
+    from monkeybot.core.tools.core_tool_executor import _run_inline_subagent_with_progress
+    from monkeybot.core.types.content_blocks import Text
+    from monkeybot.gateway.sse.routes import _drain_follow_up
+
+    settings = get_subagent_settings()
+
+    async def _on_wake(batch: list[tuple[str, str]]) -> bool:
+        if bus.current_request_id is not None:
+            return False
+        summary = ", ".join(f"{run_id} ({status})" for run_id, status in batch)
+        text = f"[harness] Background task {summary} finished. Call await_task before reporting."
+        try:
+            bus.admission.enqueue_follow_up(
+                f"wake-{uuid.uuid4().hex[:10]}",
+                [Text(text=text)],
+                provenance="harness",
+                harness_run_ids=tuple(run_id for run_id, _status in batch),
+            )
+        except Exception:
+            logger.warning(
+                "subagent wake enqueue failed %s", kv(session_id=session_id), exc_info=True
+            )
+            return False
+        await _drain_follow_up(
+            bus=bus,
+            loop_ref=loop_port,
+            storage=storage,
+            session_id=session_id,
+        )
+        return True
+
+    supervisor = SubagentSupervisor(
+        session_id=session_id,
+        run_store=storage.runs() if storage is not None else None,
+        max_background=settings.max_background,
+        lease_ms=settings.lease_ms,
+        run_inline=_run_inline_subagent_with_progress,
+        on_wake=_on_wake,
+    )
+    bus.subagent_supervisor = supervisor
+    return supervisor
+
+
 class GatewayLoopPort:
     """Schedules :func:`~monkeybot.core.runtime.loop.run` and forwards events to the session bus."""
 
@@ -1030,6 +1086,8 @@ class GatewayLoopPort:
         session_id: str,
         request_id: str,
         user_content: list[ContentBlock],
+        *,
+        provenance: str = "human",
     ) -> None:
         bus = self._registry.get(session_id)
         if bus is None:
@@ -1132,6 +1190,9 @@ class GatewayLoopPort:
             loops_available = storage_backend is not None
             loops_advertised = loops_available and loops_registry.advertised
             summarization_model = env_value(cfg, "CONTEXT_SUMMARIZATION_MODEL", "").strip() or None
+            supervisor = _ensure_subagent_supervisor(bus, session_id, storage_backend, self)
+            if provenance == "human":
+                supervisor.note_human_turn()
 
             thread_id: str | None = None
             try:
@@ -1165,7 +1226,10 @@ class GatewayLoopPort:
                     goal_ledger=gateway_runtime.goal_ledger,
                     verdict_mailbox=gateway_runtime.verdict_mailbox,
                     read_ledger=read_ledger,
+                    background_tasks_available=True,
+                    background_runs_view=supervisor.snapshot_text,
                 )
+                seed_turn_grants(ctx, bus)
             except Exception as exc:
                 logger.exception("build_context failed")
                 # run_loop never starts, so it will not persist the prompt. Keep
@@ -1211,6 +1275,7 @@ class GatewayLoopPort:
                 config=cfg,
                 grants_path=grants_path,
                 read_ledger=read_ledger,
+                subagent_supervisor=supervisor,
             )
             if transcript_writer is not None:
                 await transcript_writer.write_user_message(
@@ -1231,6 +1296,7 @@ class GatewayLoopPort:
                 transcript_writer=transcript_writer,
                 vertex_google_search=vertex_google_search_enabled_from_config(),
                 input_admission=bus.admission,
+                input_provenance=provenance,
             ):
                 if isinstance(evt, TurnComplete):
                     u = evt.usage
@@ -1420,21 +1486,14 @@ async def _startup(fastapi_app: FastAPI) -> None:
 
         instrument_fastapi_app(fastapi_app)
 
-    if os.environ.get("MONKEYBOT_WORKER_POOL", "").strip().lower() in ("1", "true", "yes"):
-        # Development-only: runs the subagent worker loop on the gateway's own asyncio
-        # event loop, so it competes with SSE streaming under load and has no backpressure.
-        # For production, run standalone worker processes (`python -m monkeybot.subagents.worker`)
-        # that scale independently of the gateway.
-        from monkeybot.core.subagents.worker_pool import (
-            start_worker_pool_background,
-        )
+    from monkeybot.core.subagents.supervisor import fail_orphaned_runs
 
-        logger.warning(
-            "MONKEYBOT_WORKER_POOL=1: running the subagent worker pool in-process is "
-            "development-only — it shares the gateway event loop with SSE streaming. "
-            "For production, run standalone workers via `python -m monkeybot.subagents.worker`."
-        )
-        fastapi_app.state.worker_pool = start_worker_pool_background(backend)
+    try:
+        swept = await fail_orphaned_runs(backend.runs())
+        if swept:
+            logger.warning("marked %d orphaned subagent runs failed", swept)
+    except Exception:
+        logger.warning("orphaned subagent sweep failed", exc_info=True)
 
     from monkeybot.gateway.sse.scheduler_wiring import (
         GatewaySessionEnsurer,
@@ -1506,12 +1565,6 @@ async def _teardown_runtime(fastapi_app: FastAPI) -> None:
             fastapi_app.state.memory = None
         except Exception as exc:
             logger.warning("memory state clear failed: %s", exc)
-    worker_pool_handle = getattr(fastapi_app.state, "worker_pool", None)
-    if worker_pool_handle is not None:
-        from monkeybot.core.subagents.worker_pool import shutdown_worker_pool
-
-        await shutdown_worker_pool(worker_pool_handle)
-        fastapi_app.state.worker_pool = None
 
     scheduler_handle = getattr(fastapi_app.state, "scheduler", None)
     if scheduler_handle is not None:

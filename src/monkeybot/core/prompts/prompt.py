@@ -21,6 +21,7 @@ from monkeybot.core.prompts.headings import (
     REPO_OVERVIEW_HEADING,
     SKILLS_HEADING,
     TODO_LIST_HEADING,
+    BACKGROUND_TASKS_HEADING,
 )
 from monkeybot.core.tools.sandbox_executor import SandboxConfig
 from monkeybot.core.types.content_blocks import Text
@@ -149,6 +150,19 @@ def _invoked_skill_section(ctx: TurnContext) -> str:
     )
 
 
+def _background_tasks_section(ctx: TurnContext) -> str:
+    view = ctx.background_runs_view
+    if view is None:
+        return ""
+    try:
+        body = view()
+    except Exception:
+        return ""
+    if not isinstance(body, str) or not body.strip():
+        return ""
+    return f"{BACKGROUND_TASKS_HEADING}{body.strip()}\n"
+
+
 def _todo_list_section(ctx: TurnContext) -> str:
     store = ctx.todo_store
     if store is None:
@@ -219,6 +233,7 @@ def compose_volatile_tail_parts(
         "skills": _skills_section(ctx),
         "invoked_skill": _invoked_skill_section(ctx),
         "todos": _todo_list_section(ctx),
+        "background_tasks": _background_tasks_section(ctx),
         "current_request": _current_request_block(chat_messages),
     }
 

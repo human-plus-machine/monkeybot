@@ -94,6 +94,7 @@ from monkeybot.core.subprocess_groups import (
     SUPPORTS_PROCESS_GROUPS,
     process_group_id,
     stop_subagent_process,
+    write_subagent_pid,
 )
 from monkeybot.core.tools.ask_user import await_ask_user_answer, parse_ask_user_args
 from monkeybot.core.tools.background_jobs import (
@@ -415,6 +416,8 @@ async def _await_subagent_drain(
     pgid_holder: list[int | None],
     accum: _SubagentDrainAccum,
     run_id: str,
+    cancel_message: str = _PARENT_CANCEL_TASK_ERR,
+    cancel_exit_reason: str = "cancelled",
 ) -> None:
     """Wait for drain with parent cancel + timeout; record errors/exit_reason in place."""
     errors = accum.errors
@@ -466,8 +469,8 @@ async def _await_subagent_drain(
                 )
                 errors.append(str(exc))
         else:
-            errors.append(_PARENT_CANCEL_TASK_ERR)
-            accum.note_exit_reason("cancelled", force=True)
+            errors.append(cancel_message)
+            accum.note_exit_reason(cancel_exit_reason, force=True)
             await stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
             if not drain_task.done():
                 drain_task.cancel()
@@ -539,6 +542,11 @@ async def _run_inline_subagent_with_progress(
     child_thread_id: str,
     subagent_type: str | None,
     task: str,
+    publisher: Any | None = None,
+    request_id: str | None = None,
+    cancelled: asyncio.Event | None = None,
+    cancel_message: str | None = None,
+    cancel_exit_reason: str = "cancelled",
 ) -> dict[str, Any]:
     """Spawn an inline subagent, forward nested SSE, always emit SubagentCompleted."""
     accum = _SubagentDrainAccum()
@@ -546,6 +554,10 @@ async def _run_inline_subagent_with_progress(
     pgid_holder: list[int | None] = [None]
     fail_count: list[int] = [0]
     label = subagent_type or "subagent"
+    pub = ctx.event_publisher if publisher is None else publisher
+    rid = ctx.request_id if request_id is None else request_id
+    cancel_event = ctx.cancelled if cancelled is None else cancelled
+    cancel_text = _PARENT_CANCEL_TASK_ERR if cancel_message is None else cancel_message
 
     async def _subprocess_exec(*cmd: str | bytes) -> asyncio.subprocess.Process:
         env = dict(os.environ)
@@ -565,6 +577,8 @@ async def _run_inline_subagent_with_progress(
         )
         proc_holder[0] = p
         pgid_holder[0] = process_group_id(p.pid)
+        if p.pid is not None:
+            write_subagent_pid(scratch, p.pid)
         return p
 
     logger.info(
@@ -577,9 +591,9 @@ async def _run_inline_subagent_with_progress(
         ),
     )
     await safe_publish(
-        ctx.event_publisher,
+        pub,
         SubagentStarted(
-            request_id=ctx.request_id,
+            request_id=rid,
             parent_call_id=call.call_id,
             run_id=run_id,
             child_thread_id=child_thread_id,
@@ -591,9 +605,9 @@ async def _run_inline_subagent_with_progress(
         run_id=run_id,
     )
     coalescer = AssistantDeltaCoalescer(
-        publisher=ctx.event_publisher,
+        publisher=pub,
         correlation={
-            "request_id": ctx.request_id,
+            "request_id": rid,
             "parent_call_id": call.call_id,
             "run_id": run_id,
             "child_thread_id": child_thread_id,
@@ -621,12 +635,14 @@ async def _run_inline_subagent_with_progress(
         try:
             await _await_subagent_drain(
                 drain_task=drain_task,
-                cancelled=ctx.cancelled,
+                cancelled=cancel_event,
                 timeout=timeout,
                 proc_holder=proc_holder,
                 pgid_holder=pgid_holder,
                 accum=accum,
                 run_id=run_id,
+                cancel_message=cancel_text,
+                cancel_exit_reason=cancel_exit_reason,
             )
         finally:
             await coalescer.aclose()
@@ -678,9 +694,9 @@ async def _run_inline_subagent_with_progress(
             "tool_call_count": accum.tool_call_count,
         }
         await safe_publish(
-            ctx.event_publisher,
+            pub,
             SubagentCompleted(
-                request_id=ctx.request_id,
+                request_id=rid,
                 parent_call_id=call.call_id,
                 run_id=run_id,
                 child_thread_id=child_thread_id,
@@ -718,6 +734,33 @@ def _built_in_tool_error(
     if details:
         payload["details"] = details
     return _j(payload)
+
+
+def _task_background_and_context(args: dict[str, Any]) -> tuple[bool, str]:
+    """Split ``background`` into the mode flag and the legacy context alias.
+
+    A bool, or the strings true/false/1/0/yes/no/on/off, selects the mode.
+    Any other string is the old ``background`` alias for ``context``.
+    """
+    raw = args.get("background")
+    background = False
+    legacy = ""
+    if isinstance(raw, bool):
+        background = raw
+    elif isinstance(raw, str) and raw.strip():
+        token = raw.strip().lower()
+        if token in ("1", "true", "yes", "on"):
+            background = True
+        elif token in ("0", "false", "no", "off"):
+            background = False
+        else:
+            legacy = raw.strip()
+    context = args.get("context") or ""
+    if not isinstance(context, str):
+        context = str(context) if context else ""
+    if not context and legacy:
+        context = legacy
+    return background, context
 
 
 def _bool_arg(raw: object, *, default: bool) -> bool:
@@ -993,6 +1036,7 @@ class CoreToolExecutor(ToolExecutorPort):
         run_store: RunStore | None = None,
         scheduled_loop_store: ScheduledLoopStore | None = None,
         subagent_registry: dict[str, SubagentConfig] | None = None,
+        subagent_supervisor: Any | None = None,
         loops_registry: LoopsToolRegistry | None = None,
         config: RuntimeConfig | None = None,
         grants_path: Path | None = None,
@@ -1018,6 +1062,7 @@ class CoreToolExecutor(ToolExecutorPort):
         self._scheduled_loop_store = scheduled_loop_store
         self._loops_registry = loops_registry if loops_registry is not None else LoopsToolRegistry()
         self._subagent_registry = dict(subagent_registry or {})
+        self._subagent_supervisor = subagent_supervisor
         self._config = config
         self._terminal: TerminalExecutor | SandboxExecutor
         self._host_terminal: TerminalExecutor | None = None
@@ -1253,6 +1298,10 @@ class CoreToolExecutor(ToolExecutorPort):
                 result_text, err_text = self._tool_list_skills(ctx)
             elif name == "task":
                 result_text, err_text = await self._tool_task(call, ctx)
+            elif name == "await_task":
+                result_text, err_text = await self._tool_await_task(args, ctx)
+            elif name == "kill_task":
+                result_text, err_text = await self._tool_kill_task(args, ctx)
             elif name == "run_command":
                 result_text, err_text = await self._tool_run_command(args, call=call, ctx=ctx)
             elif name == "await_command":
@@ -1936,9 +1985,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 ),
             )
 
-        context_val = args.get("context") or args.get("background") or ""
-        if not isinstance(context_val, str):
-            context_val = str(context_val)
+        background, context_val = _task_background_and_context(args)
         ledger_ctx = self._ledger_subagent_context(ctx)
         if ledger_ctx:
             context_val = f"{context_val}\n\n{ledger_ctx}".strip() if context_val else ledger_ctx
@@ -2013,54 +2060,12 @@ class CoreToolExecutor(ToolExecutorPort):
                 for skill in (persona.skills if persona is not None else ())
                 if isinstance(skill, str) and skill.strip()
             ),
+            path_grants=tuple(sorted(ctx.turn_path_grants)),
+            command_grants=tuple(sorted(ctx.turn_command_grants)),
         )
 
         scratch = self._workspace.repo_root / ".monkeybot" / "subagent-runs" / uuid.uuid4().hex
         scratch.mkdir(parents=True, exist_ok=True)
-
-        # Queue mode: worker pool has no parent SessionBus/EventPublisherPort, so nested
-        # SubagentStarted/Event/Completed SSE is intentionally not emitted here. Return
-        # ok:false / pending so ``ok`` never means terminal success while work is queued.
-        queue_mode = os.environ.get("MONKEYBOT_TASK_QUEUE", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        if queue_mode and self._run_store is None:
-            raise RuntimeError("MONKEYBOT_TASK_QUEUE=1 requires a configured storage backend")
-        if self._run_store is not None:
-            if queue_mode:
-                await self._run_store.record_pending(
-                    run_id=run_id,
-                    parent_run_id=parent_label,
-                    script=str(script),
-                    envelope=envelope,
-                    scratch_dir=scratch,
-                )
-                return (
-                    None,
-                    _built_in_tool_error(
-                        "pending",
-                        "Subagent run queued for worker pool; work has not finished yet.",
-                        "Do not treat this as task completion. Wait for a terminal "
-                        "exit_reason (or reopen via child_thread_id) before reporting "
-                        "done or skipping follow-up work.",
-                        {
-                            "queued": True,
-                            "run_id": run_id,
-                            "child_thread_id": child_thread_id,
-                            "subagent_type": subagent_type,
-                            "scratch_dir": str(scratch),
-                        },
-                    ),
-                )
-            await self._run_store.record_started(
-                run_id=run_id,
-                parent_run_id=parent_label,
-                script=str(script),
-                envelope=envelope,
-                scratch_dir=scratch,
-            )
 
         child_env = _task_child_env(
             repo_root=self._workspace.repo_root,
@@ -2072,6 +2077,75 @@ class CoreToolExecutor(ToolExecutorPort):
         )
         if persona is not None and persona.vertex_location:
             child_env["VERTEX_AI_LOCATION"] = persona.vertex_location
+
+        if background:
+            supervisor = self._subagent_supervisor
+            if supervisor is None:
+                return (
+                    None,
+                    _built_in_tool_error(
+                        "background_unavailable",
+                        "background task is unavailable in this session.",
+                        "Omit background to run the subagent in this turn and wait for it.",
+                        {"field": "background"},
+                    ),
+                )
+            from monkeybot.core.subagents.supervisor import BackgroundCapError, SubagentSpawn
+
+            def _artifacts() -> tuple[Any, list[Any]]:
+                return _check_expected_artifacts(self._workspace, expect_files)
+
+            try:
+                await supervisor.spawn(
+                    SubagentSpawn(
+                        script=script,
+                        envelope=envelope,
+                        scratch=scratch,
+                        child_env=child_env,
+                        timeout=get_subagent_settings(config=self._config).timeout_sec,
+                        ctx=ctx,
+                        call=call,
+                        run_id=run_id,
+                        child_thread_id=child_thread_id,
+                        subagent_type=subagent_type,
+                        task=task,
+                        session_id=ctx.session_id,
+                        publisher=ctx.event_publisher,
+                        artifact_check=_artifacts,
+                    )
+                )
+            except BackgroundCapError as exc:
+                return (
+                    None,
+                    _built_in_tool_error(
+                        "policy",
+                        str(exc),
+                        "Wait with await_task or stop one with kill_task before starting another.",
+                        {"max_background": exc.limit},
+                    ),
+                )
+            return (
+                _j(
+                    {
+                        "ok": True,
+                        "status": "running",
+                        "run_id": run_id,
+                        "child_thread_id": child_thread_id,
+                        "subagent_type": subagent_type,
+                        "scratch_dir": str(scratch),
+                    }
+                ),
+                None,
+            )
+
+        if self._run_store is not None:
+            await self._run_store.record_started(
+                run_id=run_id,
+                parent_run_id=parent_label,
+                script=str(script),
+                envelope=envelope,
+                scratch_dir=scratch,
+            )
         payload = await _run_inline_subagent_with_progress(
             script=script,
             envelope=envelope,
@@ -2090,7 +2164,7 @@ class CoreToolExecutor(ToolExecutorPort):
         payload["artifact_exists"] = artifact_exists
         payload["artifacts"] = artifacts
 
-        if self._run_store is not None and not queue_mode:
+        if self._run_store is not None:
             result_json = _j(payload)
             errors = list(payload.get("errors") or [])
             if len(errors) == 0:
@@ -2440,6 +2514,92 @@ class CoreToolExecutor(ToolExecutorPort):
             return path.resolve().relative_to(root).as_posix()
         except ValueError:
             return str(path)
+
+    async def _tool_await_task(
+        self, args: dict[str, Any], ctx: TurnContext
+    ) -> tuple[str | None, str | None]:
+        run_id = _str_arg(args, "run_id")
+        if not run_id:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "await_task requires run_id",
+                    "Pass the run_id returned by task with background true.",
+                    {},
+                ),
+            )
+        supervisor = self._subagent_supervisor
+        if supervisor is None:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "await_task is unavailable in this session.",
+                    "Background subagents run only in a gateway session.",
+                    {"run_id": run_id},
+                ),
+            )
+        requested = _coerce_int(args.get("wait_seconds"), self._await_default_wait)
+        wait_seconds = self._await_default_wait if requested is None else requested
+        if wait_seconds < 0:
+            wait_seconds = 0
+        wait_seconds = min(wait_seconds, self._await_max_wait)
+        payload = await supervisor.await_run(
+            run_id,
+            session_id=ctx.session_id,
+            wait_seconds=float(wait_seconds),
+            turn_cancelled=ctx.cancelled,
+        )
+        if payload is None:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    f"unknown background task {run_id!r}",
+                    "Use a run_id returned by task with background true in this session.",
+                    {"run_id": run_id},
+                ),
+            )
+        return _j(payload), None
+
+    async def _tool_kill_task(
+        self, args: dict[str, Any], ctx: TurnContext
+    ) -> tuple[str | None, str | None]:
+        run_id = _str_arg(args, "run_id")
+        if not run_id:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "kill_task requires run_id",
+                    "Pass the run_id returned by task with background true.",
+                    {},
+                ),
+            )
+        supervisor = self._subagent_supervisor
+        if supervisor is None:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    "kill_task is unavailable in this session.",
+                    "Background subagents run only in a gateway session.",
+                    {"run_id": run_id},
+                ),
+            )
+        payload = await supervisor.kill(run_id, session_id=ctx.session_id)
+        if payload is None:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    f"unknown background task {run_id!r}",
+                    "Use a run_id returned by task with background true in this session.",
+                    {"run_id": run_id},
+                ),
+            )
+        return _j(payload), None
 
     async def _tool_await_command(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         job_id = _str_arg(args, "job_id")

@@ -33,7 +33,7 @@ async def durable_conn():
 
 
 @pytest.mark.asyncio
-async def test_pending_runs_excludes_running(durable_conn) -> None:
+async def test_list_running_includes_started_and_drops_completed(durable_conn) -> None:
     store = SQLiteRunStore(durable_conn)
     envelope = SubagentEnvelope(
         task="t",
@@ -47,28 +47,11 @@ async def test_pending_runs_excludes_running(durable_conn) -> None:
         script="subagents/x.py",
         envelope=envelope,
         scratch_dir=Path("/tmp/run-1"),
+        owner_id="host:1:a",
     )
-    assert await store.pending_runs() == []
-
-
-@pytest.mark.asyncio
-async def test_pending_runs_excludes_completed(durable_conn) -> None:
-    store = SQLiteRunStore(durable_conn)
-    envelope = SubagentEnvelope(
-        task="t",
-        context="c",
-        memory_storage_uri="local:///m",
-        parent_run_id="p1",
-    )
-    await store.record_started(
-        run_id="run-2",
-        parent_run_id=None,
-        script="subagents/x.py",
-        envelope=envelope,
-        scratch_dir=Path("/tmp/run-2"),
-    )
-    await store.record_completed("run-2", '{"ok":true}')
-    assert await store.pending_runs() == []
+    assert [row.run_id for row in await store.list_running()] == ["run-1"]
+    await store.record_completed("run-1", '{"ok":true}', worker_id="host:1:a")
+    assert await store.list_running() == []
 
 
 def test_durable_subagent_envelope_empty_memory_uri_roundtrip() -> None:

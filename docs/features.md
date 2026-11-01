@@ -476,47 +476,41 @@ pricing:
 
 ### 12. Subagents (`task` tool)
 
-**Purpose:** Delegate work to isolated subprocess with same workspace/memory/MCP.
+**Purpose:** Delegate work to an isolated subprocess with the same workspace, memory, and MCP.
 
-**Key files:** `core/subagents/subagent_proto.py`, `subagent_worker.py`, `monkeybot.yaml` `subagents.personas`
+**Key files:** `core/subagents/subagent_proto.py`, `subagent_worker.py`, `core/subagents/supervisor.py`, `monkeybot.yaml` `subagents.personas`
 
 **How it works:**
 - Parent passes `subagent_type` to select a named persona from `monkeybot.yaml`.
-- Subagent uses separate `AGENT.md` per type.
-- Returns JSON (summary, errors, usage).
+- Omit `background` to wait for the result in this turn.
+- `background: true` returns immediately with `{status: "running", run_id, child_thread_id}`. The child keeps running after the turn ends. Read it back with `await_task`; stop it with `kill_task`.
+- A session may run `subagents.max_background` background children at once (default 4). Stop on a later turn does not kill them. Deleting the session does.
+- A child starts with the folders and commands this session has already approved. It cannot raise its own access prompt. Durable "Always allow" grants in `grants.json` still apply.
+- When a background child finishes while the session is idle, the harness starts one follow-up turn whose text begins with `[harness]`. That turn is not human intent and is not written to memory.
 
 **Invariants:**
 - No nested `task` inside subagents.
-- Max 10 parallel `task` calls per batch.
-- `subagents.max_turns` / `subagents.timeout_sec` YAML limits apply.
-- Parent reads child NDJSON with a raised StreamReader limit (`SUBAGENT_STDOUT_LINE_LIMIT`, 16 MiB) — not asyncio’s default 64 KiB — so large `SystemPromptSnapshot` lines do not fail with `Separator is not found, and chunk exceed the limit`.
-- Subagent workers redact `SystemPromptSnapshot.text` on the NDJSON pipe (parent drain ignores it; full index would otherwise inflate every inner-turn line).
+- Max 10 parallel blocking `task` calls per batch.
+- `subagents.max_turns` / `subagents.timeout_sec` YAML limits apply (timeout default 3600s).
+- Parent reads child NDJSON with a raised StreamReader limit (`SUBAGENT_STDOUT_LINE_LIMIT`, 16 MiB).
+- Subagent workers redact `SystemPromptSnapshot.text` on the NDJSON pipe.
 
 ---
 
-### 13. Durable subagent runs (task queue)
+### 13. Durable subagent runs (RunStore lease)
 
-**Purpose:** Optional async subagent execution via `RunStore`.
+**Purpose:** Remember background runs across turns and gateway restarts.
 
-**Key files:** `core/persistence/durable_runs.py`, `core/persistence/runs.py`, `subagents/worker/`
+**Key files:** `core/persistence/durable_runs.py`, `core/subagents/supervisor.py`
 
 **How it works:**
-- `MONKEYBOT_TASK_QUEUE=1` enqueues via `record_pending`; workers run `python -m monkeybot.subagents.worker`.
-- Requires `DB_URL` / storage — queue mode without storage raises at enqueue time.
-- Production: standalone `python -m monkeybot.subagents.worker`. Development only: `MONKEYBOT_WORKER_POOL=1` on the gateway (same event loop as SSE — do not use in production). See [Cloud deployment](cloud-deployment-design.md) for multi-process notes.
-
-**Worker tuning:**
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `MONKEYBOT_WORKER_STALE_CLAIM_MS` | `600000` (10 min) | Reclaim `running` rows with no heartbeat after this window; another worker may re-execute the run |
-| `MONKEYBOT_WORKER_POLL_INTERVAL_S` | `2` | Poll interval for `pending_runs()` |
-| `MONKEYBOT_WORKER_CONCURRENCY` | `1` | Max concurrent claimed runs per worker |
-| `MONKEYBOT_WORKER_ID` | auto | Worker identity for claim attribution |
+- A background spawn writes a `running` row with `worker_id` (this process) and `claimed_at`. A heartbeat renews the lease (`subagents.lease_ms`, default 60s).
+- `await_task` reads the in-memory run, or the stored payload after a restart.
+- On startup, `running` rows owned by a dead process on this host are marked failed. A row owned by another host is left alone.
 
 **Invariants:**
-- No claim heartbeat yet — subagent runs longer than `MONKEYBOT_WORKER_STALE_CLAIM_MS` risk duplicate execution. Increase the limit for long LLM workloads or keep runs under the window.
-- Queue mode without storage raises at enqueue time.
+- There is no worker pool and no `MONKEYBOT_TASK_QUEUE`. A `running` result is not completion.
+- Without a storage backend, background runs live only in the gateway process.
 
 ---
 

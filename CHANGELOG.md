@@ -8,6 +8,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `task` accepts `background: true`. The child keeps running after the turn ends. `await_task` and `kill_task` read or stop it. A finished child wakes the parent with a `[harness]` follow-up while the session is idle. `MONKEYBOT_TASK_QUEUE` and the subagent worker pool are removed.
 - `write_file`, `replace_in_file`, and `apply_patch` emit a `FileChange` and keep a before/after snapshot under `.monkeybot/changes/{session}` so a client can review the diff and undo. Undo refuses a file that changed since the edit or a snapshot that was too large to keep, and the next turn is told which paths were restored.
 
 ### Fixed

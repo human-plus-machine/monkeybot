@@ -115,8 +115,14 @@ class SessionBus:
         """Process-local steer + follow-up queues (not shared across gateway replicas)."""
         self.session_approvals = SessionApprovals()
         """Process-local 'always allow' rememberies (not shared across gateway replicas)."""
+        self.path_grants: set[str] = set()
+        """Folders the user approved for reading this session, including Allow once."""
+        self.command_grants: set[str] = set()
+        """Commands the user approved this session, including Allow once."""
         self.follow_up_retry_task: asyncio.Task[None] | None = None
         """Scheduled drain retry after a failed durable turn-lock acquire."""
+        self.subagent_supervisor: Any | None = None
+        """Background subagents for this session. Outlives individual turns."""
         self.active_turn_task: asyncio.Task[None] | None = None
         """Background turn task scheduled by ``_schedule_turn``; awaited on DELETE."""
 
@@ -369,6 +375,16 @@ class SessionRegistry:
         bus = self._detach(session_id)
         if bus is None:
             return RemoveResult(deleted=False)
+        supervisor = getattr(bus, "subagent_supervisor", None)
+        if supervisor is not None:
+            try:
+                await supervisor.aclose("session closed")
+            except Exception:
+                logger.warning(
+                    "subagent supervisor close failed %s",
+                    kv(session_id=session_id),
+                    exc_info=True,
+                )
         try:
             # Quiesce before spill cleanup so an in-flight turn cannot rewrite or
             # read spill dirs after we delete them. quiesce_active_turn drains

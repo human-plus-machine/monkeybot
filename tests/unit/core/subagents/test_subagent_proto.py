@@ -142,6 +142,21 @@ def test_subagent_envelope_roundtrip_with_persona_fields() -> None:
     assert restored == env
 
 
+def test_subagent_envelope_roundtrip_parent_grants() -> None:
+    env = SubagentEnvelope(
+        task="do thing",
+        context="ctx",
+        memory_storage_uri="local:///tmp/m",
+        parent_run_id="p1",
+        path_grants=("/Users/me/docs",),
+        command_grants=("rg",),
+    )
+    restored = SubagentEnvelope.from_json(env.to_json())
+    assert restored.path_grants == ("/Users/me/docs",)
+    assert restored.command_grants == ("rg",)
+    assert restored == env
+
+
 def test_subagent_envelope_roundtrip_persona_skills() -> None:
     env = SubagentEnvelope(
         task="do thing",

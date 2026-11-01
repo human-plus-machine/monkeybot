@@ -806,16 +806,6 @@ class FirestoreRunStore:
     def _doc(self, run_id: str) -> firestore.AsyncDocumentReference:
         return self._client.collection(self._collection).document(run_id)
 
-    async def record_pending(
-        self,
-        run_id: str,
-        parent_run_id: str | None,
-        script: str,
-        envelope: SubagentEnvelope,
-        scratch_dir: object,
-    ) -> None:
-        await self._record_run("pending", run_id, parent_run_id, script, envelope, scratch_dir)
-
     async def record_started(
         self,
         run_id: str,
@@ -823,8 +813,12 @@ class FirestoreRunStore:
         script: str,
         envelope: SubagentEnvelope,
         scratch_dir: object,
+        *,
+        owner_id: str | None = None,
     ) -> None:
-        await self._record_run("running", run_id, parent_run_id, script, envelope, scratch_dir)
+        await self._record_run(
+            "running", run_id, parent_run_id, script, envelope, scratch_dir, owner_id=owner_id
+        )
 
     async def _record_run(
         self,
@@ -834,8 +828,11 @@ class FirestoreRunStore:
         script: str,
         envelope: SubagentEnvelope,
         scratch_dir: object,
+        *,
+        owner_id: str | None = None,
     ) -> None:
         now_ms = int(time.time() * 1000)
+        claimed_at = now_ms if owner_id else None
         await self._doc(run_id).set(
             {
                 "parent_run_id": parent_run_id,
@@ -847,43 +844,10 @@ class FirestoreRunStore:
                 "started_at": now_ms,
                 "finished_at": None,
                 "scratch_dir": str(scratch_dir),
-                "worker_id": None,
-                "claimed_at": None,
+                "worker_id": owner_id,
+                "claimed_at": claimed_at,
             }
         )
-
-    async def claim(self, run_id: str, worker_id: str) -> bool:
-        doc_ref = self._doc(run_id)
-        transaction = self._client.transaction()
-
-        async def _claim_body(
-            txn: firestore.AsyncTransaction,
-            ref: firestore.AsyncDocumentReference,
-        ) -> bool:
-            snapshot = await ref.get(transaction=txn)
-            if not snapshot.exists:
-                return False
-            data = snapshot.to_dict() or {}
-            if data.get("status") != "pending":
-                return False
-            now_ms = int(time.time() * 1000)
-            txn.update(
-                ref,
-                {
-                    "status": "running",
-                    "worker_id": worker_id,
-                    "claimed_at": now_ms,
-                },
-            )
-            return True
-
-        claim_txn = cast(
-            Callable[
-                [firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]
-            ],
-            firestore.async_transactional(_claim_body),
-        )
-        return bool(await claim_txn(transaction, doc_ref))
 
     async def renew_claim(self, run_id: str, worker_id: str) -> bool:
         now_ms = int(time.time() * 1000)
@@ -927,75 +891,6 @@ class FirestoreRunStore:
                 continue
             out.append(_doc_to_run_row(doc.id, data))
         return out
-
-    async def reset_stale_claim(
-        self,
-        run_id: str,
-        stale_after_ms: int,
-        *,
-        worker_id: str | None = None,
-        now_ms: int | None = None,
-    ) -> bool:
-        cutoff = resolve_now_ms(now_ms) - stale_after_ms
-        doc_ref = self._doc(run_id)
-        transaction = self._client.transaction()
-
-        async def _reset_body(
-            txn: firestore.AsyncTransaction,
-            ref: firestore.AsyncDocumentReference,
-        ) -> bool:
-            snap = await ref.get(transaction=txn)
-            if not snap.exists:
-                return False
-            data = snap.to_dict() or {}
-            if data.get("status") != "running":
-                return False
-            claimed_at = data.get("claimed_at")
-            if claimed_at is None or int(claimed_at) >= cutoff:
-                return False
-            if worker_id is not None and data.get("worker_id") != worker_id:
-                return False
-            txn.update(
-                ref,
-                {"status": "pending", "worker_id": None, "claimed_at": None},
-            )
-            return True
-
-        reset_txn = cast(
-            Callable[
-                [firestore.AsyncTransaction, firestore.AsyncDocumentReference], Awaitable[bool]
-            ],
-            firestore.async_transactional(_reset_body),
-        )
-        return bool(await reset_txn(transaction, doc_ref))
-
-    async def reset_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int:
-        cutoff = resolve_now_ms(now_ms) - stale_after_ms
-        query = (
-            self._client.collection(self._collection)
-            .where(filter=FieldFilter("status", "==", "running"))
-            .where(filter=FieldFilter("claimed_at", "<", cutoff))
-        )
-        reset = 0
-        batch = self._client.batch()
-        count = 0
-        async for doc in query.stream():
-            data = doc.to_dict() or {}
-            if data.get("claimed_at") is None:
-                continue
-            batch.update(
-                doc.reference,
-                {"status": "pending", "worker_id": None, "claimed_at": None},
-            )
-            reset += 1
-            count += 1
-            if count >= 400:
-                await batch.commit()
-                batch = self._client.batch()
-                count = 0
-        if count:
-            await batch.commit()
-        return reset
 
     async def record_completed(
         self,
@@ -1045,14 +940,17 @@ class FirestoreRunStore:
         error: str,
         *,
         worker_id: str | None = None,
+        result_json: str | None = None,
     ) -> bool:
         now_ms = int(time.time() * 1000)
         err_payload = json.dumps({"message": error})
-        fields = {
+        fields: dict[str, object] = {
             "status": "failed",
             "error_json": err_payload,
             "finished_at": now_ms,
         }
+        if result_json is not None:
+            fields["result_json"] = result_json
         if worker_id is None:
             await self._doc(run_id).update(fields)
             return True
@@ -1081,11 +979,11 @@ class FirestoreRunStore:
         )
         return bool(await fail_txn(transaction, doc_ref))
 
-    async def pending_runs(self) -> list[SubagentRunRow]:
+    async def list_running(self) -> list[SubagentRunRow]:
         rows: list[SubagentRunRow] = []
         query = (
             self._client.collection(self._collection)
-            .where(filter=FieldFilter("status", "==", "pending"))
+            .where(filter=FieldFilter("status", "==", "running"))
             .order_by("started_at")
         )
         async for doc in query.stream():

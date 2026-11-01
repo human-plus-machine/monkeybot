@@ -86,15 +86,6 @@ class UsageStore(Protocol):
 class RunStore(Protocol):
     """Protocol for subagent run lifecycle tracking."""
 
-    async def record_pending(
-        self,
-        run_id: str,
-        parent_run_id: str | None,
-        script: str,
-        envelope: SubagentEnvelope,
-        scratch_dir: Path,
-    ) -> None: ...
-
     async def record_started(
         self,
         run_id: str,
@@ -102,26 +93,15 @@ class RunStore(Protocol):
         script: str,
         envelope: SubagentEnvelope,
         scratch_dir: Path,
+        *,
+        owner_id: str | None = None,
     ) -> None: ...
-
-    async def claim(self, run_id: str, worker_id: str) -> bool: ...
 
     async def renew_claim(self, run_id: str, worker_id: str) -> bool: ...
 
     async def list_stale_claims(
         self, stale_after_ms: int, now_ms: int | None = None
     ) -> list[SubagentRunRow]: ...
-
-    async def reset_stale_claim(
-        self,
-        run_id: str,
-        stale_after_ms: int,
-        *,
-        worker_id: str | None = None,
-        now_ms: int | None = None,
-    ) -> bool: ...
-
-    async def reset_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int: ...
 
     async def record_completed(
         self,
@@ -137,9 +117,10 @@ class RunStore(Protocol):
         error: str,
         *,
         worker_id: str | None = None,
+        result_json: str | None = None,
     ) -> bool: ...
 
-    async def pending_runs(self) -> list[SubagentRunRow]: ...
+    async def list_running(self) -> list[SubagentRunRow]: ...
 
     async def get_run(self, run_id: str) -> SubagentRunRow | None: ...
 

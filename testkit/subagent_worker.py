@@ -50,6 +50,9 @@ def _run() -> None:
     if task == "hang":
         _hang(_workspace())
         return
+    if task.startswith("sleep:"):
+        _sleep(task, _workspace())
+        return
     if task.startswith("exit:"):
         raise SystemExit(_exit_code(task))
 
@@ -87,6 +90,25 @@ def _hang(workspace: Path | None) -> None:
         _write_pgid(workspace)
     while True:
         time.sleep(3600)
+
+
+def _sleep(task: str, workspace: Path | None) -> None:
+    """Sleep ``sleep:<seconds>`` then emit a short completed tape and exit 0."""
+    raw = task.split(":", 1)[1]
+    try:
+        seconds = float(raw)
+    except ValueError as exc:
+        _emit(_error_line(f"bad sleep directive: {task}"))
+        raise SystemExit(1) from exc
+    if seconds < 0:
+        _emit(_error_line(f"bad sleep directive: {task}"))
+        raise SystemExit(1)
+    if workspace is not None:
+        _write_pgid(workspace)
+    time.sleep(seconds)
+    _emit('{"type": "AssistantDelta", "request_id": "child", "delta": "slept"}')
+    _emit('{"type": "TurnComplete", "request_id": "child"}')
+    raise SystemExit(0)
 
 
 def _exit_code(task: str) -> int:
@@ -150,6 +172,13 @@ def _apply_control(
         if isinstance(hold, bool) or not isinstance(hold, (int, float)):
             raise ValueError("hold_seconds must be a number")
         _probe_concurrency(workspace, float(hold))
+    elif "hold_seconds" in control:
+        hold = control.get("hold_seconds")
+        if isinstance(hold, bool) or not isinstance(hold, (int, float)):
+            raise ValueError("hold_seconds must be a number")
+        if workspace is not None:
+            _write_pgid(workspace)
+        time.sleep(float(hold))
 
 
 def _workspace() -> Path | None:

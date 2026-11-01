@@ -156,6 +156,10 @@ class SubagentEnvelope:
     child_thread_id: str | None = None
     skills: tuple[str, ...] = ()
     """Skill names from the persona. Empty means the child keeps the full skills tree."""
+    path_grants: tuple[str, ...] = ()
+    """Folders the parent session may already read. The child cannot ask for these."""
+    command_grants: tuple[str, ...] = ()
+    """Commands the parent session may already run."""
 
     def to_json(self) -> str:
         """Serialize to a compact JSON object for stdin (UTF-8)."""
@@ -178,6 +182,10 @@ class SubagentEnvelope:
             payload["child_thread_id"] = self.child_thread_id
         if self.skills:
             payload["skills"] = list(self.skills)
+        if self.path_grants:
+            payload["path_grants"] = list(self.path_grants)
+        if self.command_grants:
+            payload["command_grants"] = list(self.command_grants)
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     @classmethod
@@ -202,6 +210,8 @@ class SubagentEnvelope:
             parent_session_id=_opt_str_field(decoded, "parent_session_id"),
             child_thread_id=_opt_str_field(decoded, "child_thread_id"),
             skills=_opt_str_tuple(decoded, "skills"),
+            path_grants=_opt_str_tuple(decoded, "path_grants"),
+            command_grants=_opt_str_tuple(decoded, "command_grants"),
         )
 
 

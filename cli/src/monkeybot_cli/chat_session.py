@@ -241,6 +241,8 @@ class ChatSessionController:
         self._reconnecting = False
         self._last_event_id: int | None = None
         self._abandoned: deque[str] = deque(maxlen=64)
+        self._deferred: list[Any] = []
+        self._idle_task: asyncio.Task[None] | None = None
         self._turn_abort = asyncio.Event()
         self._active_request_id: str | None = None
         self._hitl_future: asyncio.Future[HitlAnswer] | None = None
@@ -292,6 +294,7 @@ class ChatSessionController:
         self._reconnecting = False
         self._last_event_id = None
         self._stream_task = asyncio.create_task(self._consume_stream())
+        self._start_idle_watch()
         self._emit("session_ready", session_id=self.session_id)
         self._emit("connection_state", state="connected")
         await self._emit_transcript_backfill()
@@ -504,6 +507,14 @@ class ChatSessionController:
             return
 
         request_id = str(uuid.uuid4())
+        if self._active_request_id is not None:
+            self._emit("session_busy")
+            return
+        await self._stop_idle_watch()
+        if self._active_request_id is not None:
+            self._emit("session_busy")
+            self._start_idle_watch()
+            return
         self._active_request_id = request_id
         self._last_cancel_ok = None
         self._turn_abort.clear()
@@ -513,15 +524,23 @@ class ChatSessionController:
                 json={"request_id": request_id, "message": message},
             )
             if reply.status_code == 409:
+                self._active_request_id = None
                 self._emit("session_busy")
+                self._start_idle_watch()
                 return
             reply.raise_for_status()
         except httpx.HTTPError as exc:
+            self._active_request_id = None
             self._emit("error", message=format_http_error("Reply", exc))
+            self._start_idle_watch()
             return
 
         self._emit("turn_started", request_id=request_id)
-        await self._run_turn(request_id)
+        try:
+            await self._run_turn(request_id)
+        finally:
+            if self._active_request_id is None and not self._closed:
+                self._start_idle_watch()
 
     async def _dequeue_payload(self) -> str | None | Literal[False]:
         """Return payload, None for stream end, False on poll timeout."""
@@ -544,9 +563,13 @@ class ChatSessionController:
             self._warn(f"skipping unparseable event: {exc}")
             return None
 
-    async def _run_turn(self, request_id: str) -> None:
+    async def _run_turn(self, request_id: str, *, prelude: list[Any] | None = None) -> None:
         assert self._client is not None and self.session_id is not None
         state = _TurnState()
+        for evt in prelude or []:
+            if state.done or self._turn_abort.is_set():
+                break
+            await self._dispatch_turn_event(evt, request_id, state)
         while not state.done and not self._turn_abort.is_set():
             payload = await self._dequeue_payload()
             if payload is False:
@@ -577,6 +600,71 @@ class ChatSessionController:
         if not self._stream_alive and not self._reconnecting:
             self._emit("stream_ended")
 
+    def _start_idle_watch(self) -> None:
+        """Render turns the gateway starts while the prompt is idle."""
+        if self._closed or self._active_request_id is not None:
+            return
+        task = self._idle_task
+        if task is not None and not task.done():
+            return
+        self._idle_task = asyncio.create_task(self._watch_idle(), name="chat-idle-watch")
+
+    async def _stop_idle_watch(self) -> None:
+        task = self._idle_task
+        if task is None or task.done():
+            self._idle_task = None
+            return
+        if self._active_request_id is not None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        self._idle_task = None
+
+    async def _watch_idle(self) -> None:
+        """Show a background-subagent wake (or any other turn) the user did not send."""
+        try:
+            while not self._closed and self._active_request_id is None:
+                await self._play_deferred()
+                if self._closed or self._active_request_id is not None:
+                    return
+                payload = await self._dequeue_payload()
+                if payload is False:
+                    continue
+                if payload is None:
+                    return
+                if self._active_request_id is not None:
+                    self._event_queue.put_nowait(payload)
+                    return
+                evt = self._decode_event(payload)
+                if evt is None:
+                    continue
+                rid = getattr(evt, "request_id", "") or ""
+                if not rid or rid in self._abandoned:
+                    continue
+                self._deferred.append(evt)
+        except asyncio.CancelledError:
+            raise
+
+    async def _play_deferred(self) -> None:
+        while self._deferred and not self._closed and self._active_request_id is None:
+            first = self._deferred.pop(0)
+            rid = getattr(first, "request_id", "") or ""
+            if not rid or rid in self._abandoned:
+                continue
+            batch = [first]
+            rest: list[Any] = []
+            for evt in self._deferred:
+                if getattr(evt, "request_id", "") == rid:
+                    batch.append(evt)
+                else:
+                    rest.append(evt)
+            self._deferred = rest
+            self._active_request_id = rid
+            self._turn_abort.clear()
+            self._emit("turn_started", request_id=rid)
+            await self._run_turn(rid, prelude=batch)
+
     async def _dispatch_turn_event(self, evt: Any, request_id: str, state: _TurnState) -> None:
         evt_rid = getattr(evt, "request_id", "") or ""
 
@@ -589,8 +677,9 @@ class ChatSessionController:
                 self._emit("thinking", text="thinking…")
             return
 
-        if evt_rid != request_id:
-            self._maybe_thinking_trace(evt, request_id)
+        if evt_rid and evt_rid != request_id:
+            if evt_rid not in self._abandoned:
+                self._deferred.append(evt)
             return
 
         if isinstance(evt, GroundingEvent):
@@ -885,6 +974,7 @@ class ChatSessionController:
         if self._active_request_id is not None:
             self._abandoned.append(self._active_request_id)
         self._active_request_id = None
+        await self._stop_idle_watch()
 
         if self._stream_task is not None:
             self._stream_task.cancel()
@@ -913,6 +1003,7 @@ class ChatSessionController:
         await self._teardown_stream()
         await self._create_session()
         self._stream_task = asyncio.create_task(self._consume_stream())
+        self._start_idle_watch()
         self._emit("session_ready", session_id=self.session_id)
         self._emit("connection_state", state="connected")
 
@@ -926,6 +1017,7 @@ class ChatSessionController:
         await self._teardown_stream()
         await self._attach_or_create_session(sid)
         self._stream_task = asyncio.create_task(self._consume_stream())
+        self._start_idle_watch()
         self._emit("session_ready", session_id=self.session_id)
         self._emit("connection_state", state="connected")
         await self._emit_transcript_backfill()
@@ -942,6 +1034,11 @@ class ChatSessionController:
         if self._closed:
             return
         self._closed = True
+        if self._idle_task is not None:
+            self._idle_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError, TimeoutError):
+                await asyncio.wait_for(self._idle_task, timeout=0.5)
+            self._idle_task = None
         if self._stream_task is not None:
             self._stream_task.cancel()
             with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError, TimeoutError):

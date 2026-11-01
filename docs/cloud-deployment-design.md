@@ -87,10 +87,6 @@ managed `DB_URL` and `MEMORY_STORAGE_URI` for state that must survive recycling.
 
 When several gateway or worker processes share one `DB_URL`, conversation isolation is by `thread_id`; subagent run isolation is by `run_id`.
 
-For **queued subagent work** (`MONKEYBOT_TASK_QUEUE=1`), workers poll `pending_runs()` and `claim(run_id, worker_id)`. Stale claims use `MONKEYBOT_WORKER_STALE_CLAIM_MS` (default 10 minutes). See [Features — durable subagent runs](features.md#14-durable-subagent-runs-task-queue) for worker env vars.
-
-- **Production:** standalone `python -m monkeybot.subagents.worker` alongside the gateway (separate event loop; share state via `DB_URL`).
-- **Development only:** `MONKEYBOT_WORKER_POOL=1` co-locates a worker in the gateway process — do not use in production.
-- **SQLite:** single-process / local only. **Postgres / Firestore:** multi-process worker pools.
+Background subagents run inside the gateway process that owns the session. There is no separate worker pool and no `MONKEYBOT_TASK_QUEUE`. A `running` row carries this process's owner id and a lease. On startup, rows whose owner is a dead process on this host are marked failed. Another host's rows are left alone, so a session must stay pinned to one gateway. See [Features — durable subagent runs](features.md#13-durable-subagent-runs-runstore-lease).
 
 Handle `StorageBackend` open/close in every entry point (gateway lifespan, FaaS cold start, AgentCore handler).

@@ -50,7 +50,6 @@ _ISOLATION: dict[str, str] = {
     "MONKEYBOT_MEMORY_HOOK_ENABLED": "false",
     "WEB_SEARCH_BACKEND": "none",
     "SANDBOX_ENABLED": "false",
-    "MONKEYBOT_WORKER_POOL": "false",
 }
 _DROP = (
     "MONKEYBOT_WORKSPACE_ROOT_OVERRIDE",

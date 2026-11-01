@@ -57,6 +57,8 @@ class FollowUpItem:
     request_id: str
     content: list[ContentBlock]
     first_lock_fail_at_ms: int | None = None
+    provenance: str = "human"
+    harness_run_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -127,7 +129,14 @@ class InputAdmission:
         )
         return len(self._steer) - 1
 
-    def enqueue_follow_up(self, request_id: str, content: list[ContentBlock]) -> int:
+    def enqueue_follow_up(
+        self,
+        request_id: str,
+        content: list[ContentBlock],
+        *,
+        provenance: str = "human",
+        harness_run_ids: tuple[str, ...] = (),
+    ) -> int:
         """Append a follow-up prompt; return 0-based queue position."""
         if not request_id.strip():
             raise ValueError("follow-up request_id must be non-empty")
@@ -135,7 +144,14 @@ class InputAdmission:
             raise ValueError("follow-up content must be non-empty")
         if len(self._follow_up) >= self.max_follow_up:
             raise AdmissionQueueFullError("follow_up", self.max_follow_up)
-        self._follow_up.append(FollowUpItem(request_id=request_id, content=list(content)))
+        self._follow_up.append(
+            FollowUpItem(
+                request_id=request_id,
+                content=list(content),
+                provenance=provenance,
+                harness_run_ids=harness_run_ids,
+            )
+        )
         return len(self._follow_up) - 1
 
     def _follow_up_index(self, request_id: str) -> int | None:
