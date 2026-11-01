@@ -159,3 +159,103 @@ async def stop_subagent_process(
     if proc is not None and proc.returncode is None:
         with contextlib.suppress(ProcessLookupError):
             await proc.wait()
+
+
+def process_identity(pid: int) -> str | None:
+    """Stable token for ``pid``, or None if the process is gone.
+
+    Used so a restart does not SIGKILL a reused PID. Prefer Linux ``/proc``
+    starttime; fall back to ``ps`` start time on other Unix platforms.
+    """
+    if pid <= 0:
+        return None
+    proc_stat = Path(f"/proc/{pid}/stat")
+    if proc_stat.exists():
+        try:
+            raw = proc_stat.read_text(encoding="utf-8")
+            close = raw.rfind(")")
+            if close < 0:
+                return None
+            fields = raw[close + 1 :].split()
+            if len(fields) < 20:
+                return None
+            starttime = fields[19]
+            boot_id = ""
+            try:
+                boot_id = (
+                    Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+                )
+            except OSError:
+                pass
+            return f"linux:{boot_id}:{starttime}"
+        except OSError:
+            return None
+    if not SUPPORTS_PROCESS_GROUPS:
+        return None
+    try:
+        completed = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    token = (completed.stdout or "").strip()
+    if not token or completed.returncode != 0:
+        return None
+    return f"ps:{token}"
+
+
+def write_subagent_pid(scratch: Path, pid: int) -> None:
+    """Record ``pid`` and its identity under ``scratch/subagent.pid``."""
+    identity = process_identity(pid)
+    if identity is None:
+        return
+    try:
+        (scratch / "subagent.pid").write_text(f"{pid}\n{identity}\n", encoding="utf-8")
+    except OSError:
+        return
+
+
+def read_subagent_pid(scratch: Path) -> tuple[int, str] | None:
+    pid_path = scratch / "subagent.pid"
+    try:
+        lines = [
+            line.strip()
+            for line in pid_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except OSError:
+        return None
+    if len(lines) < 2:
+        return None
+    try:
+        pid = int(lines[0])
+    except ValueError:
+        return None
+    identity = lines[1]
+    if pid <= 0 or not identity:
+        return None
+    return pid, identity
+
+
+def kill_recorded_subagent(scratch: Path) -> None:
+    """Kill the process group recorded in ``scratch/subagent.pid``, if it is still that process."""
+    recorded = read_subagent_pid(scratch)
+    if recorded is None:
+        return
+    pid, expected_identity = recorded
+    current = process_identity(pid)
+    if current is not None and current != expected_identity:
+        return
+    if SUPPORTS_PROCESS_GROUPS:
+        try:
+            os.killpg(pid, signal.SIGKILL)
+            return
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        return

@@ -11,6 +11,8 @@ _TOOL_KIND: dict[str, str] = {
     "run_command": "Shell",
     "await_command": "Shell",
     "kill_command": "Shell",
+    "await_task": "Subagent",
+    "kill_task": "Subagent",
     "execute": "Shell",
     "shell": "Shell",
     "bash": "Shell",

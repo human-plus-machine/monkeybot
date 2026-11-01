@@ -25,6 +25,7 @@ class Provenance(StrEnum):
     VERIFIER_STEER = "verifier_steer"
     CONTEXT_SUMMARY = "context_summary"
     TOOL_RESULT = "tool_result"
+    HARNESS = "harness"
 
 
 class Channel(StrEnum):

@@ -26,6 +26,8 @@ class _NoopLoopPort:
         session_id: str,
         request_id: str,
         user_content: list[ContentBlock],
+        *,
+        provenance: str = "human",
     ) -> None:
         _ = (session_id, request_id, user_content)
 

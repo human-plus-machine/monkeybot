@@ -108,8 +108,10 @@ def _default_loop_port(registry: SessionRegistry) -> LoopPort:
             session_id: str,
             request_id: str,
             user_content: list[ContentBlock],
+            *,
+            provenance: str = "human",
         ) -> None:
-            _ = (request_id, user_content)
+            _ = (request_id, user_content, provenance)
             bus = registry.get(session_id)
             if bus is not None:
                 bus.current_request_id = None
@@ -214,17 +216,21 @@ def _schedule_turn(
     session_id: str,
     request_id: str,
     user_content: list[ContentBlock],
+    provenance: str = "human",
 ) -> None:
     """Background a turn and drain follow-up queue when it finishes."""
 
     async def _turn() -> None:
         try:
-            await loop_ref.start_turn(session_id, request_id, user_content)
+            await loop_ref.start_turn(session_id, request_id, user_content, provenance=provenance)
         finally:
             if storage is not None:
                 await storage.session_turns().release(session_id, request_id)
             if bus.current_request_id == request_id:
                 bus.current_request_id = None
+            supervisor = getattr(bus, "subagent_supervisor", None)
+            if supervisor is not None:
+                await supervisor.wake_if_idle()
             # Steers drain only at the top of each inner turn. A promote during
             # the final inner turn would otherwise sit in `_steer` until a later
             # turn (or vanish on cancel). Put those items back on the follow-up
@@ -339,11 +345,26 @@ async def _drain_follow_up(
             session_id=session_id,
         )
         return
+    supervisor = getattr(bus, "subagent_supervisor", None)
+    if (
+        item.provenance == "harness"
+        and supervisor is not None
+        and not supervisor.runs_still_need_wake(item.harness_run_ids)
+    ):
+        if storage is not None:
+            await storage.session_turns().release(session_id, item.request_id)
+        await _drain_follow_up(
+            bus=bus,
+            loop_ref=loop_ref,
+            storage=storage,
+            session_id=session_id,
+        )
+        return
     bus.cancel_follow_up_retry()
     bus.current_request_id = item.request_id
     logger.info(
         "follow-up promoted %s",
-        kv(session_id=session_id, request_id=item.request_id),
+        kv(session_id=session_id, request_id=item.request_id, provenance=item.provenance),
     )
     _schedule_turn(
         bus=bus,
@@ -352,6 +373,7 @@ async def _drain_follow_up(
         session_id=session_id,
         request_id=item.request_id,
         user_content=item.content,
+        provenance=item.provenance,
     )
 
 

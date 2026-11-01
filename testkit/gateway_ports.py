@@ -19,6 +19,8 @@ class FakeLoopPort:
         session_id: str,
         request_id: str,
         user_content: list[Text],
+        *,
+        provenance: str = "human",
     ) -> None:
         _ = user_content
         bus = self._registry.get(session_id)

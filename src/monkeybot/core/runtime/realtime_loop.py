@@ -50,7 +50,11 @@ from monkeybot.core.runtime.events import (
     UsageTotals,
 )
 from monkeybot.core.tools.inspector import InspectorToolCall, format_denial
-from monkeybot.core.tools.permission import remember_always_approval, resource_for_call
+from monkeybot.core.tools.permission import (
+    grant_session_access,
+    remember_always_approval,
+    resource_for_call,
+)
 from monkeybot.core.tools.types import ToolExecutionResult
 from monkeybot.core.types.content_blocks import (
     ActionRequired,
@@ -338,10 +342,7 @@ async def _resolve_realtime_inspector_decision(
         if payload.get("approved"):
             outcome.allowed = True
             grant_resource = decision.grant_key or resource_for_call(inspector_call)
-            if decision.grant_kind == "command":
-                ctx.turn_command_grants.add(grant_resource)
-            elif decision.grant_kind == "path":
-                ctx.turn_path_grants.add(grant_resource)
+            grant_session_access(ctx, kind=decision.grant_kind, resource=grant_resource)
             if payload.get("always"):
                 grant_persist = (
                     ctx.grants_persist if decision.grant_kind is not None else ctx.approvals_persist

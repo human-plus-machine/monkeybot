@@ -38,6 +38,8 @@ class HoldingLoopPort:
         session_id: str,
         request_id: str,
         user_content: list[Text],
+        *,
+        provenance: str = "human",
     ) -> None:
         _ = (session_id, request_id, user_content)
         await self._hold.wait()

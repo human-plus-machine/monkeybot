@@ -7,9 +7,11 @@ rows; a product disagreement is left failing.
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1292,3 +1294,121 @@ async def test_revert_injects_an_undo_note_on_the_next_turn() -> None:
         snapshots = [frame for frame in second if frame.get("type") == "SystemPromptSnapshot"]
         assert snapshots
         assert "User undid your changes to review.txt." in snapshots[-1]["text"]
+
+
+_WORKER = Path(__file__).resolve().parents[3] / "testkit" / "subagent_worker.py"
+
+
+def _deltas(frames: list[dict[str, Any]]) -> str:
+    return "".join(
+        str(frame.get("delta") or "") for frame in frames if frame.get("type") == "AssistantDelta"
+    )
+
+
+def _script(turns: list[list[dict[str, Any]]]) -> str:
+    return yaml.safe_dump(turns, sort_keys=False)
+
+
+@pytest.mark.case("T2-SUB-15")
+async def test_background_task_inherits_session_folder_grant() -> None:
+    """A folder approved on an earlier turn is already granted to a later background child."""
+    home = Path(tempfile.mkdtemp(prefix="mb-grant-home-"))
+    docs = home / "docs"
+    docs.mkdir()
+    notes = docs / "notes.txt"
+    notes.write_text("session-grant\n", encoding="utf-8")
+    script = _script(
+        [
+            [
+                {
+                    "type": "tool_call",
+                    "call_id": "read1",
+                    "name": "read_file",
+                    "args": {"path": str(notes)},
+                },
+                {"type": "done"},
+            ],
+            [{"type": "text", "text": "Read it."}, {"type": "done"}],
+            [
+                {
+                    "type": "tool_call",
+                    "call_id": "task1",
+                    "name": "task",
+                    "args": {"task": "sleep:0.2", "background": True},
+                },
+                {"type": "done"},
+            ],
+            [{"type": "text", "text": "Started."}, {"type": "done"}],
+        ]
+    )
+    env = {
+        "HOME": str(home),
+        "MONKEYBOT_SUBAGENT_SCRIPT": str(_WORKER),
+    }
+    async with open_gateway(script=script, env=env) as gateway:
+        await gateway.create_session("s-grant")
+        async with listening(gateway, "s-grant") as reader:
+            await reader.until("ActiveRequests")
+            await _reply(gateway, "s-grant", "r1", "read the notes")
+            asked = await reader.until("ToolConfirmationRequest")
+            call_id = str(_frame(asked, "ToolConfirmationRequest").get("tool_call_id"))
+            approved = await gateway.client.post(
+                f"/sessions/s-grant/tool-confirmations/{call_id}",
+                json={"approved": True},
+            )
+            assert approved.status_code == 202, approved.text[:300]
+            await reader.until("TurnComplete")
+            await wait_turn(gateway, "s-grant")
+            second = await _turn(
+                gateway, reader, "s-grant", "r2", "survey that folder in the background"
+            )
+        result = _frame(second, "ToolCallResult")
+        body = json.loads(str(result.get("result") or "{}"))
+        assert body.get("status") == "running"
+        row = await gateway.app.state.storage.runs().get_run(str(body["run_id"]))
+        assert row is not None
+        assert str(docs.resolve()) in row.envelope_json
+
+
+@pytest.mark.case("T2-SUB-16")
+async def test_background_finish_wakes_parent_after_a_later_question() -> None:
+    """A user question is answered while a background child runs, then its finish starts a parent turn."""
+    script = _script(
+        [
+            [
+                {
+                    "type": "tool_call",
+                    "call_id": "c1",
+                    "name": "task",
+                    "args": {"task": "sleep:1.2", "background": True},
+                },
+                {"type": "done"},
+            ],
+            [{"type": "text", "text": "Started."}, {"type": "done"}],
+            [{"type": "text", "text": "Four."}, {"type": "done"}],
+            [{"type": "text", "text": "The background task finished."}, {"type": "done"}],
+        ]
+    )
+    env = {"MONKEYBOT_SUBAGENT_SCRIPT": str(_WORKER)}
+    async with open_gateway(script=script, env=env) as gateway:
+        await gateway.create_session("s-wake")
+        async with listening(gateway, "s-wake") as reader:
+            await reader.until("ActiveRequests")
+            first = await _turn(
+                gateway, reader, "s-wake", "r1", "survey the workspace in the background"
+            )
+            assert "Started." in _deltas(first)
+            started = json.loads(str(_frame(first, "ToolCallResult").get("result") or "{}"))
+            assert started.get("status") == "running"
+            second = await _turn(gateway, reader, "s-wake", "r2", "what is 2 + 2")
+            assert "Four." in _deltas(second)
+            assert "[harness]" not in _deltas(second)
+            woke = await reader.until("TurnComplete", timeout=15)
+            await wait_turn(gateway, "s-wake")
+        rows = await history(gateway, "s-wake")
+    user_texts = [message_text(row) for row in rows if row.role == "user"]
+    assert any(text.startswith("[harness] Background task") for text in user_texts)
+    assert user_texts.index(
+        next(text for text in user_texts if text.startswith("[harness]"))
+    ) > user_texts.index("what is 2 + 2")
+    assert "The background task finished." in _deltas(woke)

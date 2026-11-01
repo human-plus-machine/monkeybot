@@ -77,6 +77,7 @@ async def run(
     transcript_writer: TranscriptWriter | None = None,
     vertex_google_search: bool = False,
     input_admission: InputAdmission | None = None,
+    input_provenance: str = "human",
 ) -> AsyncIterator[AgentEvent]:
     """Stream agent events for one user message; ends with ``TurnComplete`` (never raises).
 
@@ -130,6 +131,7 @@ async def run(
             transcript_writer=transcript_writer,
             vertex_google_search=vertex_google_search,
             input_admission=input_admission,
+            input_provenance=input_provenance,
         ):
             yield evt
     except asyncio.CancelledError:

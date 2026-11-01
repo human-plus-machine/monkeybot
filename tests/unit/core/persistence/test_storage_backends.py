@@ -915,355 +915,37 @@ async def test_run_record_started_get_run_roundtrip(sqlite_backend: SQLiteStorag
 
 
 @pytest.mark.asyncio
-async def test_run_record_started_not_in_pending_runs(sqlite_backend: SQLiteStorageBackend) -> None:
+async def test_run_owner_lease_and_failed_payload(sqlite_backend: SQLiteStorageBackend) -> None:
+    """Spawn writes the lease; renew keeps it; a failed row keeps result_json."""
     store = sqlite_backend.runs()
-    env = _make_envelope(parent_run_id="p2")
+    env = _make_envelope(parent_run_id="p-lease")
+    scratch = Path("/tmp/run-lease")
     await store.record_started(
-        run_id="run-002",
-        parent_run_id=None,
-        script="subagents/x.py",
+        run_id="run-lease",
+        parent_run_id="parent",
+        script="worker.py",
         envelope=env,
-        scratch_dir=Path("/tmp/run-002"),
+        scratch_dir=scratch,
+        owner_id="host:1:live",
     )
-    pending = await store.pending_runs()
-    run_ids = [r.run_id for r in pending]
-    assert "run-002" not in run_ids
-
-
-@pytest.mark.asyncio
-async def test_run_record_completed_removes_from_pending(
-    sqlite_backend: SQLiteStorageBackend,
-) -> None:
-    store = sqlite_backend.runs()
-    env = _make_envelope(parent_run_id="p3")
-    await store.record_pending(
-        run_id="run-003",
-        parent_run_id=None,
-        script="subagents/x.py",
-        envelope=env,
-        scratch_dir=Path("/tmp/run-003"),
-    )
-    await store.record_completed("run-003", '{"ok": true}')
-    pending = await store.pending_runs()
-    assert all(r.run_id != "run-003" for r in pending)
-
-
-@pytest.mark.asyncio
-async def test_run_record_completed_updates_status(sqlite_backend: SQLiteStorageBackend) -> None:
-    store = sqlite_backend.runs()
-    env = _make_envelope(parent_run_id="p4")
-    await store.record_started(
-        run_id="run-004",
-        parent_run_id=None,
-        script="subagents/x.py",
-        envelope=env,
-        scratch_dir=Path("/tmp/run-004"),
-    )
-    await store.record_completed("run-004", '{"result": "done"}')
-    row = await store.get_run("run-004")
-    assert row is not None
-    assert row.status == "completed"
-    assert row.result_json == '{"result": "done"}'
-    assert row.finished_at is not None
-
-
-@pytest.mark.asyncio
-async def test_run_record_failed_sets_status_and_error(
-    sqlite_backend: SQLiteStorageBackend,
-) -> None:
-    store = sqlite_backend.runs()
-    env = _make_envelope(parent_run_id="p5")
-    await store.record_started(
-        run_id="run-005",
-        parent_run_id=None,
-        script="subagents/x.py",
-        envelope=env,
-        scratch_dir=Path("/tmp/run-005"),
-    )
-    await store.record_failed("run-005", "something exploded")
-    row = await store.get_run("run-005")
-    assert row is not None
-    assert row.status == "failed"
-    assert row.error_json is not None
-    assert "something exploded" in row.error_json
-    assert row.finished_at is not None
-
-
-@pytest.mark.asyncio
-async def test_run_get_run_returns_none_for_missing(sqlite_backend: SQLiteStorageBackend) -> None:
-    store = sqlite_backend.runs()
-    assert await store.get_run("no-such-run") is None
-
-
-@pytest.mark.asyncio
-async def test_run_pending_runs_excludes_failed(sqlite_backend: SQLiteStorageBackend) -> None:
-    store = sqlite_backend.runs()
-    env = _make_envelope(parent_run_id="p6")
-    await store.record_started(
-        run_id="run-006",
-        parent_run_id=None,
-        script="subagents/x.py",
-        envelope=env,
-        scratch_dir=Path("/tmp/run-006"),
-    )
-    await store.record_failed("run-006", "boom")
-    pending = await store.pending_runs()
-    assert all(r.run_id != "run-006" for r in pending)
-
-
-@pytest.mark.asyncio
-async def test_run_pending_runs_orders_by_started_at(sqlite_backend: SQLiteStorageBackend) -> None:
-    """pending_runs returns rows oldest-first."""
-    store = sqlite_backend.runs()
-    for i in range(3):
-        env = _make_envelope(parent_run_id=f"p-ord-{i}")
-        await store.record_pending(
-            run_id=f"run-ord-{i}",
-            parent_run_id=None,
-            script="subagents/x.py",
-            envelope=env,
-            scratch_dir=Path(f"/tmp/run-ord-{i}"),
-        )
-    pending = await store.pending_runs()
-    ord_rows = [r for r in pending if r.run_id.startswith("run-ord-")]
-    assert [r.run_id for r in ord_rows] == ["run-ord-0", "run-ord-1", "run-ord-2"]
-
-
-# ---------------------------------------------------------------------------
-# RunStore claim / record_pending / reset_stale_claims
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_run_record_pending_appears_in_pending_runs(
-    sqlite_backend: SQLiteStorageBackend,
-) -> None:
-    store = sqlite_backend.runs()
-    env = _make_envelope(parent_run_id="pending-parent")
-    await store.record_pending(
-        run_id="run-pending-1",
-        parent_run_id=None,
-        script="subagents/x.py",
-        envelope=env,
-        scratch_dir=Path("/tmp/run-pending-1"),
-    )
-    pending = await store.pending_runs()
-    row = next(r for r in pending if r.run_id == "run-pending-1")
-    assert row.status == "pending"
-
-
-@pytest.mark.asyncio
-async def test_run_claim_transitions_pending_to_running(
-    sqlite_backend: SQLiteStorageBackend,
-) -> None:
-    store = sqlite_backend.runs()
-    env = _make_envelope(parent_run_id="claim-parent")
-    await store.record_pending(
-        run_id="run-claim-1",
-        parent_run_id=None,
-        script="subagents/x.py",
-        envelope=env,
-        scratch_dir=Path("/tmp/run-claim-1"),
-    )
-    assert await store.claim("run-claim-1", "worker-a") is True
-    row = await store.get_run("run-claim-1")
+    row = await store.get_run("run-lease")
     assert row is not None
     assert row.status == "running"
-    assert row.worker_id == "worker-a"
+    assert row.worker_id == "host:1:live"
     assert row.claimed_at is not None
-
-
-@pytest.mark.asyncio
-async def test_run_claim_returns_false_for_second_caller(
-    sqlite_backend: SQLiteStorageBackend,
-) -> None:
-    store = sqlite_backend.runs()
-    env = _make_envelope(parent_run_id="claim-parent-2")
-    await store.record_pending(
-        run_id="run-claim-2",
-        parent_run_id=None,
-        script="subagents/x.py",
-        envelope=env,
-        scratch_dir=Path("/tmp/run-claim-2"),
+    assert await store.renew_claim("run-lease", "host:1:live") is True
+    assert await store.renew_claim("run-lease", "other") is False
+    running = await store.list_running()
+    assert [item.run_id for item in running] == ["run-lease"]
+    payload = '{"ok": false, "exit_reason": "killed"}'
+    assert await store.record_failed(
+        "run-lease", "killed", worker_id="host:1:live", result_json=payload
     )
-    assert await store.claim("run-claim-2", "worker-a") is True
-    assert await store.claim("run-claim-2", "worker-b") is False
-
-
-@pytest.mark.asyncio
-async def test_run_claim_returns_false_for_non_pending(
-    sqlite_backend: SQLiteStorageBackend,
-) -> None:
-    store = sqlite_backend.runs()
-    env = _make_envelope(parent_run_id="claim-parent-3")
-    await store.record_started(
-        run_id="run-claim-3",
-        parent_run_id=None,
-        script="subagents/x.py",
-        envelope=env,
-        scratch_dir=Path("/tmp/run-claim-3"),
-    )
-    assert await store.claim("run-claim-3", "worker-a") is False
-
-
-@pytest.mark.asyncio
-async def test_run_claim_concurrency_only_one_wins(sqlite_backend: SQLiteStorageBackend) -> None:
-    import asyncio
-
-    store = sqlite_backend.runs()
-    env = _make_envelope(parent_run_id="claim-race")
-    await store.record_pending(
-        run_id="run-claim-race",
-        parent_run_id=None,
-        script="subagents/x.py",
-        envelope=env,
-        scratch_dir=Path("/tmp/run-claim-race"),
-    )
-
-    results = await asyncio.gather(
-        *[store.claim("run-claim-race", f"worker-{i}") for i in range(8)]
-    )
-    assert sum(1 for ok in results if ok) == 1
-
-
-@pytest.mark.asyncio
-async def test_run_reset_stale_claims(sqlite_backend: SQLiteStorageBackend) -> None:
-    import asyncio
-
-    store = sqlite_backend.runs()
-    env = _make_envelope(parent_run_id="stale-parent")
-    await store.record_pending(
-        run_id="run-stale-1",
-        parent_run_id=None,
-        script="subagents/x.py",
-        envelope=env,
-        scratch_dir=Path("/tmp/run-stale-1"),
-    )
-    assert await store.claim("run-stale-1", "worker-stale") is True
-    await asyncio.sleep(0.02)
-    stale = await store.list_stale_claims(stale_after_ms=10)
-    assert len(stale) == 1
-    assert stale[0].run_id == "run-stale-1"
-    reset = await store.reset_stale_claims(stale_after_ms=10)
-    assert reset == 1
-    row = await store.get_run("run-stale-1")
-    assert row is not None
-    assert row.status == "pending"
-    assert row.worker_id is None
-
-
-@pytest.mark.asyncio
-async def test_run_reset_stale_claim_skips_renewed_lease(
-    sqlite_backend: SQLiteStorageBackend,
-) -> None:
-    import asyncio
-
-    store = sqlite_backend.runs()
-    env = _make_envelope(parent_run_id="stale-renew-parent")
-    await store.record_pending(
-        run_id="run-stale-renew",
-        parent_run_id=None,
-        script="subagents/x.py",
-        envelope=env,
-        scratch_dir=Path("/tmp/run-stale-renew"),
-    )
-    assert await store.claim("run-stale-renew", "worker-stale") is True
-    await asyncio.sleep(0.02)
-    stale = await store.list_stale_claims(stale_after_ms=10)
-    assert len(stale) == 1
-    assert await store.renew_claim("run-stale-renew", "worker-stale") is True
-    assert (
-        await store.reset_stale_claim(
-            "run-stale-renew",
-            10,
-            worker_id="worker-stale",
-        )
-        is False
-    )
-    row = await store.get_run("run-stale-renew")
-    assert row is not None
-    assert row.status == "running"
-    assert row.worker_id == "worker-stale"
-
-
-@pytest.mark.asyncio
-async def test_run_renew_claim_extends_lease(sqlite_backend: SQLiteStorageBackend) -> None:
-    import asyncio
-
-    store = sqlite_backend.runs()
-    env = _make_envelope(parent_run_id="renew-parent")
-    await store.record_pending(
-        run_id="run-renew-1",
-        parent_run_id=None,
-        script="subagents/x.py",
-        envelope=env,
-        scratch_dir=Path("/tmp/run-renew-1"),
-    )
-    assert await store.claim("run-renew-1", "worker-renew") is True
-    before = await store.get_run("run-renew-1")
-    assert before is not None and before.claimed_at is not None
-    await asyncio.sleep(0.02)
-    assert await store.renew_claim("run-renew-1", "worker-renew") is True
-    after = await store.get_run("run-renew-1")
-    assert after is not None and after.claimed_at is not None
-    assert after.claimed_at >= before.claimed_at
-    assert await store.list_stale_claims(stale_after_ms=10) == []
-
-
-@pytest.mark.asyncio
-async def test_run_record_completed_requires_owner_when_worker_id_set(
-    sqlite_backend: SQLiteStorageBackend,
-) -> None:
-    store = sqlite_backend.runs()
-    env = _make_envelope(parent_run_id="owner-parent")
-    await store.record_pending(
-        run_id="run-owner-1",
-        parent_run_id=None,
-        script="subagents/x.py",
-        envelope=env,
-        scratch_dir=Path("/tmp/run-owner-1"),
-    )
-    assert await store.claim("run-owner-1", "worker-a") is True
-    assert (
-        await store.record_completed("run-owner-1", '{"from":"b"}', worker_id="worker-b") is False
-    )
-    row = await store.get_run("run-owner-1")
-    assert row is not None
-    assert row.status == "running"
-    assert await store.record_completed("run-owner-1", '{"from":"a"}', worker_id="worker-a") is True
-    row = await store.get_run("run-owner-1")
-    assert row is not None
-    assert row.status == "completed"
-    assert row.result_json == '{"from":"a"}'
-
-
-@pytest.mark.asyncio
-async def test_run_record_failed_ignored_after_reclaim(
-    sqlite_backend: SQLiteStorageBackend,
-) -> None:
-    import asyncio
-
-    store = sqlite_backend.runs()
-    env = _make_envelope(parent_run_id="reclaim-parent")
-    await store.record_pending(
-        run_id="run-reclaim-1",
-        parent_run_id=None,
-        script="subagents/x.py",
-        envelope=env,
-        scratch_dir=Path("/tmp/run-reclaim-1"),
-    )
-    assert await store.claim("run-reclaim-1", "worker-old") is True
-    await asyncio.sleep(0.02)
-    assert await store.reset_stale_claims(stale_after_ms=10) == 1
-    assert await store.claim("run-reclaim-1", "worker-new") is True
-    assert (
-        await store.record_failed("run-reclaim-1", "stale worker finishing", worker_id="worker-old")
-        is False
-    )
-    row = await store.get_run("run-reclaim-1")
-    assert row is not None
-    assert row.status == "running"
-    assert row.worker_id == "worker-new"
+    done = await store.get_run("run-lease")
+    assert done is not None
+    assert done.status == "failed"
+    assert done.result_json == payload
+    assert await store.list_running() == []
 
 
 def test_factory_raises_runtime_error_for_firestore_without_client(

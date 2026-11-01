@@ -11,6 +11,7 @@ from monkeybot.core.context import TurnContext
 from monkeybot.core.tools.grant_store import add_path_grant
 from monkeybot.core.tools.inspector import InspectorToolCall
 from monkeybot.core.tools.path_grant_inspector import PathGrantInspector
+from monkeybot.core.tools.permission import grant_session_access, seed_turn_grants
 
 
 def _ctx(*, turn_path_grants: set[str] | None = None) -> TurnContext:
@@ -124,6 +125,35 @@ class TestAskAndGrant:
         assert d.grant_kind == "path"
         assert d.grant_key == str(desktop.resolve())
         assert "Desktop" in (d.message or "")
+
+    @pytest.mark.asyncio
+    async def test_session_grant_lets_a_later_turn_read_without_asking(
+        self, home: Path, workspace: Path
+    ) -> None:
+        desktop = home / "Desktop"
+        desktop.mkdir()
+        target = desktop / "report.pdf"
+        bus = type("Bus", (), {"path_grants": set(), "command_grants": set()})()
+        first = TurnContext(
+            thread_id="t",
+            request_id="r",
+            agent_md="",
+            memory_index=[],
+            skills=[],
+            tools=[],
+            user_id=None,
+            parent_run_id=None,
+            model="gemini-2.5-flash",
+            sse_bus=bus,  # type: ignore[arg-type]
+        )
+        grant_session_access(first, kind="path", resource=str(desktop.resolve()))
+        later = _ctx()
+        seed_turn_grants(later, bus)
+        insp = PathGrantInspector(workspace_root=workspace)
+        decision = await insp.check(
+            InspectorToolCall("2", "read_file", {"path": str(target)}), later
+        )
+        assert decision.kind == "allow"
 
     @pytest.mark.asyncio
     async def test_load_file_and_glob_and_grep_all_covered(

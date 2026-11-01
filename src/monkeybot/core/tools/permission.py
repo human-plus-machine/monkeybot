@@ -202,6 +202,42 @@ class SessionApprovals:
         self._keys = {(tool, resource) for tool, resource in self._keys if not predicate(tool)}
 
 
+def grant_session_access(ctx: object, *, kind: str | None, resource: str) -> None:
+    """Remember a folder or command the user just approved, for this turn and the session.
+
+    ``Allow once`` and ``Always allow`` both land here. Durable ``Always allow``
+    still goes through :func:`remember_always_approval`. A subagent copies the
+    session sets at spawn, because it has no prompt of its own.
+    """
+    if kind == "command":
+        turn_name, session_name = "turn_command_grants", "command_grants"
+    elif kind == "path":
+        turn_name, session_name = "turn_path_grants", "path_grants"
+    else:
+        return
+    turn_grants = getattr(ctx, turn_name, None)
+    if isinstance(turn_grants, set):
+        turn_grants.add(resource)
+    bus = getattr(ctx, "sse_bus", None)
+    session_grants = getattr(bus, session_name, None) if bus is not None else None
+    if isinstance(session_grants, set):
+        session_grants.add(resource)
+
+
+def seed_turn_grants(ctx: object, bus: object | None) -> None:
+    """Copy the session's approved folders and commands onto a new turn."""
+    if bus is None:
+        return
+    for turn_name, session_name in (
+        ("turn_path_grants", "path_grants"),
+        ("turn_command_grants", "command_grants"),
+    ):
+        turn_grants = getattr(ctx, turn_name, None)
+        session_grants = getattr(bus, session_name, None)
+        if isinstance(turn_grants, set) and isinstance(session_grants, set):
+            turn_grants.update(session_grants)
+
+
 def remember_always_approval(
     bus: object | None,
     tool: str,
@@ -343,7 +379,9 @@ __all__ = [
     "SessionApprovals",
     "evaluate",
     "load_permissions",
+    "grant_session_access",
     "remember_always_approval",
+    "seed_turn_grants",
     "resource_for_call",
     "try_load_permission_inspector",
 ]

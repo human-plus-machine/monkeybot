@@ -114,6 +114,8 @@ class SubagentSettings:
     timeout_sec: float = 3600.0
     max_turns: int = 1000
     vertex_google_search: bool = False
+    max_background: int = 4
+    lease_ms: int = 60_000
 
 
 _DEFAULT_SUBAGENT_SETTINGS = SubagentSettings()
@@ -534,10 +536,28 @@ def subagent_settings_from_section(section: dict[str, Any]) -> SubagentSettings:
             "subagents.personas, or omit subagent_type to inherit paths.agent_md"
         )
 
+    max_background = _DEFAULT_SUBAGENT_SETTINGS.max_background
+    raw_background = section.get("max_background")
+    if raw_background is not None:
+        if isinstance(raw_background, bool) or not isinstance(raw_background, int):
+            raise ConfigError(
+                f"subagents.max_background must be an integer, got {raw_background!r}"
+            )
+        max_background = max(1, raw_background)
+
+    lease_ms = _DEFAULT_SUBAGENT_SETTINGS.lease_ms
+    raw_lease = section.get("lease_ms")
+    if raw_lease is not None:
+        if isinstance(raw_lease, bool) or not isinstance(raw_lease, int):
+            raise ConfigError(f"subagents.lease_ms must be an integer, got {raw_lease!r}")
+        lease_ms = max(1000, raw_lease)
+
     return SubagentSettings(
         timeout_sec=timeout,
         max_turns=max_turns,
         vertex_google_search=vertex,
+        max_background=max_background,
+        lease_ms=lease_ms,
     )
 
 
