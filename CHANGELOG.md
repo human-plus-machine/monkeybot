@@ -6,6 +6,17 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [cli v0.13.0] - 2026-11-01
+
+### Added
+
+- Chat renders a turn the gateway starts while the prompt is idle, including the follow-up when a background subagent finishes. A message sent during that turn reports the session as busy.
+
+### Fixed
+
+- `monkeybot doctor` points a config-only tree at the Pillow overrides file shipped with the CLI. A bare `uv tool install` still resolves core 3.10.0.
+- New coding scaffolds tell the image generator to use the `skills` path from `list_skills` instead of an absolute host directory.
+
 ## [core v3.13.0] - 2026-11-01
 
 ### Added
