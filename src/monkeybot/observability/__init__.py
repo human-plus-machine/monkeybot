@@ -41,6 +41,10 @@ logger = logging.getLogger(__name__)
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
+# Spans carry up to 1 MiB per I/O attribute, so the SDK default of 512 per batch can
+# exceed a collector's body limit and drop the whole batch.
+_OTLP_MAX_EXPORT_BATCH_SIZE = 16
+
 
 def _env_truthy(name: str) -> bool:
     raw = os.environ.get(name)
@@ -64,7 +68,13 @@ def _create_span_processor(exporter: str) -> Any:
     if exporter == "otlp":
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 
-        return BatchSpanProcessor(OTLPSpanExporter())
+        # An explicit size would override OTEL_BSP_MAX_EXPORT_BATCH_SIZE; None lets the SDK read it.
+        batch_size = (
+            None
+            if os.environ.get("OTEL_BSP_MAX_EXPORT_BATCH_SIZE")
+            else _OTLP_MAX_EXPORT_BATCH_SIZE
+        )
+        return BatchSpanProcessor(OTLPSpanExporter(), max_export_batch_size=batch_size)
     if exporter == "console":
         from opentelemetry.sdk.trace.export import ConsoleSpanExporter
 

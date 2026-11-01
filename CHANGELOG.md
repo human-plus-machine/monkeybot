@@ -6,9 +6,15 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Core
+
 ### Added
 
 - `write_file`, `replace_in_file`, and `apply_patch` emit a `FileChange` and keep a before/after snapshot under `.monkeybot/changes/{session}` so a client can review the diff and undo. Undo refuses a file that changed since the edit or a snapshot that was too large to keep, and the next turn is told which paths were restored.
+
+### Changed
+
+- Tool input and output, completions, and turn I/O are no longer clipped at 8 KB in traces or at 4 KB in the SQLite trace DB. Each attribute is capped at 1 MiB instead. The history prompt stays at 8 KB. Full tool I/O now reaches OTLP backends, so redact at the collector. The SQLite DB no longer stores the `langfuse.*` mirror keys, and the OTLP exporter sends 16 spans per request (override with `OTEL_BSP_MAX_EXPORT_BATCH_SIZE`).
 
 ### Fixed
 

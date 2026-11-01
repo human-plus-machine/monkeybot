@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from monkeybot.core.context import TurnContext
@@ -96,10 +98,11 @@ async def test_span_llm_sets_gen_ai_attributes(otel_memory_exporter) -> None:
 
 
 @pytest.mark.asyncio
-async def test_span_tool_truncates_input_output(otel_memory_exporter) -> None:
+async def test_span_tool_keeps_large_input_output_whole(otel_memory_exporter) -> None:
     from monkeybot.observability.spans import record_tool_outcome
 
-    big = "x" * 20_000
+    big = "x" * 50_000
+    result = "ok" * 25_000
     async with span_tool(
         tool_name="run_command",
         tool_call_id="c1",
@@ -107,14 +110,65 @@ async def test_span_tool_truncates_input_output(otel_memory_exporter) -> None:
         request_id="r1",
         args={"q": big},
     ):
-        record_tool_outcome("ok" * 20_000, None)
+        record_tool_outcome(result, None)
     tool_spans = [
         s for s in otel_memory_exporter.get_finished_spans() if s.name == "monkeybot.tool"
     ]
     assert tool_spans
     tool = tool_spans[0]
-    assert str(tool.attributes["tool.input"]).endswith("…[truncated]")
-    assert str(tool.attributes["tool.output"]).endswith("…[truncated]")
+    args_json = json.dumps({"q": big})
+    assert tool.attributes["tool.input"] == args_json
+    assert tool.attributes["input.value"] == args_json
+    assert tool.attributes["tool.output"] == result
+    assert tool.attributes["output.value"] == result
+    assert tool.attributes["langfuse.observation.output"] == result
+
+
+@pytest.mark.asyncio
+async def test_span_tool_clips_io_at_hard_backstop(otel_memory_exporter) -> None:
+    from monkeybot.observability.spans import record_tool_outcome
+
+    async with span_tool(
+        tool_name="run_command",
+        tool_call_id="c1",
+        thread_id="t1",
+        request_id="r1",
+    ):
+        record_tool_outcome("z" * (2 * 1024 * 1024), None)
+    tool = next(s for s in otel_memory_exporter.get_finished_spans() if s.name == "monkeybot.tool")
+    out = str(tool.attributes["tool.output"])
+    assert out.endswith("…[truncated]")
+    assert len(out.encode("utf-8")) <= 1024 * 1024 + 32
+
+
+@pytest.mark.asyncio
+async def test_set_llm_io_clips_prompt_but_not_completion(otel_memory_exporter) -> None:
+    from monkeybot.observability.spans import set_llm_io
+
+    prompt = "p" * 50_000
+    completion = "c" * 50_000
+    async with span_llm(ctx=_ctx()):
+        set_llm_io(prompt=prompt, completion=completion)
+    llm = next(
+        s for s in otel_memory_exporter.get_finished_spans() if s.name == "monkeybot.llm.stream"
+    )
+    for key in ("gen_ai.prompt", "input.value", "langfuse.observation.input"):
+        value = str(llm.attributes[key])
+        assert value.endswith("…[truncated]")
+        assert len(value.encode("utf-8")) <= 8192 + 32
+    assert llm.attributes["gen_ai.completion"] == completion
+    assert llm.attributes["output.value"] == completion
+
+
+def test_set_span_attribute_safe_clips_non_io_string_at_default(otel_memory_exporter) -> None:
+    from opentelemetry import trace
+
+    tracer = trace.get_tracer("test")
+    with tracer.start_as_current_span("x") as span:
+        set_span_attribute_safe(span, "some.note", "n" * 20_000)
+        value = str(span.attributes["some.note"])
+    assert value.endswith("…[truncated]")
+    assert len(value.encode("utf-8")) <= 8192 + 32
 
 
 @pytest.mark.asyncio

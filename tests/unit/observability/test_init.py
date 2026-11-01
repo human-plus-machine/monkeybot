@@ -76,6 +76,33 @@ def test_init_observability_otlp_failure_does_not_raise(
     assert is_observability_enabled() is False
 
 
+def _otlp_batch_size(monkeypatch: pytest.MonkeyPatch) -> object:
+    """Build the OTLP processor with ``BatchSpanProcessor`` stubbed; return its batch size arg."""
+    import opentelemetry.sdk.trace.export as export_mod
+
+    from monkeybot.observability import _create_span_processor
+
+    captured: dict[str, object] = {}
+
+    def _fake_bsp(_exporter: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(export_mod, "BatchSpanProcessor", _fake_bsp)
+    _create_span_processor("otlp")
+    return captured["max_export_batch_size"]
+
+
+def test_otlp_processor_uses_small_batch_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", raising=False)
+    assert _otlp_batch_size(monkeypatch) == 16
+
+
+def test_otlp_processor_defers_to_batch_size_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", "64")
+    assert _otlp_batch_size(monkeypatch) is None
+
+
 def test_shutdown_observability_flushes_and_resets(otel_memory_exporter) -> None:
     from opentelemetry import trace
 
