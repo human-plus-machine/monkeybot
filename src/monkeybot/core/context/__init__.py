@@ -760,8 +760,9 @@ def _core_tool_defs(
                 "When true, start the subagent and return immediately with status running, "
                 "run_id, and child_thread_id. Use this for long independent work when the user "
                 "may want to keep talking. After it returns, tell the user it is running and "
-                "end this turn. Do not call await_task in the same turn. A later turn will "
-                "bring the result; call await_task then, before reporting it. Do not spin-poll."
+                "end this turn. Do not call await_task in the same turn. On a later turn, "
+                "answer the user. Call await_task only when they ask for the result, or when "
+                "a harness note says the child finished. Do not spin-poll."
             ),
         },
     }
@@ -944,8 +945,10 @@ def _core_tool_defs(
                     "(see harness Subagent personas). Omit background (or pass false) to wait for the "
                     "result in this turn. Pass background true for long independent work when the user "
                     "may want to keep talking: the call returns immediately with status running. "
-                    "Tell the user it is running and end the turn. Do not call await_task until "
-                    "a later turn. Do not edit files a running child owns (expect_files). "
+                    "Tell the user it is running and end the turn. Do not call await_task in that "
+                    "same turn. On a later turn, answer the user. Call await_task only when they "
+                    "ask for the result, or when a harness note says the child finished. "
+                    "Do not edit files a running child owns (expect_files). "
                     "Nested task calls are disabled inside the subagent."
                 ),
                 task_schema,
@@ -958,10 +961,11 @@ def _core_tool_defs(
                         "await_task",
                         (
                             "Wait for a background subagent started with task background true. "
-                            "Blocks until the child finishes or wait_seconds elapses (default 300, max 600) "
-                            "and returns status running, completed, failed, or timeout. A terminal status "
-                            "includes the normal task payload. Repeating await_task on a child that is "
-                            "still running is expected. Do not spin-poll. Call this before reporting results."
+                            "Call this only when the user asked for that result, or a harness note says "
+                            "the child finished. Blocks until the child finishes or wait_seconds elapses "
+                            "(default 300, max 600) and returns status running, completed, failed, or "
+                            "timeout. A terminal status includes the normal task payload. Do not call "
+                            "this to wait out a child the user did not ask about. Do not spin-poll."
                         ),
                         {
                             "type": "object",
