@@ -91,6 +91,9 @@ class _McpBundle(Bundle):
                 "MCP_CONFIG needs executor: real so the fixture server has a workspace"
             )
         ctx.mcp_client, ctx.mcp_path = await _open_mcp(ctx.env, ctx.cfg, ctx.workspace)
+        # Subagents read MCP_CONFIG, not the parent client. Point them at the
+        # expanded copy this process actually loaded.
+        ctx.env["MCP_CONFIG"] = str(ctx.mcp_path)
         ctx.advertised, ctx.catalog = _advertised_tools(ctx.mcp_client)
 
     async def close(self, ctx: RunCtx) -> None:

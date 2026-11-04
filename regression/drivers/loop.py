@@ -21,6 +21,7 @@ from monkeybot.core.context import (
     PendingResponseBusPort,
     TurnContext,
     _core_tool_defs,
+    refresh_tools_after_mcp_change,
 )
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.llm.provider import ToolCall
@@ -437,6 +438,11 @@ async def _drive(
             else MCPSessionVisibility()
         )
         turn = replace(turn, thread_id=thread_id, mcp_visibility=session_visibility)
+        # Production builds each chat's tool list from the shared client. The
+        # first session's hide mutates this list in place; the next session
+        # has to see the servers that are still connected.
+        if session_index > 1 and live.mcp is not None:
+            refresh_tools_after_mcp_change(turn, live.mcp)
         for nth, message in enumerate(session_messages, start=1):
             start = len(events)
             if multi:

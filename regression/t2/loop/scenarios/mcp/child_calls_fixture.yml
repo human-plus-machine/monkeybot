@@ -1,0 +1,15 @@
+- - type: tool_call
+    call_id: c1
+    name: enable_mcp
+    args:
+      name: fixture
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: fixture__echo
+    args:
+      text: ping
+  - type: done
+- - type: text
+    text: Child echoed ping.
+  - type: done

@@ -35,10 +35,10 @@ def test_catalog_pairing() -> None:
 
 
 def _assert_seed_shape(catalog: Catalog) -> None:
-    assert len(catalog.rows) == 440
+    assert len(catalog.rows) == 442
     filled = [row for row in catalog.rows if row.tests]
-    assert len(filled) == 434
-    assert sum(len(row.tests) for row in filled) == 458
+    assert len(filled) == 436
+    assert sum(len(row.tests) for row in filled) == 460
     ranged = catalog.covering("T4-CODE-05")
     assert ranged is not None and ranged.raw_id == "T4-CODE-04..10"
     earlier = catalog.covering("T4-CODE-03")
