@@ -1,0 +1,124 @@
+id: regression/t2/loop/scenarios/mcp/hidden_tool_call_rejected
+case: T2-MCP-15
+description: A remembered call to a hidden server is rejected, and listing resources skips that server.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- After the fixture server is hidden, call it anyway.
+config:
+  model:
+    max_turns: 30
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.progressive.json
+script:
+- - type: tool_call
+    call_id: c0
+    name: enable_mcp
+    args:
+      name: fixture
+  - type: done
+- - type: tool_call
+    call_id: c1
+    name: list_dir
+    args:
+      path: .
+      nonce: 0
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: list_dir
+    args:
+      path: .
+      nonce: 1
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: list_dir
+    args:
+      path: .
+      nonce: 2
+  - type: done
+- - type: tool_call
+    call_id: c4
+    name: list_dir
+    args:
+      path: .
+      nonce: 3
+  - type: done
+- - type: tool_call
+    call_id: c5
+    name: list_dir
+    args:
+      path: .
+      nonce: 4
+  - type: done
+- - type: tool_call
+    call_id: c6
+    name: list_dir
+    args:
+      path: .
+      nonce: 5
+  - type: done
+- - type: tool_call
+    call_id: c7
+    name: list_dir
+    args:
+      path: .
+      nonce: 6
+  - type: done
+- - type: tool_call
+    call_id: c8
+    name: list_dir
+    args:
+      path: .
+      nonce: 7
+  - type: done
+- - type: tool_call
+    call_id: c9
+    name: list_dir
+    args:
+      path: .
+      nonce: 8
+  - type: done
+- - type: tool_call
+    call_id: c10
+    name: list_dir
+    args:
+      path: .
+      nonce: 9
+  - type: done
+- - type: tool_call
+    call_id: hidden-echo
+    name: fixture__echo
+    args:
+      text: ping
+  - type: tool_call
+    call_id: hidden-list
+    name: list_mcp_resources
+    args: {}
+  - type: done
+- - type: text
+    text: "Rejected."
+  - type: done
+assertions:
+  provider_calls: 13
+  provider_request:
+  - n: 12
+    tools_exclude:
+    - fixture__echo
+    - list_mcp_resources
+  - n: 13
+    messages_contain: "enable_mcp"
+    messages_not_contain: "fixture://readme"
+  events_sequence:
+  - type: ToolCallResult
+    tool: fixture__echo
+    error:
+      regex: "enable_mcp"
+  - type: ToolCallResult
+    tool: list_mcp_resources
+    result:
+      regex: '"count": 0'
+  turn_completed: true
+  no_errors: true

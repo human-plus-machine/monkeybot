@@ -1,0 +1,114 @@
+id: regression/t2/loop/scenarios/mcp/child_keeps_calling_hidden_server
+case: T2-MCP-26
+description: A subagent keeps calling an MCP server after the parent chat has hidden it.
+mode: scripted
+driver: loop
+executor: real
+config:
+  model:
+    max_turns: 30
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.autoconnect.json
+    MONKEYBOT_SUBAGENT_SCRIPT: "{repo_root}/src/monkeybot/core/subagents/subagent_worker.py"
+    MONKEYBOT_CONFIG: "{repo_root}/regression/fixtures/configs/agent.base.yaml"
+    MONKEYBOT_FAKE_PROVIDER_SCRIPT: "{repo_root}/regression/t2/loop/scenarios/mcp/child_calls_fixture.yml"
+    AGENT_MD: "{repo_root}/regression/t4/agent/monkeybot_config/AGENT.md"
+    DB_URL: "sqlite:///{workspace}/child.db"
+messages:
+- Hide the fixture server, then ask a subagent to echo through it.
+script:
+- - type: tool_call
+    call_id: c0
+    name: list_dir
+    args:
+      path: .
+      nonce: 0
+  - type: done
+- - type: tool_call
+    call_id: c1
+    name: list_dir
+    args:
+      path: .
+      nonce: 1
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: list_dir
+    args:
+      path: .
+      nonce: 2
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: list_dir
+    args:
+      path: .
+      nonce: 3
+  - type: done
+- - type: tool_call
+    call_id: c4
+    name: list_dir
+    args:
+      path: .
+      nonce: 4
+  - type: done
+- - type: tool_call
+    call_id: c5
+    name: list_dir
+    args:
+      path: .
+      nonce: 5
+  - type: done
+- - type: tool_call
+    call_id: c6
+    name: list_dir
+    args:
+      path: .
+      nonce: 6
+  - type: done
+- - type: tool_call
+    call_id: c7
+    name: list_dir
+    args:
+      path: .
+      nonce: 7
+  - type: done
+- - type: tool_call
+    call_id: c8
+    name: list_dir
+    args:
+      path: .
+      nonce: 8
+  - type: done
+- - type: tool_call
+    call_id: c9
+    name: list_dir
+    args:
+      path: .
+      nonce: 9
+  - type: done
+- - type: tool_call
+    call_id: task1
+    name: task
+    args:
+      task: Echo ping through the fixture server.
+  - type: done
+- - type: text
+    text: Parent saw the child echo.
+  - type: done
+assertions:
+  provider_calls: 12
+  provider_request:
+  - n: 11
+    tools_exclude:
+    - fixture__echo
+  events_sequence:
+  - type: ToolCallResult
+    tool: task
+    result:
+      regex: "echo: ping"
+  subagent:
+    started: true
+    completed_ok: true
+  turn_completed: true
+  no_errors: true

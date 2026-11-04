@@ -29,6 +29,7 @@ from monkeybot.core.hooks import HookEvent, HookManager
 from monkeybot.core.llm.provider import Provider, ToolCall
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.mcp.session_visibility import idle_note
 from monkeybot.core.messages.tool_integrity import cancelled_tool_result_text
 from monkeybot.core.path_safety import path_contained_under
 from monkeybot.core.persistence.backends import HistoryStore
@@ -888,6 +889,55 @@ async def _execute_allowed_chunk(
             yield evt
 
 
+def _hide_idle_mcp_servers(
+    state: ToolBatchState,
+    all_tool_responses: list[ContentBlock],
+    *,
+    tool_executor: ToolExecutorPort,
+    doom_tracker: _DoomLoopTracker,
+) -> None:
+    """Hide servers that reached the idle limit and note that in the last result.
+
+    Runs only for a batch that will be written. A cancelled batch leaves the
+    connection and this session's tool list alone. The note is a text block
+    inside the last tool result, not a separate user message.
+    """
+    visibility = state.ctx.mcp_visibility
+    if visibility is None:
+        return
+    newly = visibility.take_newly_idle()
+    if not newly:
+        return
+    note = idle_note(newly)
+    for block in reversed(all_tool_responses):
+        if isinstance(block, ToolResponse):
+            block.result.append(Text(text=note))
+            break
+    mcp_client = getattr(tool_executor, "mcp", None)
+    if mcp_client is None:
+        logger.error(
+            "MCP idle hide but tool executor has no mcp client %s",
+            kv(request_id=state.ctx.request_id, thread_id=state.ctx.thread_id),
+        )
+        return
+    ctx = refresh_tools_after_mcp_change(state.ctx, mcp_client)
+    state.ctx = ctx
+    state.tools_dirty = True
+    if state.tools_dirty_reason is None:
+        state.tools_dirty_reason = "mcp_idle"
+    doom_tracker.exempt_names = _doom_loop_exempt_names(ctx.tools)
+    logger.info(
+        "mcp idle hide %s",
+        kv(
+            request_id=ctx.request_id,
+            thread_id=ctx.thread_id,
+            session=ctx.session_id,
+            servers=",".join(newly),
+            tool_count=len(ctx.tools),
+        ),
+    )
+
+
 async def _post_batch_budget_and_registry(
     *,
     state: ToolBatchState,
@@ -927,6 +977,14 @@ async def _post_batch_budget_and_registry(
             ),
         )
         yield Error(request_id=ctx.request_id, error=doom_msg)
+
+    if all_tool_responses and not state.aborted:
+        _hide_idle_mcp_servers(
+            state,
+            all_tool_responses,
+            tool_executor=tool_executor,
+            doom_tracker=doom_tracker,
+        )
 
     if all_tool_responses:
         # Compaction + load-max run before every provider call, so steady-state

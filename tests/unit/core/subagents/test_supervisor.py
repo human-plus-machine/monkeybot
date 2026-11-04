@@ -77,8 +77,44 @@ async def test_cap_and_stop_unblocks_await_without_killing() -> None:
     assert waiting["status"] == "running"
     assert supervisor.running_count() == 1
 
+    note = supervisor.snapshot_text()
+    assert "Answer the user." in note
+    assert "Do not call await_task for a child that is still running" in note
+    assert "Call await_task before reporting results" not in note
+
     killed = await supervisor.kill("run-1", session_id="sess")
     assert killed is not None
     assert killed["status"] == "failed"
     assert killed["exit_reason"] == "killed"
+    await supervisor.aclose("test")
+
+
+@pytest.mark.asyncio
+async def test_finished_snapshot_still_requires_await_before_reporting() -> None:
+    release = asyncio.Event()
+
+    async def _inline(**kwargs: object) -> dict[str, object]:
+        await release.wait()
+        return {
+            "ok": True,
+            "exit_reason": "completed",
+            "final_message": "done",
+            "run_id": kwargs["run_id"],
+            "child_thread_id": kwargs["child_thread_id"],
+            "subagent_type": None,
+        }
+
+    supervisor = SubagentSupervisor(
+        session_id="sess", run_store=None, max_background=1, run_inline=_inline
+    )
+    await supervisor.spawn(_spec("run-done"))
+    release.set()
+    task = supervisor._runs["run-done"].task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=1)
+
+    note = supervisor.snapshot_text()
+    assert "finished (completed). Call await_task before reporting." in note
+    assert note.endswith("Call await_task before reporting. Do not spin-poll.")
+    assert "Answer the user." not in note
     await supervisor.aclose("test")

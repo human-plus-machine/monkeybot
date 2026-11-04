@@ -31,6 +31,7 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.mcp.session_visibility import advertised_servers, servers_used_by_calls
 from monkeybot.core.memory.ingest import persist_message
 from monkeybot.core.messages import convert_to_provider
 from monkeybot.core.messages.tool_integrity import (
@@ -496,6 +497,33 @@ def _tools_schema_hash(tools: Sequence[ToolDef]) -> str:
     payload = [t.to_model_schema() for t in tools]
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _mcp_known_servers(tool_executor: ToolExecutorPort) -> list[str]:
+    """Server names the executor's MCP client has seen. Empty when there is none."""
+    mcp = getattr(tool_executor, "mcp", None)
+    names = getattr(mcp, "known_server_names", None)
+    if not callable(names):
+        return []
+    return list(names())
+
+
+def _note_mcp_idle_turn(state: _TurnState, tool_executor: ToolExecutorPort) -> None:
+    """Count this model call against servers whose tools were offered.
+
+    A recovery call that sent no tools (``tools_suppressed``) does not count.
+    Calls the model made reset a visible server. Hiding itself waits for the
+    tool-batch boundary.
+    """
+    visibility = state.ctx.mcp_visibility
+    if visibility is None:
+        return
+    known = _mcp_known_servers(tool_executor)
+    advertised: set[str] = set()
+    if not state.tools_suppressed:
+        advertised = advertised_servers(state.turn_tools, known)
+    calls = [(call.name, call.args) for call in state.pending.values()]
+    visibility.note_inner_turn(advertised, servers_used_by_calls(calls, known))
 
 
 def _mark_tools_dirty(state: _TurnState, reason: str, tools: Sequence[ToolDef]) -> None:
@@ -2117,6 +2145,8 @@ async def _run_inner_core(
                     state, history=history, last_assistant=last_assistant
                 )
                 break
+
+            _note_mcp_idle_turn(state, tool_executor)
 
             if not state.pending:
                 async for evt in _handle_empty_or_final_text(

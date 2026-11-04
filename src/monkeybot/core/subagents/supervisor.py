@@ -167,10 +167,16 @@ class SubagentSupervisor:
         lines = self.snapshot_lines()
         if not lines:
             return ""
-        return (
-            "\n".join(lines)
-            + "\nRunning is not done. Call await_task before reporting results. Do not spin-poll."
-        )
+        running = any(not run.finished.is_set() for run in self._runs.values())
+        if running:
+            footer = (
+                "Answer the user. Do not call await_task for a child that is still running "
+                "unless they asked for that result. Call await_task before reporting a child "
+                "that has finished. Do not edit files a running child owns."
+            )
+        else:
+            footer = "Call await_task before reporting. Do not spin-poll."
+        return "\n".join(lines) + "\n" + footer
 
     def runs_still_need_wake(self, run_ids: tuple[str, ...]) -> bool:
         for run_id in run_ids:

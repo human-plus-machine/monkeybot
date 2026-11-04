@@ -30,6 +30,7 @@ from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.llm.provider import Message, Provider, ToolCall
 from monkeybot.core.llm.realtime_provider import RealtimeToolCall
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.mcp.session_visibility import servers_used_by_calls
 from monkeybot.core.memory.ingest import persist_message
 from monkeybot.core.messages.tool_integrity import cancelled_tool_result_text
 from monkeybot.core.persistence.backends import HistoryStore
@@ -92,6 +93,22 @@ _REALTIME_LOOPS_NEW_SESSION_NOTE = (
     "tool schemas are not pushed into the live voice session; start a new realtime "
     "session to advertise them to the model (v1 has no reconnect/resume)."
 )
+
+
+def _record_realtime_mcp_use(
+    ctx: TurnContext,
+    tool_executor: Any,
+    calls: Sequence[ToolCall],
+) -> None:
+    """Reset idle counts for servers this voice turn called. Does not hide any."""
+    visibility = ctx.mcp_visibility
+    if visibility is None or not calls:
+        return
+    mcp = getattr(tool_executor, "mcp", None)
+    names = getattr(mcp, "known_server_names", None)
+    known = list(names()) if callable(names) else []
+    for server in servers_used_by_calls([(call.name, call.args) for call in calls], known):
+        visibility.record_use(server)
 
 
 def _user_text_from_content(blocks: Sequence[ContentBlock]) -> str:
@@ -572,6 +589,8 @@ async def run_realtime_turn(
         mcp_registry_mutated = False
         loops_registry_mutated = False
         pending_calls = [_realtime_tool_call_to_tool_call(rtc) for rtc in assistant_tool_calls]
+        # Voice never hides a server. A call still counts as use for the chat.
+        _record_realtime_mcp_use(ctx, tool_executor, pending_calls)
         # Realtime has no vendor length-limit signal; reject only all-parse_error batches.
         reject_batch = _should_reject_tool_batch(pending_calls, truncated=False)
         if reject_batch:

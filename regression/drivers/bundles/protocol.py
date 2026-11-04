@@ -36,6 +36,7 @@ class RunCtx:
     pristine: Path | None = None
     hook_memory: Any = None
     read_ledger: Any = None
+    mcp_visibility: Any = None
     mcp_client: Any = None
     mcp_path: Path | None = None
     advertised: list[Any] | None = None

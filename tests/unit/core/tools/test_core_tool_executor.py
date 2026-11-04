@@ -5762,3 +5762,124 @@ async def test_grep_subdir_ignores_parent_gitignore(tmp_path: Path, grep_engine:
     assert json.loads(out)["files"] == ["src/a.log"]
     out, _ = await _call(ex, "grep", {"pattern": "NEEDLE", "files_only": True})
     assert json.loads(out)["files"] == []
+
+
+class _VisibilityMCP(_CatalogMCP):
+    """Connected browser plus wiki, with a real prefix split and list results."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._catalog = {"browser": True, "wiki": True}
+        self.calls: list[tuple[str, str]] = []
+        self.connected["browser"] = [ToolDef("browser__goto", "Go", {})]
+        self.connected["wiki"] = [ToolDef("wiki__search", "Search", {})]
+
+    def split_prefixed_tool(self, prefixed_name: str) -> tuple[str, str] | None:
+        for server in sorted(self.connected, key=len, reverse=True):
+            prefix = f"{server}__"
+            if prefixed_name.startswith(prefix):
+                return server, prefixed_name[len(prefix) :]
+        return None
+
+    async def call_tool(
+        self,
+        server_name: str,
+        tool_name: str,
+        args: dict[str, object],
+        *,
+        meta: dict[str, object] | None = None,
+    ) -> str:
+        del args, meta
+        self.calls.append((server_name, tool_name))
+        return "called"
+
+    async def list_resources(self, server_name: str | None = None) -> list[dict[str, str]]:
+        rows = [
+            {"server": "browser", "uri": "browser://home"},
+            {"server": "wiki", "uri": "wiki://home"},
+        ]
+        if server_name is None:
+            return rows
+        return [row for row in rows if row["server"] == server_name]
+
+    async def read_resource(self, server_name: str, uri: str) -> dict[str, object]:
+        self.calls.append((server_name, uri))
+        return {"server": server_name, "uri": uri, "text": "body", "contents": []}
+
+    async def get_prompt(
+        self,
+        server_name: str,
+        prompt_name: str,
+        arguments: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        del arguments
+        self.calls.append((server_name, prompt_name))
+        return {"server": server_name, "name": prompt_name, "description": None, "messages": []}
+
+
+def _hidden_ctx(server: str = "browser") -> TurnContext:
+    from monkeybot.core.mcp.session_visibility import MCPSessionVisibility
+
+    visibility = MCPSessionVisibility()
+    visibility.hidden.add(server)
+    return dataclasses.replace(_ctx(), mcp_visibility=visibility)
+
+
+@pytest.mark.asyncio
+async def test_hidden_mcp_tool_and_meta_calls_are_rejected(tmp_path: Path) -> None:
+    mcp = _VisibilityMCP()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=mcp,
+    )
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ctx = _hidden_ctx()
+    hidden_calls = [
+        ToolCall(name="browser__goto", args={"url": "https://example.com"}, call_id="1"),
+        ToolCall(
+            name="read_mcp_resource",
+            args={"server": "browser", "uri": "browser://home"},
+            call_id="2",
+        ),
+        ToolCall(name="get_mcp_prompt", args={"server": "browser", "prompt": "hi"}, call_id="3"),
+        ToolCall(name="list_mcp_resources", args={"server": "browser"}, call_id="4"),
+    ]
+    for call in hidden_calls:
+        result = await ex.execute(call=call, ctx=ctx)
+        assert result.error is not None
+        assert "enable_mcp" in result.error
+    assert mcp.calls == []
+
+    listed = await ex.execute(
+        call=ToolCall(name="list_mcp_resources", args={}, call_id="5"),
+        ctx=ctx,
+    )
+    assert listed.error is None
+    body = json.loads(listed.blocks[0].text)  # type: ignore[index]
+    servers = {row["server"] for row in body["resources"]}
+    assert servers == {"wiki"}
+    assert ctx.mcp_visibility is not None
+    assert ctx.mcp_visibility.is_hidden("browser")
+
+
+@pytest.mark.asyncio
+async def test_enable_mcp_records_use_and_unhides(tmp_path: Path) -> None:
+    mcp = _VisibilityMCP()
+    ex = CoreToolExecutor(
+        workspace_root=tmp_path,
+        memory=_mem_sub(tmp_path / "mem"),
+        skills_path=tmp_path / "skills",
+        mcp=mcp,
+    )
+    (tmp_path / "skills").mkdir(exist_ok=True)
+    ctx = _hidden_ctx()
+    result = await ex.execute(
+        call=ToolCall(name="enable_mcp", args={"name": "browser"}, call_id="1"),
+        ctx=ctx,
+    )
+    assert result.error is None
+    assert ctx.mcp_visibility is not None
+    assert not ctx.mcp_visibility.is_hidden("browser")
+    assert ctx.mcp_visibility.idle_count("browser") == 0

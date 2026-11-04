@@ -21,9 +21,11 @@ from monkeybot.core.context import (
     PendingResponseBusPort,
     TurnContext,
     _core_tool_defs,
+    refresh_tools_after_mcp_change,
 )
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.llm.provider import ToolCall
+from monkeybot.core.mcp.session_visibility import MCPSessionVisibility
 from monkeybot.core.runtime.events import Error, TurnComplete, event_from_json
 from monkeybot.core.runtime.input_admission import InputAdmission
 from monkeybot.core.runtime.loop import run
@@ -269,6 +271,7 @@ async def _run(scenario: Scenario, workdir: Path) -> LoopRun:
                 project_instructions=ctx.project_instructions,
                 repo_overview=ctx.repo_overview,
                 session_id=ctx.session_id,
+                mcp_visibility=ctx.mcp_visibility,
                 attachment_store=ctx.attachment_store,
                 computer_inspector=ctx.computer_inspector,
             )
@@ -328,6 +331,7 @@ async def _drive(
     project_instructions: str = "",
     repo_overview: str = "",
     session_id: str = _SESSION_ID,
+    mcp_visibility: MCPSessionVisibility | None = None,
     attachment_store: Any = None,
     computer_inspector: Any = None,
 ) -> tuple[list[object], list[_SessionSlice] | None]:
@@ -411,6 +415,7 @@ async def _drive(
         event_publisher=publisher,
         grants_persist=grants_persist,
         approvals_persist=approvals_persist,
+        mcp_visibility=mcp_visibility,
     )
     turn = apply_project_context(
         turn,
@@ -426,7 +431,18 @@ async def _drive(
         thread_id = session_id if not multi else f"{session_id}-{session_index}"
         bindings.history = active_history
         bindings.thread_id = thread_id
-        turn = replace(turn, thread_id=thread_id)
+        # One tracker per scenario session, kept across that session's user messages.
+        session_visibility = (
+            mcp_visibility
+            if session_index == 1 and mcp_visibility is not None
+            else MCPSessionVisibility()
+        )
+        turn = replace(turn, thread_id=thread_id, mcp_visibility=session_visibility)
+        # Production builds each chat's tool list from the shared client. The
+        # first session's hide mutates this list in place; the next session
+        # has to see the servers that are still connected.
+        if session_index > 1 and live.mcp is not None:
+            refresh_tools_after_mcp_change(turn, live.mcp)
         for nth, message in enumerate(session_messages, start=1):
             start = len(events)
             if multi:
@@ -503,6 +519,7 @@ def _turn_context(
     event_publisher: _SubagentPublisher | None = None,
     grants_persist: Callable[[str, str], bool] | None = None,
     approvals_persist: Callable[[str, str], bool] | None = None,
+    mcp_visibility: MCPSessionVisibility | None = None,
 ) -> TurnContext:
     advertised = list(tools) if tools is not None else _core_tool_defs(include_task_tool=True)
     names = {tool.name for tool in advertised}
@@ -536,6 +553,7 @@ def _turn_context(
         verdict_mailbox=verdict_mailbox,
         grants_persist=grants_persist,
         approvals_persist=approvals_persist,
+        mcp_visibility=mcp_visibility,
     )
 
 

@@ -1,0 +1,92 @@
+id: regression/t2/loop/scenarios/mcp/only_idle_server_hidden
+case: T2-MCP-17
+description: With two connected servers, only the one that goes unused is hidden.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Keep calling the shorter server.
+config:
+  model:
+    max_turns: 30
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.two_prefix.json
+script:
+- - type: tool_call
+    call_id: e0
+    name: fix__echo
+    args:
+      text: n0
+  - type: done
+- - type: tool_call
+    call_id: e1
+    name: fix__echo
+    args:
+      text: n1
+  - type: done
+- - type: tool_call
+    call_id: e2
+    name: fix__echo
+    args:
+      text: n2
+  - type: done
+- - type: tool_call
+    call_id: e3
+    name: fix__echo
+    args:
+      text: n3
+  - type: done
+- - type: tool_call
+    call_id: e4
+    name: fix__echo
+    args:
+      text: n4
+  - type: done
+- - type: tool_call
+    call_id: e5
+    name: fix__echo
+    args:
+      text: n5
+  - type: done
+- - type: tool_call
+    call_id: e6
+    name: fix__echo
+    args:
+      text: n6
+  - type: done
+- - type: tool_call
+    call_id: e7
+    name: fix__echo
+    args:
+      text: n7
+  - type: done
+- - type: tool_call
+    call_id: e8
+    name: fix__echo
+    args:
+      text: n8
+  - type: done
+- - type: tool_call
+    call_id: e9
+    name: fix__echo
+    args:
+      text: n9
+  - type: done
+- - type: text
+    text: "Only the idle one dropped."
+  - type: done
+assertions:
+  provider_calls: 11
+  provider_request:
+  - n: 10
+    tools_include:
+    - fix__echo
+    - fix__extra__echo
+  - n: 11
+    tools_include:
+    - fix__echo
+    tools_exclude:
+    - fix__extra__echo
+    messages_contain: "MCP server `fix__extra` was hidden"
+  turn_completed: true
+  no_errors: true
