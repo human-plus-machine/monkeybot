@@ -42,6 +42,7 @@ from monkeybot.core.llm.realtime_provider import (
 )
 from monkeybot.core.llm.realtime_provider import RealtimeError as ProviderError
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.mcp.session_visibility import MCPSessionVisibility
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.transcript import (
     TranscriptWriter,
@@ -172,6 +173,7 @@ async def _build_realtime_context(
     todo_store: TodoListStore | None = None,
     cancelled: asyncio.Event | None = None,
     read_ledger: FileReadLedger | None = None,
+    mcp_visibility: MCPSessionVisibility | None = None,
 ) -> TurnContext:
     if deps.mcp is None:
         raise RuntimeError("MCP client is not initialized")
@@ -213,6 +215,7 @@ async def _build_realtime_context(
             config=cfg,
             verdict_mailbox=live.verdict_mailbox,
             read_ledger=read_ledger,
+            mcp_visibility=mcp_visibility,
         )
     finally:
         end_in_flight_turn()
@@ -914,6 +917,11 @@ def create_realtime_router(
             # the socket closes. Chat compaction must not forget them.
             read_ledger = FileReadLedger()
             cancelled = asyncio.Event()
+            # Share the chat session's idle tracker when this call has one.
+            # Voice never hides servers; its tool calls still count as use.
+            registry = getattr(ws.app.state, "registry", None)
+            bus = registry.get(session_id) if registry is not None else None
+            mcp_visibility = bus.mcp_visibility if bus is not None else None
             ctx = await _build_realtime_context(
                 session_id,
                 request_id,
@@ -922,6 +930,7 @@ def create_realtime_router(
                 todo_store=todo_store,
                 cancelled=cancelled,
                 read_ledger=read_ledger,
+                mcp_visibility=mcp_visibility,
             )
             if ctx.verdict_mailbox is not None:
                 ctx.verdict_mailbox.open_request(ctx.thread_id, request_id)

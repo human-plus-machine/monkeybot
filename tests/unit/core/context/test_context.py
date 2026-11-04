@@ -692,3 +692,88 @@ async def test_build_context_waits_for_background_mcp_tools(
     )
     assert time.perf_counter() - started >= 0.05
     assert any(tool.name == "fixture__echo" for tool in ctx.tools)
+
+
+@pytest.mark.asyncio
+async def test_build_context_hides_servers_for_this_session(tmp_path: Path) -> None:
+    from monkeybot.core.mcp.session_visibility import MCPSessionVisibility
+
+    agent_path = tmp_path / "AGENT.md"
+    agent_path.write_text("You are a helpful assistant.\n", encoding="utf-8")
+    mem = tmp_path / "memory"
+    mem.mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    hidden = MCPSessionVisibility()
+    hidden.hidden.add("browser")
+    ctx = await build_context(
+        "thread-1",
+        "req-1",
+        agent_md_path=agent_path,
+        memory=_memory_subsystem(mem),
+        skills_path=skills,
+        mcp_client=FakeMCPClient(
+            [
+                ToolDef("browser__goto", "Go", {}),
+                ToolDef("wiki__search", "Search", {}),
+            ]
+        ),
+        mcp_visibility=hidden,
+    )
+    names = {tool.name for tool in ctx.tools}
+    assert "browser__goto" not in names
+    assert "wiki__search" in names
+    assert "list_mcp_resources" in names
+
+
+def test_refresh_drops_meta_tools_when_every_connected_server_is_hidden() -> None:
+    from monkeybot.core.context import TurnContext, refresh_tools_after_mcp_change
+    from monkeybot.core.mcp.session_visibility import MCPSessionVisibility
+
+    class _Two(FakeMCPClient):
+        def __init__(self) -> None:
+            super().__init__([])
+            self._connected = {
+                "browser": [ToolDef("browser__goto", "Go", {})],
+                "wiki": [ToolDef("wiki__search", "Search", {})],
+            }
+
+        def known_server_names(self) -> list[str]:
+            return ["browser", "wiki"]
+
+        def is_connected(self, name: str) -> bool:
+            return name in self._connected
+
+        def all_tools(self) -> list[ToolDef]:
+            out: list[ToolDef] = []
+            for tools in self._connected.values():
+                out.extend(tools)
+            return out
+
+    visibility = MCPSessionVisibility()
+    visibility.hidden.add("browser")
+    ctx = TurnContext(
+        thread_id="t",
+        request_id="r",
+        agent_md="# Agent",
+        memory_index=[],
+        skills=[],
+        tools=[ToolDef("list_dir", "List", {}), ToolDef("browser__goto", "Go", {})],
+        user_id=None,
+        parent_run_id=None,
+        model="fake",
+        mcp_visibility=visibility,
+    )
+    refresh_tools_after_mcp_change(ctx, _Two())
+    names = {tool.name for tool in ctx.tools}
+    assert "browser__goto" not in names
+    assert "wiki__search" in names
+    assert "list_dir" in names
+    assert "list_mcp_resources" in names
+
+    visibility.hidden.add("wiki")
+    refresh_tools_after_mcp_change(ctx, _Two())
+    names = {tool.name for tool in ctx.tools}
+    assert "wiki__search" not in names
+    assert "list_mcp_resources" not in names
+    assert "list_dir" in names

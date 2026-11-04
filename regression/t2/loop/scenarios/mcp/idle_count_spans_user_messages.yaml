@@ -1,0 +1,103 @@
+id: regression/t2/loop/scenarios/mcp/idle_count_spans_user_messages
+case: T2-MCP-16
+description: Idle inner turns add up across user messages. The first message's closing text is one of its six idle turns.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- |
+  Enable the fixture server and list a few directories.
+- List a few more directories.
+config:
+  model:
+    max_turns: 30
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.progressive.json
+script:
+- - type: tool_call
+    call_id: c0
+    name: enable_mcp
+    args:
+      name: fixture
+  - type: done
+- - type: tool_call
+    call_id: c1
+    name: list_dir
+    args:
+      path: .
+      nonce: 0
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: list_dir
+    args:
+      path: .
+      nonce: 1
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: list_dir
+    args:
+      path: .
+      nonce: 2
+  - type: done
+- - type: tool_call
+    call_id: c4
+    name: list_dir
+    args:
+      path: .
+      nonce: 3
+  - type: done
+- - type: tool_call
+    call_id: c5
+    name: list_dir
+    args:
+      path: .
+      nonce: 4
+  - type: done
+- - type: text
+    text: "Paused."
+  - type: done
+- - type: tool_call
+    call_id: c10
+    name: list_dir
+    args:
+      path: .
+      nonce: 5
+  - type: done
+- - type: tool_call
+    call_id: c11
+    name: list_dir
+    args:
+      path: .
+      nonce: 6
+  - type: done
+- - type: tool_call
+    call_id: c12
+    name: list_dir
+    args:
+      path: .
+      nonce: 7
+  - type: done
+- - type: tool_call
+    call_id: c13
+    name: list_dir
+    args:
+      path: .
+      nonce: 8
+  - type: done
+- - type: text
+    text: "Hidden now."
+  - type: done
+assertions:
+  provider_calls: 12
+  provider_request:
+  - n: 7
+    tools_include:
+    - fixture__echo
+  - n: 12
+    tools_exclude:
+    - fixture__echo
+    messages_contain: "was hidden after 10 turns without use"
+  turn_completed: true
+  no_errors: true

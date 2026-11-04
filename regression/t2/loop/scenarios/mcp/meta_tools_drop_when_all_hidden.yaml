@@ -1,0 +1,109 @@
+id: regression/t2/loop/scenarios/mcp/meta_tools_drop_when_all_hidden
+case: T2-MCP-19
+description: Resource and prompt tools disappear once every connected server is hidden from this chat.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Enable the fixture server and then stop using it.
+config:
+  model:
+    max_turns: 30
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.progressive.json
+script:
+- - type: tool_call
+    call_id: c0
+    name: enable_mcp
+    args:
+      name: fixture
+  - type: done
+- - type: tool_call
+    call_id: c1
+    name: list_dir
+    args:
+      path: .
+      nonce: 0
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: list_dir
+    args:
+      path: .
+      nonce: 1
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: list_dir
+    args:
+      path: .
+      nonce: 2
+  - type: done
+- - type: tool_call
+    call_id: c4
+    name: list_dir
+    args:
+      path: .
+      nonce: 3
+  - type: done
+- - type: tool_call
+    call_id: c5
+    name: list_dir
+    args:
+      path: .
+      nonce: 4
+  - type: done
+- - type: tool_call
+    call_id: c6
+    name: list_dir
+    args:
+      path: .
+      nonce: 5
+  - type: done
+- - type: tool_call
+    call_id: c7
+    name: list_dir
+    args:
+      path: .
+      nonce: 6
+  - type: done
+- - type: tool_call
+    call_id: c8
+    name: list_dir
+    args:
+      path: .
+      nonce: 7
+  - type: done
+- - type: tool_call
+    call_id: c9
+    name: list_dir
+    args:
+      path: .
+      nonce: 8
+  - type: done
+- - type: tool_call
+    call_id: c10
+    name: list_dir
+    args:
+      path: .
+      nonce: 9
+  - type: done
+- - type: text
+    text: "Meta tools dropped."
+  - type: done
+assertions:
+  provider_calls: 12
+  provider_request:
+  - n: 2
+    tools_include:
+    - list_mcp_resources
+    - fixture__echo
+  - n: 11
+    tools_include:
+    - list_mcp_resources
+  - n: 12
+    tools_exclude:
+    - list_mcp_resources
+    - fixture__echo
+  turn_completed: true
+  no_errors: true

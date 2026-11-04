@@ -1,0 +1,116 @@
+id: regression/t2/loop/scenarios/mcp/second_session_still_sees_server
+case: T2-MCP-25
+description: After one chat hides a connected server, the next chat still receives its tools and can call them.
+mode: scripted
+driver: loop
+executor: real
+config:
+  model:
+    max_turns: 30
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.autoconnect.json
+sessions:
+- - Hide the fixture server by listing directories.
+- - Echo through the fixture server.
+script:
+- - type: tool_call
+    call_id: c0
+    name: list_dir
+    args:
+      path: .
+      nonce: 0
+  - type: done
+- - type: tool_call
+    call_id: c1
+    name: list_dir
+    args:
+      path: .
+      nonce: 1
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: list_dir
+    args:
+      path: .
+      nonce: 2
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: list_dir
+    args:
+      path: .
+      nonce: 3
+  - type: done
+- - type: tool_call
+    call_id: c4
+    name: list_dir
+    args:
+      path: .
+      nonce: 4
+  - type: done
+- - type: tool_call
+    call_id: c5
+    name: list_dir
+    args:
+      path: .
+      nonce: 5
+  - type: done
+- - type: tool_call
+    call_id: c6
+    name: list_dir
+    args:
+      path: .
+      nonce: 6
+  - type: done
+- - type: tool_call
+    call_id: c7
+    name: list_dir
+    args:
+      path: .
+      nonce: 7
+  - type: done
+- - type: tool_call
+    call_id: c8
+    name: list_dir
+    args:
+      path: .
+      nonce: 8
+  - type: done
+- - type: tool_call
+    call_id: c9
+    name: list_dir
+    args:
+      path: .
+      nonce: 9
+  - type: done
+- - type: text
+    text: Hidden in this chat.
+  - type: done
+- - type: tool_call
+    call_id: echo
+    name: fixture__echo
+    args:
+      text: ping
+  - type: done
+- - type: text
+    text: Session B echoed.
+  - type: done
+assertions:
+  provider_calls: 13
+  provider_request:
+  - n: 10
+    tools_include:
+    - fixture__echo
+  - n: 11
+    tools_exclude:
+    - fixture__echo
+    messages_contain: "was hidden after 10 turns without use"
+  - n: 12
+    tools_include:
+    - fixture__echo
+  events_sequence:
+  - type: ToolCallResult
+    tool: fixture__echo
+    result: "echo: ping"
+  turn_completed: true
+  no_errors: true

@@ -16,11 +16,12 @@ from typing import Any, Literal
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.config.snapshot import current_env
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.mcp.session_visibility import MCPSessionVisibility
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.input_admission import InputAdmission
 from monkeybot.core.tools.permission import SessionApprovals
-from monkeybot.gateway.pending_response_bus import TERMINATED_PENDING_KEYS_MAXLEN
 from monkeybot.core.tools.read_ledger import FileReadLedger
+from monkeybot.gateway.pending_response_bus import TERMINATED_PENDING_KEYS_MAXLEN
 from monkeybot.todo_list.store import TodoListStore
 
 from .sse import format_data_event
@@ -109,6 +110,8 @@ class SessionBus:
         """Process-local session todo list (not shared across gateway replicas)."""
         self.read_ledger: FileReadLedger | None = None
         """Coding-mode read/write ledger; per session because ``CoreToolExecutor`` is per request."""
+        self.mcp_visibility = MCPSessionVisibility()
+        """Idle hiding for MCP servers in this chat. The connection stays process-wide."""
         self.transcript_writer: TranscriptWriter | None = None
         """Lazily-created ``TranscriptWriter`` (internal debugging only); None when disabled."""
         self.admission = InputAdmission()

@@ -1,0 +1,168 @@
+id: regression/t2/loop/scenarios/mcp/use_resets_idle_count
+case: T2-MCP-13
+description: Calling fixture__echo resets its idle count, so nine more unused turns do not hide it.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Use the fixture server once between two idle stretches.
+config:
+  model:
+    max_turns: 30
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.progressive.json
+script:
+- - type: tool_call
+    call_id: c0
+    name: enable_mcp
+    args:
+      name: fixture
+  - type: done
+- - type: tool_call
+    call_id: c1
+    name: list_dir
+    args:
+      path: .
+      nonce: 0
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: list_dir
+    args:
+      path: .
+      nonce: 1
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: list_dir
+    args:
+      path: .
+      nonce: 2
+  - type: done
+- - type: tool_call
+    call_id: c4
+    name: list_dir
+    args:
+      path: .
+      nonce: 3
+  - type: done
+- - type: tool_call
+    call_id: c5
+    name: list_dir
+    args:
+      path: .
+      nonce: 4
+  - type: done
+- - type: tool_call
+    call_id: c6
+    name: list_dir
+    args:
+      path: .
+      nonce: 5
+  - type: done
+- - type: tool_call
+    call_id: c7
+    name: list_dir
+    args:
+      path: .
+      nonce: 6
+  - type: done
+- - type: tool_call
+    call_id: c8
+    name: list_dir
+    args:
+      path: .
+      nonce: 7
+  - type: done
+- - type: tool_call
+    call_id: c9
+    name: list_dir
+    args:
+      path: .
+      nonce: 8
+  - type: done
+- - type: tool_call
+    call_id: echo
+    name: fixture__echo
+    args:
+      text: ping
+  - type: done
+- - type: tool_call
+    call_id: c20
+    name: list_dir
+    args:
+      path: .
+      nonce: 9
+  - type: done
+- - type: tool_call
+    call_id: c21
+    name: list_dir
+    args:
+      path: .
+      nonce: 10
+  - type: done
+- - type: tool_call
+    call_id: c22
+    name: list_dir
+    args:
+      path: .
+      nonce: 11
+  - type: done
+- - type: tool_call
+    call_id: c23
+    name: list_dir
+    args:
+      path: .
+      nonce: 12
+  - type: done
+- - type: tool_call
+    call_id: c24
+    name: list_dir
+    args:
+      path: .
+      nonce: 13
+  - type: done
+- - type: tool_call
+    call_id: c25
+    name: list_dir
+    args:
+      path: .
+      nonce: 14
+  - type: done
+- - type: tool_call
+    call_id: c26
+    name: list_dir
+    args:
+      path: .
+      nonce: 15
+  - type: done
+- - type: tool_call
+    call_id: c27
+    name: list_dir
+    args:
+      path: .
+      nonce: 16
+  - type: done
+- - type: tool_call
+    call_id: c28
+    name: list_dir
+    args:
+      path: .
+      nonce: 17
+  - type: done
+- - type: text
+    text: "Still available."
+  - type: done
+assertions:
+  provider_calls: 21
+  provider_request:
+  - n: 21
+    tools_include:
+    - fixture__echo
+    messages_not_contain: "was hidden after 10 turns without use"
+  events_sequence:
+  - type: ToolCallResult
+    tool: fixture__echo
+    result: "echo: ping"
+  turn_completed: true
+  no_errors: true

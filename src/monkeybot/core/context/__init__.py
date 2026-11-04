@@ -17,6 +17,7 @@ from monkeybot.core.attachments.tools import load_file_tool_def
 from monkeybot.core.config.settings import SubagentConfig
 from monkeybot.core.context.project_context import load_project_instructions, repo_overview
 from monkeybot.core.mcp.ports_mcp import MCPClientPort, normalize_catalog_mcp_names
+from monkeybot.core.mcp.session_visibility import MCPSessionVisibility
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.runtime.events import AgentEvent
 from monkeybot.core.tools.read_ledger import FileReadLedger
@@ -130,6 +131,8 @@ class TurnContext:
     """Named subagent types (name, description) advertised to the parent in the harness."""
     catalog_mcp_servers: tuple[str, ...] = ()
     """Configured MCP server names available via ``enable_mcp`` (not connected until activated)."""
+    mcp_visibility: MCPSessionVisibility | None = None
+    """Per-session idle hiding. ``None`` leaves every connected server visible."""
     scheduled_loops_available: bool = False
     """True when durable loop storage is wired (DB_URL); advertise ``enable_loops`` catalog hint."""
     todo_store: TodoListStore | None = None
@@ -429,9 +432,33 @@ SCHEDULED_LOOP_TOOL_DEFS: tuple[ToolDef, ...] = (
 SCHEDULED_LOOP_TOOL_NAMES = frozenset(t.name for t in SCHEDULED_LOOP_TOOL_DEFS)
 
 
-def _any_mcp_connected(mcp_client: Any) -> bool:
-    """True when any known MCP server has an active session."""
-    return any(mcp_client.is_connected(name) for name in mcp_client.known_server_names())
+def _any_mcp_connected(
+    mcp_client: Any,
+    visibility: MCPSessionVisibility | None = None,
+) -> bool:
+    """True when any known MCP server has an active session this chat can see.
+
+    A server hidden for ``visibility`` does not count, so resource and prompt
+    meta-tools drop once every connected server is hidden from this session.
+    """
+    for name in mcp_client.known_server_names():
+        if not mcp_client.is_connected(name):
+            continue
+        if visibility is not None and visibility.is_hidden(name):
+            continue
+        return True
+    return False
+
+
+def _visible_mcp_tools(
+    mcp_client: Any,
+    visibility: MCPSessionVisibility | None,
+) -> list[ToolDef]:
+    """Connected MCP tools, minus servers hidden for this session."""
+    tools = list(mcp_client.all_tools())
+    if visibility is None:
+        return tools
+    return visibility.filter_tools(tools, list(mcp_client.known_server_names()))
 
 
 def refresh_tools_after_mcp_change(
@@ -455,8 +482,8 @@ def refresh_tools_after_mcp_change(
         if t.name not in MCP_PROGRESSIVE_META_TOOLS
         and not any(t.name.startswith(f"{prefix}__") for prefix in prefixes)
     ]
-    rebuilt = kept + list(mcp_client.all_tools())
-    if _any_mcp_connected(mcp_client):
+    rebuilt = kept + _visible_mcp_tools(mcp_client, ctx.mcp_visibility)
+    if _any_mcp_connected(mcp_client, ctx.mcp_visibility):
         rebuilt.extend(MCP_PROGRESSIVE_META_TOOL_DEFS)
     ctx.tools[:] = rebuilt
     return ctx
@@ -1164,6 +1191,7 @@ async def build_context(
     read_ledger: FileReadLedger | None = None,
     skill_names: Sequence[str] | None = None,
     background_runs_view: Callable[[], str] | None = None,
+    mcp_visibility: MCPSessionVisibility | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
 
@@ -1208,6 +1236,9 @@ async def build_context(
         read_ledger: Optional coding-mode file read/write ledger shared with the executor.
         session_id: Chat session when it differs from ``thread_id``; see
             ``TurnContext.session_id``.
+        mcp_visibility: Optional per-session idle hiding. Connected servers in
+            its hidden set are left out of this turn's tool list. ``None``
+            shows every connected server.
 
     Returns:
         Frozen :class:`TurnContext`.
@@ -1236,8 +1267,8 @@ async def build_context(
     )
     if attachments_enabled_from_env():
         tools.append(load_file_tool_def())
-    tools.extend(mcp_client.all_tools())
-    if _any_mcp_connected(mcp_client):
+    tools.extend(_visible_mcp_tools(mcp_client, mcp_visibility))
+    if _any_mcp_connected(mcp_client, mcp_visibility):
         tools.extend(MCP_PROGRESSIVE_META_TOOL_DEFS)
     if loops_advertised and scheduled_loops_available:
         tools.extend(SCHEDULED_LOOP_TOOL_DEFS)
@@ -1268,6 +1299,7 @@ async def build_context(
         event_publisher=event_publisher,
         subagent_personas=personas,
         catalog_mcp_servers=catalog_names,
+        mcp_visibility=mcp_visibility,
         scheduled_loops_available=scheduled_loops_available,
         todo_store=todo_store,
         approvals_persist=approvals_persist,

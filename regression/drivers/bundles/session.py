@@ -13,6 +13,7 @@ from monkeybot.core.context import TurnContext
 from monkeybot.core.context.slash_skills import apply_invoked_skill
 from monkeybot.core.hooks import HookManager
 from monkeybot.core.layout import resolve_agent_path
+from monkeybot.core.mcp.session_visibility import MCPSessionVisibility
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import ScheduledLoopStore
 from monkeybot.core.persistence.scheduled_loops import KIND_GOAL, KIND_LOOP
@@ -254,6 +255,7 @@ class _SessionBundle(Bundle):
         if "memory" in ctx.hook_names and not _scenario_memory_disabled(ctx.scenario):
             root = ctx.workdir / "memory"
             ctx.hook_memory = _memory_subsystem(root, drawers, db_url=_scenario_sqlite_url(ctx))
+        ctx.mcp_visibility = MCPSessionVisibility()
         if ctx.scenario.executor != "real":
             if _PATCH_FAIL_ENV in ctx.env:
                 raise LoopDriverError(f"{_PATCH_FAIL_ENV} needs executor: real")
@@ -297,9 +299,9 @@ class _SessionBundle(Bundle):
         if policy is not None and policy.allowed_commands is not None:
             policy_kwargs["run_command_allowed_commands"] = policy.allowed_commands
             policy_kwargs["run_command_allowed_path_prefixes"] = policy.allowed_path_prefixes
+        from monkeybot.core.config.settings import get_subagent_settings
         from monkeybot.core.subagents.supervisor import SubagentSupervisor
         from monkeybot.core.tools.core_tool_executor import _run_inline_subagent_with_progress
-        from monkeybot.core.config.settings import get_subagent_settings
 
         settings = get_subagent_settings(config=ctx.cfg)
         supervisor = SubagentSupervisor(
