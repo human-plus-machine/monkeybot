@@ -6,6 +6,16 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [core v3.14.0] - 2026-11-04
+
+### Added
+
+- An MCP server a chat does not use for ten model turns is hidden from that chat. The connection stays up for other chats and for subagents. `enable_mcp` shows that server's tools again. A call to a hidden server is rejected.
+
+### Fixed
+
+- A message sent while a background subagent is still running is answered. It is not treated as a request for the child's result. `await_task` runs when the user asks for that result, or when a harness note says the child has finished.
+
 ## [cli v0.13.0] - 2026-11-01
 
 ### Added
