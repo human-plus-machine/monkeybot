@@ -1,0 +1,93 @@
+id: regression/t2/loop/scenarios/mcp/enable_other_keeps_hidden
+case: T2-MCP-18
+description: Enabling one server does not bring back a different server this chat has hidden.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- Hide the longer prefix, then enable the shorter one again.
+config:
+  model:
+    max_turns: 30
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.two_prefix.json
+script:
+- - type: tool_call
+    call_id: e0
+    name: fix__echo
+    args:
+      text: n0
+  - type: done
+- - type: tool_call
+    call_id: e1
+    name: fix__echo
+    args:
+      text: n1
+  - type: done
+- - type: tool_call
+    call_id: e2
+    name: fix__echo
+    args:
+      text: n2
+  - type: done
+- - type: tool_call
+    call_id: e3
+    name: fix__echo
+    args:
+      text: n3
+  - type: done
+- - type: tool_call
+    call_id: e4
+    name: fix__echo
+    args:
+      text: n4
+  - type: done
+- - type: tool_call
+    call_id: e5
+    name: fix__echo
+    args:
+      text: n5
+  - type: done
+- - type: tool_call
+    call_id: e6
+    name: fix__echo
+    args:
+      text: n6
+  - type: done
+- - type: tool_call
+    call_id: e7
+    name: fix__echo
+    args:
+      text: n7
+  - type: done
+- - type: tool_call
+    call_id: e8
+    name: fix__echo
+    args:
+      text: n8
+  - type: done
+- - type: tool_call
+    call_id: e9
+    name: fix__echo
+    args:
+      text: n9
+  - type: done
+- - type: tool_call
+    call_id: again
+    name: enable_mcp
+    args:
+      name: fix
+  - type: done
+- - type: text
+    text: "The other server stays hidden."
+  - type: done
+assertions:
+  provider_calls: 12
+  provider_request:
+  - n: 12
+    tools_include:
+    - fix__echo
+    tools_exclude:
+    - fix__extra__echo
+  turn_completed: true
+  no_errors: true

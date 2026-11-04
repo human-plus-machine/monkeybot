@@ -1226,6 +1226,7 @@ class GatewayLoopPort:
                     goal_ledger=gateway_runtime.goal_ledger,
                     verdict_mailbox=gateway_runtime.verdict_mailbox,
                     read_ledger=read_ledger,
+                    mcp_visibility=bus.mcp_visibility,
                     background_tasks_available=True,
                     background_runs_view=supervisor.snapshot_text,
                 )

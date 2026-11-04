@@ -193,6 +193,42 @@ _CORE_TOOL_NAMES = frozenset(
 _SPILL_SKIP_TOOLS = frozenset({"read_file", "load_file", "run_command"})
 
 
+def _hidden_mcp_server_error(ctx: TurnContext, server: str | None) -> str | None:
+    """Error text when ``server`` is hidden from this chat. ``None`` when it may be called."""
+    if not server:
+        return None
+    visibility = ctx.mcp_visibility
+    if visibility is None or not visibility.is_hidden(server):
+        return None
+    return _built_in_tool_error(
+        "runtime",
+        f"MCP server {server!r} is hidden for this chat after going unused.",
+        f"Call enable_mcp with name {server!r} to restore it.",
+        {"server": server},
+    )
+
+
+def _record_mcp_use(ctx: TurnContext, server: str) -> None:
+    """Count a successful call as use so the server stays visible to this chat."""
+    visibility = ctx.mcp_visibility
+    if visibility is not None and server:
+        visibility.record_use(server)
+
+
+def _without_hidden_servers(ctx: TurnContext, items: list[Any]) -> list[Any]:
+    """Drop list rows whose ``server`` is hidden from this chat."""
+    visibility = ctx.mcp_visibility
+    if visibility is None:
+        return items
+    kept: list[Any] = []
+    for item in items:
+        server = item.get("server") if isinstance(item, dict) else None
+        if isinstance(server, str) and visibility.is_hidden(server):
+            continue
+        kept.append(item)
+    return kept
+
+
 def _mcp_call_meta(ctx: TurnContext) -> dict[str, object]:
     """Request ``_meta.monkeybot`` so MCP servers can attribute work to a chat."""
     if not str(ctx.session_id).strip():
@@ -1309,7 +1345,7 @@ class CoreToolExecutor(ToolExecutorPort):
             elif name == "kill_command":
                 result_text, err_text = await self._tool_kill_command(args)
             elif name == "enable_mcp":
-                result_text, err_text = await self._tool_enable_mcp(args)
+                result_text, err_text = await self._tool_enable_mcp(args, ctx)
             elif name == "disable_mcp":
                 result_text, err_text = await self._tool_disable_mcp(args)
             elif name == "enable_loops":
@@ -1317,13 +1353,13 @@ class CoreToolExecutor(ToolExecutorPort):
             elif name == "disable_loops":
                 result_text, err_text = await self._tool_disable_loops()
             elif name == "list_mcp_resources":
-                result_text, err_text = await self._tool_list_mcp_resources(args)
+                result_text, err_text = await self._tool_list_mcp_resources(args, ctx)
             elif name == "read_mcp_resource":
-                result_text, err_text = await self._tool_read_mcp_resource(args)
+                result_text, err_text = await self._tool_read_mcp_resource(args, ctx)
             elif name == "list_mcp_prompts":
-                result_text, err_text = await self._tool_list_mcp_prompts(args)
+                result_text, err_text = await self._tool_list_mcp_prompts(args, ctx)
             elif name == "get_mcp_prompt":
-                result_text, err_text = await self._tool_get_mcp_prompt(args)
+                result_text, err_text = await self._tool_get_mcp_prompt(args, ctx)
             elif name == "start_loop":
                 result_text, err_text = await self._tool_start_loop(args, ctx)
             elif name == "loop_status":
@@ -1372,13 +1408,18 @@ class CoreToolExecutor(ToolExecutorPort):
                 mcp_pair = self._mcp.split_prefixed_tool(name)
                 if mcp_pair is not None:
                     server_name, tool_name = mcp_pair
-                    try:
-                        text = await self._mcp.call_tool(
-                            server_name, tool_name, args, meta=_mcp_call_meta(ctx)
-                        )
-                        result_text, err_text = text, None
-                    except MCPServerNotConnectedError as exc:
-                        result_text, err_text = None, str(exc)
+                    hidden = _hidden_mcp_server_error(ctx, server_name)
+                    if hidden is not None:
+                        result_text, err_text = None, hidden
+                    else:
+                        try:
+                            text = await self._mcp.call_tool(
+                                server_name, tool_name, args, meta=_mcp_call_meta(ctx)
+                            )
+                            result_text, err_text = text, None
+                            _record_mcp_use(ctx, server_name)
+                        except MCPServerNotConnectedError as exc:
+                            result_text, err_text = None, str(exc)
                 else:
                     result_text, err_text = (
                         None,
@@ -2683,7 +2724,9 @@ class CoreToolExecutor(ToolExecutorPort):
             None,
         )
 
-    async def _tool_enable_mcp(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+    async def _tool_enable_mcp(
+        self, args: dict[str, Any], ctx: TurnContext
+    ) -> tuple[str | None, str | None]:
         sname = _str_arg(args, "name")
         if not sname:
             return (None, "enable_mcp requires name")
@@ -2697,6 +2740,7 @@ class CoreToolExecutor(ToolExecutorPort):
             logger.warning("enable_mcp failed %s", kv(server=sname, error=str(exc)))
             return (None, str(exc))
         status_snap = self._mcp.status(sname)
+        _record_mcp_use(ctx, sname)
         logger.info(
             "enable_mcp ok %s",
             kv(server=sname, already_connected=already, tools=len(defs)),
@@ -2846,15 +2890,30 @@ class CoreToolExecutor(ToolExecutorPort):
             return (_j({"ok": True, **result}), None)
         return (_j({"ok": True, **ok_payload(result)}), None)
 
-    async def _tool_list_mcp_resources(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+    async def _tool_list_mcp_resources(
+        self, args: dict[str, Any], ctx: TurnContext
+    ) -> tuple[str | None, str | None]:
         sname = _str_arg(args, "server") or None
-        return await self._mcp_meta_call(
+        hidden = _hidden_mcp_server_error(ctx, sname)
+        if hidden is not None:
+            return None, hidden
+
+        def _payload(resources: list[Any]) -> dict[str, Any]:
+            visible = resources if sname else _without_hidden_servers(ctx, list(resources))
+            return {"resources": visible, "count": len(visible)}
+
+        result_text, err_text = await self._mcp_meta_call(
             "list_mcp_resources",
             self._mcp.list_resources(sname),
-            ok_payload=lambda resources: {"resources": resources, "count": len(resources)},
+            ok_payload=_payload,
         )
+        if err_text is None and sname:
+            _record_mcp_use(ctx, sname)
+        return result_text, err_text
 
-    async def _tool_read_mcp_resource(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+    async def _tool_read_mcp_resource(
+        self, args: dict[str, Any], ctx: TurnContext
+    ) -> tuple[str | None, str | None]:
         sname = _str_arg(args, "server")
         uri = _str_arg(args, "uri")
         if not sname:
@@ -2875,20 +2934,41 @@ class CoreToolExecutor(ToolExecutorPort):
                     "Pass the resource URI from list_mcp_resources.",
                 ),
             )
-        return await self._mcp_meta_call(
+        hidden = _hidden_mcp_server_error(ctx, sname)
+        if hidden is not None:
+            return None, hidden
+        result_text, err_text = await self._mcp_meta_call(
             "read_mcp_resource",
             self._mcp.read_resource(sname, uri),
         )
+        if err_text is None:
+            _record_mcp_use(ctx, sname)
+        return result_text, err_text
 
-    async def _tool_list_mcp_prompts(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+    async def _tool_list_mcp_prompts(
+        self, args: dict[str, Any], ctx: TurnContext
+    ) -> tuple[str | None, str | None]:
         sname = _str_arg(args, "server") or None
-        return await self._mcp_meta_call(
+        hidden = _hidden_mcp_server_error(ctx, sname)
+        if hidden is not None:
+            return None, hidden
+
+        def _payload(prompts: list[Any]) -> dict[str, Any]:
+            visible = prompts if sname else _without_hidden_servers(ctx, list(prompts))
+            return {"prompts": visible, "count": len(visible)}
+
+        result_text, err_text = await self._mcp_meta_call(
             "list_mcp_prompts",
             self._mcp.list_prompts(sname),
-            ok_payload=lambda prompts: {"prompts": prompts, "count": len(prompts)},
+            ok_payload=_payload,
         )
+        if err_text is None and sname:
+            _record_mcp_use(ctx, sname)
+        return result_text, err_text
 
-    async def _tool_get_mcp_prompt(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
+    async def _tool_get_mcp_prompt(
+        self, args: dict[str, Any], ctx: TurnContext
+    ) -> tuple[str | None, str | None]:
         sname = _str_arg(args, "server")
         prompt_name = _str_arg(args, "prompt")
         if not sname:
@@ -2909,14 +2989,20 @@ class CoreToolExecutor(ToolExecutorPort):
                     "Pass the prompt name from list_mcp_prompts.",
                 ),
             )
+        hidden = _hidden_mcp_server_error(ctx, sname)
+        if hidden is not None:
+            return None, hidden
         raw_args = args.get("arguments")
         prompt_args: dict[str, str] = {}
         if isinstance(raw_args, dict):
             prompt_args = {str(k): "" if v is None else str(v) for k, v in raw_args.items()}
-        return await self._mcp_meta_call(
+        result_text, err_text = await self._mcp_meta_call(
             "get_mcp_prompt",
             self._mcp.get_prompt(sname, prompt_name, prompt_args or None),
         )
+        if err_text is None:
+            _record_mcp_use(ctx, sname)
+        return result_text, err_text
 
     def _require_loop_store(self) -> ScheduledLoopStore | tuple[None, str]:
         if self._scheduled_loop_store is None:

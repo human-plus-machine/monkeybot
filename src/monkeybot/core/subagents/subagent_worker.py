@@ -37,6 +37,7 @@ from monkeybot.core.llm.provider import (
     UsageEvent,
 )
 from monkeybot.core.mcp.mcp_client import MCPClient, run_cleanup
+from monkeybot.core.mcp.session_visibility import MCPSessionVisibility
 from monkeybot.core.memory.subsystem import MemorySubsystem
 from monkeybot.core.persistence.backends import HistoryStore, create_storage_backend
 from monkeybot.core.persistence.transcript import TranscriptWriter, start_child_transcript
@@ -448,6 +449,7 @@ async def _async_main() -> None:
             extra_tools=extra_tools,
             config=cfg,
             read_ledger=read_ledger,
+            mcp_visibility=MCPSessionVisibility(),
         )
         ctx.turn_path_grants.update(envelope.path_grants)
         ctx.turn_command_grants.update(envelope.command_grants)
