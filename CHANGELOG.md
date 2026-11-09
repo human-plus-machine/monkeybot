@@ -6,9 +6,18 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Changed
+### Core
+
+### Fixed
 
 - Send now (`POST /sessions/{id}/queue/{request_id}/steer`) stops the current step immediately. The model stream is cut off, a running tool is killed, and the message is injected into the same turn. Stop still ends the turn and does not inject it.
+- A goal stays active until an audit proves every requirement against the current transcript. Ending the turn, a budget pause, or a plausible answer does not complete it. `update_goal` with `status="waiting"` waits on a person or an external event instead of ticking.
+
+### CLI
+
+### Fixed
+
+- The goal scaffold requires an evidence audit before `status="complete"`, and uses `status="waiting"` while blocked on a person or an external event. A budget pause is not completion.
 
 ## [core v3.14.0] - 2026-11-04
 
