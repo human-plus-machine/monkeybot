@@ -146,7 +146,15 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     claimed_at_ms BIGINT,
     kind TEXT NOT NULL DEFAULT 'loop',
     objective TEXT,
-    consecutive_error_count INTEGER NOT NULL DEFAULT 0
+    consecutive_error_count INTEGER NOT NULL DEFAULT 0,
+    budget_tick_start INTEGER NOT NULL DEFAULT 0,
+    budget_started_at_ms BIGINT,
+    wait_reason TEXT,
+    wake_at_ms BIGINT,
+    wake_reason TEXT,
+    wake_source TEXT,
+    wake_requested_at_ms BIGINT,
+    completion_evidence TEXT
 )""",
     """CREATE INDEX IF NOT EXISTS idx_scheduled_loops_due
     ON scheduled_loops(status, tick_in_flight, next_tick_at_ms)
@@ -268,6 +276,23 @@ async def _apply_schema(pool: asyncpg.Pool) -> None:
             "consecutive_error_count INTEGER NOT NULL DEFAULT 0"
         )
         await conn.execute(
+            "ALTER TABLE scheduled_loops ADD COLUMN IF NOT EXISTS "
+            "budget_tick_start INTEGER NOT NULL DEFAULT 0"
+        )
+        await conn.execute(
+            "ALTER TABLE scheduled_loops ADD COLUMN IF NOT EXISTS budget_started_at_ms BIGINT"
+        )
+        await conn.execute("ALTER TABLE scheduled_loops ADD COLUMN IF NOT EXISTS wait_reason TEXT")
+        await conn.execute("ALTER TABLE scheduled_loops ADD COLUMN IF NOT EXISTS wake_at_ms BIGINT")
+        await conn.execute("ALTER TABLE scheduled_loops ADD COLUMN IF NOT EXISTS wake_reason TEXT")
+        await conn.execute("ALTER TABLE scheduled_loops ADD COLUMN IF NOT EXISTS wake_source TEXT")
+        await conn.execute(
+            "ALTER TABLE scheduled_loops ADD COLUMN IF NOT EXISTS wake_requested_at_ms BIGINT"
+        )
+        await conn.execute(
+            "ALTER TABLE scheduled_loops ADD COLUMN IF NOT EXISTS completion_evidence TEXT"
+        )
+        await conn.execute(
             """
             WITH ranked AS (
                 SELECT loop_id,
@@ -276,7 +301,7 @@ async def _apply_schema(pool: asyncpg.Pool) -> None:
                            ORDER BY started_at_ms DESC, loop_id DESC
                        ) AS open_rank
                 FROM scheduled_loops
-                WHERE kind = 'goal' AND status IN ('active', 'paused')
+                WHERE kind = 'goal' AND status IN ('active', 'paused', 'waiting')
             )
             UPDATE scheduled_loops AS loops
             SET status = 'completed',
@@ -292,10 +317,11 @@ async def _apply_schema(pool: asyncpg.Pool) -> None:
             "CREATE INDEX IF NOT EXISTS idx_scheduled_loops_kind_session "
             "ON scheduled_loops(kind, session_id, status)"
         )
+        await conn.execute("DROP INDEX IF EXISTS idx_scheduled_loops_one_open_goal")
         await conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_loops_one_open_goal "
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_loops_one_open_goal_v2 "
             "ON scheduled_loops(session_id) "
-            "WHERE kind = 'goal' AND status IN ('active', 'paused')"
+            "WHERE kind = 'goal' AND status IN ('active', 'paused', 'waiting')"
         )
 
 
@@ -1049,10 +1075,11 @@ class PostgresScheduledLoopStore:
                         max_ticks, max_runtime_ms, skip_if_busy, tick_index,
                         next_tick_at_ms, started_at_ms, last_tick_at_ms,
                         last_error, stop_reason, tick_in_flight, worker_id, claimed_at_ms,
-                        kind, objective, consecutive_error_count
+                        kind, objective, consecutive_error_count,
+                        budget_tick_start, budget_started_at_ms
                     ) VALUES (
                         $1, $2, 'active', $3, $4, $5, $6, $7, 0, $8, $9,
-                        NULL, NULL, NULL, 0, NULL, NULL, $10, $11, 0
+                        NULL, NULL, NULL, 0, NULL, NULL, $10, $11, 0, $12, $13
                     )
                     """,
                     loop_id,
@@ -1066,6 +1093,8 @@ class PostgresScheduledLoopStore:
                     values.started_at_ms,
                     values.kind,
                     values.objective,
+                    values.budget_tick_start,
+                    values.budget_started_at_ms,
                 )
         except asyncpg.UniqueViolationError as exc:
             if await self.get(loop_id) is not None:
@@ -1229,8 +1258,13 @@ class PostgresScheduledLoopStore:
                 SET tick_index = $1, last_tick_at_ms = $2, last_error = $3,
                     status = $4, stop_reason = $5, next_tick_at_ms = $6,
                     tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL,
-                    consecutive_error_count = $7
-                WHERE loop_id = $8 AND worker_id = $9 AND tick_in_flight = 1
+                    consecutive_error_count = $7,
+                    wake_reason = CASE WHEN $8 THEN NULL ELSE wake_reason END,
+                    wake_source = CASE WHEN $8 THEN NULL ELSE wake_source END,
+                    wake_requested_at_ms = CASE WHEN $8 THEN NULL ELSE wake_requested_at_ms END,
+                    wait_reason = CASE WHEN $9 THEN NULL ELSE wait_reason END,
+                    wake_at_ms = CASE WHEN $9 THEN NULL ELSE wake_at_ms END
+                WHERE loop_id = $10 AND worker_id = $11 AND tick_in_flight = 1
                 """,
                 result.tick_index,
                 now_ms,
@@ -1239,6 +1273,8 @@ class PostgresScheduledLoopStore:
                 result.stop_reason,
                 result.next_tick_at_ms,
                 result.consecutive_error_count,
+                result.clear_wake,
+                result.clear_wait,
                 loop_id,
                 worker_id,
             )
@@ -1310,7 +1346,13 @@ class PostgresScheduledLoopStore:
                 """
                 UPDATE scheduled_loops
                 SET status = 'active', stop_reason = NULL, next_tick_at_ms = $1,
-                    tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL
+                    tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL,
+                    budget_tick_start = CASE
+                        WHEN kind = 'goal' THEN tick_index ELSE budget_tick_start
+                    END,
+                    budget_started_at_ms = CASE
+                        WHEN kind = 'goal' THEN $1 ELSE budget_started_at_ms
+                    END
                 WHERE loop_id = $2 AND status = 'paused'
                 """,
                 now_ms,
@@ -1318,19 +1360,88 @@ class PostgresScheduledLoopStore:
             )
         return _asyncpg_affected_rows(status) == 1
 
-    async def stop(self, loop_id: str, *, stop_reason: str = "manual") -> bool:
+    async def stop(
+        self,
+        loop_id: str,
+        *,
+        stop_reason: str = "manual",
+        completion_evidence: str | None = None,
+    ) -> bool:
         async with self._pool.acquire() as conn:
             status = await conn.execute(
                 """
                 UPDATE scheduled_loops
                 SET status = 'completed', stop_reason = $1,
-                    tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL
-                WHERE loop_id = $2
+                    tick_in_flight = 0, worker_id = NULL, claimed_at_ms = NULL,
+                    completion_evidence = COALESCE($2, completion_evidence)
+                WHERE loop_id = $3
                 """,
                 stop_reason,
+                completion_evidence,
                 loop_id,
             )
         return _asyncpg_affected_rows(status) == 1
+
+    async def set_waiting(
+        self,
+        loop_id: str,
+        *,
+        reason: str,
+        wake_at_ms: int | None,
+    ) -> bool:
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                UPDATE scheduled_loops
+                SET status = 'waiting', wait_reason = $1, wake_at_ms = $2, stop_reason = NULL
+                WHERE loop_id = $3 AND kind = 'goal' AND status IN ('active', 'waiting')
+                """,
+                reason,
+                wake_at_ms,
+                loop_id,
+            )
+        return _asyncpg_affected_rows(status) == 1
+
+    async def wake(
+        self,
+        loop_id: str,
+        *,
+        reason: str,
+        source: str,
+        now_ms: int | None = None,
+    ) -> bool:
+        now_ms = resolve_now_ms(now_ms)
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                UPDATE scheduled_loops
+                SET status = 'active', next_tick_at_ms = $1, wake_reason = $2, wake_source = $3,
+                    wake_requested_at_ms = $1, wait_reason = NULL, wake_at_ms = NULL
+                WHERE loop_id = $4 AND kind = 'goal' AND status IN ('active', 'waiting')
+                """,
+                now_ms,
+                reason,
+                source,
+                loop_id,
+            )
+        return _asyncpg_affected_rows(status) == 1
+
+    async def release_due_waits(self, now_ms: int | None = None) -> int:
+        now_ms = resolve_now_ms(now_ms)
+        async with self._pool.acquire() as conn:
+            status = await conn.execute(
+                """
+                UPDATE scheduled_loops
+                SET status = 'active', next_tick_at_ms = $1, wake_reason = $2,
+                    wake_source = 'timer', wake_requested_at_ms = $1,
+                    wait_reason = NULL, wake_at_ms = NULL
+                WHERE kind = 'goal' AND status = 'waiting'
+                  AND wake_at_ms IS NOT NULL AND wake_at_ms <= $1
+                """,
+                now_ms,
+                "recheck timer",
+            )
+        return _asyncpg_affected_rows(status)
 
 
 class PostgresSessionTurnLockStore:

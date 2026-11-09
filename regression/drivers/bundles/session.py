@@ -197,6 +197,47 @@ def _apply_user_slash(ctx: TurnContext, message: str) -> TurnContext:
     return applied
 
 
+def _scenario_extra(ctx: RunCtx) -> dict[str, Any]:
+    if ctx.scenario.config is None:
+        return {}
+    return ctx.scenario.config.model_dump()
+
+
+def _scripted_completion_verifier(ctx: RunCtx) -> Any | None:
+    """Queue of pass/fail/timeout/bad_json outcomes from ``config.completion_judge``."""
+    raw = _scenario_extra(ctx).get("completion_judge")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    from monkeybot.core.goals.completion import ScriptedCompletionVerifier
+
+    modes = [part.strip() for part in raw.split(",") if part.strip()]
+    return ScriptedCompletionVerifier(modes)
+
+
+async def _seed_goal(ctx: RunCtx) -> None:
+    """Insert one goal with a known id so a scripted ``update_goal`` can name it."""
+    extra = _scenario_extra(ctx)
+    goal_id = extra.get("seed_goal_id")
+    objective = extra.get("seed_goal_objective")
+    if not isinstance(goal_id, str) or not goal_id.strip():
+        return
+    if not isinstance(objective, str) or not objective.strip() or ctx.loop_store is None:
+        return
+    from monkeybot.core.persistence.scheduled_loops import KIND_GOAL, ScheduledLoopCreate
+
+    await ctx.loop_store.create(
+        ScheduledLoopCreate(
+            prompt=objective.strip(),
+            interval_ms=300_000,
+            session_id=ctx.session_id,
+            loop_id=goal_id.strip(),
+            max_ticks=50,
+            kind=KIND_GOAL,
+            objective=objective.strip(),
+        )
+    )
+
+
 async def _store_snapshot(store: ScheduledLoopStore) -> StoreView:
     loops = await store.list_kind(KIND_LOOP)
     goals = await store.list_kind(KIND_GOAL)
@@ -311,6 +352,7 @@ class _SessionBundle(Bundle):
             lease_ms=settings.lease_ms,
             run_inline=_run_inline_subagent_with_progress,
         )
+        await _seed_goal(ctx)
         tool_executor = CoreToolExecutor(
             workspace_root=ctx.workspace,
             memory=tool_memory,
@@ -324,6 +366,7 @@ class _SessionBundle(Bundle):
             subagent_supervisor=supervisor,
             read_ledger=ctx.read_ledger,
             config=ctx.cfg,
+            completion_verifier=_scripted_completion_verifier(ctx),
             **policy_kwargs,
         )
         _apply_workspace_env_caps(tool_executor, ctx.env)

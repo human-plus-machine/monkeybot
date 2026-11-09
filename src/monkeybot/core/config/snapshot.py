@@ -54,10 +54,12 @@ from monkeybot.core.config.runtime_env import (
 from monkeybot.core.config.settings import (
     CodingConfig,
     ConfigError,
+    GoalsConfig,
     SubagentConfig,
     SubagentSettings,
     VerifierConfig,
     _coding_section,
+    _goals_section,
     _parse_subagent_entries,
     _persona_registry,
     _subagents_section,
@@ -65,6 +67,9 @@ from monkeybot.core.config.settings import (
 )
 from monkeybot.core.config.settings import (
     coding_config_from_section as _coding_config_from_section,
+)
+from monkeybot.core.config.settings import (
+    goals_config_from_section as _goals_config_from_section,
 )
 from monkeybot.core.config.settings import (
     subagent_settings_from_section as _subagent_settings_from_section,
@@ -237,6 +242,7 @@ class RuntimeConfig:
     verifier: VerifierConfig
     env_values: Mapping[str, str]
     coding: CodingConfig = field(default_factory=CodingConfig)
+    goals: GoalsConfig = field(default_factory=GoalsConfig)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "env_values", MappingProxyType(dict(self.env_values)))
@@ -611,6 +617,7 @@ def build_runtime_config(
     subagents, subagent_settings = _parse_subagents(merged)
     verifier = _parse_verifier(merged)
     coding = _parse_coding(merged)
+    goals = _parse_goals(merged)
     return RuntimeConfig(
         revision=revision,
         digest=digest,
@@ -627,6 +634,7 @@ def build_runtime_config(
         verifier=verifier,
         env_values=env_values,
         coding=coding,
+        goals=goals,
     )
 
 
@@ -1037,6 +1045,15 @@ def _parse_verifier(doc: Mapping[str, Any]) -> VerifierConfig:
     except ConfigError as exc:
         logger.error("Ignoring invalid verifier section during snapshot load: %s", exc)
         return VerifierConfig()
+
+
+def _parse_goals(doc: Mapping[str, Any]) -> GoalsConfig:
+    """Parse ``goals:`` for the snapshot (invalid shapes fall back to defaults)."""
+    try:
+        return _goals_config_from_section(_goals_section(dict(doc)))
+    except ConfigError as exc:
+        logger.error("Ignoring invalid goals section during snapshot load: %s", exc)
+        return GoalsConfig()
 
 
 def _parse_coding(doc: Mapping[str, Any]) -> CodingConfig:

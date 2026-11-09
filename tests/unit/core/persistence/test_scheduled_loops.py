@@ -156,6 +156,14 @@ def _sql_loop_tuple(*, loop_id: str = "demo", interval_ms: int = 1000) -> tuple[
         "loop",
         None,
         0,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
 
 
@@ -376,5 +384,8 @@ async def test_sqlite_migrates_kind_and_objective_columns(tmp_path) -> None:
     indexes_cursor = await store._conn.execute("PRAGMA index_list(scheduled_loops)")
     indexes = {str(row[1]): bool(row[2]) for row in await indexes_cursor.fetchall()}
     await indexes_cursor.close()
-    assert indexes["idx_scheduled_loops_one_open_goal"] is True
+    assert indexes["idx_scheduled_loops_one_open_goal_v2"] is True
+    assert "idx_scheduled_loops_one_open_goal" not in indexes
+    assert "budget_tick_start" in columns
+    assert "completion_evidence" in columns
     await backend.close()

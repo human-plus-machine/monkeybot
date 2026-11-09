@@ -189,6 +189,28 @@ class VerifierConfig:
 _DEFAULT_VERIFIER_CONFIG = VerifierConfig()
 
 
+@dataclass(frozen=True)
+class GoalCompletionJudgeConfig:
+    """``goals.completion_judge`` — blocking check before a goal can be completed."""
+
+    enabled: bool = True
+    model: str | None = None
+    timeout_s: float = 30.0
+
+
+@dataclass(frozen=True)
+class GoalsConfig:
+    """``goals:`` — budget and completion gate for native ``/goal``."""
+
+    interval_ms: int = 5 * 60 * 1000
+    max_ticks: int = 50
+    max_runtime_ms: int | None = None
+    completion_judge: GoalCompletionJudgeConfig = field(default_factory=GoalCompletionJudgeConfig)
+
+
+_DEFAULT_GOALS_CONFIG = GoalsConfig()
+
+
 # ``run_command`` lines that count as "ran the project's tests/lint" for the verification gate.
 DEFAULT_VERIFY_COMMANDS: tuple[str, ...] = (
     r"\bpytest\b",
@@ -879,6 +901,87 @@ def get_coding_config(
         return config.coding
     _, doc = load_monkeybot_yaml_dict(config_path)
     return coding_config_from_section(_coding_section(doc))
+
+
+def _goals_section(doc: dict[str, Any]) -> dict[str, Any]:
+    """Return the ``goals:`` mapping, or empty dict when absent."""
+    section = doc.get("goals")
+    if section is None:
+        return {}
+    if not isinstance(section, dict):
+        raise ConfigError(f"goals must be a mapping, got {type(section).__name__}")
+    return section
+
+
+def goals_config_from_section(section: dict[str, Any]) -> GoalsConfig:
+    """Parse a ``goals:`` mapping. Omitted keys keep the defaults (judge on, 50 ticks)."""
+    from monkeybot.scheduler.interval import parse_interval_ms, parse_optional_duration_ms
+
+    defaults = _DEFAULT_GOALS_CONFIG
+    if not section:
+        return defaults
+    judge_raw = section.get("completion_judge")
+    if judge_raw is None:
+        judge_raw = {}
+    if not isinstance(judge_raw, dict):
+        raise ConfigError(
+            f"goals.completion_judge must be a mapping, got {type(judge_raw).__name__}"
+        )
+    interval_raw = section.get("interval")
+    if interval_raw is None:
+        interval_ms = defaults.interval_ms
+    else:
+        try:
+            interval_ms = parse_interval_ms(interval_raw)
+        except ValueError as exc:
+            raise ConfigError(f"goals.interval is invalid: {exc}") from exc
+    runtime_raw = section.get("max_runtime")
+    if runtime_raw is None or runtime_raw == "off":
+        max_runtime_ms = None
+    else:
+        try:
+            max_runtime_ms = parse_optional_duration_ms(runtime_raw)
+        except ValueError as exc:
+            raise ConfigError(f"goals.max_runtime is invalid: {exc}") from exc
+    return GoalsConfig(
+        interval_ms=interval_ms,
+        max_ticks=_verifier_int(
+            section.get("max_ticks"),
+            "goals.max_ticks",
+            defaults.max_ticks,
+            min_value=1,
+        ),
+        max_runtime_ms=max_runtime_ms,
+        completion_judge=GoalCompletionJudgeConfig(
+            enabled=_verifier_bool(
+                judge_raw.get("enabled"),
+                "goals.completion_judge.enabled",
+                defaults.completion_judge.enabled,
+            ),
+            model=_verifier_optional_str(
+                judge_raw.get("model"),
+                "goals.completion_judge.model",
+            ),
+            timeout_s=_verifier_float(
+                judge_raw.get("timeout_s"),
+                "goals.completion_judge.timeout_s",
+                defaults.completion_judge.timeout_s,
+                min_value=1.0,
+            ),
+        ),
+    )
+
+
+def get_goals_config(
+    config_path: str | None = None,
+    *,
+    config: RuntimeConfig | None = None,
+) -> GoalsConfig:
+    """``goals:`` section from monkeybot.yaml (a pinned snapshot wins when given)."""
+    if config is not None:
+        return config.goals
+    _, doc = load_monkeybot_yaml_dict(config_path)
+    return goals_config_from_section(_goals_section(doc))
 
 
 def get_verifier_config(

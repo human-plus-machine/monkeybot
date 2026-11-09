@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-_LOOP_STATUSES = frozenset({"active", "paused", "completed", "failed"})
+_LOOP_STATUSES = frozenset({"active", "paused", "waiting", "completed", "failed"})
 _STALE_RELEASE_MAX_PER_PASS = 400
 _STALE_RELEASE_CONCURRENCY = 25
 
@@ -70,6 +70,14 @@ def _create_payload(values: PlannedScheduledLoop) -> dict[str, object]:
         "kind": values.kind,
         "objective": values.objective,
         "consecutive_error_count": 0,
+        "budget_tick_start": values.budget_tick_start,
+        "budget_started_at_ms": values.budget_started_at_ms,
+        "wait_reason": None,
+        "wake_at_ms": None,
+        "wake_reason": None,
+        "wake_source": None,
+        "wake_requested_at_ms": None,
+        "completion_evidence": None,
     }
 
 
@@ -382,21 +390,26 @@ class FirestoreScheduledLoopStore:
                 logger.error("complete_tick skipped loop_id=%s: %s", loop_id, exc)
                 return False
             result = resolve_complete_tick(row, error=error, now_ms=now_ms)
-            txn.update(
-                ref,
-                {
-                    "tick_index": result.tick_index,
-                    "last_tick_at_ms": now_ms,
-                    "last_error": result.last_error,
-                    "status": result.status,
-                    "stop_reason": result.stop_reason,
-                    "next_tick_at_ms": result.next_tick_at_ms,
-                    "consecutive_error_count": result.consecutive_error_count,
-                    "tick_in_flight": 0,
-                    "worker_id": None,
-                    "claimed_at_ms": None,
-                },
-            )
+            update: dict[str, object] = {
+                "tick_index": result.tick_index,
+                "last_tick_at_ms": now_ms,
+                "last_error": result.last_error,
+                "status": result.status,
+                "stop_reason": result.stop_reason,
+                "next_tick_at_ms": result.next_tick_at_ms,
+                "consecutive_error_count": result.consecutive_error_count,
+                "tick_in_flight": 0,
+                "worker_id": None,
+                "claimed_at_ms": None,
+            }
+            if result.clear_wake:
+                update["wake_reason"] = None
+                update["wake_source"] = None
+                update["wake_requested_at_ms"] = None
+            if result.clear_wait:
+                update["wait_reason"] = None
+                update["wake_at_ms"] = None
+            txn.update(ref, update)
             return True
 
         if not await self._in_transaction(doc_ref, _complete_body):
@@ -511,17 +524,152 @@ class FirestoreScheduledLoopStore:
         if data.get("status") != "paused":
             return False
         now_ms = int(time.time() * 1000)
-        await self._doc(loop_id).update(
-            {
-                "status": "active",
-                "stop_reason": None,
-                "next_tick_at_ms": now_ms,
-                "tick_in_flight": 0,
-                "worker_id": None,
-                "claimed_at_ms": None,
-            }
-        )
+        update: dict[str, object] = {
+            "status": "active",
+            "stop_reason": None,
+            "next_tick_at_ms": now_ms,
+            "tick_in_flight": 0,
+            "worker_id": None,
+            "claimed_at_ms": None,
+        }
+        if data.get("kind") == KIND_GOAL:
+            update["budget_tick_start"] = int(cast(int, data.get("tick_index", 0)))
+            update["budget_started_at_ms"] = now_ms
+        await self._doc(loop_id).update(update)
         return True
 
-    async def stop(self, loop_id: str, *, stop_reason: str = "manual") -> bool:
-        return await self.set_status(loop_id, "completed", stop_reason=stop_reason)
+    async def stop(
+        self,
+        loop_id: str,
+        *,
+        stop_reason: str = "manual",
+        completion_evidence: str | None = None,
+    ) -> bool:
+        if not await self.set_status(loop_id, "completed", stop_reason=stop_reason):
+            return False
+        if completion_evidence is not None:
+            await self._doc(loop_id).update({"completion_evidence": completion_evidence})
+        return True
+
+    async def set_waiting(
+        self,
+        loop_id: str,
+        *,
+        reason: str,
+        wake_at_ms: int | None,
+    ) -> bool:
+        doc_ref = self._doc(loop_id)
+
+        async def _body(
+            txn: firestore.AsyncTransaction,
+            ref: firestore.AsyncDocumentReference,
+        ) -> bool:
+            snapshot = await ref.get(transaction=txn)
+            if not snapshot.exists:
+                return False
+            data = snapshot.to_dict() or {}
+            if data.get("kind") != KIND_GOAL or data.get("status") not in {"active", "waiting"}:
+                return False
+            txn.update(
+                ref,
+                {
+                    "status": "waiting",
+                    "wait_reason": reason,
+                    "wake_at_ms": wake_at_ms,
+                    "stop_reason": None,
+                },
+            )
+            return True
+
+        return bool(await self._in_transaction(doc_ref, _body))
+
+    async def wake(
+        self,
+        loop_id: str,
+        *,
+        reason: str,
+        source: str,
+        now_ms: int | None = None,
+    ) -> bool:
+        doc_ref = self._doc(loop_id)
+        now_ms = resolve_now_ms(now_ms)
+
+        async def _body(
+            txn: firestore.AsyncTransaction,
+            ref: firestore.AsyncDocumentReference,
+        ) -> bool:
+            snapshot = await ref.get(transaction=txn)
+            if not snapshot.exists:
+                return False
+            data = snapshot.to_dict() or {}
+            if data.get("kind") != KIND_GOAL or data.get("status") not in {"active", "waiting"}:
+                return False
+            txn.update(
+                ref,
+                {
+                    "status": "active",
+                    "next_tick_at_ms": now_ms,
+                    "wake_reason": reason,
+                    "wake_source": source,
+                    "wake_requested_at_ms": now_ms,
+                    "wait_reason": None,
+                    "wake_at_ms": None,
+                },
+            )
+            return True
+
+        return bool(await self._in_transaction(doc_ref, _body))
+
+    async def release_due_waits(self, now_ms: int | None = None) -> int:
+        now_ms = resolve_now_ms(now_ms)
+        query = self._client.collection(self._collection).where(
+            filter=FieldFilter("status", "==", "waiting")
+        )
+        due_ids: list[str] = []
+        async for doc in query.stream():
+            data = doc.to_dict() or {}
+            wake_at = data.get("wake_at_ms")
+            if data.get("kind") != KIND_GOAL or wake_at is None:
+                continue
+            if int(cast(int, wake_at)) <= now_ms:
+                due_ids.append(doc.id)
+        released = 0
+        for loop_id in due_ids:
+            if await self._release_one_wait(loop_id, now_ms):
+                released += 1
+        return released
+
+    async def _release_one_wait(self, loop_id: str, now_ms: int) -> bool:
+        doc_ref = self._doc(loop_id)
+
+        async def _body(
+            txn: firestore.AsyncTransaction,
+            ref: firestore.AsyncDocumentReference,
+        ) -> bool:
+            snapshot = await ref.get(transaction=txn)
+            if not snapshot.exists:
+                return False
+            data = snapshot.to_dict() or {}
+            wake_at = data.get("wake_at_ms")
+            if (
+                data.get("kind") != KIND_GOAL
+                or data.get("status") != "waiting"
+                or wake_at is None
+                or int(cast(int, wake_at)) > now_ms
+            ):
+                return False
+            txn.update(
+                ref,
+                {
+                    "status": "active",
+                    "next_tick_at_ms": now_ms,
+                    "wake_reason": "recheck timer",
+                    "wake_source": "timer",
+                    "wake_requested_at_ms": now_ms,
+                    "wait_reason": None,
+                    "wake_at_ms": None,
+                },
+            )
+            return True
+
+        return bool(await self._in_transaction(doc_ref, _body))

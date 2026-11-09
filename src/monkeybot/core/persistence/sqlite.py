@@ -201,7 +201,15 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     claimed_at_ms INTEGER,
     kind TEXT NOT NULL DEFAULT 'loop',
     objective TEXT,
-    consecutive_error_count INTEGER NOT NULL DEFAULT 0
+    consecutive_error_count INTEGER NOT NULL DEFAULT 0,
+    budget_tick_start INTEGER NOT NULL DEFAULT 0,
+    budget_started_at_ms INTEGER,
+    wait_reason TEXT,
+    wake_at_ms INTEGER,
+    wake_reason TEXT,
+    wake_source TEXT,
+    wake_requested_at_ms INTEGER,
+    completion_evidence TEXT
 )""",
     """CREATE INDEX IF NOT EXISTS idx_scheduled_loops_due
     ON scheduled_loops(status, tick_in_flight, next_tick_at_ms)
@@ -617,6 +625,18 @@ async def _ensure_scheduled_loop_kind_columns(conn: aiosqlite.Connection) -> Non
             "ALTER TABLE scheduled_loops "
             "ADD COLUMN consecutive_error_count INTEGER NOT NULL DEFAULT 0"
         )
+    for column, ddl in (
+        ("budget_tick_start", "budget_tick_start INTEGER NOT NULL DEFAULT 0"),
+        ("budget_started_at_ms", "budget_started_at_ms INTEGER"),
+        ("wait_reason", "wait_reason TEXT"),
+        ("wake_at_ms", "wake_at_ms INTEGER"),
+        ("wake_reason", "wake_reason TEXT"),
+        ("wake_source", "wake_source TEXT"),
+        ("wake_requested_at_ms", "wake_requested_at_ms INTEGER"),
+        ("completion_evidence", "completion_evidence TEXT"),
+    ):
+        if column not in names:
+            await conn.execute(f"ALTER TABLE scheduled_loops ADD COLUMN {ddl}")
     await conn.execute(
         """
         UPDATE scheduled_loops
@@ -634,7 +654,7 @@ async def _ensure_scheduled_loop_kind_columns(conn: aiosqlite.Connection) -> Non
                            ORDER BY started_at_ms DESC, loop_id DESC
                        ) AS open_rank
                 FROM scheduled_loops
-                WHERE kind = 'goal' AND status IN ('active', 'paused')
+                WHERE kind = 'goal' AND status IN ('active', 'paused', 'waiting')
             )
             WHERE open_rank > 1
         )
@@ -644,10 +664,11 @@ async def _ensure_scheduled_loop_kind_columns(conn: aiosqlite.Connection) -> Non
         "CREATE INDEX IF NOT EXISTS idx_scheduled_loops_kind_session "
         "ON scheduled_loops(kind, session_id, status)"
     )
+    await conn.execute("DROP INDEX IF EXISTS idx_scheduled_loops_one_open_goal")
     await conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_loops_one_open_goal "
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduled_loops_one_open_goal_v2 "
         "ON scheduled_loops(session_id) "
-        "WHERE kind = 'goal' AND status IN ('active', 'paused')"
+        "WHERE kind = 'goal' AND status IN ('active', 'paused', 'waiting')"
     )
     await conn.commit()
 

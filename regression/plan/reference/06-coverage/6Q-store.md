@@ -25,6 +25,7 @@ Existing: SQLite well covered in T1. Only `test_branch_store_backends.py` is a r
 | T1-STORE-12 | `outbox_claim_scoped` | Other `palace_id` / `agent_id` not claimed; gc respects age. |
 | T1-STORE-13 | `goal_ledger_presence` | SQLite: `commit_classified` rolls back on failure. Postgres/Firestore: `None` (pinned until implemented). |
 | T1-STORE-14 | `known_unscoped_tables` | Pins today: usage/runs/loops/locks visible across agent scopes on a shared DB. Flip when scoping lands. |
+| T1-STORE-15 | `waiting_goal_is_one_open_goal` | A `waiting` goal still blocks a second `create_goal` for the same session. |
 
 Migrations and the rest:
 

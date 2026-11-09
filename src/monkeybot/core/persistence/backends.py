@@ -179,7 +179,32 @@ class ScheduledLoopStore(Protocol):
 
     async def resume(self, loop_id: str) -> bool: ...
 
-    async def stop(self, loop_id: str, *, stop_reason: str = "manual") -> bool: ...
+    async def stop(
+        self,
+        loop_id: str,
+        *,
+        stop_reason: str = "manual",
+        completion_evidence: str | None = None,
+    ) -> bool: ...
+
+    async def set_waiting(
+        self,
+        loop_id: str,
+        *,
+        reason: str,
+        wake_at_ms: int | None,
+    ) -> bool: ...
+
+    async def wake(
+        self,
+        loop_id: str,
+        *,
+        reason: str,
+        source: str,
+        now_ms: int | None = None,
+    ) -> bool: ...
+
+    async def release_due_waits(self, now_ms: int | None = None) -> int: ...
 
 
 @runtime_checkable

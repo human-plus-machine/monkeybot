@@ -21,6 +21,13 @@ Existing: T1 `test_scheduled_loops.py`, `test_firestore_scheduled_loops.py`, `te
 | T2-SCHED-09 | `create_goal_requires_slash_goal` | `create_goal` without `/goal`: error; with it: one row. |
 | T2-SCHED-10 | `one_open_goal_per_session` | Second `create_goal` with a different objective: "a goal is already active in this session". |
 | T2-SCHED-11 | `tool_loops` (migrate, recording) | As today. |
+| T2-SCHED-12 | `update_goal_complete_requires_audit` | `update_goal complete` with no audit, or any item not `proved`, is rejected. The goal stays active. |
+| T2-SCHED-13 | `update_goal_complete_judge_gate` | Scripted completion judge: fail, timeout, and bad JSON reject completion. A pass stores `completion_evidence`. |
+| T2-SCHED-14 | `goal_budget_pauses` | After `max_ticks` ticks the goal is `paused` with `budget_exhausted`, never `completed`. Resume starts a new window. |
+| T2-SCHED-15 | `goal_waiting_no_ticks` | `update_goal waiting` records the reason. Advancing the clock does not tick a waiting goal. |
+| T2-SCHED-16 | `goal_waiting_recheck` | `recheck_after` / `release_due_waits` returns the goal to active and it ticks once. |
+| T2-SCHED-17 | `goal_wake_route` | `POST /goals/{id}/wake` makes an active goal due and a waiting goal active. Paused and closed goals return 409. A bad token returns 401. |
+| T2-SCHED-18 | `goal_wake_mid_tick` | A wake during a tick schedules an immediate follow-up, and the reason is fenced in that tick's prompt. |
 | T2-SCHED-G1 | `invoke_tick_busy_409` (gateway) | `POST /scheduler/invoke-tick` during a turn: 409 `SESSION_BUSY`; loop not failed. |
 | T2-SCHED-G2 | `routes_lifecycle` (gateway) | `/scheduler/loops` CRUD and `/goals` lifecycle; reserved session ids rejected; `confirmed=true` required. |
 | T4-SCHED-01 | `http_one_tick_live` | Create via HTTP + invoke-tick: history gains one user message equal to the tick prompt; a real reply follows. |
