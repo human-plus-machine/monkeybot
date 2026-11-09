@@ -725,16 +725,27 @@ async def _execute_serial_chunk(
     loops_mutated = result.loops_mutated
     call = allowed_exec[0]
     try:
-        tool_result = await race_preempt(
-            _execute_one_tool_call(
+        if preempt is None:
+            # Await inline so a fire-and-forget after-response hook still runs
+            # after PRE_TOOL is recorded, matching the unpreempted turn.
+            tool_result = await _execute_one_tool_call(
                 call,
                 ctx=ctx,
                 state=state,
                 tool_executor=tool_executor,
                 hook_manager=hook_manager,
-            ),
-            preempt,
-        )
+            )
+        else:
+            tool_result = await race_preempt(
+                _execute_one_tool_call(
+                    call,
+                    ctx=ctx,
+                    state=state,
+                    tool_executor=tool_executor,
+                    hook_manager=hook_manager,
+                ),
+                preempt,
+            )
     except StepPreemptedError:
         if cancelled is not None and cancelled.is_set():
             yield Error(request_id=ctx.request_id, error="Request cancelled")
@@ -819,12 +830,15 @@ async def _execute_parallel_chunk(
     outcomes: list[object]
     saw_preempt = False
     try:
-        outcomes = list(
-            await race_preempt(
-                asyncio.gather(*tasks, return_exceptions=True),
-                preempt,
+        if preempt is None:
+            outcomes = list(await asyncio.gather(*tasks, return_exceptions=True))
+        else:
+            outcomes = list(
+                await race_preempt(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    preempt,
+                )
             )
-        )
     except StepPreemptedError:
         for t in tasks:
             if not t.done():
