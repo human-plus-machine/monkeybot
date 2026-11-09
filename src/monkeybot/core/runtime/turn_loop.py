@@ -2001,6 +2001,11 @@ async def _run_inner_core(
             exempt_names=_doom_loop_exempt_names(ctx.tools),
         ),
     )
+
+    def _transcript_view() -> list[Message]:
+        return state.chat_messages
+
+    state.ctx = dataclasses.replace(state.ctx, transcript_view=_transcript_view)
     user_row_id = new_row_id()
     harness_turn = input_provenance == "harness"
     await persist_message(

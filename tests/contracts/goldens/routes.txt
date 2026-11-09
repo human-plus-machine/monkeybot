@@ -32,6 +32,7 @@ POST /api/chat-title
 POST /goals/{goal_id}/pause
 POST /goals/{goal_id}/resume
 POST /goals/{goal_id}/stop
+POST /goals/{goal_id}/wake
 POST /scheduler/invoke-tick
 POST /scheduler/loops
 POST /scheduler/loops/{loop_id}/pause

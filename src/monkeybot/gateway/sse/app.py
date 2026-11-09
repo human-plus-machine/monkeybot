@@ -242,6 +242,7 @@ class GatewayRuntime:
     verdict_mailbox: VerdictMailbox | None = None
     nudge_actuator: NudgeActuator | None = None
     judge_worker: JudgeWorker | None = None
+    completion_verifier: Any | None = None
     evidence_guard: EvidencePathGuard = field(default_factory=EvidencePathGuard)
     todo_reminder: TodoListReminder = field(default_factory=TodoListReminder)
 
@@ -365,6 +366,7 @@ class GatewayRuntime:
         self.verdict_mailbox = None
         self.judge_worker = None
         self.nudge_actuator = None
+        self.completion_verifier = self._build_completion_verifier(cfg)
         if cfg is None or not cfg.verifier.enabled:
             self._attach_verifier_inspector()
             return
@@ -430,6 +432,37 @@ class GatewayRuntime:
         )
         self.nudge_actuator = NudgeActuator(self.verdict_mailbox)
         logger.info("progress tracker enabled")
+
+    def _build_completion_verifier(self, cfg: RuntimeConfig | None) -> Any:
+        from monkeybot.core.goals.completion import AuditOnlyVerifier, ProviderCompletionJudge
+        from monkeybot.core.verifier.binding import (
+            current_verifier_binding,
+            resolve_session_verifier_model,
+        )
+
+        goals = cfg.goals if cfg is not None else None
+        judge = goals.completion_judge if goals is not None else None
+        if judge is None or not judge.enabled:
+            return AuditOnlyVerifier()
+        timeout_s = judge.timeout_s
+        model_override = judge.model
+
+        def _model(session: str = "") -> str:
+            return resolve_session_verifier_model(
+                cfg,
+                model_override,
+                session_model=session or None,
+            )
+
+        logger.info(
+            "completion judge enabled %s",
+            kv(model=model_override or "(inherit)", timeout_s=timeout_s),
+        )
+        return ProviderCompletionJudge(
+            lambda: current_verifier_binding().provider or self.provider,
+            model=_model,
+            timeout_s=timeout_s,
+        )
 
     def _release_replaced_verifier(self, live: GatewayRuntime) -> None:
         """Close newly staged verifier resources that are not shared with ``live``."""
@@ -1277,6 +1310,7 @@ class GatewayLoopPort:
                 grants_path=grants_path,
                 read_ledger=read_ledger,
                 subagent_supervisor=supervisor,
+                completion_verifier=gateway_runtime.completion_verifier,
             )
             if transcript_writer is not None:
                 await transcript_writer.write_user_message(

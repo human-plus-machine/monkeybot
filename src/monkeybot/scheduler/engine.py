@@ -159,6 +159,9 @@ async def run_scheduler_loop(
             released = await store.release_stale_claims(stale_claim_ms, now_ms=current_ms)
             if released:
                 logger.warning("scheduler released %d stale tick claims", released)
+            released_waits = await store.release_due_waits(current_ms)
+            if released_waits:
+                logger.info("scheduler released %d waiting goals", released_waits)
             due = await store.list_due(current_ms)
             claimed_rows: list[ScheduledLoopRow] = []
             for candidate in due:

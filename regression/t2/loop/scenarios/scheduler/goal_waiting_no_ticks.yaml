@@ -1,0 +1,36 @@
+id: regression/t2/loop/scenarios/scheduler/goal_waiting_no_ticks
+case: T2-SCHED-15
+description: update_goal waiting records the gate and leaves the goal waiting.
+mode: scripted
+driver: loop
+executor: real
+config:
+  seed_goal_id: goal-fixed
+  seed_goal_objective: Wait for review.
+messages:
+- "[GOAL CONTINUATION · goal_id=goal-fixed · session=loop-scenario]\n\nContinue."
+script:
+- - type: tool_call
+    call_id: c-wait
+    name: update_goal
+    args:
+      goal_id: goal-fixed
+      status: waiting
+      reason: waiting on review
+  - type: done
+- - type: text
+    text: Waiting on review.
+  - type: done
+assertions:
+  turn_completed: true
+  provider_calls: 2
+  required_tools:
+  - update_goal
+  store:
+    goals: 1
+  events_sequence:
+  - type: ToolCallResult
+    tool: update_goal
+    call_id: c-wait
+    result:
+      regex: '"status": "waiting"'

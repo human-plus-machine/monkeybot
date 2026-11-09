@@ -28,6 +28,7 @@ from monkeybot.todo_list.store import TodoListStore
 
 if TYPE_CHECKING:
     from monkeybot.core.config.snapshot import RuntimeConfig
+    from monkeybot.core.llm.provider import Message
     from monkeybot.core.verifier.ledger import GoalLedger
     from monkeybot.core.verifier.mailbox import VerdictMailbox
 
@@ -180,6 +181,8 @@ class TurnContext:
     """Installed skill the user explicitly invoked with a leading `/slug` this turn."""
     background_runs_view: Callable[[], str] | None = None
     """Optional text for the volatile Background subagents section. None when unused."""
+    transcript_view: Callable[[], Sequence[Message]] | None = None
+    """Live chat messages for the completion judge. None outside the turn loop."""
     session: str | None = None
     """Chat session when it differs from ``thread_id`` (a conversation branch's
     history thread); read it through :attr:`session_id`."""
@@ -319,9 +322,15 @@ GOAL_TOOL_DEFS: tuple[ToolDef, ...] = (
     ),
     ToolDef(
         "update_goal",
-        "Update a specific open goal in this conversation. Set status to complete only "
-        "when evidence proves the objective is done. Set active only when the user "
-        "paused the goal and asked to resume. You cannot pause with this tool.",
+        "Update one open goal in this conversation. "
+        "status=complete only after an audit proves every requirement of the objective. "
+        "Pass audit as one item per requirement with requirement, evidence, and verdict "
+        "(proved, contradicted, incomplete, too_weak, or missing). Every verdict must be "
+        "proved, and the evidence must already be in this turn's tool results. "
+        "Call it in its own step, after those tool calls. Ending the turn does not "
+        "finish the goal. status=waiting when blocked on a person or external event; "
+        "pass reason and optional recheck_after (for example 2h). status=active only "
+        "when the user paused the goal and asked to resume. This tool cannot pause a goal.",
         {
             "type": "object",
             "properties": {
@@ -332,7 +341,38 @@ GOAL_TOOL_DEFS: tuple[ToolDef, ...] = (
                 },
                 "status": {
                     "type": "string",
-                    "enum": ["active", "complete"],
+                    "enum": ["active", "waiting", "complete"],
+                },
+                "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Required when status is waiting. What the goal is blocked on.",
+                },
+                "recheck_after": {
+                    "type": "string",
+                    "description": "Optional wait before the goal wakes itself, such as 30m or 2h.",
+                },
+                "audit": {
+                    "type": "array",
+                    "description": "Required when status is complete. One entry per requirement.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "requirement": {"type": "string", "minLength": 1},
+                            "evidence": {"type": "string", "minLength": 1},
+                            "verdict": {
+                                "type": "string",
+                                "enum": [
+                                    "proved",
+                                    "contradicted",
+                                    "incomplete",
+                                    "too_weak",
+                                    "missing",
+                                ],
+                            },
+                        },
+                        "required": ["requirement", "evidence", "verdict"],
+                    },
                 },
             },
             "required": ["goal_id", "status"],

@@ -258,6 +258,7 @@ def _create_tool_executor(
         config=config if config is not None else get_config_store().current_or_none(),
         grants_path=AgentLayout.from_environment().grants_path,
         read_ledger=read_ledger,
+        completion_verifier=getattr(live, "completion_verifier", None),
     )
 
 

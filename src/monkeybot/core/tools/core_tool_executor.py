@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import tempfile
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
@@ -46,6 +47,14 @@ from monkeybot.core.context.tool_result_ingress import (
     cap_tool_result_text,
     sanitize_tool_result_text,
     skip_tool_result_sanitize,
+)
+from monkeybot.core.goals.completion import (
+    AuditOnlyVerifier,
+    CompletionVerifier,
+    audit_blocks_completion,
+    completion_evidence_json,
+    parse_audit,
+    transcript_excerpt,
 )
 from monkeybot.core.goals.service import (
     DurableGoalService,
@@ -1077,6 +1086,7 @@ class CoreToolExecutor(ToolExecutorPort):
         config: RuntimeConfig | None = None,
         grants_path: Path | None = None,
         read_ledger: FileReadLedger | None = None,
+        completion_verifier: CompletionVerifier | None = None,
     ) -> None:
         ws_settings = workspace_settings_from_config()
         self._skills_path = Path(skills_path).resolve()
@@ -1096,6 +1106,7 @@ class CoreToolExecutor(ToolExecutorPort):
         self._attachment_store = attachment_store
         self._run_store = run_store
         self._scheduled_loop_store = scheduled_loop_store
+        self._completion_verifier = completion_verifier or AuditOnlyVerifier()
         self._loops_registry = loops_registry if loops_registry is not None else LoopsToolRegistry()
         self._subagent_registry = dict(subagent_registry or {})
         self._subagent_supervisor = subagent_supervisor
@@ -3367,7 +3378,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 _built_in_tool_error(
                     "validation",
                     "update_goal requires status",
-                    "Pass status as active or complete.",
+                    "Pass status as active, waiting, or complete.",
                 ),
             )
         goal_id = _str_arg(args, "goal_id", "id")
@@ -3380,11 +3391,42 @@ class CoreToolExecutor(ToolExecutorPort):
                     "Pass the goal_id from create_goal.",
                 ),
             )
+        evidence_json: str | None = None
+        wake_at_ms: int | None = None
+        reason = _str_arg(args, "reason")
+        if status == "waiting":
+            recheck = _str_arg(args, "recheck_after")
+            if recheck:
+                try:
+                    from monkeybot.scheduler.interval import parse_interval_ms
+
+                    wake_at_ms = int(time.time() * 1000) + parse_interval_ms(recheck)
+                except ValueError as exc:
+                    return (
+                        None,
+                        _built_in_tool_error(
+                            "validation",
+                            f"recheck_after is invalid: {exc}",
+                            "Pass a duration such as 30m or 2h, or omit it.",
+                        ),
+                    )
+        if status == "complete":
+            evidence_json, gate_error = await self._gate_goal_completion(
+                service_or_err,
+                args,
+                ctx,
+                goal_id=goal_id,
+            )
+            if gate_error is not None:
+                return None, gate_error
         try:
             row = await service_or_err.update(
                 goal_id=goal_id,
                 session_id=ctx.session_id,
                 status=status,
+                reason=reason or None,
+                wake_at_ms=wake_at_ms,
+                completion_evidence=evidence_json,
             )
         except GoalNotFoundError as exc:
             logger.warning(
@@ -3409,7 +3451,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 _built_in_tool_error(
                     "validation",
                     str(exc),
-                    "Use status active or complete.",
+                    "Use status active, waiting, or complete.",
                 ),
             )
         logger.info(
@@ -3426,6 +3468,66 @@ class CoreToolExecutor(ToolExecutorPort):
             ),
             None,
         )
+
+    async def _gate_goal_completion(
+        self,
+        service: DurableGoalService,
+        args: dict[str, Any],
+        ctx: TurnContext,
+        *,
+        goal_id: str,
+    ) -> tuple[str | None, str | None]:
+        """Return completion evidence JSON, or a tool error string."""
+        existing = await service.get(goal_id)
+        if existing is None or existing.session_id != ctx.session_id:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    f"no goal {goal_id} in this session",
+                    "Pass a goal_id that is open in this session.",
+                ),
+            )
+        parsed = parse_audit(args.get("audit"))
+        if isinstance(parsed, str):
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    parsed,
+                    "Pass an audit with one proved item per requirement. The goal stays active.",
+                ),
+            )
+        blocked = audit_blocks_completion(parsed)
+        if blocked is not None:
+            return (
+                None,
+                _built_in_tool_error(
+                    "validation",
+                    blocked,
+                    "Leave the goal active until every requirement is proved.",
+                ),
+            )
+        view = ctx.transcript_view
+        transcript = transcript_excerpt(view()) if view is not None else ""
+        verdict = await self._completion_verifier.verify(
+            existing.objective or existing.prompt,
+            parsed,
+            transcript,
+            thread_id=ctx.thread_id,
+            request_id=ctx.request_id,
+        )
+        if not verdict.passed:
+            detail = "; ".join(verdict.reasons) or "completion judge rejected the audit"
+            return (
+                None,
+                _built_in_tool_error(
+                    "policy",
+                    f"completion is unproven; the goal stays active. {detail}",
+                    "Gather evidence for the remaining requirements, then audit again.",
+                ),
+            )
+        return completion_evidence_json(parsed, verdict), None
 
     async def _tool_ask_user(
         self, args: dict[str, Any], call: ToolCall, ctx: TurnContext

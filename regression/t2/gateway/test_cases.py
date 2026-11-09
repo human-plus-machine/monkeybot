@@ -1080,6 +1080,69 @@ async def test_scheduler_and_goal_lifecycle() -> None:
         assert goal_stop.json()["goal"]["status"] == "completed"
 
 
+@pytest.mark.case("T2-SCHED-17")
+async def test_goal_wake_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MONKEYBOT_GOAL_WAKE_TOKEN", "wake-secret")
+    auth = {"authorization": "Bearer wake-secret"}
+    async with open_gateway(script=_HELLO) as gateway:
+        service = DurableGoalService(gateway.app.state.storage.scheduled_loops())
+        goal, created_goal = await service.create(
+            objective="ship the catalog", session_id="goal-wake"
+        )
+        assert created_goal
+        goal_id = goal.loop_id
+        denied = await gateway.client.post(f"/goals/{goal_id}/wake", json={"reason": "ci"})
+        assert denied.status_code == 401
+        assert error_code(denied) == "UNAUTHORIZED"
+        bad = await gateway.client.post(
+            f"/goals/{goal_id}/wake",
+            json={"reason": "ci"},
+            headers={"authorization": "Bearer nope"},
+        )
+        assert bad.status_code == 401
+        woken = await gateway.client.post(
+            f"/goals/{goal_id}/wake",
+            json={"reason": "ci green", "source": "ci"},
+            headers=auth,
+        )
+        assert woken.status_code == 200
+        body = woken.json()["goal"]
+        assert body["status"] == "active"
+        assert body["wake_reason"] == "ci green"
+        assert body["next_tick_at_ms"] <= int(time.time() * 1000) + 2_000
+        waiting = await service.update(
+            goal_id=goal_id,
+            session_id="goal-wake",
+            status="waiting",
+            reason="needs approval",
+        )
+        assert waiting.status == "waiting"
+        resumed = await gateway.client.post(
+            f"/goals/{goal_id}/wake",
+            json={"reason": "approved", "source": "github"},
+            headers=auth,
+        )
+        assert resumed.status_code == 200
+        assert resumed.json()["goal"]["status"] == "active"
+        paused = await gateway.client.post(f"/goals/{goal_id}/pause")
+        assert paused.status_code == 200
+        blocked = await gateway.client.post(
+            f"/goals/{goal_id}/wake",
+            json={"reason": "again"},
+            headers=auth,
+        )
+        assert blocked.status_code == 409
+        assert error_code(blocked) == "GOAL_PAUSED"
+        await gateway.client.post(f"/goals/{goal_id}/stop")
+        closed = await gateway.client.post(
+            f"/goals/{goal_id}/wake",
+            json={"reason": "too late"},
+            headers=auth,
+        )
+        assert closed.status_code == 409
+        assert error_code(closed) == "GOAL_CLOSED"
+
+
 @pytest.mark.case("T2-STORE-G1")
 async def test_regenerate_replays_without_splitting_tool_pairs() -> None:
     async with open_gateway(script=_TOOL_PAIR_REPLAY) as gateway:

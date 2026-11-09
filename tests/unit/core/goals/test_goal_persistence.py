@@ -50,8 +50,9 @@ def test_planned_create_goal_is_unbounded_and_deferred() -> None:
     )
     assert values.kind == KIND_GOAL
     assert values.objective == "Ship it"
-    assert values.max_ticks is None
+    assert values.max_ticks == 50
     assert values.max_runtime_ms is None
+    assert values.budget_started_at_ms == 1_000
     assert values.next_tick_at_ms == 1_000 + 300_000
     loop_values = planned_create(
         ScheduledLoopCreate(
@@ -394,9 +395,10 @@ async def test_postgres_goal_queries_run() -> None:
         unique_index = await store._pool.fetchval(
             "SELECT indexdef FROM pg_indexes "
             "WHERE tablename = 'scheduled_loops' "
-            "AND indexname = 'idx_scheduled_loops_one_open_goal'"
+            "AND indexname = 'idx_scheduled_loops_one_open_goal_v2'"
         )
         assert unique_index is not None
+        assert "waiting" in unique_index
         await store.create(
             ScheduledLoopCreate(
                 prompt="poll inbox",
@@ -419,7 +421,7 @@ async def test_postgres_goal_queries_run() -> None:
         )
         assert created.kind == KIND_GOAL
         assert created.objective == "Ship it"
-        assert created.max_ticks is None
+        assert created.max_ticks == 50
 
         goals = await store.list_kind(KIND_GOAL)
         assert [row.loop_id for row in goals] == ["goal-pg-1"]

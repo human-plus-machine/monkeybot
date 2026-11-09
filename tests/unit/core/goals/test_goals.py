@@ -55,7 +55,7 @@ async def test_goal_create_is_idempotent_and_one_per_session(store) -> None:
     row, created = await service.create(objective="Ship the report", session_id="sess-1")
     assert created is True
     assert row.kind == KIND_GOAL
-    assert row.max_ticks is None
+    assert row.max_ticks == 50
     assert row.max_runtime_ms is None
     assert row.next_tick_at_ms > row.started_at_ms
     again, created_again = await service.create(
@@ -342,7 +342,17 @@ async def test_create_goal_requires_slash_invocation(tmp_path) -> None:
     done = await ex.execute(
         call=ToolCall(
             name="update_goal",
-            args={"goal_id": payload["goal"]["id"], "status": "complete"},
+            args={
+                "goal_id": payload["goal"]["id"],
+                "status": "complete",
+                "audit": [
+                    {
+                        "requirement": "Ship it",
+                        "evidence": "the report file exists",
+                        "verdict": "proved",
+                    }
+                ],
+            },
             call_id="4",
         ),
         ctx=_ctx(),
@@ -446,8 +456,14 @@ def test_goal_tool_schemas_are_cursor_style() -> None:
     assert list(create.input_schema["properties"]) == ["objective"]
     assert create.input_schema["required"] == ["objective"]
     update = tools["update_goal"]
-    assert list(update.input_schema["properties"]) == ["goal_id", "status"]
-    assert update.input_schema["properties"]["status"]["enum"] == ["active", "complete"]
+    assert list(update.input_schema["properties"]) == [
+        "goal_id",
+        "status",
+        "reason",
+        "recheck_after",
+        "audit",
+    ]
+    assert update.input_schema["properties"]["status"]["enum"] == ["active", "waiting", "complete"]
     assert update.input_schema["required"] == ["goal_id", "status"]
 
 
