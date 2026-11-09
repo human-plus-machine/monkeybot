@@ -655,14 +655,24 @@ class TerminalExecutor:
         stdout_task = asyncio.create_task(_pump_stream(process.stdout, stdout_chunks))
         stderr_task = asyncio.create_task(_pump_stream(process.stderr, stderr_chunks))
         timed_out = False
-        if await _wait_for_exit(process, timeout):
-            timed_out = True
-            kill_process_group(pgid, process)
-            # Reap the direct child if it is still listed; ignore if already gone.
-            with contextlib.suppress(ProcessLookupError):
-                await _wait_for_exit(process, _STREAM_DRAIN_TIMEOUT_SEC)
+        try:
+            if await _wait_for_exit(process, timeout):
+                timed_out = True
+                kill_process_group(pgid, process)
+                # Reap the direct child if it is still listed; ignore if already gone.
+                with contextlib.suppress(ProcessLookupError):
+                    await _wait_for_exit(process, _STREAM_DRAIN_TIMEOUT_SEC)
 
-        drained_clean = await _drain_pumps(stdout_task, stderr_task)
+            drained_clean = await _drain_pumps(stdout_task, stderr_task)
+        except asyncio.CancelledError:
+            kill_process_group(pgid, process)
+            stdout_task.cancel()
+            stderr_task.cancel()
+            with contextlib.suppress(ProcessLookupError, asyncio.CancelledError):
+                await _wait_for_exit(process, _STREAM_DRAIN_TIMEOUT_SEC)
+            with contextlib.suppress(asyncio.CancelledError):
+                await _drain_pumps(stdout_task, stderr_task)
+            raise
         if not drained_clean:
             # Orphans may still hold the capture pipes open after the child exits.
             kill_process_group(pgid, process)

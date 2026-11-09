@@ -30,10 +30,14 @@ from monkeybot.core.llm.provider import Provider, ToolCall
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.mcp.session_visibility import idle_note
-from monkeybot.core.messages.tool_integrity import cancelled_tool_result_text
+from monkeybot.core.messages.tool_integrity import (
+    cancelled_tool_result_text,
+    preempted_tool_result_text,
+)
 from monkeybot.core.path_safety import path_contained_under
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.runtime.context_budget import ContextBudgeter
+from monkeybot.core.runtime.preempt import StepPreemptedError, race_preempt
 from monkeybot.core.tools.inspector import InspectorToolCall, ToolInspector, format_denial
 from monkeybot.core.tools.permission import (
     grant_session_access,
@@ -221,6 +225,7 @@ class ToolBatchState:
     tools_dirty: bool
     pre_tool_extra_next: str | None
     aborted: bool = False
+    preempted: bool = False
     needs_followup_after_tools: bool = True
     tools_dirty_reason: str | None = None
     started_at: dict[str, float] = dataclasses.field(default_factory=dict)
@@ -233,6 +238,7 @@ class _GateChunkResult:
     allowed_exec: list[ToolCall] = dataclasses.field(default_factory=list)
     chunk_responses: list[ContentBlock] = dataclasses.field(default_factory=list)
     aborted: bool = False
+    preempted: bool = False
 
 
 @dataclasses.dataclass
@@ -242,6 +248,7 @@ class _ExecuteChunkResult:
     mcp_mutated: bool = False
     loops_mutated: bool = False
     aborted: bool = False
+    preempted: bool = False
 
 
 async def _emit_rejected_batch(
@@ -293,6 +300,7 @@ class _InspectorGateOutcome:
     denial_code: str | None = None
     denial_kind: str | None = None
     decision: str = "allow"
+    preempted: bool = False
 
 
 # Workspace tools whose ``path`` arg is a filesystem path. MCP / computer /
@@ -380,6 +388,7 @@ async def _resolve_inspector_decision(
     ctx: TurnContext,
     inspectors: list[ToolInspector],
     outcome: _InspectorGateOutcome,
+    preempt: asyncio.Event | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Run inspectors for one call; may yield ``ToolConfirmationRequestEvent``.
 
@@ -430,9 +439,21 @@ async def _resolve_inspector_decision(
                 timeout_sec = float(
                     env_value_or_current(ctx.config, "PENDING_RESPONSE_TIMEOUT_SEC", "300")
                 )
-                payload = await _await_user_response_any(
-                    bus, fut, call.call_id, timeout_sec=timeout_sec, config=ctx.config
-                )
+                try:
+                    payload = await race_preempt(
+                        _await_user_response_any(
+                            bus, fut, call.call_id, timeout_sec=timeout_sec, config=ctx.config
+                        ),
+                        preempt,
+                    )
+                except StepPreemptedError:
+                    if not fut.done():
+                        fut.cancel()
+                    if ctx.cancelled is not None and ctx.cancelled.is_set():
+                        raise asyncio.CancelledError from None
+                    outcome.preempted = True
+                    outcome.allowed = False
+                    return
                 if payload.get("_timeout"):
                     outcome.allowed = False
                     outcome.decision = "confirm_denied"
@@ -504,6 +525,7 @@ async def _gate_chunk_calls(
     ctx: TurnContext,
     inspectors: list[ToolInspector],
     cancelled: asyncio.Event | None,
+    preempt: asyncio.Event | None,
     finish_tool: _FinishTool,
     result: _GateChunkResult,
     started_at: dict[str, float],
@@ -550,6 +572,7 @@ async def _gate_chunk_calls(
                 ctx=ctx,
                 inspectors=inspectors,
                 outcome=insp_outcome,
+                preempt=preempt,
             ):
                 yield evt
         except asyncio.CancelledError:
@@ -573,6 +596,12 @@ async def _gate_chunk_calls(
                 result.aborted = True
                 return
             raise
+
+        if insp_outcome.preempted:
+            result.allowed_exec = allowed_exec
+            result.chunk_responses = chunk_responses
+            result.preempted = True
+            return
 
         if not insp_outcome.allowed:
             msg = format_denial(
@@ -688,19 +717,35 @@ async def _execute_serial_chunk(
     hook_manager: HookManager | None,
     finish_tool: _FinishTool,
     result: _ExecuteChunkResult,
+    preempt: asyncio.Event | None = None,
+    cancelled: asyncio.Event | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute a single allowed tool call serially."""
     mcp_mutated = result.mcp_mutated
     loops_mutated = result.loops_mutated
     call = allowed_exec[0]
     try:
-        tool_result = await _execute_one_tool_call(
-            call,
-            ctx=ctx,
-            state=state,
-            tool_executor=tool_executor,
-            hook_manager=hook_manager,
+        tool_result = await race_preempt(
+            _execute_one_tool_call(
+                call,
+                ctx=ctx,
+                state=state,
+                tool_executor=tool_executor,
+                hook_manager=hook_manager,
+            ),
+            preempt,
         )
+    except StepPreemptedError:
+        if cancelled is not None and cancelled.is_set():
+            yield Error(request_id=ctx.request_id, error="Request cancelled")
+            result.mcp_mutated = mcp_mutated
+            result.loops_mutated = loops_mutated
+            result.aborted = True
+            return
+        result.mcp_mutated = mcp_mutated
+        result.loops_mutated = loops_mutated
+        result.preempted = True
+        return
     except asyncio.CancelledError:
         yield Error(request_id=ctx.request_id, error="Request cancelled")
         result.mcp_mutated = mcp_mutated
@@ -737,6 +782,7 @@ async def _execute_parallel_chunk(
     hook_manager: HookManager | None,
     finish_tool: _FinishTool,
     result: _ExecuteChunkResult,
+    preempt: asyncio.Event | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute multiple allowed tool calls concurrently (bounded semaphore)."""
     mcp_mutated = result.mcp_mutated
@@ -771,8 +817,24 @@ async def _execute_parallel_chunk(
 
     tasks = [asyncio.create_task(_run_parallel(c)) for c in allowed_exec]
     outcomes: list[object]
+    saw_preempt = False
     try:
+        outcomes = list(
+            await race_preempt(
+                asyncio.gather(*tasks, return_exceptions=True),
+                preempt,
+            )
+        )
+    except StepPreemptedError:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
         outcomes = list(await asyncio.gather(*tasks, return_exceptions=True))
+        if cancelled is not None and cancelled.is_set():
+            saw_cancel = True
+        else:
+            saw_cancel = False
+            saw_preempt = True
     except asyncio.CancelledError:
         for t in tasks:
             if not t.done():
@@ -785,7 +847,8 @@ async def _execute_parallel_chunk(
     for idx, outcome in enumerate(outcomes):
         call = allowed_exec[idx]
         if isinstance(outcome, asyncio.CancelledError):
-            saw_cancel = True
+            if not saw_preempt:
+                saw_cancel = True
             continue
         if isinstance(outcome, Exception):
             logger.warning(
@@ -822,6 +885,9 @@ async def _execute_parallel_chunk(
         yield Error(request_id=ctx.request_id, error="Request cancelled")
         result.aborted = True
         return
+    if saw_preempt:
+        result.preempted = True
+        return
     result.aborted = False
 
 
@@ -834,6 +900,7 @@ async def _execute_allowed_chunk(
     safe_names: frozenset[str],
     tool_executor: ToolExecutorPort,
     cancelled: asyncio.Event | None,
+    preempt: asyncio.Event | None,
     hook_manager: HookManager | None,
     turn_index: int,
     finish_tool: _FinishTool,
@@ -872,6 +939,8 @@ async def _execute_allowed_chunk(
             hook_manager=hook_manager,
             finish_tool=finish_tool,
             result=result,
+            preempt=preempt,
+            cancelled=cancelled,
         ):
             yield evt
     else:
@@ -885,6 +954,7 @@ async def _execute_allowed_chunk(
             hook_manager=hook_manager,
             finish_tool=finish_tool,
             result=result,
+            preempt=preempt,
         ):
             yield evt
 
@@ -1091,6 +1161,7 @@ def _fill_abort_tool_responses(
     finish_tool: _FinishTool,
     request_id: str,
     thread_id: str,
+    result_text: Callable[[str], str] = cancelled_tool_result_text,
 ) -> list[ToolCallResult]:
     """Merge pending chunk results; synthesize cancel envelopes for missing ids.
 
@@ -1106,9 +1177,7 @@ def _fill_abort_tool_responses(
     for call in ordered:
         if call.call_id in responded_ids:
             continue
-        result_evt, tool_resp = finish_tool(
-            call, ToolExecutionResult.err(cancelled_tool_result_text(call.name))
-        )
+        result_evt, tool_resp = finish_tool(call, ToolExecutionResult.err(result_text(call.name)))
         events.append(result_evt)
         all_tool_responses.append(tool_resp)
         responded_ids.add(call.call_id)
@@ -1120,6 +1189,7 @@ def _fill_abort_tool_responses(
             thread_id=thread_id,
             completed_count=completed_count,
             cancelled_count=len(events),
+            reason="preempt" if result_text is preempted_tool_result_text else "cancel",
         ),
     )
     return events
@@ -1134,6 +1204,7 @@ async def dispatch_tool_batch(
     inspectors: list[ToolInspector],
     tool_executor: ToolExecutorPort,
     cancelled: asyncio.Event | None,
+    preempt: asyncio.Event | None = None,
     history: HistoryStore,
     usage: Usage,
     provider: Provider,
@@ -1203,11 +1274,17 @@ async def dispatch_tool_batch(
             ctx=ctx,
             inspectors=inspectors,
             cancelled=cancelled,
+            preempt=preempt,
             finish_tool=_finish_tool,
             result=gate_result,
             started_at=state.started_at,
         ):
             yield evt
+
+        if gate_result.preempted and not gate_result.aborted:
+            state.preempted = True
+            abort_pending = gate_result.chunk_responses
+            break
 
         if gate_result.aborted:
             state.aborted = True
@@ -1234,6 +1311,7 @@ async def dispatch_tool_batch(
             safe_names=safe_names,
             tool_executor=tool_executor,
             cancelled=cancelled,
+            preempt=preempt,
             hook_manager=hook_manager,
             turn_index=turn_index,
             finish_tool=_finish_tool,
@@ -1248,10 +1326,16 @@ async def dispatch_tool_batch(
             state.needs_followup_after_tools = False
             abort_pending = chunk_responses
             break
+        if exec_result.preempted:
+            state.preempted = True
+            abort_pending = chunk_responses
+            break
 
         all_tool_responses.extend(chunk_responses)
 
-    if state.aborted:
+    if state.aborted or state.preempted:
+        if state.aborted:
+            state.preempted = False
         for evt in _fill_abort_tool_responses(
             ordered=ordered,
             all_tool_responses=all_tool_responses,
@@ -1259,6 +1343,9 @@ async def dispatch_tool_batch(
             finish_tool=_finish_tool,
             request_id=ctx.request_id,
             thread_id=ctx.thread_id,
+            result_text=(
+                cancelled_tool_result_text if state.aborted else preempted_tool_result_text
+            ),
         ):
             yield evt
 

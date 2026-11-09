@@ -4,6 +4,9 @@ Two queues, intentionally separate from HITL ``ToolConfirmationRequest``:
 
 * **Steer** — inject user text at the next safe loop boundary (after the current
   tool batch / before the next provider call) while a turn is in flight.
+  Promoting a follow-up also sets ``preempt_event`` so the current step stops
+  immediately and the text is injected on the next loop pass. ``enqueue_steer``
+  does not preempt.
 * **Follow-up** — FIFO prompts drained when the session would otherwise go idle
   (after ``TurnComplete`` / lock release).
 
@@ -12,6 +15,7 @@ Gateway routes enqueue; the agent loop and gateway drain.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections import deque
 from dataclasses import dataclass
@@ -94,6 +98,9 @@ class InputAdmission:
         # it back or start a turn after telling the client it was gone.
         self._draining_ids: set[str] = set()
         self._dropped_while_draining: set[str] = set()
+        # Set by promote ("Send now"). The running step races this event and
+        # aborts. Cleared once the steer queue has been drained or dropped.
+        self.preempt_event = asyncio.Event()
 
     @property
     def steer_depth(self) -> int:
@@ -160,11 +167,21 @@ class InputAdmission:
             None,
         )
 
+    def request_preempt(self) -> None:
+        """Ask the running step to abort so a promoted steer can be injected."""
+        self.preempt_event.set()
+
+    def clear_preempt(self) -> None:
+        """Drop a preempt signal after the steer queue was drained or discarded."""
+        self.preempt_event.clear()
+
     def promote_follow_up(self, request_id: str) -> int:
-        """Move a follow-up into the steer queue. Return 0-based steer position.
+        """Move a follow-up into the steer queue and preempt the current step.
 
         Capacity is checked before removal so a full steer queue cannot drop
-        the follow-up. Remaining follow-ups keep their FIFO order.
+        the follow-up. Remaining follow-ups keep their FIFO order. The running
+        turn races ``preempt_event`` and injects this steer without waiting for
+        the model stream or an in-flight tool to finish.
 
         Raises:
             FollowUpNotFoundError: when ``request_id`` is not queued.
@@ -187,6 +204,7 @@ class InputAdmission:
                 queued_request_id=item.request_id,
             )
         )
+        self.request_preempt()
         return len(self._steer) - 1
 
     def drop_follow_up(self, request_id: str) -> None:
@@ -274,6 +292,10 @@ class InputAdmission:
         self._steer = remaining
         for follow_up in reversed(promoted):
             self._follow_up.appendleft(follow_up)
+        if promoted:
+            # These items are follow-ups again. A stale preempt must not abort
+            # the next turn before that follow-up starts.
+            self.clear_preempt()
         return len(promoted)
 
     def clear_steer(self) -> None:
@@ -284,6 +306,7 @@ class InputAdmission:
         """
         self.restore_promoted_steers()
         self._steer.clear()
+        self.clear_preempt()
 
     def clear_all(self) -> None:
         """Drop steer and follow-up queues (session teardown)."""
@@ -291,6 +314,7 @@ class InputAdmission:
         self._follow_up.clear()
         self._draining_ids.clear()
         self._dropped_while_draining.clear()
+        self.clear_preempt()
 
 
 def join_text(content: list[ContentBlock]) -> str:

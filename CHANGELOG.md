@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- Send now (`POST /sessions/{id}/queue/{request_id}/steer`) stops the current step immediately. The model stream is cut off, a running tool is killed, and the message is injected into the same turn. Stop still ends the turn and does not inject it.
+
 ## [core v3.14.0] - 2026-11-04
 
 ### Added

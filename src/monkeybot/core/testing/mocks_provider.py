@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import builtins
 import json
 import os
@@ -124,7 +125,11 @@ _EVENT_TYPES: tuple[str, ...] = (
     "usage",
     "done",
     "raise",
+    "hang",
 )
+
+# A scripted hang fails the test instead of blocking CI when nothing cancels it.
+HANG_TIMEOUT_S = 5.0
 
 _EVENT_FIELDS: dict[str, frozenset[str]] = {
     "text": frozenset({"text"}),
@@ -143,6 +148,7 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
     ),
     "done": frozenset({"truncated"}),
     "raise": frozenset({"error", "message", "after"}),
+    "hang": frozenset(),
 }
 
 
@@ -173,6 +179,17 @@ class RaiseStep:
 
 
 @dataclass(frozen=True, kw_only=True)
+class HangStep:
+    """Block the scripted stream until it is cancelled.
+
+    ``timeout_s`` bounds a hang nothing preempts, so a regression that stops
+    racing the stream fails instead of stalling the suite.
+    """
+
+    timeout_s: float = HANG_TIMEOUT_S
+
+
+@dataclass(frozen=True, kw_only=True)
 class CountInputTokensCall:
     """One recorded ``count_input_tokens`` invocation."""
 
@@ -188,6 +205,7 @@ class _TurnPlan:
     events: tuple[ProviderEvent, ...]
     error: type[BaseException] | None = None
     message: str = ""
+    hang_s: float | None = None
 
 
 def _compile_turn(turn: object, *, index: int) -> _TurnPlan:
@@ -196,14 +214,24 @@ def _compile_turn(turn: object, *, index: int) -> _TurnPlan:
         raise TypeError(f"{label} must be a list of events, got {type(turn).__name__}")
     raise_step: RaiseStep | None = None
     raise_at: int | None = None
+    hang: HangStep | None = None
     events: list[ProviderEvent] = []
     for item in turn:
+        if isinstance(item, HangStep):
+            if hang is not None or raise_step is not None:
+                raise ValueError(f"{label} has more than one hang or raise step")
+            hang = item
+            continue
         if isinstance(item, RaiseStep):
+            if hang is not None:
+                raise ValueError(f"{label} has a raise step after hang")
             if raise_step is not None:
                 raise ValueError(f"{label} has more than one raise step")
             raise_step = item
             raise_at = len(events) if item.after is None else item.after
             continue
+        if hang is not None:
+            raise ValueError(f"{label} has events after a hang step")
         if not isinstance(item, _PROVIDER_EVENT_TYPES):
             raise TypeError(
                 f"{label} has {type(item).__name__}, expected a provider event or RaiseStep"
@@ -215,7 +243,10 @@ def _compile_turn(turn: object, *, index: int) -> _TurnPlan:
             )
         events.append(item)
     if raise_step is None:
-        return _TurnPlan(events=tuple(events))
+        return _TurnPlan(
+            events=tuple(events),
+            hang_s=None if hang is None else hang.timeout_s,
+        )
     if raise_at is None or raise_at > len(events):
         raise ValueError(f"{label} raise after={raise_at} but the turn has {len(events)} event(s)")
     return _TurnPlan(
@@ -235,7 +266,7 @@ class ScriptedProvider:
 
     def __init__(
         self,
-        turns: Sequence[Sequence[ProviderEvent | RaiseStep]],
+        turns: Sequence[Sequence[ProviderEvent | RaiseStep | HangStep]],
         *,
         name: str = "fake",
         supports_streaming: bool = True,
@@ -285,6 +316,14 @@ class ScriptedProvider:
         self._cursor += 1
         for ev in plan.events:
             yield ev
+        if plan.hang_s is not None:
+            try:
+                await asyncio.wait_for(asyncio.Event().wait(), timeout=plan.hang_s)
+            except TimeoutError as exc:
+                raise RuntimeError(
+                    f"scripted provider hang was not cancelled within {plan.hang_s:g}s"
+                ) from exc
+            return
         if plan.error is not None:
             raise plan.error(plan.message)
 
@@ -390,7 +429,9 @@ def _exception_class(name: str, *, where: str) -> type[BaseException]:
     )
 
 
-def _event_from_mapping(raw: Mapping[str, object], *, where: str) -> ProviderEvent | RaiseStep:
+def _event_from_mapping(
+    raw: Mapping[str, object], *, where: str
+) -> ProviderEvent | RaiseStep | HangStep:
     kind = raw.get("type")
     known = ", ".join(_EVENT_TYPES)
     if not isinstance(kind, str) or kind not in _EVENT_FIELDS:
@@ -451,6 +492,8 @@ def _event_from_mapping(raw: Mapping[str, object], *, where: str) -> ProviderEve
         )
     if kind == "done":
         return Done(truncated=_as_bool(raw.get("truncated", False), where=f"{where}.truncated"))
+    if kind == "hang":
+        return HangStep()
     after: int | None
     if "after" not in raw or raw["after"] is None:
         after = None
@@ -502,7 +545,9 @@ def _load_document(text: str, *, suffix: str, where: str) -> object:
     return _load_yaml(text, where=where)
 
 
-def _turns_from_document(data: object, *, where: str) -> list[list[ProviderEvent | RaiseStep]]:
+def _turns_from_document(
+    data: object, *, where: str
+) -> list[list[ProviderEvent | RaiseStep | HangStep]]:
     body = data
     if isinstance(data, dict):
         if set(data) != {"script"}:
@@ -513,12 +558,12 @@ def _turns_from_document(data: object, *, where: str) -> list[list[ProviderEvent
         body = cast(object, data["script"])
     if not isinstance(body, list):
         raise ValueError(f"{where}: script must be a list of turns")
-    turns: list[list[ProviderEvent | RaiseStep]] = []
+    turns: list[list[ProviderEvent | RaiseStep | HangStep]] = []
     for i, turn in enumerate(body):
         turn_where = f"{where}: turn {i + 1}"
         if not isinstance(turn, list):
             raise ValueError(f"{turn_where} must be a list of events, got {type(turn).__name__}")
-        events: list[ProviderEvent | RaiseStep] = []
+        events: list[ProviderEvent | RaiseStep | HangStep] = []
         for j, item in enumerate(turn):
             events.append(
                 _event_from_mapping(
@@ -541,8 +586,8 @@ def load_scripted_provider(
     The file is a list of turns, and each turn is a list of events. A mapping
     with a single ``script`` key is also accepted. Event ``type`` is one of
     ``text``, ``thinking``, ``tool_call``, ``tool_input_delta``, ``grounding``,
-    ``usage``, ``done`` (optional ``truncated``), or ``raise`` (``error`` class
-    name, optional ``message`` and ``after``).
+    ``usage``, ``done`` (optional ``truncated``), ``raise`` (``error`` class
+    name, optional ``message`` and ``after``), or ``hang`` (block until cancelled).
     """
     file = Path(path).expanduser()
     where = str(file)
@@ -578,6 +623,7 @@ def scripted_provider_from_env(
 
 __all__ = [
     "CountInputTokensCall",
+    "HangStep",
     "RaiseStep",
     "ScriptedFakeProvider",
     "ScriptedProvider",

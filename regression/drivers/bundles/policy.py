@@ -181,6 +181,12 @@ class _ScenarioConfirmInspector:
         confirm_all = False
         ids: set[str] = set()
         for step in steps:
+            when = step.when
+            if when is not None and when.event == "tool_confirmation":
+                if when.call_id is None:
+                    confirm_all = True
+                else:
+                    ids.add(when.call_id)
             if not isinstance(step, ConfirmToolStep):
                 continue
             call_id = step.call_id or step.when.call_id
@@ -218,7 +224,11 @@ def _inspectors(
         inspectors.append(computer_inspector)
     if policy is not None:
         inspectors.extend(policy.inspectors)
-    elif any(isinstance(step, ConfirmToolStep) for step in scenario.steps):
+    elif any(
+        isinstance(step, ConfirmToolStep)
+        or (step.when is not None and step.when.event == "tool_confirmation")
+        for step in scenario.steps
+    ):
         inspectors.append(_ScenarioConfirmInspector(scenario.steps))
     else:
         inspectors.append(AllowInspector())

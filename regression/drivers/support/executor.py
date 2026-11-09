@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,9 @@ def _recording_executor(scenario: Scenario) -> RecordingExecutor:
     return _MappedRecording(scenario.tool_results)
 
 
+_HANG_TIMEOUT_S = 5.0
+
+
 class _MappedRecording(RecordingExecutor):
     """Recording executor that answers each call id from ``tool_results``."""
 
@@ -36,6 +40,15 @@ class _MappedRecording(RecordingExecutor):
         envelope = self._envelopes.get(call.call_id)
         if envelope is None:
             return self.result
+        if envelope.get("hang") is True:
+            try:
+                await asyncio.wait_for(asyncio.Event().wait(), timeout=_HANG_TIMEOUT_S)
+            except TimeoutError as exc:
+                raise LoopDriverError(
+                    f"tool_results[{call.call_id}] hang was not cancelled within "
+                    f"{_HANG_TIMEOUT_S:g}s"
+                ) from exc
+            return ToolExecutionResult.ok_text("")
         try:
             text = json.dumps(envelope)
         except TypeError as exc:
