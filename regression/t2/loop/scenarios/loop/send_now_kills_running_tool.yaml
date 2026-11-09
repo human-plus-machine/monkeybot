@@ -1,0 +1,54 @@
+id: regression/t2/loop/scenarios/loop/send_now_kills_running_tool
+case: T2-LOOP-44
+description: Send now kills the running tool and injects the message before the next model call.
+mode: scripted
+driver: loop
+messages:
+- read a file
+script:
+- - type: tool_call
+    call_id: r1
+    name: read_file
+    args:
+      path: a.txt
+  - type: done
+- - type: text
+    text: steered reply
+  - type: done
+tool_results:
+  r1:
+    hang: true
+steps:
+- action: queue_follow_up
+  request_id: q-now
+  text: steer-now
+  when:
+    event: ToolCallStarted
+    nth: 1
+    call_id: r1
+- action: promote_follow_up
+  request_id: q-now
+  when:
+    event: ToolCallStarted
+    nth: 1
+    call_id: r1
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  events_sequence:
+  - type: ToolCallResult
+    call_id: r1
+    error:
+      regex: stopped because the user sent a new message
+  - type: UserSteered
+    text: steer-now
+    queued_request_id: q-now
+  history:
+    no_repaired_rows: true
+    tool_pairs_intact: true
+  provider_request:
+  - n: 2
+    messages_contain: steer-now
+  - n: 2
+    messages_contain: stopped because the user sent a new message

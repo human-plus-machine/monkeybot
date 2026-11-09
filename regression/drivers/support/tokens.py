@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from monkeybot.core.llm.provider import ToolCall
-from monkeybot.core.testing.mocks_provider import RaiseStep, _exception_class
+from monkeybot.core.testing.mocks_provider import HangStep, RaiseStep, _exception_class
 from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
 from regression.drivers.bundles.protocol import LoopDriverError
 from regression.drivers.support.paths import (
@@ -20,7 +20,7 @@ from regression.drivers.support.paths import (
     _RESULT_FIELD_TOKENS,
     _WORKSPACE_TOKEN,
 )
-from regression.schema.events import RaiseEvent, to_provider_event
+from regression.schema.events import HangEvent, RaiseEvent, to_provider_event
 from regression.schema.scenario import Scenario
 from testkit.provider import ScriptedProvider
 from testkit.verifier import ScriptedJudge
@@ -313,7 +313,9 @@ def _script_turns(
         compiled: list[Any] = []
         where = f"{scenario.case} script turn {index + 1}"
         for event in turn:
-            if isinstance(event, RaiseEvent):
+            if isinstance(event, HangEvent):
+                compiled.append(HangStep())
+            elif isinstance(event, RaiseEvent):
                 compiled.append(
                     RaiseStep(
                         error=_exception_class(event.error, where=where),

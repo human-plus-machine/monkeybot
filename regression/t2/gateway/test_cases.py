@@ -158,6 +158,14 @@ _QUEUE = """\
     text: after-promote
   - type: done
 """
+_SEND_NOW = """\
+- - type: text
+    text: partial-now
+  - type: hang
+- - type: text
+    text: steered-reply
+  - type: done
+"""
 
 
 def _rewrite_config(gateway: GatewaySession, mutate: Any) -> None:
@@ -472,17 +480,50 @@ async def test_queue_starts_promotes_and_drops() -> None:
             assert dropped.status_code == 202
             removed = await gateway.client.delete("/sessions/s-11/queue/q-drop")
             assert removed.status_code == 204
-            await _answer(gateway, "s-11", "ask1", "yes")
-            finished = await reader.until("TurnComplete")
+            finished = await reader.until("TurnComplete", timeout=2)
             steered = _frame(finished, "UserSteered")
             assert steered.get("queued_request_id") == "q-promote"
             assert steered.get("request_id") == "r-busy"
             assert "promoted-text" in str(steered.get("text", ""))
+            late = await gateway.client.post(
+                "/sessions/s-11/ask-user/ask1",
+                json={"answer": "yes"},
+            )
+            assert late.status_code == 409
+            assert error_code(late) == "STALE_PENDING_RESPONSE"
             await wait_turn(gateway, "s-11")
         rows = await history(gateway, "s-11")
         blob = "\n".join(message_text(row) for row in rows)
         assert "dropped-text" not in blob
         assert "promoted-text" in blob
+
+
+@pytest.mark.case("T2-GW-23")
+async def test_send_now_preempts_hanging_provider() -> None:
+    """Promote while the provider is blocked injects before the turn ends."""
+    async with open_gateway(script=_SEND_NOW) as gateway:
+        await gateway.create_session("s-23")
+        async with listening(gateway, "s-23") as reader:
+            await reader.until("ActiveRequests")
+            await _reply(gateway, "s-23", "r1", "go")
+            opening = await reader.until("AssistantDelta")
+            assert any(frame.get("delta") == "partial-now" for frame in opening)
+            queued = await gateway.client.post(
+                "/sessions/s-23/queue",
+                json={"request_id": "q-now", "message": "send-now-body"},
+            )
+            assert queued.status_code == 202
+            promoted = await gateway.client.post("/sessions/s-23/queue/q-now/steer")
+            assert promoted.status_code == 202
+            steered_frames = await reader.until("UserSteered", timeout=1)
+            steered = _frame(steered_frames, "UserSteered")
+            assert steered.get("queued_request_id") == "q-now"
+            assert "send-now-body" in str(steered.get("text", ""))
+            finished = await reader.until("TurnComplete")
+            assert sum(frame.get("type") == "TurnComplete" for frame in finished) == 1
+            assert any(frame.get("delta") == "steered-reply" for frame in finished)
+            extra = await reader.collect(0.3)
+            assert not any(frame.get("type") == "TurnComplete" for frame in extra)
 
 
 @pytest.mark.case("T2-GW-12")

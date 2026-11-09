@@ -1,0 +1,43 @@
+id: regression/t2/loop/scenarios/loop/send_now_on_final_step
+case: T2-LOOP-46
+description: Send now on a finished text reply still joins that turn instead of waiting for a later one.
+mode: scripted
+driver: loop
+messages:
+- answer
+script:
+- - type: text
+    text: final answer
+  - type: done
+- - type: text
+    text: steered reply
+  - type: done
+steps:
+- action: queue_follow_up
+  request_id: q-now
+  text: steer-now
+  when:
+    event: done
+    nth: 1
+- action: promote_follow_up
+  request_id: q-now
+  when:
+    event: done
+    nth: 1
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  events_sequence:
+  - type: AssistantDelta
+    delta: final answer
+  - type: UserSteered
+    text: steer-now
+    queued_request_id: q-now
+  - type: AssistantDelta
+    delta: steered reply
+  provider_request:
+  - n: 2
+    messages_contain: final answer
+  - n: 2
+    messages_contain: steer-now

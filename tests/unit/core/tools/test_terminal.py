@@ -540,6 +540,54 @@ class TestTerminalExecutorTimeout:
         assert exc_info.value.timeout == 1
 
     @pytest.mark.asyncio
+    async def test_cancel_kills_process(self, executor):
+        """Cancelling the execute task kills the child, including a jailed grandchild."""
+        import os
+        import subprocess
+
+        marker = "monkeybot-cancel-kill-marker"
+
+        def sleeper_pids() -> set[int]:
+            out = subprocess.check_output(["ps", "-ax", "-o", "pid=,command="], text=True)
+            found: set[int] = set()
+            for line in out.splitlines():
+                if marker not in line:
+                    continue
+                pid_s = line.split(None, 1)[0]
+                found.add(int(pid_s))
+            return found
+
+        task = asyncio.create_task(
+            executor.execute(
+                "python3",
+                ["-c", f"import time; time.sleep(60)  # {marker}"],
+                timeout=30,
+            )
+        )
+        spawned: set[int] = set()
+        for _ in range(50):
+            spawned = sleeper_pids()
+            if spawned:
+                break
+            await asyncio.sleep(0.05)
+        assert spawned, "sleep process did not start"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        for _ in range(50):
+            alive: list[int] = []
+            for pid in spawned:
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    continue
+                alive.append(pid)
+            if not alive:
+                return
+            await asyncio.sleep(0.05)
+        raise AssertionError(f"processes still running after cancel: {spawned}")
+
+    @pytest.mark.asyncio
     async def test_timeout_preserves_partial_stdout(self, executor):
         """Drained stdout/stderr from before kill are attached to the error."""
         from monkeybot.core.tools.terminal import CommandTimeoutError

@@ -521,6 +521,15 @@ async def _await_subagent_drain(
                 drain_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await drain_task
+    except asyncio.CancelledError:
+        # The tool task itself was cancelled (Send now), not the parent
+        # cancel event. Kill the child or it keeps running after the turn moves on.
+        await stop_subagent_process(proc_holder[0], pgid=pgid_holder[0])
+        if not drain_task.done():
+            drain_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await drain_task
+        raise
     finally:
         if cancel_wait is not None and not cancel_wait.done():
             cancel_wait.cancel()

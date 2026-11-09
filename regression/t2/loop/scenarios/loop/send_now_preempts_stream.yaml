@@ -1,0 +1,44 @@
+id: regression/t2/loop/scenarios/loop/send_now_preempts_stream
+case: T2-LOOP-43
+description: Send now cuts off the model stream and injects the message in the same turn.
+mode: scripted
+driver: loop
+messages:
+- start answering
+script:
+- - type: text
+    text: Hello partial
+  - type: hang
+- - type: text
+    text: steered reply
+  - type: done
+steps:
+- action: queue_follow_up
+  request_id: q-now
+  text: steer-now
+  when:
+    event: text
+    nth: 1
+- action: promote_follow_up
+  request_id: q-now
+  when:
+    event: text
+    nth: 1
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  events_sequence:
+  - type: AssistantDelta
+    delta: Hello partial
+  - type: UserSteered
+    text: steer-now
+    queued_request_id: q-now
+  - type: AssistantDelta
+    delta: steered reply
+  response_contains: steered reply
+  provider_request:
+  - n: 2
+    messages_contain: Hello partial
+  - n: 2
+    messages_contain: steer-now
