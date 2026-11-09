@@ -27,7 +27,11 @@ from monkeybot.core.persistence.goal_ledger import (
     Provenance,
     Status,
 )
-from monkeybot.core.persistence.scheduled_loops import ScheduledLoopCreate
+from monkeybot.core.persistence.scheduled_loops import (
+    KIND_GOAL,
+    OpenGoalExistsError,
+    ScheduledLoopCreate,
+)
 from monkeybot.core.persistence.thread_summary import CONTEXT_SUMMARY_PREFIX
 from monkeybot.core.persistence.usage_buckets import utc_bucket_key
 from monkeybot.core.runtime.history_rewrite import (
@@ -510,3 +514,32 @@ async def test_known_unscoped_tables(open_backend: Any, tmp_path: Path) -> None:
     session = _id("lock")
     assert await scope_a.session_turns().try_acquire(session, "request-1")
     assert await scope_b.session_turns().is_busy(session)
+
+
+@pytest.mark.case("T1-STORE-15")
+async def test_waiting_goal_is_one_open_goal(open_backend: Any) -> None:
+    backend = await open_backend(agent_scope="scope-a")
+    loops = backend.scheduled_loops()
+    session = _id("goal-session")
+    first = await loops.create(
+        ScheduledLoopCreate(
+            prompt="First",
+            interval_ms=60_000,
+            session_id=session,
+            loop_id=_id("goal"),
+            kind=KIND_GOAL,
+            objective="First",
+        )
+    )
+    assert await loops.set_waiting(first.loop_id, reason="review", wake_at_ms=None)
+    with pytest.raises(OpenGoalExistsError):
+        await loops.create(
+            ScheduledLoopCreate(
+                prompt="Second",
+                interval_ms=60_000,
+                session_id=session,
+                loop_id=_id("goal-2"),
+                kind=KIND_GOAL,
+                objective="Second",
+            )
+        )

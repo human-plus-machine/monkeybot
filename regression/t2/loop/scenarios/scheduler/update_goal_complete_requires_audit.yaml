@@ -1,0 +1,51 @@
+id: regression/t2/loop/scenarios/scheduler/update_goal_complete_requires_audit
+case: T2-SCHED-12
+description: update_goal complete without a proved audit is rejected and the goal stays active.
+mode: scripted
+driver: loop
+executor: real
+config:
+  seed_goal_id: goal-fixed
+  seed_goal_objective: Watch the deploy until it is green.
+messages:
+- "[GOAL CONTINUATION · goal_id=goal-fixed · session=loop-scenario]\n\nContinue."
+script:
+- - type: tool_call
+    call_id: c-missing
+    name: update_goal
+    args:
+      goal_id: goal-fixed
+      status: complete
+  - type: done
+- - type: tool_call
+    call_id: c-weak
+    name: update_goal
+    args:
+      goal_id: goal-fixed
+      status: complete
+      audit:
+      - requirement: the deploy is green
+        evidence: someone said it looked fine
+        verdict: missing
+  - type: done
+- - type: text
+    text: The goal stays active.
+  - type: done
+assertions:
+  turn_completed: true
+  provider_calls: 3
+  required_tools:
+  - update_goal
+  store:
+    goals: 1
+  events_sequence:
+  - type: ToolCallResult
+    tool: update_goal
+    call_id: c-missing
+    error:
+      regex: audit
+  - type: ToolCallResult
+    tool: update_goal
+    call_id: c-weak
+    error:
+      regex: stays active

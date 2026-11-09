@@ -1,0 +1,37 @@
+id: regression/t2/loop/scenarios/loop/cancel_beats_send_now
+case: T2-LOOP-48
+description: Stop during Send now ends the turn and does not inject the promoted message.
+mode: scripted
+driver: loop
+messages:
+- start answering
+script:
+- - type: text
+    text: Hello partial
+  - type: hang
+steps:
+- action: queue_follow_up
+  request_id: q-now
+  text: steer-now
+  when:
+    event: text
+    nth: 1
+- action: promote_follow_up
+  request_id: q-now
+  when:
+    event: text
+    nth: 1
+- action: cancel
+  when:
+    event: text
+    nth: 1
+assertions:
+  turn_completed: true
+  provider_calls: 1
+  events_absent:
+  - UserSteered
+  error_contains: Request cancelled
+  response_contains: Hello partial
+  provider_request:
+  - n: 1
+    messages_not_contain: steer-now

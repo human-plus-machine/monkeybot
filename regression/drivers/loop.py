@@ -337,7 +337,9 @@ async def _drive(
 ) -> tuple[list[object], list[_SessionSlice] | None]:
     events: list[object] = []
     needs_bus = any(
-        isinstance(step, (AnswerAskUserStep, ConfirmToolStep)) for step in scenario.steps
+        isinstance(step, (AnswerAskUserStep, ConfirmToolStep))
+        or (step.when is not None and step.when.event in {"ask_user", "tool_confirmation"})
+        for step in scenario.steps
     )
     needs_admission = any(
         isinstance(step, (SteerStep, QueueFollowUpStep, PromoteFollowUpStep))

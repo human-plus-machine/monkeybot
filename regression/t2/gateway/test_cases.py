@@ -158,6 +158,14 @@ _QUEUE = """\
     text: after-promote
   - type: done
 """
+_SEND_NOW = """\
+- - type: text
+    text: partial-now
+  - type: hang
+- - type: text
+    text: steered-reply
+  - type: done
+"""
 
 
 def _rewrite_config(gateway: GatewaySession, mutate: Any) -> None:
@@ -472,17 +480,50 @@ async def test_queue_starts_promotes_and_drops() -> None:
             assert dropped.status_code == 202
             removed = await gateway.client.delete("/sessions/s-11/queue/q-drop")
             assert removed.status_code == 204
-            await _answer(gateway, "s-11", "ask1", "yes")
-            finished = await reader.until("TurnComplete")
+            finished = await reader.until("TurnComplete", timeout=2)
             steered = _frame(finished, "UserSteered")
             assert steered.get("queued_request_id") == "q-promote"
             assert steered.get("request_id") == "r-busy"
             assert "promoted-text" in str(steered.get("text", ""))
+            late = await gateway.client.post(
+                "/sessions/s-11/ask-user/ask1",
+                json={"answer": "yes"},
+            )
+            assert late.status_code == 409
+            assert error_code(late) == "STALE_PENDING_RESPONSE"
             await wait_turn(gateway, "s-11")
         rows = await history(gateway, "s-11")
         blob = "\n".join(message_text(row) for row in rows)
         assert "dropped-text" not in blob
         assert "promoted-text" in blob
+
+
+@pytest.mark.case("T2-GW-23")
+async def test_send_now_preempts_hanging_provider() -> None:
+    """Promote while the provider is blocked injects before the turn ends."""
+    async with open_gateway(script=_SEND_NOW) as gateway:
+        await gateway.create_session("s-23")
+        async with listening(gateway, "s-23") as reader:
+            await reader.until("ActiveRequests")
+            await _reply(gateway, "s-23", "r1", "go")
+            opening = await reader.until("AssistantDelta")
+            assert any(frame.get("delta") == "partial-now" for frame in opening)
+            queued = await gateway.client.post(
+                "/sessions/s-23/queue",
+                json={"request_id": "q-now", "message": "send-now-body"},
+            )
+            assert queued.status_code == 202
+            promoted = await gateway.client.post("/sessions/s-23/queue/q-now/steer")
+            assert promoted.status_code == 202
+            steered_frames = await reader.until("UserSteered", timeout=1)
+            steered = _frame(steered_frames, "UserSteered")
+            assert steered.get("queued_request_id") == "q-now"
+            assert "send-now-body" in str(steered.get("text", ""))
+            finished = await reader.until("TurnComplete")
+            assert sum(frame.get("type") == "TurnComplete" for frame in finished) == 1
+            assert any(frame.get("delta") == "steered-reply" for frame in finished)
+            extra = await reader.collect(0.3)
+            assert not any(frame.get("type") == "TurnComplete" for frame in extra)
 
 
 @pytest.mark.case("T2-GW-12")
@@ -1078,6 +1119,69 @@ async def test_scheduler_and_goal_lifecycle() -> None:
         goal_stop = await gateway.client.post(f"/goals/{goal_id}/stop")
         assert goal_stop.status_code == 200
         assert goal_stop.json()["goal"]["status"] == "completed"
+
+
+@pytest.mark.case("T2-SCHED-17")
+async def test_goal_wake_route(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MONKEYBOT_GOAL_WAKE_TOKEN", "wake-secret")
+    auth = {"authorization": "Bearer wake-secret"}
+    async with open_gateway(script=_HELLO) as gateway:
+        service = DurableGoalService(gateway.app.state.storage.scheduled_loops())
+        goal, created_goal = await service.create(
+            objective="ship the catalog", session_id="goal-wake"
+        )
+        assert created_goal
+        goal_id = goal.loop_id
+        denied = await gateway.client.post(f"/goals/{goal_id}/wake", json={"reason": "ci"})
+        assert denied.status_code == 401
+        assert error_code(denied) == "UNAUTHORIZED"
+        bad = await gateway.client.post(
+            f"/goals/{goal_id}/wake",
+            json={"reason": "ci"},
+            headers={"authorization": "Bearer nope"},
+        )
+        assert bad.status_code == 401
+        woken = await gateway.client.post(
+            f"/goals/{goal_id}/wake",
+            json={"reason": "ci green", "source": "ci"},
+            headers=auth,
+        )
+        assert woken.status_code == 200
+        body = woken.json()["goal"]
+        assert body["status"] == "active"
+        assert body["wake_reason"] == "ci green"
+        assert body["next_tick_at_ms"] <= int(time.time() * 1000) + 2_000
+        waiting = await service.update(
+            goal_id=goal_id,
+            session_id="goal-wake",
+            status="waiting",
+            reason="needs approval",
+        )
+        assert waiting.status == "waiting"
+        resumed = await gateway.client.post(
+            f"/goals/{goal_id}/wake",
+            json={"reason": "approved", "source": "github"},
+            headers=auth,
+        )
+        assert resumed.status_code == 200
+        assert resumed.json()["goal"]["status"] == "active"
+        paused = await gateway.client.post(f"/goals/{goal_id}/pause")
+        assert paused.status_code == 200
+        blocked = await gateway.client.post(
+            f"/goals/{goal_id}/wake",
+            json={"reason": "again"},
+            headers=auth,
+        )
+        assert blocked.status_code == 409
+        assert error_code(blocked) == "GOAL_PAUSED"
+        await gateway.client.post(f"/goals/{goal_id}/stop")
+        closed = await gateway.client.post(
+            f"/goals/{goal_id}/wake",
+            json={"reason": "too late"},
+            headers=auth,
+        )
+        assert closed.status_code == 409
+        assert error_code(closed) == "GOAL_CLOSED"
 
 
 @pytest.mark.case("T2-STORE-G1")

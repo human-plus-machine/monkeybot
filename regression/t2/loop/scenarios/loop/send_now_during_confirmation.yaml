@@ -1,0 +1,49 @@
+id: regression/t2/loop/scenarios/loop/send_now_during_confirmation
+case: T2-LOOP-47
+description: Send now while a tool confirmation is waiting stops that call and injects the message.
+mode: scripted
+driver: loop
+messages:
+- read a file
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: a.txt
+  - type: done
+- - type: text
+    text: steered reply
+  - type: done
+steps:
+- action: queue_follow_up
+  request_id: q-now
+  text: steer-now
+  when:
+    event: tool_confirmation
+    nth: 1
+    call_id: c1
+- action: promote_follow_up
+  request_id: q-now
+  when:
+    event: tool_confirmation
+    nth: 1
+    call_id: c1
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  tool_calls:
+    read_file: 0
+  events_sequence:
+  - type: ToolConfirmationRequest
+    tool_call_id: c1
+  - type: ToolCallResult
+    call_id: c1
+    error:
+      regex: stopped because the user sent a new message
+  - type: UserSteered
+    text: steer-now
+    queued_request_id: q-now
+  history:
+    tool_pairs_intact: true

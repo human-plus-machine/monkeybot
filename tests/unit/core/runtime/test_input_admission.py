@@ -10,7 +10,7 @@ from httpx import ASGITransport, AsyncClient
 
 from monkeybot.core.context import TurnContext
 from monkeybot.core.llm.provider import Done, Message, ProviderEvent, TextDelta, ToolCall
-from monkeybot.core.runtime.events import UserSteered
+from monkeybot.core.runtime.events import AssistantDelta, UserSteered
 from monkeybot.core.runtime.input_admission import (
     AdmissionQueueFullError,
     FollowUpNotFoundError,
@@ -710,7 +710,7 @@ async def test_drop_unknown_follow_up(registry: SessionRegistry) -> None:
 async def test_promote_during_last_inner_turn_drains_as_follow_up(
     registry: SessionRegistry,
 ) -> None:
-    """Promote while the only inner turn is in flight must still start after it ends."""
+    """A loop that never drains steers still starts the promoted item as its own turn."""
     started: list[str] = []
     hold = asyncio.Event()
 
@@ -758,10 +758,25 @@ async def test_promote_during_last_inner_turn_drains_as_follow_up(
         assert bus.admission.follow_up_depth == 0
 
 
+def test_promote_sets_preempt_and_clear_drops_it() -> None:
+    adm = InputAdmission()
+    adm.enqueue_follow_up("q1", [Text(text="later")])
+    assert adm.preempt_event.is_set() is False
+    adm.promote_follow_up("q1")
+    assert adm.preempt_event.is_set() is True
+    assert adm.steer_depth == 1
+    adm.clear_steer()
+    assert adm.preempt_event.is_set() is False
+    assert adm.steer_depth == 0
+    restored = adm.pop_follow_up()
+    assert restored is not None and restored.request_id == "q1"
+
+
 @pytest.mark.asyncio
-async def test_promoted_steer_is_not_injected_on_final_inner_turn() -> None:
-    """turn_loop only drains steer at the top of each inner turn."""
+async def test_promoted_steer_is_injected_on_final_inner_turn() -> None:
+    """A promote during the only text reply joins that turn instead of waiting."""
     admission = InputAdmission()
+    calls = {"n": 0}
 
     class OneShotProvider:
         @property
@@ -781,9 +796,12 @@ async def test_promoted_steer_is_not_injected_on_final_inner_turn() -> None:
             thinking_budget: int | None = None,
         ) -> AsyncIterator[ProviderEvent]:
             del messages, tools, model, thinking_budget
-            admission.enqueue_follow_up("q1", [Text(text="later")])
-            admission.promote_follow_up("q1")
-            yield TextDelta(text="done")
+            calls["n"] += 1
+            if calls["n"] == 1:
+                yield TextDelta(text="done")
+                yield Done()
+                return
+            yield TextDelta(text="after-steer")
             yield Done()
 
         async def count_input_tokens(
@@ -798,6 +816,7 @@ async def test_promoted_steer_is_not_injected_on_final_inner_turn() -> None:
             return 0
 
     events: list[object] = []
+    promoted = False
 
     class NoopExecutor:
         async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
@@ -815,12 +834,18 @@ async def test_promoted_steer_is_not_injected_on_final_inner_turn() -> None:
         input_admission=admission,
     ):
         events.append(e)
+        if not promoted and isinstance(e, AssistantDelta) and e.delta == "done":
+            admission.enqueue_follow_up("q1", [Text(text="later")])
+            admission.promote_follow_up("q1")
+            promoted = True
 
-    assert not any(isinstance(e, UserSteered) for e in events)
-    assert admission.steer_depth == 1
-    assert admission.restore_promoted_steers() == 1
-    restored = admission.pop_follow_up()
-    assert restored is not None and restored.request_id == "q1"
+    steered = [e for e in events if isinstance(e, UserSteered)]
+    assert len(steered) == 1
+    assert steered[0].text == "later"
+    assert any(isinstance(e, AssistantDelta) and e.delta == "after-steer" for e in events)
+    assert admission.steer_depth == 0
+    assert admission.preempt_event.is_set() is False
+    assert admission.restore_promoted_steers() == 0
 
 
 @pytest.mark.asyncio

@@ -848,6 +848,13 @@ def test_thinking_signature_defaults_none() -> None:
     assert to_provider_event(event) == ThinkingDelta(text="hmm", signature=None)
 
 
+def test_hang_event_is_not_a_provider_event() -> None:
+    event = parse_event({"type": "hang"})
+    assert event.type == "hang"
+    with pytest.raises(TypeError, match="hang is not a ProviderEvent"):
+        to_provider_event(event)
+
+
 def test_tool_call_args_default_empty() -> None:
     event = parse_event({"type": "tool_call", "call_id": "c1", "name": "read_file"})
     assert to_provider_event(event) == ToolCall(call_id="c1", name="read_file", args={})

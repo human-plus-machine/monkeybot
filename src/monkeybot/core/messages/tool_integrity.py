@@ -44,6 +44,13 @@ def interrupted_tool_result_text(tool_name: str) -> str:
     )
 
 
+def preempted_tool_result_text(tool_name: str) -> str:
+    return (
+        f'Tool "{tool_name}" was stopped because the user sent a new message. '
+        "Read the new message before retrying."
+    )
+
+
 def _log_repair(action: str, **fields: object) -> None:
     logger.warning("tool_integrity_repair %s", kv(action=action, **fields))
 

@@ -7,7 +7,7 @@ import dataclasses
 import hashlib
 import json
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import aclosing
 from typing import Any, Literal, cast
 
@@ -37,6 +37,7 @@ from monkeybot.core.messages import convert_to_provider
 from monkeybot.core.messages.tool_integrity import (
     cancelled_tool_result_text,
     interrupted_tool_result_text,
+    preempted_tool_result_text,
 )
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.row_ids import new_row_id
@@ -87,6 +88,7 @@ from .events import (
     HarnessIntervention,
     SystemPromptSnapshot,
     Thinking,
+    ToolCallResult,
     UserSteered,
     VerifierVerdict,
 )
@@ -134,6 +136,7 @@ from .loop_usage import (
     _provider_prompt_input_tokens,
     _stream_thinking_budget,
 )
+from .preempt import StepPreemptedError, race_preempt
 from .tool_dispatch import ToolBatchState, dispatch_tool_batch
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.turn_loop")
@@ -143,7 +146,7 @@ logger = logging.getLogger("monkeybot.core.runtime.loop.turn_loop")
 # a contract between the loop and the subagent completion payload, not a message.
 MAX_TURNS_ERROR = "Max turns exceeded"
 
-TurnAction = Literal["continue", "break", "return"]
+TurnAction = Literal["continue", "break", "return", "preempt"]
 
 _EMPTY_COMPLETION_RETRIES = 2
 _POST_TOOL_EMPTY_RETRIES = 1
@@ -309,6 +312,9 @@ async def _drain_steers(
                 text=preview,
                 queued_request_id=item.queued_request_id or "",
             )
+        # The preempt that woke this step must not abort the provider call
+        # that is about to see the injected text.
+        input_admission.clear_preempt()
     async for verdict_evt in _drain_verdicts(ctx, history):
         yield verdict_evt
 
@@ -1168,10 +1174,12 @@ async def _consume_provider_stream_body(
     vertex_google_search: bool,
     stream_mapper: ProviderStreamMapper,
     cancelled: asyncio.Event | None = None,
+    preempt: asyncio.Event | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Consume provider stream, write response transcript, fire after-response hook.
 
-    Sets ``state.action = "return"`` on cancel or provider error.
+    Sets ``state.action = "return"`` on cancel or provider error, and
+    ``state.action = "preempt"`` when a promoted steer aborts the stream.
     """
     from monkeybot.observability.spans import set_llm_io, set_llm_usage, span_llm
 
@@ -1197,11 +1205,16 @@ async def _consume_provider_stream_body(
                     ),
                 )
             ) as stream:
-                async for ev in stream:
-                    # Stop mid-token-stream when POST /cancel sets the event —
-                    # otherwise Stop only takes effect after the full LLM call.
-                    if cancelled is not None and cancelled.is_set():
-                        raise asyncio.CancelledError
+                stream_iter = stream.__aiter__()
+                while True:
+                    try:
+                        ev = await race_preempt(
+                            stream_iter.__anext__(),
+                            preempt,
+                            cancelled=cancelled,
+                        )
+                    except StopAsyncIteration:
+                        break
                     if isinstance(ev, UsageEvent):
                         _merge_usage_event(usage, ev)
                         usage.cost_usd += estimate_cost(
@@ -1367,6 +1380,49 @@ async def _consume_provider_stream_body(
         state.needs_followup_after_tools = False
         state.action = "return"
         return
+    except StepPreemptedError:
+        state.hold_assistant_text = False
+        for aev in [*state.held_text_events, *stream_mapper.finish()]:
+            yield aev
+        state.held_text_events.clear()
+        _sync_stream_mapper_text(state, stream_mapper)
+        logger.info(
+            "provider stream preempted %s",
+            kv(
+                request_id=state.ctx.request_id,
+                thread_id=state.ctx.thread_id,
+                turn=state.turn_index,
+                partial_chars=len(state.assistant_text or ""),
+            ),
+        )
+        if transcript_writer is not None:
+            await transcript_writer.write_provider_response(
+                request_id=state.ctx.request_id,
+                inner_turn=state.turn_index,
+                model=state.ctx.model,
+                text=state.assistant_text,
+                thinking=state.thinking_text,
+                tool_requests=[
+                    {"call_id": tc.call_id, "name": tc.name, "args": tc.args}
+                    for tc in state.pending.values()
+                ],
+                usage={
+                    "input_tokens": llm_input,
+                    "output_tokens": llm_output,
+                    "cached_tokens": llm_cached,
+                    "cache_read_tokens": llm_cache_read,
+                    "cache_creation_tokens": llm_cache_creation,
+                },
+            )
+        await _fire_after_provider_response(
+            hook_manager,
+            ctx=state.ctx,
+            inner_turn=state.turn_index,
+            assistant_text=state.assistant_text,
+            thinking_text=state.thinking_text,
+        )
+        state.action = "preempt"
+        return
     except Exception as exc:
         state.hold_assistant_text = False
         for aev in [*state.held_text_events, *stream_mapper.finish()]:
@@ -1438,6 +1494,7 @@ async def _persist_partial_assistant_on_abort(
     *,
     history: HistoryStore,
     last_assistant: list[str],
+    tool_result_text: Callable[[str], str] | None = None,
 ) -> None:
     """Persist already-streamed assistant output so Stop/errors keep model context.
 
@@ -1466,9 +1523,12 @@ async def _persist_partial_assistant_on_abort(
         )
     if not assist_blocks:
         return
-    tool_text_fn = (
-        interrupted_tool_result_text if state.provider_stream_failed else cancelled_tool_result_text
-    )
+    if tool_result_text is not None:
+        tool_text_fn = tool_result_text
+    elif state.provider_stream_failed:
+        tool_text_fn = interrupted_tool_result_text
+    else:
+        tool_text_fn = cancelled_tool_result_text
     await persist_message(
         history,
         Message(role="assistant", content=assist_blocks),
@@ -1586,6 +1646,7 @@ async def _stream_provider_turn(
     vertex_google_search: bool,
     tool_executor: object | None = None,
     cancelled: asyncio.Event | None = None,
+    preempt: asyncio.Event | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Stream provider events; fill ``state.pending`` / text fields. May set action=return."""
     # Previous attempt's text is not this call's partial output. Clearing it here
@@ -1612,6 +1673,7 @@ async def _stream_provider_turn(
         vertex_google_search=vertex_google_search,
         stream_mapper=stream_mapper,
         cancelled=cancelled,
+        preempt=preempt,
     ):
         yield evt
 
@@ -1887,6 +1949,7 @@ async def _append_tool_requests_and_dispatch(
     tool_executor: ToolExecutorPort,
     cancelled: asyncio.Event | None,
     usage: Usage,
+    preempt: asyncio.Event | None = None,
     provider: Provider,
     hook_manager: HookManager | None,
     attachment_store: AttachmentStore | None,
@@ -1943,6 +2006,7 @@ async def _append_tool_requests_and_dispatch(
         inspectors=inspectors,
         tool_executor=tool_executor,
         cancelled=cancelled,
+        preempt=preempt,
         history=history,
         usage=usage,
         provider=provider,
@@ -1962,6 +2026,8 @@ async def _append_tool_requests_and_dispatch(
     if batch_state.aborted:
         state.needs_followup_after_tools = batch_state.needs_followup_after_tools
         state.action = "return"
+    elif batch_state.preempted:
+        state.action = "preempt"
 
 
 async def _run_inner_core(
@@ -2001,6 +2067,11 @@ async def _run_inner_core(
             exempt_names=_doom_loop_exempt_names(ctx.tools),
         ),
     )
+
+    def _transcript_view() -> list[Message]:
+        return state.chat_messages
+
+    state.ctx = dataclasses.replace(state.ctx, transcript_view=_transcript_view)
     user_row_id = new_row_id()
     harness_turn = input_provenance == "harness"
     await persist_message(
@@ -2040,8 +2111,19 @@ async def _run_inner_core(
             user_row_id=user_row_id,
         )
 
+    def _preempt_event() -> asyncio.Event | None:
+        if input_admission is None:
+            return None
+        return input_admission.preempt_event
+
+    def _drop_steers_if_stopped() -> None:
+        """Stop ends the turn. Promoted messages go back to the follow-up queue."""
+        if cancelled is not None and cancelled.is_set() and input_admission is not None:
+            input_admission.clear_steer()
+
     while state.turn_index < state.effective_max:
         if cancelled is not None and cancelled.is_set():
+            _drop_steers_if_stopped()
             yield Error(request_id=state.ctx.request_id, error="Request cancelled")
             state.needs_followup_after_tools = False
             break
@@ -2084,6 +2166,7 @@ async def _run_inner_core(
             yield Thinking(request_id=state.ctx.request_id)
 
             if cancelled is not None and cancelled.is_set():
+                _drop_steers_if_stopped()
                 yield Error(request_id=state.ctx.request_id, error="Request cancelled")
                 state.needs_followup_after_tools = False
                 break
@@ -2118,6 +2201,7 @@ async def _run_inner_core(
                 vertex_google_search=vertex_google_search,
                 tool_executor=tool_executor,
                 cancelled=cancelled,
+                preempt=_preempt_event(),
             ):
                 yield evt
             if state.action == "return":
@@ -2126,17 +2210,48 @@ async def _run_inner_core(
                 # Cancel/error mid-stream skips _handle_empty_or_final_text —
                 # persist any text already shown to the user before exiting.
                 # Break (do not return) so freeze_attachments_in_history still runs.
+                _drop_steers_if_stopped()
                 state.needs_followup_after_tools = False
                 await _persist_partial_assistant_on_abort(
                     state, history=history, last_assistant=last_assistant
                 )
                 break
+            if state.action == "preempt":
+                logger.info(
+                    "step preempted %s",
+                    kv(
+                        request_id=state.ctx.request_id,
+                        thread_id=state.ctx.thread_id,
+                        turn=state.turn_index,
+                        where="stream",
+                    ),
+                )
+                for evt in _release_held_text(state):
+                    yield evt
+                preempted_calls = list(state.pending.values())
+                await _persist_partial_assistant_on_abort(
+                    state,
+                    history=history,
+                    last_assistant=last_assistant,
+                    tool_result_text=preempted_tool_result_text,
+                )
+                for call in preempted_calls:
+                    note = preempted_tool_result_text(call.name)
+                    yield ToolCallResult(
+                        request_id=state.ctx.request_id,
+                        tool=call.name,
+                        call_id=call.call_id,
+                        error=note,
+                    )
+                state.action = None
+                continue
             state.action = None
 
             if cancelled is not None and cancelled.is_set():
                 # Stream already finished (and may have been shown over SSE).
                 # Persist text and settle any finalized tool calls the same way
                 # mid-stream abort does.
+                _drop_steers_if_stopped()
                 for evt in _release_held_text(state):
                     yield evt
                 yield Error(request_id=state.ctx.request_id, error="Request cancelled")
@@ -2160,6 +2275,13 @@ async def _run_inner_core(
                 if state.action == "continue":
                     continue
                 if state.action == "break":
+                    # A promote that landed on this text-only step joins the
+                    # turn instead of waiting for a later one.
+                    if input_admission is not None and input_admission.steer_depth > 0:
+                        await _await_history_write(state.assistant_write_task)
+                        state.assistant_write_task = None
+                        state.action = None
+                        continue
                     break
 
             else:
@@ -2171,6 +2293,7 @@ async def _run_inner_core(
                     inspectors=inspectors,
                     tool_executor=tool_executor,
                     cancelled=cancelled,
+                    preempt=_preempt_event(),
                     usage=usage,
                     provider=provider,
                     hook_manager=hook_manager,
@@ -2180,7 +2303,20 @@ async def _run_inner_core(
                 ):
                     yield evt
                 if state.action == "return":
+                    _drop_steers_if_stopped()
                     break
+                if state.action == "preempt":
+                    logger.info(
+                        "step preempted %s",
+                        kv(
+                            request_id=state.ctx.request_id,
+                            thread_id=state.ctx.thread_id,
+                            turn=state.turn_index,
+                            where="tools",
+                        ),
+                    )
+                    state.action = None
+                    continue
 
         finally:
             set_turn_prompt_tokens(usage.estimated_prompt_tokens)

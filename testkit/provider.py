@@ -7,6 +7,7 @@ from typing import Any, Protocol, cast
 
 from monkeybot.core.llm.provider import Message, ProviderEvent
 from monkeybot.core.testing.mocks_provider import (
+    HangStep,
     RaiseStep,
     _event_from_mapping,
     fake_provider_prompt_tokens,
@@ -41,9 +42,9 @@ def scripted_from_cassette(cassette: _Cassette, *, name: str = "fake") -> Script
     ``ScriptedProviderExhaustedError``, so a replay that diverges from the recording
     fails instead of getting an empty reply.
     """
-    turns: list[list[ProviderEvent | RaiseStep]] = []
+    turns: list[list[ProviderEvent | RaiseStep | HangStep]] = []
     for position, call in enumerate(cassette.calls):
-        events: list[ProviderEvent | RaiseStep] = []
+        events: list[ProviderEvent | RaiseStep | HangStep] = []
         for index, event in enumerate(call.events):
             where = f"cassette call {position} event {index}"
             events.append(_event_from_mapping(event.model_dump(exclude_none=True), where=where))

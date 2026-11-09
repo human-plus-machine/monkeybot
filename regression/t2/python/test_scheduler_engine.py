@@ -17,6 +17,7 @@ from monkeybot.core.goals.service import DurableGoalService
 from monkeybot.core.persistence.backends import ScheduledLoopStore
 from monkeybot.core.persistence.scheduled_loops import (
     GOAL_MAX_CONSECUTIVE_ERRORS,
+    KIND_GOAL,
     ScheduledLoopCreate,
     ScheduledLoopRow,
     format_tick_prompt,
@@ -387,3 +388,131 @@ async def test_heartbeat_prevents_reclaim_during_slow_tick(loop_store: Scheduled
             "slow tick completed without reclaim",
         )
     assert probe.calls == 1
+
+
+async def _create_goal(
+    store: ScheduledLoopStore,
+    *,
+    loop_id: str,
+    max_ticks: int = 50,
+) -> ScheduledLoopRow:
+    return await store.create(
+        ScheduledLoopCreate(
+            prompt="Ship it",
+            interval_ms=60_000,
+            session_id="sess-1",
+            loop_id=loop_id,
+            max_ticks=max_ticks,
+            kind=KIND_GOAL,
+            objective="Ship it",
+        )
+    )
+
+
+class _WakeMidTick(_RecordingInvoker):
+    def __init__(self, store: ScheduledLoopStore, clock: FakeClock, loop_id: str) -> None:
+        super().__init__()
+        self.store = store
+        self.clock = clock
+        self.loop_id = loop_id
+        self.woke = False
+
+    async def invoke_tick(
+        self,
+        session_id: str,
+        request_id: str,
+        user_content: list[ContentBlock],
+    ) -> TickInvokeResult:
+        self.calls.append((session_id, request_id, user_content))
+        if not self.woke:
+            self.woke = True
+            self.clock.advance(5)
+            await self.store.wake(
+                self.loop_id,
+                reason="ci green",
+                source="ci",
+                now_ms=self.clock.now_ms(),
+            )
+        return TickInvokeResult.ok()
+
+
+@pytest.mark.case("T2-SCHED-14")
+async def test_goal_budget_pauses_and_resume_resets_the_window(
+    loop_store: ScheduledLoopStore,
+) -> None:
+    row = await _create_goal(loop_store, loop_id="goal-budget", max_ticks=2)
+    clock = FakeClock(row.next_tick_at_ms)
+    invoker = _RecordingInvoker()
+    async with _running(loop_store, clock=clock, invoker=invoker):
+        first = await _wait_row(
+            loop_store,
+            row.loop_id,
+            lambda item: item.tick_index == 1 and not item.tick_in_flight,
+            "first budget tick settled",
+        )
+        _advance_until_due(clock, first.next_tick_at_ms)
+        paused = await _wait_row(
+            loop_store,
+            row.loop_id,
+            lambda item: item.status == "paused" and item.stop_reason == "budget_exhausted",
+            "budget pause",
+        )
+        assert paused.status != "completed"
+        assert await loop_store.resume(row.loop_id)
+        resumed = await loop_store.get(row.loop_id)
+        assert resumed is not None
+        assert resumed.budget_tick_start == paused.tick_index
+        await _wait_row(
+            loop_store,
+            row.loop_id,
+            lambda item: item.tick_index == paused.tick_index + 1 and item.status == "active",
+            "fresh budget window stays active",
+        )
+
+
+@pytest.mark.case("T2-SCHED-15")
+async def test_waiting_goal_does_not_tick(loop_store: ScheduledLoopStore) -> None:
+    row = await _create_goal(loop_store, loop_id="goal-wait")
+    clock = FakeClock(row.next_tick_at_ms + 60_000)
+    assert await loop_store.set_waiting(row.loop_id, reason="needs review", wake_at_ms=None)
+    invoker = _RecordingInvoker()
+    async with _running(loop_store, clock=clock, invoker=invoker):
+        await asyncio.sleep(0.15)
+        assert invoker.calls == []
+    current = await loop_store.get(row.loop_id)
+    assert current is not None and current.status == "waiting"
+
+
+@pytest.mark.case("T2-SCHED-16")
+async def test_waiting_recheck_ticks_once(loop_store: ScheduledLoopStore) -> None:
+    row = await _create_goal(loop_store, loop_id="goal-recheck")
+    clock = FakeClock(row.next_tick_at_ms)
+    assert await loop_store.set_waiting(
+        row.loop_id,
+        reason="needs review",
+        wake_at_ms=clock.now_ms() + 5_000,
+    )
+    invoker = _RecordingInvoker()
+    async with _running(loop_store, clock=clock, invoker=invoker):
+        await asyncio.sleep(0.1)
+        assert invoker.calls == []
+        clock.advance(5_000)
+        await _wait_until(lambda: len(invoker.calls) == 1, "recheck tick")
+        await asyncio.sleep(0.1)
+        assert len(invoker.calls) == 1
+        assert "recheck timer" in _tick_text(invoker.calls[0])
+    current = await loop_store.get(row.loop_id)
+    assert current is not None
+    assert current.tick_index == 1
+
+
+@pytest.mark.case("T2-SCHED-18")
+async def test_wake_during_tick_schedules_a_follow_up(loop_store: ScheduledLoopStore) -> None:
+    row = await _create_goal(loop_store, loop_id="goal-wake")
+    clock = FakeClock(row.next_tick_at_ms)
+    invoker = _WakeMidTick(loop_store, clock, row.loop_id)
+    async with _running(loop_store, clock=clock, invoker=invoker):
+        await _wait_until(lambda: len(invoker.calls) >= 2, "follow-up wake tick")
+    assert "ci green" in _tick_text(invoker.calls[1])
+    assert "untrusted data" in _tick_text(invoker.calls[1])
+    assert "```" in _tick_text(invoker.calls[1])

@@ -1,7 +1,7 @@
 """YAML script events mapped onto provider events.
 
 The vocabulary is the §5.2 ``script`` row: ``text``, ``thinking``, ``tool_call``,
-``tool_input_delta``, ``grounding``, ``usage``, ``done``, and ``raise``.
+``tool_input_delta``, ``grounding``, ``usage``, ``done``, ``raise``, and ``hang``.
 ``raise`` is a script control, not a :class:`~monkeybot.core.llm.provider.ProviderEvent`.
 """
 
@@ -78,6 +78,16 @@ class DoneEvent(_YamlEvent):
     truncated: bool = False
 
 
+class HangEvent(_YamlEvent):
+    """Block the scripted call until the stream is cancelled.
+
+    Used to hold a model turn open so a promote can preempt it. The provider
+    fails the hang after a few seconds if nothing cancels it.
+    """
+
+    type: Literal["hang"]
+
+
 class RaiseEvent(_YamlEvent):
     """Stop the scripted call. ``error`` is an exception class name.
 
@@ -100,6 +110,7 @@ _ScriptEvent: TypeAlias = (
     | GroundingEvent
     | UsageEvent
     | DoneEvent
+    | HangEvent
     | RaiseEvent
 )
 ScriptEvent: TypeAlias = Annotated[_ScriptEvent, Field(discriminator="type")]
@@ -152,12 +163,15 @@ def to_provider_event(event: ScriptEvent) -> ProviderEvent:
         return ProviderDone(truncated=event.truncated)
     if isinstance(event, RaiseEvent):
         raise TypeError("raise is not a ProviderEvent")
+    if isinstance(event, HangEvent):
+        raise TypeError("hang is not a ProviderEvent")
     assert_never(event)
 
 
 __all__ = [
     "DoneEvent",
     "GroundingEvent",
+    "HangEvent",
     "RaiseEvent",
     "ScriptEvent",
     "TextEvent",

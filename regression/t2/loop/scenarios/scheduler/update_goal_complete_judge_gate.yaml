@@ -1,0 +1,88 @@
+id: regression/t2/loop/scenarios/scheduler/update_goal_complete_judge_gate
+case: T2-SCHED-13
+description: A scripted completion judge must pass before update_goal can complete the goal.
+mode: scripted
+driver: loop
+executor: real
+config:
+  seed_goal_id: goal-fixed
+  seed_goal_objective: Watch the deploy until it is green.
+  completion_judge: fail,timeout,bad_json,pass
+messages:
+- "[GOAL CONTINUATION · goal_id=goal-fixed · session=loop-scenario]\n\nContinue."
+script:
+- - type: tool_call
+    call_id: c-fail
+    name: update_goal
+    args:
+      goal_id: goal-fixed
+      status: complete
+      audit:
+      - requirement: the deploy is green
+        evidence: ci status is success
+        verdict: proved
+  - type: done
+- - type: tool_call
+    call_id: c-timeout
+    name: update_goal
+    args:
+      goal_id: goal-fixed
+      status: complete
+      audit:
+      - requirement: the deploy is green
+        evidence: ci status is success
+        verdict: proved
+  - type: done
+- - type: tool_call
+    call_id: c-bad
+    name: update_goal
+    args:
+      goal_id: goal-fixed
+      status: complete
+      audit:
+      - requirement: the deploy is green
+        evidence: ci status is success
+        verdict: proved
+  - type: done
+- - type: tool_call
+    call_id: c-pass
+    name: update_goal
+    args:
+      goal_id: goal-fixed
+      status: complete
+      audit:
+      - requirement: the deploy is green
+        evidence: ci status is success
+        verdict: proved
+  - type: done
+- - type: text
+    text: The goal is complete.
+  - type: done
+assertions:
+  turn_completed: true
+  provider_calls: 5
+  required_tools:
+  - update_goal
+  store:
+    goals: 1
+  events_sequence:
+  - type: ToolCallResult
+    tool: update_goal
+    call_id: c-fail
+    error:
+      regex: not covered
+  - type: ToolCallResult
+    tool: update_goal
+    call_id: c-timeout
+    error:
+      regex: timed out
+  - type: ToolCallResult
+    tool: update_goal
+    call_id: c-bad
+    error:
+      regex: unusable
+  - type: ToolCallResult
+    tool: update_goal
+    call_id: c-pass
+    result:
+      regex: '"passed": true'
