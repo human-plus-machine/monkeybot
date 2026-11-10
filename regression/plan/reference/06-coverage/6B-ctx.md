@@ -19,7 +19,7 @@ Gaps: `compaction_fallback` untested; epochs never asserted through `run`; nothi
 | T2-CTX-04 | `compact_keep_tail_ratio` | Tail keeps `max(2, 20%)` rows and never cuts a tool pair. |
 | T2-CTX-05 | `compact_fallback` | Summarizer `raise` + > 5000 preloaded rows: `compaction_fallback`; pins kept; `ContextEpochStarted`. |
 | T2-CTX-06 | `compact_trailer_from_goal_ledger` | Summary row carries the workspace trailer. |
-| T2-CTX-07 | `summarizer_model_override` | `model.summarization_model` is the model of the summary call; summary call has no `vertex_google_search`. |
+| T2-CTX-07 | `summarizer_model_override` | The summary call uses `model.name` and has no `vertex_google_search`. |
 | T2-CTX-08 | `background_summary_applied` | At the moderate bar a background summary is applied on the next turn when the prefix matches. |
 | T2-CTX-09 | `background_summary_stale_fallback` | After a rewind, the stale background summary is discarded and inline compaction runs. |
 | T2-CTX-10 | `epoch_volatile_update` | Memory index changes between inner turns: `SystemContextUpdated` with `changed_sources: [memory]`; stable prefix bytes identical. |

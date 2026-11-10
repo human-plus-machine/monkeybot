@@ -28,7 +28,6 @@ def _ctx() -> TurnContext:
         user_id=None,
         parent_run_id=None,
         model="gemini-2.5-flash",
-        summarization_model=None,
         workspace_root=None,
         context_window_tokens=200_000,
     )
