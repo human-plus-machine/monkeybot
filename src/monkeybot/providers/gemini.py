@@ -53,6 +53,11 @@ _SIGNATURE_B64_PREFIX = "b64:"
 
 _log = logging.getLogger(__name__)
 
+# Whole-request cap, in milliseconds. google-genai maps this to
+# ``aiohttp.ClientTimeout(total=...)``, so it bounds a call that never returns.
+# A silent stream that is still open is bounded by the loop's idle timeout.
+_GEMINI_HTTP_TIMEOUT_MS = 900_000
+
 # Keep this in sync when onboarding another Vertex Gemini model that must use "global".
 _GLOBAL_VERTEX_MODEL_IDS = frozenset({"gemini-3-flash-preview"})
 
@@ -693,15 +698,23 @@ class GeminiProvider:
             api_key = self._api_key
             return cached_sdk_client(
                 ("gemini-api",),
-                lambda: genai.Client(api_key=api_key),
+                lambda: genai.Client(
+                    api_key=api_key,
+                    http_options={"timeout": _GEMINI_HTTP_TIMEOUT_MS},
+                ),
                 # google-genai reads GOOGLE_* and GEMINI_* env in Client.__init__.
-                fingerprint=(api_key, sdk_env("GOOGLE_", "GEMINI_")),
+                fingerprint=(api_key, sdk_env("GOOGLE_", "GEMINI_"), _GEMINI_HTTP_TIMEOUT_MS),
             )
         project, location = _vertex_project_and_location(model_param)
         return cached_sdk_client(
             ("gemini-vertex", project, location),
-            lambda: genai.Client(vertexai=True, project=project, location=location),
-            fingerprint=sdk_env("GOOGLE_", "GEMINI_"),
+            lambda: genai.Client(
+                vertexai=True,
+                project=project,
+                location=location,
+                http_options={"timeout": _GEMINI_HTTP_TIMEOUT_MS},
+            ),
+            fingerprint=(sdk_env("GOOGLE_", "GEMINI_"), _GEMINI_HTTP_TIMEOUT_MS),
         )
 
     @property

@@ -230,10 +230,23 @@ async def test_gemini_client_follows_endpoint_not_model(monkeypatch: pytest.Monk
     assert global_client is not regional
     assert vertex._client("gemini-3-flash-preview") is global_client
 
+    from monkeybot.providers.gemini import _GEMINI_HTTP_TIMEOUT_MS
+
+    http_options = {"timeout": _GEMINI_HTTP_TIMEOUT_MS}
     assert constructed == [
-        {"api_key": "studio-key"},
-        {"vertexai": True, "project": "proj", "location": "us-central1"},
-        {"vertexai": True, "project": "proj", "location": "global"},
+        {"api_key": "studio-key", "http_options": http_options},
+        {
+            "vertexai": True,
+            "project": "proj",
+            "location": "us-central1",
+            "http_options": http_options,
+        },
+        {
+            "vertexai": True,
+            "project": "proj",
+            "location": "global",
+            "http_options": http_options,
+        },
     ]
 
 

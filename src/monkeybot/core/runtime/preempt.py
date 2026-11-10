@@ -14,11 +14,20 @@ class StepPreemptedError(Exception):
     """The current step was aborted because the user sent a message now."""
 
 
+class StreamStalledError(TimeoutError):
+    """No stream event arrived within the idle timeout."""
+
+    def __init__(self, idle_timeout_s: float) -> None:
+        super().__init__(f"Provider stream stalled: no event for {idle_timeout_s:g}s")
+        self.idle_timeout_s = idle_timeout_s
+
+
 async def race_preempt(
     awaitable: Awaitable[T],
     preempt: asyncio.Event | None,
     *,
     cancelled: asyncio.Event | None = None,
+    idle_timeout_s: float | None = None,
 ) -> T:
     """Return ``awaitable``'s result, or abort it when ``preempt`` is set.
 
@@ -27,13 +36,17 @@ async def race_preempt(
     A preempt that fires first abandons the awaitable and raises
     :class:`StepPreemptedError`. A stream that already ended
     (``StopAsyncIteration``) is returned as-is so a finished step is not
-    thrown away.
+    thrown away. ``idle_timeout_s`` aborts a wait that produces nothing and
+    raises :class:`StreamStalledError`; it never outranks Stop or a steer.
+    Zero or negative disables it.
     """
+    if idle_timeout_s is not None and idle_timeout_s <= 0:
+        idle_timeout_s = None
     task: asyncio.Task[T] = asyncio.ensure_future(awaitable)
     if cancelled is not None and cancelled.is_set():
         await _abandon(task)
         raise asyncio.CancelledError
-    if preempt is None and cancelled is None:
+    if preempt is None and cancelled is None and idle_timeout_s is None:
         return await task
 
     preempt_wait = asyncio.create_task(preempt.wait()) if preempt is not None else None
@@ -44,7 +57,14 @@ async def race_preempt(
     if cancel_wait is not None:
         waiters.add(cancel_wait)
     try:
-        await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+        done, _pending = await asyncio.wait(
+            waiters,
+            return_when=asyncio.FIRST_COMPLETED,
+            timeout=idle_timeout_s,
+        )
+        if not done:
+            await _abandon(task)
+            raise StreamStalledError(idle_timeout_s or 0)
         if _stream_ended(task):
             return task.result()
         if cancelled is not None and cancelled.is_set():
