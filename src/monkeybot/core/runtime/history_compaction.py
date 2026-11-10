@@ -178,7 +178,8 @@ HISTORY_LOAD_MAX = 5000
 SUMMARY_KEEP_HEAD_COUNT = 1
 # Keep newest rows until they consume this fraction of the model context window.
 SUMMARY_KEEP_TAIL_RATIO = 0.20
-# Floor so a user/assistant (or tool) pair survives even on tiny windows.
+# A transcript shorter than head + this many newest rows + one middle row is not split.
+# Only the single newest row is kept when it does not fit the tail budget.
 SUMMARY_KEEP_TAIL_MIN = 2
 
 # Fixed Markdown template for middle-history compression.
@@ -392,9 +393,10 @@ def _split_accountable(
 
     Head and tail slots (and the tail budget) are counted over rows with
     provider-visible content; UI-only / thinking-only raw rows ride along with
-    their neighbours for free. Tail grows from the newest message until it reaches
-    ``window_tokens * SUMMARY_KEEP_TAIL_RATIO`` (at least ``SUMMARY_KEEP_TAIL_MIN``
-    visible rows), leaving ≥1 middle row whenever the transcript is long enough.
+    their neighbours for free. The newest visible row is always kept. The head
+    and every older tail row stay verbatim only while they fit
+    ``window_tokens * SUMMARY_KEEP_TAIL_RATIO``; past that they are summarized.
+    A transcript long enough still leaves at least one middle row.
     """
     n = len(messages)
     visible = [is_provider_visible(m) for m in messages]
@@ -410,8 +412,16 @@ def _split_accountable(
             if seen == SUMMARY_KEEP_HEAD_COUNT:
                 head_end = i + 1
                 break
-    head = list(messages[:head_end])
     tail_budget = max(1, int(max(1, window_tokens) * SUMMARY_KEEP_TAIL_RATIO))
+    head = list(messages[:head_end])
+    head_tokens = sum(
+        _estimate_message_tokens(msg)
+        for msg, is_visible in zip(head, visible[:head_end], strict=True)
+        if is_visible
+    )
+    if head_tokens > tail_budget:
+        head = []
+        head_end = 0
     max_tail = n - head_end - 1  # leave ≥1 middle
 
     tail_rev: list[Message] = []
@@ -423,7 +433,8 @@ def _split_accountable(
         msg = messages[i]
         if visible[i]:
             tok = _estimate_message_tokens(msg)
-            if visible_in_tail >= SUMMARY_KEEP_TAIL_MIN and used + tok > tail_budget:
+            # The newest visible row is kept even when it is larger than the budget.
+            if visible_in_tail >= 1 and used + tok > tail_budget:
                 break
             used += tok
             visible_in_tail += 1

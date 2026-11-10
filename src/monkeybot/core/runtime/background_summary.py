@@ -93,8 +93,8 @@ def _prefix_matches(pending: PendingSummary, raw: Sequence[Message]) -> bool:
 def _suffix_within_limit(pending: PendingSummary, raw: Sequence[Message]) -> bool:
     """True when rows after the cut have not outgrown the tail this job can keep.
 
-    The split keeps at least two recent rows even when they already exceed the
-    token budget. That tail is fresh until new rows push it further: restarting
+    The split keeps the newest row even when it already exceeds the token
+    budget. That tail is fresh until new rows push it further: restarting
     on every in-band turn would cancel the same summary before it finishes.
     A tail that fit the budget may still grow up to the budget. A shorter
     history has lost rows, so this cut is no longer the one a new split would use.

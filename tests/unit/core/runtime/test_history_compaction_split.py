@@ -46,7 +46,8 @@ def test_split_requires_room_for_middle() -> None:
     assert len(head) + len(tail) == SUMMARY_KEEP_HEAD_COUNT + SUMMARY_KEEP_TAIL_MIN
 
 
-def test_split_keeps_a_tool_pair_when_the_response_blows_the_budget() -> None:
+def test_split_summarizes_a_huge_response_behind_a_newer_row_with_its_request() -> None:
+    """A response that does not fit is summarized, and its request goes with it."""
     older = _msgs(6, chars=400)
     request = Message(
         role="assistant",
@@ -65,8 +66,32 @@ def test_split_keeps_a_tool_pair_when_the_response_blows_the_budget() -> None:
     newest = Message(role="user", content=[Text(text="go")])
     messages = [*older, request, response, newest]
     head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
-    assert request in tail
+    assert tail == [newest]
+    assert request in middle
+    assert response in middle
+    assert head + middle + tail == messages
+
+
+def test_split_keeps_a_huge_newest_response_with_its_request() -> None:
+    older = _msgs(6, chars=40)
+    request = Message(
+        role="assistant",
+        content=[ToolRequest(id="cut", name="read_file", args={"path": "a.txt"})],
+    )
+    response = Message(
+        role="user",
+        content=[
+            ToolResponse(
+                id="cut",
+                tool_name="read_file",
+                result=[Text(text="R" * 20_000)],
+            )
+        ],
+    )
+    messages = [*older, request, response]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=10_000)
     assert response in tail
+    assert request in tail
     assert head + middle + tail == messages
     assert middle
 
@@ -93,12 +118,12 @@ def test_split_pins_attachment_descriptor_text() -> None:
     assert descriptor in rebuilt
 
 
-def test_split_keeps_minimum_tail_on_tiny_window() -> None:
+def test_split_keeps_only_the_newest_row_when_every_row_exceeds_the_budget() -> None:
     messages = _msgs(20, chars=400)
     head, middle, tail = split_messages_for_compaction(messages, window_tokens=100)
-    assert len(head) == SUMMARY_KEEP_HEAD_COUNT
-    assert len(tail) >= SUMMARY_KEEP_TAIL_MIN
-    assert middle
+    assert head == []
+    assert tail == [messages[-1]]
+    assert messages[0] in middle
     assert head + middle + tail == messages
 
 
