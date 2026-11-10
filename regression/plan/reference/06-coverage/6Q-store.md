@@ -27,6 +27,7 @@ Existing: SQLite well covered in T1. Only `test_branch_store_backends.py` is a r
 | T1-STORE-14 | `known_unscoped_tables` | Pins today: usage/runs/loops/locks visible across agent scopes on a shared DB. Flip when scoping lands. |
 | T1-STORE-15 | `waiting_goal_is_one_open_goal` | A `waiting` goal still blocks a second `create_goal` for the same session. |
 | T1-STORE-16 | `request_history_snapshot_matches_load` | After append, outbox append, and reset, the snapshot matches a fresh load, including row ids, and a second load is a probe. |
+| T1-STORE-17 | `reset_keeps_row_metadata` | Survivors keep `created_at`, `turn_id`, and `message_id`. `list_threads` does not move. A retried `message_id` does not duplicate. A copy onto a new thread keeps every row and does not take the source ids. |
 
 Migrations and the rest:
 
