@@ -1,8 +1,7 @@
 """Short chat titles from the first user message and the first assistant reply.
 
-A separate, cheap model call. It is not part of the reply the user is waiting on.
-``CONTEXT_SUMMARIZATION_MODEL`` is preferred so a local or small model can name
-the chat without using the main chat model.
+A separate model call. It is not part of the reply the user is waiting on, and it
+uses the same model as the chat.
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ from contextlib import aclosing
 from typing import Any, cast
 
 from monkeybot.core.config.settings import _agent_model_name
-from monkeybot.core.config.snapshot import current_env
 from monkeybot.core.llm.provider import Done, Message, Provider, TextDelta
 from monkeybot.core.memory.ingest import visible_text
 from monkeybot.core.types.content_blocks import Text
@@ -31,10 +29,7 @@ _TRAIL = " \t.!?:;,-\"'`*_"
 
 
 def title_model_id() -> str:
-    """Summarization model, else the configured chat model."""
-    chosen = current_env("CONTEXT_SUMMARIZATION_MODEL", "").strip()
-    if chosen:
-        return chosen
+    """The configured chat model. Titles use the same model as the conversation."""
     return _agent_model_name(None)
 
 

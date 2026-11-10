@@ -1,4 +1,4 @@
-"""Title cleanup and the short prompt sent to the summarization model."""
+"""Title cleanup and the short prompt sent to the chat model."""
 
 from __future__ import annotations
 
@@ -104,19 +104,7 @@ async def test_generate_chat_title_clips_inputs_and_cleans_the_reply() -> None:
     assert "a" * (TITLE_SOURCE_CHARS + 1) not in prompt
 
 
-def test_title_model_id_prefers_the_summarization_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "monkeybot.core.runtime.chat_title.current_env",
-        lambda key, default="": "cheap-model" if key == "CONTEXT_SUMMARIZATION_MODEL" else "",
-    )
-    assert title_model_id() == "cheap-model"
-
-
-def test_title_model_id_falls_back_to_the_chat_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "monkeybot.core.runtime.chat_title.current_env",
-        lambda key, default="": "",
-    )
+def test_title_model_id_uses_the_chat_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "monkeybot.core.runtime.chat_title._agent_model_name",
         lambda _cfg, model_name=None: "gemini-2.5-flash",

@@ -13,7 +13,6 @@ from typing import Any, cast
 
 from monkeybot.core.attachments.text import parse_attachment_descriptor_text
 from monkeybot.core.coding.verification_gate import last_proven_verification
-from monkeybot.core.config.snapshot import current_env, env_value
 from monkeybot.core.context import TurnContext
 from monkeybot.core.context.epoch import ContextEpochTracker
 from monkeybot.core.hooks import HookEvent, HookManager
@@ -547,29 +546,6 @@ def _summarization_viable(
     return bool(_middle_summary_lines(middle, window_tokens=window_tokens))
 
 
-def _summarization_model_id(ctx: TurnContext) -> str:
-    """Model id for history compression.
-
-    When ``ctx.config`` is pinned, do not re-read process env (turn isolation).
-    Without a snapshot, env still overrides ``ctx.summarization_model`` as before.
-    """
-    if ctx.config is not None:
-        ctx_sm = (ctx.summarization_model or "").strip()
-        if ctx_sm:
-            return ctx_sm
-        from_cfg = env_value(ctx.config, "CONTEXT_SUMMARIZATION_MODEL", "").strip()
-        if from_cfg:
-            return from_cfg
-        return ctx.model
-    from_env = current_env("CONTEXT_SUMMARIZATION_MODEL", "").strip()
-    if from_env:
-        return from_env
-    ctx_sm = (ctx.summarization_model or "").strip()
-    if ctx_sm:
-        return ctx_sm
-    return ctx.model
-
-
 async def _compact_history_if_needed(
     *,
     thread_id: str,
@@ -640,7 +616,7 @@ async def _append_budgeted_tool_responses(
                 thread_id=ctx.thread_id,
                 history=history,
                 provider=provider,
-                model=_summarization_model_id(ctx),
+                model=ctx.model,
                 window_tokens=ctx.context_window_tokens,
                 intent_facts=_intent_facts_from_ctx(ctx),
                 workspace_trailer=_workspace_trailer_from_ctx(ctx),

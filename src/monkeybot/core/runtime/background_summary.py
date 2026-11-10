@@ -26,7 +26,6 @@ from .history_compaction import (
     _finalize_summary_row,
     _generate_summary_text,
     _intent_facts_from_ctx,
-    _summarization_model_id,
     _summarization_viable,
     rebuild_compacted_history,
     split_messages_for_compaction,
@@ -232,7 +231,7 @@ async def maybe_start(
     if floor >= cap or preflight < floor or preflight >= cap:
         return
     raw = await history.load(ctx.thread_id)
-    model = _summarization_model_id(ctx)
+    model = ctx.model
     existing = _pending.get(ctx.thread_id)
     if existing is not None and _is_fresh(existing, raw, model=model, window=window):
         return

@@ -541,7 +541,6 @@ def _turn_context(
         user_id=None,
         parent_run_id=None,
         model=cfg.model.name or "fake",
-        summarization_model=cfg.model.summarization_model,
         cancelled=cancelled,
         context_window_tokens=context_window_tokens(cfg),
         workspace_root=workspace,

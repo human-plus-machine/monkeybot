@@ -171,10 +171,8 @@ async def test_span_contract_tool_path_includes_tool_span_keys(
 @pytest.mark.asyncio
 async def test_span_contract_summarize_path_includes_summarize_span_keys(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     otel_memory_exporter: Any,
 ) -> None:
-    monkeypatch.delenv("CONTEXT_SUMMARIZATION_MODEL", raising=False)
     preload = [
         Message(
             role="user" if i % 2 == 0 else "assistant",

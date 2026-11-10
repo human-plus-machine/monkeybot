@@ -50,7 +50,6 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("model", "thinking_budget"): "MODEL_THINKING_BUDGET",
     ("model", "reasoning_effort"): "MODEL_REASONING_EFFORT",
     ("model", "context_window"): "MODEL_CONTEXT_WINDOW",
-    ("model", "summarization_model"): "CONTEXT_SUMMARIZATION_MODEL",
     ("model", "max_turns"): "MAX_TURNS",
     ("model", "max_request_bytes"): "MODEL_MAX_REQUEST_BYTES",
     ("model", "cache_retention"): "MODEL_CACHE_RETENTION",
@@ -140,7 +139,6 @@ ENV_SPEC: dict[str, tuple[ConfigTier, str]] = {
     "MAX_TURNS": (ConfigTier.HOT, "model.max_turns"),
     "MODEL_MAX_REQUEST_BYTES": (ConfigTier.HOT, "model.max_request_bytes"),
     "MODEL_CONTEXT_WINDOW": (ConfigTier.HOT, "model.context_window"),
-    "CONTEXT_SUMMARIZATION_MODEL": (ConfigTier.HOT, "model.summarization_model"),
     "MODEL_CACHE_RETENTION": (ConfigTier.HOT, "model.cache_retention"),
     "MONKEYBOT_TODO_LIST_ENABLED": (ConfigTier.HOT, "tools.todo_list_enabled"),
     "MONKEYBOT_TODO_LIST_MIRROR_TO_DISK": (ConfigTier.HOT, "tools.todo_list_mirror_to_disk"),
@@ -300,6 +298,13 @@ def warn_retired_tools_keys(doc: Mapping[str, Any]) -> list[str]:
         logger.warning(
             "coding.enabled is retired and ignored — coding mode is always on; "
             "coding.verification_gate.enabled is the remaining opt-in"
+        )
+    model = doc.get("model")
+    if isinstance(model, dict) and "summarization_model" in model:
+        found.append("summarization_model")
+        logger.warning(
+            "model.summarization_model is retired and ignored — "
+            "history summarization uses model.name"
         )
     return found
 
