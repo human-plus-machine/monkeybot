@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from monkeybot.core.attachments.text import render_attachment_descriptor_text
 from monkeybot.core.llm.provider import Message
+from monkeybot.core.messages.transform_context import transform_context
 from monkeybot.core.runtime.history_compaction import (
     SUMMARY_KEEP_HEAD_COUNT,
     SUMMARY_KEEP_TAIL_MIN,
@@ -69,6 +70,179 @@ def test_split_summarizes_a_huge_response_behind_a_newer_row_with_its_request() 
     assert tail == [newest]
     assert request in middle
     assert response in middle
+    assert head + middle + tail == messages
+
+
+def test_split_keeps_the_request_when_the_tail_also_holds_an_orphan_result() -> None:
+    """An unpaired result later in the tail must not drop the request at the cut."""
+    older = _msgs(6, chars=400)
+    request = Message(
+        role="assistant",
+        content=[ToolRequest(id="real", name="write_file", args={"content": "c" * 6000})],
+    )
+    response = Message(
+        role="user",
+        content=[ToolResponse(id="real", tool_name="write_file", result=[Text(text="ok")])],
+    )
+    noted = Message(role="assistant", content=[Text(text="noted")])
+    orphan = Message(
+        role="user",
+        content=[ToolResponse(id="orphan", tool_name="write_file", result=[Text(text="leftover")])],
+    )
+    newest = Message(role="assistant", content=[Text(text="go")])
+    messages = [*older, request, response, noted, orphan, newest]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert request in tail
+    assert response in tail
+    assert orphan in tail
+    assert middle
+    assert head + middle + tail == messages
+    summary = Message(role="assistant", content=[Text(text="[Context Summary]: mid")])
+    view = transform_context([*head, summary, *tail])
+    real = [
+        block
+        for message in view
+        for block in message.content
+        if isinstance(block, ToolRequest) and block.id == "real"
+    ]
+    assert len(real) == 1
+    assert real[0].args == {"content": "c" * 6000}
+
+
+def test_split_keeps_the_request_when_the_cut_splits_its_assistant_turn() -> None:
+    """Two adjacent assistant rows are one turn, so a cut between them keeps the request."""
+    older = _msgs(6, chars=400)
+    request = Message(
+        role="assistant",
+        content=[ToolRequest(id="real", name="write_file", args={"content": "c" * 6000})],
+    )
+    bridge = Message(role="assistant", content=[Text(text="n" * 3000)])
+    response = Message(
+        role="user",
+        content=[ToolResponse(id="real", tool_name="write_file", result=[Text(text="ok")])],
+    )
+    newest = Message(role="assistant", content=[Text(text="go")])
+    messages = [*older, request, bridge, response, newest]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert request in tail
+    assert bridge in tail
+    assert response in tail
+    assert newest in tail
+    assert middle
+    assert head + middle + tail == messages
+
+
+def test_split_keeps_a_split_turn_request_when_the_tail_also_holds_an_orphan() -> None:
+    """An orphan later in the tail must not drop a request whose turn is split by the cut."""
+    older = _msgs(6, chars=400)
+    request = Message(
+        role="assistant",
+        content=[ToolRequest(id="real", name="write_file", args={"content": "c" * 6000})],
+    )
+    bridge = Message(role="assistant", content=[Text(text="n" * 3000)])
+    response = Message(
+        role="user",
+        content=[ToolResponse(id="real", tool_name="write_file", result=[Text(text="ok")])],
+    )
+    noted = Message(role="assistant", content=[Text(text="noted")])
+    orphan = Message(
+        role="user",
+        content=[ToolResponse(id="orphan", tool_name="write_file", result=[Text(text="leftover")])],
+    )
+    newest = Message(role="assistant", content=[Text(text="go")])
+    messages = [*older, request, bridge, response, noted, orphan, newest]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert request in tail
+    assert bridge in tail
+    assert response in tail
+    assert orphan in tail
+    assert middle
+    assert head + middle + tail == messages
+
+
+def test_split_does_not_extend_the_tail_when_the_pair_is_already_inside_it() -> None:
+    """A pair behind the tail's leading assistant row does not pull older rows back."""
+    head_row = Message(role="user", content=[Text(text="goal")])
+    bulky = _msgs(7, chars=4000)
+    preface = Message(role="assistant", content=[Text(text="preface")])
+    request = Message(
+        role="assistant",
+        content=[ToolRequest(id="inside", name="read_file", args={"path": "a.txt"})],
+    )
+    response = Message(
+        role="user",
+        content=[ToolResponse(id="inside", tool_name="read_file", result=[Text(text="body")])],
+    )
+    newest = Message(role="assistant", content=[Text(text="go")])
+    messages = [head_row, *bulky, preface, request, response, newest]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert tail == [preface, request, response, newest]
+    assert bulky[-1] in middle
+    assert head + middle + tail == messages
+
+
+def test_split_does_not_pull_an_already_answered_request_into_the_tail() -> None:
+    """A repeated result id matches the turn at the cut, not the original request."""
+    head_row = Message(role="user", content=[Text(text="goal")])
+    old_request = Message(
+        role="assistant",
+        content=[ToolRequest(id="dup", name="read_file", args={"path": "a.txt"})],
+    )
+    old_response = Message(
+        role="user",
+        content=[ToolResponse(id="dup", tool_name="read_file", result=[Text(text="body")])],
+    )
+    bulky = _msgs(6, chars=4000)
+    stale = Message(
+        role="user",
+        content=[ToolResponse(id="dup", tool_name="read_file", result=[Text(text="again")])],
+    )
+    newest = Message(role="assistant", content=[Text(text="go")])
+    messages = [head_row, old_request, old_response, *bulky, stale, newest]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert tail == [stale, newest]
+    assert old_request in middle
+    assert old_response in middle
+    assert head + middle + tail == messages
+
+
+def test_split_keeps_the_request_across_a_ui_row_at_the_cut() -> None:
+    """A UI-only row between a request and its result does not hide the pair."""
+    older = _msgs(6, chars=400)
+    request = Message(
+        role="assistant",
+        content=[ToolRequest(id="cut", name="read_file", args={"pad": "p" * 6000})],
+    )
+    ui = Message(
+        role="user",
+        content=[SystemNotification(notification_type="inline", msg="n")],  # type: ignore[arg-type]
+    )
+    response = Message(
+        role="user",
+        content=[ToolResponse(id="cut", tool_name="read_file", result=[Text(text="R" * 20)])],
+    )
+    messages = [*older, request, ui, response]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert request in tail
+    assert ui in tail
+    assert response in tail
+    assert middle
+    assert head + middle + tail == messages
+
+
+def test_split_leaves_the_tail_unchanged_when_it_opens_on_an_orphan_result() -> None:
+    """An orphan result at the cut has no request in the turn before it."""
+    head_row = Message(role="user", content=[Text(text="goal")])
+    bulky = _msgs(6, chars=4000)
+    orphan = Message(
+        role="user",
+        content=[ToolResponse(id="orphan", tool_name="echo", result=[Text(text="leftover")])],
+    )
+    newest = Message(role="assistant", content=[Text(text="go")])
+    messages = [head_row, *bulky, orphan, newest]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert tail == [orphan, newest]
+    assert bulky[-1] in middle
     assert head + middle + tail == messages
 
 

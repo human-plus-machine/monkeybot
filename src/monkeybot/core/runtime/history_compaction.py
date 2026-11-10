@@ -356,33 +356,50 @@ def _extend_tail_to_keep_tool_pairs(
     The minimum tail can fill up on a huge response plus a newer row, then stop
     before the request. That stores a response with no request. The request is
     small; the pair stays together in the tail.
+
+    Only the pair straddling the cut counts: results in the rows that follow
+    the assistant turn, requests in that turn. The turn can itself be split by
+    the cut, because two adjacent assistant rows are one turn to the provider.
+    A result later in the tail with no request in the tail is already unpaired,
+    and a result whose id was answered by an older request is already answered.
+    Neither pulls the tail back. One such result used to make this give up, and
+    a real request was summarized away.
     """
     if not tail:
         return tail
     start = len(messages) - len(tail)
     if start <= 0:
         return tail
-    request_ids: set[str] = set()
-    response_ids: set[str] = set()
+    before = next((m for m in reversed(messages[:start]) if is_provider_visible(m)), None)
+    # Two adjacent assistant rows are one turn to the provider. The cut can land between them.
+    in_split_turn = before is not None and before.role == "assistant"
+    wanted: set[str] = set()
     for message in tail:
-        requests, responses = _message_tool_ids(message)
-        request_ids |= requests
-        response_ids |= responses
-    missing = response_ids - request_ids
-    if not missing:
-        return tail
-    found_at: int | None = None
-    for index in range(start - 1, -1, -1):
-        requests, _responses = _message_tool_ids(messages[index])
-        if not requests & missing:
+        if not is_provider_visible(message):
             continue
-        missing -= requests
-        found_at = index
-        if not missing:
+        if message.role == "assistant":
+            if in_split_turn:
+                continue
             break
-    if found_at is None or missing:
+        in_split_turn = False
+        wanted |= _message_tool_ids(message)[1]
+    if not wanted:
         return tail
-    return list(messages[found_at:])
+    keep_from: int | None = None
+    in_assistant_turn = False
+    for index in range(start - 1, -1, -1):
+        message = messages[index]
+        if not is_provider_visible(message):
+            continue
+        if message.role == "assistant":
+            in_assistant_turn = True
+            if _message_tool_ids(message)[0] & wanted:
+                keep_from = index
+        elif in_assistant_turn:
+            break
+    if keep_from is None:
+        return tail
+    return list(messages[keep_from:])
 
 
 def _split_accountable(
