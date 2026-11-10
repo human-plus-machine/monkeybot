@@ -72,6 +72,97 @@ def test_split_summarizes_a_huge_response_behind_a_newer_row_with_its_request() 
     assert head + middle + tail == messages
 
 
+def test_split_keeps_the_request_when_the_tail_also_holds_an_orphan_result() -> None:
+    """An unpaired result later in the tail must not drop the request at the cut."""
+    older = _msgs(6, chars=400)
+    request = Message(
+        role="assistant",
+        content=[ToolRequest(id="real", name="write_file", args={"content": "c" * 6000})],
+    )
+    response = Message(
+        role="user",
+        content=[ToolResponse(id="real", tool_name="write_file", result=[Text(text="ok")])],
+    )
+    noted = Message(role="assistant", content=[Text(text="noted")])
+    orphan = Message(
+        role="user",
+        content=[ToolResponse(id="orphan", tool_name="write_file", result=[Text(text="leftover")])],
+    )
+    newest = Message(role="assistant", content=[Text(text="go")])
+    messages = [*older, request, response, noted, orphan, newest]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert request in tail
+    assert response in tail
+    assert orphan in tail
+    assert middle
+    assert head + middle + tail == messages
+
+
+def test_split_does_not_pull_an_already_answered_request_into_the_tail() -> None:
+    """A repeated result id matches the turn at the cut, not the original request."""
+    head_row = Message(role="user", content=[Text(text="goal")])
+    old_request = Message(
+        role="assistant",
+        content=[ToolRequest(id="dup", name="read_file", args={"path": "a.txt"})],
+    )
+    old_response = Message(
+        role="user",
+        content=[ToolResponse(id="dup", tool_name="read_file", result=[Text(text="body")])],
+    )
+    bulky = _msgs(6, chars=4000)
+    stale = Message(
+        role="user",
+        content=[ToolResponse(id="dup", tool_name="read_file", result=[Text(text="again")])],
+    )
+    newest = Message(role="assistant", content=[Text(text="go")])
+    messages = [head_row, old_request, old_response, *bulky, stale, newest]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert tail == [stale, newest]
+    assert old_request in middle
+    assert old_response in middle
+    assert head + middle + tail == messages
+
+
+def test_split_keeps_the_request_across_a_ui_row_at_the_cut() -> None:
+    """A UI-only row between a request and its result does not hide the pair."""
+    older = _msgs(6, chars=400)
+    request = Message(
+        role="assistant",
+        content=[ToolRequest(id="cut", name="read_file", args={"pad": "p" * 6000})],
+    )
+    ui = Message(
+        role="user",
+        content=[SystemNotification(notification_type="inline", msg="n")],  # type: ignore[arg-type]
+    )
+    response = Message(
+        role="user",
+        content=[ToolResponse(id="cut", tool_name="read_file", result=[Text(text="R" * 20)])],
+    )
+    messages = [*older, request, ui, response]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert request in tail
+    assert ui in tail
+    assert response in tail
+    assert middle
+    assert head + middle + tail == messages
+
+
+def test_split_leaves_the_tail_unchanged_when_it_opens_on_an_orphan_result() -> None:
+    """An orphan result at the cut has no request in the turn before it."""
+    head_row = Message(role="user", content=[Text(text="goal")])
+    bulky = _msgs(6, chars=4000)
+    orphan = Message(
+        role="user",
+        content=[ToolResponse(id="orphan", tool_name="echo", result=[Text(text="leftover")])],
+    )
+    newest = Message(role="assistant", content=[Text(text="go")])
+    messages = [head_row, *bulky, orphan, newest]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert tail == [orphan, newest]
+    assert bulky[-1] in middle
+    assert head + middle + tail == messages
+
+
 def test_split_keeps_a_huge_newest_response_with_its_request() -> None:
     older = _msgs(6, chars=40)
     request = Message(
