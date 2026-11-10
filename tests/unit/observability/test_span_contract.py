@@ -186,7 +186,7 @@ async def test_span_contract_summarize_path_includes_summarize_span_keys(
             [TextDelta(text="final"), Done()],
         ]
     )
-    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=1_600)
     async for _ in run(
         "hello",
         ctx,

@@ -33,7 +33,10 @@ from monkeybot.core.persistence.thread_summary import CONTEXT_SUMMARY_PREFIX
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.context_budget import (
     ContextBudgeter,
+    _head_and_tail,
+    estimate_tokens,
     estimate_tokens_from_char_count,
+    summary_input_budget,
 )
 from monkeybot.core.types.content_blocks import (
     AttachmentRef,
@@ -655,6 +658,97 @@ async def _append_budgeted_tool_responses(
     )
 
 
+_SUMMARY_LEAD = "Create a structured summary from the conversation segment below.\n\n"
+_SUMMARY_SEPARATOR = "\n\n---\n\n"
+
+
+def _summary_user_text(lines: Sequence[str], intent_facts: str | None) -> str:
+    """The user message for one summary call. One chunk is the old single prompt."""
+    user_text = _SUMMARY_LEAD + _SUMMARY_SEPARATOR.join(lines)
+    if intent_facts:
+        user_text = intent_facts + "\n\n" + user_text
+    return user_text
+
+
+def _summary_request_tokens(lines: Sequence[str], intent_facts: str | None) -> int:
+    return estimate_tokens(_COMPACTION_SUMMARY_SYSTEM) + estimate_tokens(
+        _summary_user_text(lines, intent_facts)
+    )
+
+
+def _summary_fits(lines: Sequence[str], intent_facts: str | None, budget: int) -> bool:
+    return _summary_request_tokens(lines, intent_facts) <= budget
+
+
+def _trim_line_to_budget(
+    prefix: Sequence[str],
+    line: str,
+    *,
+    budget: int,
+    intent_facts: str | None,
+) -> str:
+    """Shorten ``line`` until it fits after ``prefix``, keeping its head and tail."""
+    if _summary_fits([*prefix, line], intent_facts, budget):
+        return line
+    lo = 1
+    hi = len(line)
+    best = ""
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        trimmed = _head_and_tail(line, mid)
+        if trimmed and _summary_fits([*prefix, trimmed], intent_facts, budget):
+            best = trimmed
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    if best:
+        return best
+    # The fixed prompt already fills the budget. One character keeps the fold moving.
+    return line[:1] or line
+
+
+def _carry_line(summary: str) -> str:
+    """Previous summary, in the same shape a stored summary row is re-summarized."""
+    return f"assistant: {CONTEXT_SUMMARY_PREFIX}\n{summary}"
+
+
+def _pack_summary_chunk(
+    lines: list[str],
+    index: int,
+    *,
+    carry: str | None,
+    budget: int,
+    intent_facts: str | None,
+) -> tuple[list[str], int]:
+    """Lines for one summary call, and the index of the first line not taken.
+
+    ``carry`` is the summary of the lines already consumed. A line that does not
+    fit in a call by itself is trimmed, so the index always advances.
+    """
+    chunk: list[str] = []
+    if carry:
+        chunk.append(_carry_line(carry))
+        if not _summary_fits(chunk, intent_facts, budget):
+            chunk[0] = _trim_line_to_budget([], chunk[0], budget=budget, intent_facts=intent_facts)
+    start = index
+    while index < len(lines):
+        if _summary_fits([*chunk, lines[index]], intent_facts, budget):
+            chunk.append(lines[index])
+            index += 1
+            continue
+        if index > start:
+            break
+        lines[index] = _trim_line_to_budget(
+            chunk, lines[index], budget=budget, intent_facts=intent_facts
+        )
+        chunk.append(lines[index])
+        index += 1
+        break
+    if index == start:
+        raise RuntimeError("summary packing did not advance")
+    return chunk, index
+
+
 async def _generate_summary_text(
     provider: Provider,
     model: str,
@@ -665,16 +759,39 @@ async def _generate_summary_text(
 ) -> str | None:
     """Stream a summary of ``middle``. ``None`` when those rows have nothing to compact.
 
-    The workspace trailer is not applied here. It is taken from the ledger when the
-    summary is written, so files touched after this call still appear.
+    The middle is summarized in calls that each fit ``summary_input_budget``. A
+    middle that fits is one call, with the same prompt as before. A larger middle
+    is folded: each later call starts from the summary so far. The workspace
+    trailer is not applied here. It is taken from the ledger when the summary is
+    written, so files touched after this call still appear.
     """
     lines = _middle_summary_lines(middle, window_tokens=window_tokens)
     if not lines:
         return None
-    blob = "\n\n---\n\n".join(lines)
-    user_text = "Create a structured summary from the conversation segment below.\n\n" + blob
-    if intent_facts:
-        user_text = intent_facts + "\n\n" + user_text
+    budget = summary_input_budget(window_tokens)
+    working = list(lines)
+    summary: str | None = None
+    index = 0
+    while index < len(working):
+        chunk, index = _pack_summary_chunk(
+            working,
+            index,
+            carry=summary,
+            budget=budget,
+            intent_facts=intent_facts,
+        )
+        summary = await _summarize_chunk(provider, model, chunk, intent_facts=intent_facts)
+    return summary
+
+
+async def _summarize_chunk(
+    provider: Provider,
+    model: str,
+    lines: Sequence[str],
+    *,
+    intent_facts: str | None,
+) -> str:
+    """One summary call. The caller keeps the returned text only if every call succeeds."""
     summarize_messages = [
         Message(
             role="system",
@@ -682,7 +799,7 @@ async def _generate_summary_text(
         ),
         Message(
             role="user",
-            content=[Text(text=user_text)],
+            content=[Text(text=_summary_user_text(lines, intent_facts))],
         ),
     ]
     binding = _summary_transcript.get()

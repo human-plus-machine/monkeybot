@@ -1584,7 +1584,7 @@ async def test_run_emits_context_summarize_events_when_over_cap(tmp_path: Path) 
             [TextDelta(text="final"), Done()],
         ]
     )
-    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=1_600)
     events = []
     async for e in run(
         "hello",
@@ -1643,7 +1643,7 @@ async def _run_over_cap(tmp_path: Path, preload: list[Message]) -> FakeHistory:
     prov = FakeProvider(
         [[TextDelta(text=" compressed summary "), Done()], [TextDelta(text="final"), Done()]]
     )
-    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=1_600)
     async for _ in run(
         "hello",
         ctx,
@@ -1675,7 +1675,7 @@ async def test_compaction_records_the_raw_summary_call_on_the_transcript(tmp_pat
     writer = TranscriptWriter("sess-compact", workspace_root=tmp_path)
     async for _ in run(
         "hello",
-        _ctx(workspace_root=tmp_path, context_window_tokens=800),
+        _ctx(workspace_root=tmp_path, context_window_tokens=1_600),
         provider=prov,
         history=hist,
         inspectors=[],
@@ -1946,7 +1946,7 @@ async def test_summarization_call_never_receives_vertex_google_search(tmp_path: 
         ],
         name="gemini",
     )
-    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=1_600)
     async for _ in run(
         "hello",
         ctx,
@@ -3380,7 +3380,7 @@ class _CodingCfg:
 
 def _ledger_ctx(tmp_path: Path, ledger: Any) -> TurnContext:
     return dataclasses.replace(
-        _ctx(workspace_root=tmp_path, context_window_tokens=800),
+        _ctx(workspace_root=tmp_path, context_window_tokens=1_600),
         read_ledger=ledger,
         config=_CodingCfg(),  # type: ignore[arg-type]
     )
