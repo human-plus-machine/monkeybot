@@ -65,5 +65,16 @@ def heading_marker(heading: str) -> str:
     return heading[: heading.index("\n", 2) + 1]
 
 
+def is_system_context_update(text: str) -> bool:
+    """True when ``text`` is a live context tail, not a later mention of the heading.
+
+    The tail block starts with the ``## System context update`` title line.
+    Cache markers sit on the block before it, so a message that only quotes the
+    heading further down is left alone.
+    """
+    title = heading_marker(SYSTEM_CONTEXT_UPDATE_HEADING).strip()
+    return text.lstrip("\n").startswith(title)
+
+
 #: Title-line-only markers for locating the volatile tail in a composed prompt.
 VOLATILE_SECTION_MARKERS = tuple(heading_marker(h) for h in VOLATILE_SECTION_HEADINGS)
