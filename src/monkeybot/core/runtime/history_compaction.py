@@ -357,24 +357,31 @@ def _extend_tail_to_keep_tool_pairs(
     before the request. That stores a response with no request. The request is
     small; the pair stays together in the tail.
 
-    Only the pair straddling the cut counts: results in the leading rows of the
-    tail, requests in the assistant turn just before the cut. That is the same
-    pairing the provider sees. A result later in the tail with no request in
-    the tail is already unpaired, and a result whose id was answered by an
-    older request is already answered. Neither pulls the tail back. One such
-    result used to make this give up, and a real request was summarized away.
+    Only the pair straddling the cut counts: results in the rows that follow
+    the assistant turn, requests in that turn. The turn can itself be split by
+    the cut, because two adjacent assistant rows are one turn to the provider.
+    A result later in the tail with no request in the tail is already unpaired,
+    and a result whose id was answered by an older request is already answered.
+    Neither pulls the tail back. One such result used to make this give up, and
+    a real request was summarized away.
     """
     if not tail:
         return tail
     start = len(messages) - len(tail)
     if start <= 0:
         return tail
+    before = next((m for m in reversed(messages[:start]) if is_provider_visible(m)), None)
+    # Two adjacent assistant rows are one turn to the provider. The cut can land between them.
+    in_split_turn = before is not None and before.role == "assistant"
     wanted: set[str] = set()
     for message in tail:
         if not is_provider_visible(message):
             continue
         if message.role == "assistant":
+            if in_split_turn:
+                continue
             break
+        in_split_turn = False
         wanted |= _message_tool_ids(message)[1]
     if not wanted:
         return tail
