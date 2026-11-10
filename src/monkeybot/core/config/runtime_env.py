@@ -51,6 +51,8 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("model", "reasoning_effort"): "MODEL_REASONING_EFFORT",
     ("model", "context_window"): "MODEL_CONTEXT_WINDOW",
     ("model", "max_turns"): "MAX_TURNS",
+    ("model", "provider_max_retries"): "PROVIDER_MAX_RETRIES",
+    ("model", "stream_idle_timeout_s"): "STREAM_IDLE_TIMEOUT_S",
     ("model", "max_request_bytes"): "MODEL_MAX_REQUEST_BYTES",
     ("model", "cache_retention"): "MODEL_CACHE_RETENTION",
     ("gcp", "project_id"): "VERTEX_AI_PROJECT_ID",
@@ -137,6 +139,8 @@ ENV_SPEC: dict[str, tuple[ConfigTier, str]] = {
     # HOT — next turn reads the new snapshot.
     "MODEL_NAME": (ConfigTier.HOT, "model.name"),
     "MAX_TURNS": (ConfigTier.HOT, "model.max_turns"),
+    "PROVIDER_MAX_RETRIES": (ConfigTier.HOT, "model.provider_max_retries"),
+    "STREAM_IDLE_TIMEOUT_S": (ConfigTier.HOT, "model.stream_idle_timeout_s"),
     "MODEL_MAX_REQUEST_BYTES": (ConfigTier.HOT, "model.max_request_bytes"),
     "MODEL_CONTEXT_WINDOW": (ConfigTier.HOT, "model.context_window"),
     "MODEL_CACHE_RETENTION": (ConfigTier.HOT, "model.cache_retention"),
