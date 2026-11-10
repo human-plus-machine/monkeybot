@@ -1042,6 +1042,7 @@ async def _post_batch_budget_and_registry(
     inner_turn: int,
     hook_manager: HookManager | None = None,
     prompt_ledger: PromptTokenLedger | None = None,
+    prompt_tokens: int = 0,
 ) -> AsyncIterator[AgentEvent]:
     """Doom-loop error, budgeted history append, and MCP/loops registry refresh."""
     ctx = state.ctx
@@ -1101,7 +1102,10 @@ async def _post_batch_budget_and_registry(
                 chat_for_budget = truncate_history_preserving_pins(
                     chat_for_budget, max_rows=HISTORY_LOAD_MAX
                 )
-            budget_used = usage.estimated_prompt_tokens
+            # A failed recount must not fall back to the request peak. That peak
+            # stays high after a compaction, and a moderate tier here trims the
+            # new results and forces another compaction.
+            budget_used = prompt_tokens if prompt_tokens > 0 else usage.estimated_prompt_tokens
             try:
                 budget_used = await _prompt_input_tokens_for_history(
                     ctx=ctx,
@@ -1115,8 +1119,12 @@ async def _post_batch_budget_and_registry(
                 )
             except Exception:
                 logger.warning(
-                    "tool budget token recount failed %s; using estimated_prompt_tokens",
-                    kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
+                    "tool budget token recount failed %s; using last prompt count",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        prompt_tokens=budget_used,
+                    ),
                     exc_info=True,
                 )
         usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, budget_used)
@@ -1247,6 +1255,7 @@ async def dispatch_tool_batch(
     vertex_google_search: bool,
     epoch_tracker: ContextEpochTracker,
     prompt_ledger: PromptTokenLedger | None = None,
+    prompt_tokens: int = 0,
 ) -> AsyncIterator[AgentEvent]:
     """Execute one provider tool-call batch; yield events; update ``state`` in place.
 
@@ -1399,5 +1408,6 @@ async def dispatch_tool_batch(
         inner_turn=turn_index,
         hook_manager=hook_manager,
         prompt_ledger=prompt_ledger,
+        prompt_tokens=prompt_tokens,
     ):
         yield evt

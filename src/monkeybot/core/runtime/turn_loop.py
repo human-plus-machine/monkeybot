@@ -942,6 +942,7 @@ async def _run_history_summarization(
             provider=provider,
             vertex_google_search=vertex_google_search,
         )
+        state.last_preflight_tokens = post
         usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, post)
         yield ContextUsage(
             request_id=state.ctx.request_id,
@@ -1035,14 +1036,18 @@ async def _apply_history_load_max_safety(
 async def _apply_pressure_and_before_provider(
     state: _TurnState,
     *,
-    usage: Usage,
     hook_manager: HookManager | None,
     attachment_store: AttachmentStore | None,
 ) -> AsyncIterator[AgentEvent]:
-    """Apply context-pressure shaping, BEFORE_PROVIDER hook, and SystemPromptSnapshot."""
+    """Apply context-pressure shaping, BEFORE_PROVIDER hook, and SystemPromptSnapshot.
+
+    The tier follows the count of the request about to be sent. The per-request
+    peak on ``Usage`` is a report, and reading it here kept shaping on after a
+    compaction had already brought the prompt back down.
+    """
     system_msg, admit = _require_prompt(state)
     pressure_tier = compute_context_pressure_tier(
-        usage.estimated_prompt_tokens,
+        state.last_preflight_tokens,
         state.ctx.context_window_tokens,
     )
     if pressure_tier in ("moderate", "aggressive"):
@@ -1156,7 +1161,6 @@ async def _maybe_compact_and_shape(
         yield evt
     async for evt in _apply_pressure_and_before_provider(
         state,
-        usage=usage,
         hook_manager=hook_manager,
         attachment_store=attachment_store,
     ):
@@ -2401,6 +2405,7 @@ async def _append_tool_requests_and_dispatch(
         vertex_google_search=vertex_google_search,
         epoch_tracker=state.epoch_tracker,
         prompt_ledger=state.prompt_ledger,
+        prompt_tokens=state.last_preflight_tokens,
     ):
         yield evt
     state.ctx = batch_state.ctx
