@@ -179,6 +179,26 @@ def _text_at(by_seq: dict[int, dict[str, Any]], seq: object) -> str | None:
     return text if isinstance(text, str) else None
 
 
+def _resolve_context_tail(record: dict[str, Any], by_seq: dict[int, dict[str, Any]]) -> None:
+    """Expand ``context_tail_seq`` once earlier records have their own text.
+
+    The cited record is either an event with ``text`` or an earlier provider
+    request that stored ``context_tail`` in full. Resolved in file order, so a
+    pointer to a pointer has already been expanded.
+    """
+    seq = record.get("context_tail_seq")
+    if not isinstance(seq, int) or isinstance(record.get("context_tail"), str):
+        return
+    source = by_seq.get(seq)
+    if not isinstance(source, dict):
+        return
+    text = source.get("text")
+    if not isinstance(text, str):
+        text = source.get("context_tail")
+    if isinstance(text, str):
+        record["context_tail"] = text
+
+
 def _resolve_message_pointers(messages: object, by_seq: dict[int, dict[str, Any]]) -> None:
     if not isinstance(messages, list):
         return
@@ -227,6 +247,8 @@ def resolve_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     _resolve_text_anchors(resolved, by_seq)
     for record in resolved:
         _resolve_schema(record, by_seq)
+    for record in resolved:
+        _resolve_context_tail(record, by_seq)
     for record in resolved:
         _resolve_message_pointers(record.get("messages"), by_seq)
     return resolved
@@ -466,6 +488,18 @@ def _last_manifest(records: list[dict[str, Any]]) -> dict[str, Any]:
         if record.get("type") == "SessionManifest":
             manifest = record
     return manifest
+
+
+def _note_context_tail(builder: _TurnBuilder, record: dict[str, Any], *, full: bool) -> None:
+    """One digest line per provider call that carried a live context tail."""
+    tail = record.get("context_tail")
+    if not isinstance(tail, str) or not tail.strip():
+        return
+    inner = record.get("inner_turn")
+    prefix = f"call {inner}: " if isinstance(inner, int) else ""
+    note = _note(record, "context_tail", f"{prefix}{tail}", full=full)
+    if note is not None:
+        builder.turn.items.append(note)
 
 
 def _note(record: dict[str, Any], kind: str, text: str, *, full: bool) -> TurnNote | None:
@@ -743,11 +777,14 @@ def _turns_from_records(
                 full=full,
             )
             continue
+        if kind == "ProviderRequest":
+            if current is not None:
+                _note_context_tail(current, record, full=full)
+            continue
         if kind in (
             "SessionManifest",
             "SystemPromptSnapshot",
             "SystemContextUpdated",
-            "ProviderRequest",
             "ContextUsage",
         ):
             continue

@@ -10,6 +10,7 @@ import re
 from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Any, Literal
 
+from monkeybot.core.attachments.text import filename_from_metadata
 from monkeybot.core.llm.provider import (
     Done,
     Message,
@@ -21,7 +22,7 @@ from monkeybot.core.llm.provider import (
     UsageEvent,
 )
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.attachments.text import filename_from_metadata
+from monkeybot.core.prompts.headings import is_system_context_update
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
     File,
@@ -276,6 +277,27 @@ def _append_cache_point_to_tools(tool_config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _converse_block_is_context_tail(block: object) -> bool:
+    if not isinstance(block, dict):
+        return False
+    text = block.get("text")
+    return isinstance(text, str) and is_system_context_update(text)
+
+
+def _cache_point_before_tail(content: list[Any]) -> list[Any] | None:
+    """Insert a cache point before a trailing context tail.
+
+    ``None`` when every block is a tail, so the point stays on an earlier user
+    message whose bytes the next call will still send.
+    """
+    split = len(content)
+    while split > 0 and _converse_block_is_context_tail(content[split - 1]):
+        split -= 1
+    if split == 0 and content:
+        return None
+    return [*content[:split], dict(_CACHE_POINT_BLOCK), *content[split:]]
+
+
 def _append_cache_points_to_last_user_messages(
     messages: list[dict[str, Any]],
     *,
@@ -285,15 +307,25 @@ def _append_cache_points_to_last_user_messages(
         return [
             dict(m, content=_copy_content_blocks(list(m.get("content") or []))) for m in messages
         ]
-    user_indices = [i for i, m in enumerate(messages) if m.get("role") == "user"]
-    targets = set(user_indices[-2:])
+    # Walk user messages from the end. A tail-only message is not a cache point:
+    # the next call drops that text, so a point after it would never be read.
+    pending: list[int] = []
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") != "user":
+            continue
+        content = list(messages[index].get("content") or [])
+        if content and all(_converse_block_is_context_tail(block) for block in content):
+            continue
+        pending.append(index)
+        if len(pending) >= max_points:
+            break
+    targets = set(pending)
     out: list[dict[str, Any]] = []
-    budget = max_points
-    for i, msg in enumerate(messages):
+    for index, msg in enumerate(messages):
         content = _copy_content_blocks(list(msg.get("content") or []))
-        if i in targets and budget > 0:
-            content.append(dict(_CACHE_POINT_BLOCK))
-            budget -= 1
+        if index in targets:
+            placed = _cache_point_before_tail(content)
+            content = content if placed is None else placed
         out.append({"role": msg["role"], "content": content})
     return out
 

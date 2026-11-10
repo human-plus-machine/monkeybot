@@ -100,6 +100,52 @@ async def test_resolve_expands_diff_schema_content_and_result(tmp_path: Path) ->
     assert restored[1]["result"] == big_result
 
 
+@pytest.mark.asyncio
+async def test_digest_shows_the_context_tail_on_each_call(tmp_path: Path) -> None:
+    tail = (
+        "## System context update\n"
+        "The following replaces the prior current-request section for this conversation.\n\n"
+        "## Current request\nfix it"
+    )
+    writer = TranscriptWriter("sess-tail", workspace_root=tmp_path)
+    await writer.write_user_message(request_id="r", content="fix it")
+    await writer.write_provider_request(
+        request_id="r",
+        inner_turn=2,
+        model="m",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "fix it"},
+                    {"type": "text", "text": tail},
+                ],
+            }
+        ],
+        thinking_budget=None,
+    )
+    await writer.write_provider_request(
+        request_id="r",
+        inner_turn=3,
+        model="m",
+        messages=[{"role": "user", "content": "fix it"}],
+        thinking_budget=None,
+        context_tail=tail,
+    )
+
+    resolved = resolve_records(load_records(writer.path))
+    requests = [row for row in resolved if row.get("type") == "ProviderRequest"]
+    assert requests[0]["context_tail"] == tail
+    assert requests[0]["messages"][0]["content"] == [{"type": "text", "text": "fix it"}]
+    assert requests[1]["context_tail"] == tail
+    assert requests[1]["context_tail_seq"] == requests[0]["seq"]
+    digest = build_digest(writer.session_dir, full=True)
+    notes = [
+        item for item in digest.turns[0].items if getattr(item, "kind", None) == "context_tail"
+    ]
+    assert [note.text for note in notes] == [f"call 2: {tail}", f"call 3: {tail}"]
+
+
 def test_load_records_skips_corrupt_lines(tmp_path: Path) -> None:
     path = tmp_path / "transcript.ndjson"
     path.write_text('{"seq":1,"type":"UserMessage","content":"hi"}\nnot-json\n', encoding="utf-8")

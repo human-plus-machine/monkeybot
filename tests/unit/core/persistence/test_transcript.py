@@ -389,8 +389,10 @@ async def test_system_message_points_at_system_prompt_snapshot(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_injected_context_update_points_at_its_event(tmp_path: Path) -> None:
-    """The mid-epoch update is replayed verbatim in the next message body."""
+async def test_context_tail_points_at_its_event_and_stays_out_of_the_message(
+    tmp_path: Path,
+) -> None:
+    """The tail is a per-call field, not a block later calls would still be sending."""
     writer = TranscriptWriter("sess-scu", workspace_root=tmp_path)
     injected = "## System context update\n" + "\n".join(f"fact {i}" for i in range(60))
     await writer.write_event(
@@ -398,29 +400,40 @@ async def test_injected_context_update_points_at_its_event(tmp_path: Path) -> No
             request_id="r1", epoch_id=1, changed_sources=["current_request"], text=injected
         )
     )
+    message = {
+        "role": "user",
+        "content": [
+            {"type": "toolResponse", "id": "c1", "toolName": "glob", "result": "x"},
+            {"type": "text", "text": injected},
+        ],
+    }
     await writer.write_provider_request(
         request_id="r1",
         inner_turn=2,
         model="gpt-5",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "toolResponse", "id": "c1", "toolName": "glob", "result": "x"},
-                    {"type": "text", "text": injected},
-                ],
-            }
-        ],
+        messages=[message],
         thinking_budget=None,
     )
+    await writer.write_provider_request(
+        request_id="r1",
+        inner_turn=3,
+        model="gpt-5",
+        messages=[message],
+        message_offset=0,
+        thinking_budget=None,
+        context_tail=injected,
+    )
 
-    event, request = _read_lines(writer.path)
+    event, first, second = _read_lines(writer.path)
     assert event["text"] == injected
-    assert request["messages"][0]["content"][1] == {
-        "type": "text",
-        "text_seq": event["seq"],
-        "chars": len(injected),
-    }
+    assert first["messages"][0]["content"] == [
+        {"type": "toolResponse", "id": "c1", "toolName": "glob", "result": "x"}
+    ]
+    assert first["context_tail_seq"] == event["seq"]
+    assert first["context_tail_chars"] == len(injected)
+    assert "context_tail" not in first
+    assert second["context_tail_seq"] == event["seq"]
+    assert second["messages"][0]["content"] == first["messages"][0]["content"]
 
 
 @pytest.mark.asyncio

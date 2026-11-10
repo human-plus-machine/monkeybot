@@ -163,7 +163,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - **Steer / follow-up:** `POST /steer` injects at the next safe boundary. Promote (`Send now`) aborts the current step immediately and injects in the same turn. Follow-up FIFO drains only when idle. One reply-in-flight lock still applies to `/reply`.
 - **Settlement barrier:** `PRE_TOOL` is awaited before execute; fire-and-forget hooks are drained (bounded by `MONKEYBOT_HOOK_SETTLEMENT_TIMEOUT_S`, default 2s) before the next provider call and before `TurnComplete` (`run()` finally). Settlement does **not** wait on SSE client ACKs (avoids deadlock).
 - **Parallel-safe tools:** `ToolDef.parallel_safe=True` for read-only core tools (`read_file`, `glob`, `grep`, `search_memory`, `list_skills`, `loop_status`, `load_file`). Mutating tools (`write_file`, `replace_in_file`, `apply_patch`, …) stay serial. MCP tools default serial. Results always append in `call_id` order.
-- **Context Epoch:** At each safe provider-turn boundary the harness reconciles stable vs volatile system-context sources. The leading system message keeps an immutable epoch baseline (cache prefix). Volatile changes emit a chronological mid-conversation update (user-role, not persisted) and a `SystemContextUpdated` event. Compaction / stable-source change opens a new epoch (`ContextEpochStarted`).
+- **Context Epoch:** At each safe provider-turn boundary the harness reconciles stable vs volatile system-context sources. The leading system message keeps an immutable epoch baseline (cache prefix). Sections that differ from that baseline are sent again on every later call of the request, as a `## System context update` block after the history (user-role, not persisted). `SystemContextUpdated` fires on the call where a section changes. Compaction or a stable-source change opens a new epoch (`ContextEpochStarted`).
 - **Message pipeline:** `history → transform_context() → convert_to_provider() → Provider.stream`. Transform strips UI-only blocks, then repairs tool pairs on that provider-shaped list; convert resolves attachments and applies pressure shaping without mutating persisted history.
 - **Streaming grammar (additive):** `AssistantTextStarted` / `AssistantTextEnded`, `ThinkingBlockStarted`, and `ToolInputDelta` supplement existing `AssistantDelta` / `ThinkingBlockDelta` / `ToolCallStarted`. Clients may ignore the new events.
 
@@ -179,7 +179,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 
 1. **Stable prefix (epoch baseline):** `AGENT.md` + harness + (`## Project instructions`, `## Repo overview`; see [§22](#22-coding-mode)) + session attachments
 2. **Volatile tail:** current date (`YYYY-MM-DD`) + memory index + skills + "Current request" anchor
-3. **Mid-conversation updates (within epoch):** chronological user message with `## System context update` when volatile sources change; leading baseline stays byte-identical for prompt cache
+3. **Live tail (within an epoch):** `## System context update` carrying every section that differs from the baseline, on every later call of the request, not only the call that first saw the change. The leading baseline stays byte-identical for prompt cache.
 
 **How it works:**
 - `compose_stable_baseline()` / `compose_volatile_tail()` split the prompt; `compose_system_prompt()` remains the full-string helper for tests/tools.
@@ -188,7 +188,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Emission-style block (Levers 1–2: minimum code, terse prose) is injected into the stable prefix when `MONKEYBOT_EMISSION_STYLE=terse`; its dense agent-to-agent sub-block (Lever 3) is additionally gated on the `task` tool being active. Default off. See [§21](#21-emission-style-terse-output-guidance).
 - `HARNESS_TOOL_CALL_PROTOCOL` enforces native tool-call channel, evidence rule, no-repeat rule.
 - Skills are listed as `- name — description` (description collapsed to one line, 200 chars max) in the volatile tail.
-- "Current date" injects the host-local calendar day as machine-stable `YYYY-MM-DD` in the volatile tail (not the stable cache prefix), so a midnight rollover mid-session emits a mid-conversation update without busting prompt cache.
+- "Current date" injects the host-local calendar day as machine-stable `YYYY-MM-DD` in the volatile tail (not the stable cache prefix), so a midnight rollover mid-session emits a context tail without busting prompt cache and keeps the new date visible for the rest of the request.
 - "Current request" block restates last user text when transcript continued with assistant/tool messages (skipped when user row is already last).
 - Memory selection (`MemoryPromptSelection`) replaces full `ctx.memory_index` when truncated; skill names always come from `ctx.skills` (use `list_skills`/`read_file` for the skills root path and full `SKILL.md` procedure).
 
@@ -198,7 +198,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 - Harness text lives in **code** (`harness_prompt.py`), not `AGENT.md` — do not duplicate tool protocol in operator prompts.
 - `_MAX_CURRENT_REQUEST_CHARS = 8000` caps injected user text.
 - Stable prefix before volatile tail for prompt caching; epoch baseline is immutable until compaction or stable-source change.
-- Mid-conversation system updates are provider-view only (not written to history).
+- The context tail is provider-view only (not written to history). It stays on every later call until the section matches the baseline again or a new epoch opens.
 - Model should prefer **active tool list** over stale harness summaries.
 
 ---

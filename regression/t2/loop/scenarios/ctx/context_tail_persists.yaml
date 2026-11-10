@@ -1,0 +1,60 @@
+id: regression/t2/loop/scenarios/ctx/context_tail_persists
+case: T2-CTX-20
+description: The current-request anchor stays in the provider messages after the call
+  that first carried it.
+mode: scripted
+driver: loop
+messages:
+- keep this task in view
+script:
+- - type: tool_call
+    call_id: c1
+    name: read_file
+    args:
+      path: a.txt
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: read_file
+    args:
+      path: b.txt
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: read_file
+    args:
+      path: c.txt
+  - type: done
+- - type: text
+    text: done-20
+  - type: done
+tool_results:
+  c1:
+    text: ok
+  c2:
+    text: ok
+  c3:
+    text: ok
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 4
+  provider_request:
+  - n: 1
+    messages_not_contain: "## Current request"
+    system_not_contains: "## System context update"
+  - n: 2
+    messages_contain: "## System context update"
+    system_not_contains: "## System context update"
+  - n: 2
+    messages_contain: "## Current request"
+  - n: 3
+    messages_contain: "## System context update"
+    system_not_contains: "## System context update"
+  - n: 3
+    messages_contain: "## Current request"
+  - n: 4
+    messages_contain: "## System context update"
+    system_not_contains: "## System context update"
+  - n: 4
+    messages_contain: "## Current request"

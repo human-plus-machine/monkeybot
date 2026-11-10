@@ -32,6 +32,7 @@ Gaps: `compaction_fallback` untested; epochs never asserted through `run`; nothi
 | T2-CTX-17 | `base64_sanitized` | Tool result with a base64 blob is redacted before the provider (`MONKEYBOT_TOOL_RESULT_SANITIZE` default). |
 | T2-CTX-18 | `context_usage_current_not_peak` | `ContextUsage.estimated_tokens` drops after compaction. |
 | T2-CTX-19 | `memory_wake_up_large` (migrate) | Large wake-up index injected; turn completes. |
+| T2-CTX-20 | `context_tail_persists` | The current-request anchor is absent on call 1 and is in the provider messages, not the system prompt, on calls 2, 3, and 4. |
 | T3-CTX-01 | `replay_live_compaction` | Recorded long-session cassette compacts at the same call index. |
 | T4-CTX-01 | `summarization_trigger` (migrate, retuned) | `config: model.context_window` small enough that the scenario must compact; `min_summarizations: 1`. Fails if it would have passed without compacting. |
 | T4-CTX-02 | `post_compaction_continuity` | Multi-step task spanning a forced compaction still completes (workspace grader). |
