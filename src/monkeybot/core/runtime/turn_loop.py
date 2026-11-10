@@ -139,6 +139,7 @@ from .loop_usage import (
 )
 from .preempt import StepPreemptedError, race_preempt
 from .prompt_ledger import PromptTokenLedger
+from .request_history import RequestHistory
 from .tool_dispatch import ToolBatchState, dispatch_tool_batch
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.turn_loop")
@@ -2156,6 +2157,7 @@ async def _run_inner_core(
         set_turn_prompt_tokens,
     )
 
+    history = RequestHistory.wrap(history, thread_id=ctx.thread_id)
     state = _TurnState(
         ctx=ctx,
         user_text=_user_text_from_content(user_content),
