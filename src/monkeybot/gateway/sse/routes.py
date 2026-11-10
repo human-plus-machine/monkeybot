@@ -41,6 +41,7 @@ from monkeybot.core.runtime.input_admission import (
     FollowUpNotFoundError,
 )
 from monkeybot.core.tools.change_recorder import ChangeRevertError, ChangeStore
+from monkeybot.core.tools.fs_worker import run_fs
 from monkeybot.core.tools.workspace_service import WorkspaceError, WorkspaceFileService
 from monkeybot.core.types.content_blocks import ContentBlock
 from monkeybot.core.verifier.rewrite_effects import VerifierRewriteEffects
@@ -1388,7 +1389,7 @@ def create_app(
         rel = path.strip() if path and path.strip() else None
         ws = WorkspaceFileService(_api_workspace_root())
         try:
-            entries = ws.list_directory(rel)
+            entries = await run_fs(ws.list_directory, rel)
         except WorkspaceError as exc:
             raise _workspace_exc_to_api(exc) from exc
         display = rel if rel else "."
@@ -1417,7 +1418,7 @@ def create_app(
             )
         ws = WorkspaceFileService(_api_workspace_root())
         try:
-            result = ws.read_file(path.strip(), offset=offset, limit=limit)
+            result = await run_fs(ws.read_file, path.strip(), offset=offset, limit=limit)
         except WorkspaceError as exc:
             raise _workspace_exc_to_api(exc) from exc
         return {
