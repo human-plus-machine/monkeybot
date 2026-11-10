@@ -87,8 +87,10 @@ from .events import (
     ContextUsage,
     Error,
     HarnessIntervention,
+    SystemNotificationEvent,
     SystemPromptSnapshot,
     Thinking,
+    ThinkingBlockComplete,
     ToolCallResult,
     UserSteered,
     VerifierVerdict,
@@ -136,7 +138,16 @@ from .loop_usage import (
     _provider_prompt_input_tokens,
     _stream_thinking_budget,
 )
-from .preempt import StepPreemptedError, race_preempt
+from .preempt import StepPreemptedError, StreamStalledError, race_preempt
+from .provider_retry import (
+    RESUME_NOTE,
+    RESUME_NOTICE,
+    classify,
+    idle_timeout_s,
+    policy_for,
+    recovery,
+    retry_notice,
+)
 from .tool_dispatch import ToolBatchState, dispatch_tool_batch
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.turn_loop")
@@ -149,7 +160,7 @@ CONTEXT_OVERFLOW_ERROR = (
     "This request is too large for the model's context window. Send it in smaller pieces."
 )
 
-TurnAction = Literal["continue", "break", "return", "preempt", "overflow"]
+TurnAction = Literal["continue", "break", "return", "preempt", "resume", "overflow"]
 
 _EMPTY_COMPLETION_RETRIES = 2
 _POST_TOOL_EMPTY_RETRIES = 1
@@ -604,6 +615,8 @@ class _TurnState:
     stream_truncated: bool = False
     last_preflight_tokens: int = 0
     provider_stream_failed: bool = False
+    # Resumes keep text the client already saw. Capped for the whole user request.
+    provider_resumes_used: int = 0
     # One size rejection per send is answered by compacting and sending again.
     overflow_recovered: bool = False
     tools_dirty_reason: str | None = None
@@ -1169,6 +1182,254 @@ async def _write_transcript_provider_request(
     state.tools_dirty_reason = None
 
 
+@dataclasses.dataclass
+class _StreamStats:
+    """Token totals and the longest silence for one inner call, retries included."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    max_event_gap_s: float = 0.0
+
+
+def _text_reached_client(state: _TurnState, mapper: ProviderStreamMapper) -> bool:
+    """True when assistant text from this attempt was yielded to the client.
+
+    Held text is still private to the loop, so a retry may discard it.
+    """
+    if state.hold_assistant_text:
+        return False
+    return bool((mapper.assistant_text or "").strip())
+
+
+def _thinking_close_events(mapper: ProviderStreamMapper) -> list[AgentEvent]:
+    """Close a thinking block the client saw. Drop any text-block close.
+
+    ``finish`` also ends an open text block. On a retry that text was held or
+    empty, and yielding its end would close a block the client never opened.
+    """
+    return [evt for evt in mapper.finish() if isinstance(evt, ThinkingBlockComplete)]
+
+
+def _stream_usage_payload(stats: _StreamStats) -> dict[str, object]:
+    return {
+        "input_tokens": stats.input_tokens,
+        "output_tokens": stats.output_tokens,
+        "cached_tokens": stats.cached_tokens,
+        "cache_read_tokens": stats.cache_read_tokens,
+        "cache_creation_tokens": stats.cache_creation_tokens,
+    }
+
+
+async def _one_provider_attempt(
+    state: _TurnState,
+    *,
+    provider: Provider,
+    usage: Usage,
+    stream_mapper: ProviderStreamMapper,
+    hints: Any,
+    vertex_google_search: bool,
+    cancelled: asyncio.Event | None,
+    preempt: asyncio.Event | None,
+    idle: float | None,
+    stats: _StreamStats,
+) -> AsyncIterator[AgentEvent]:
+    """Read one provider stream into ``stream_mapper`` and ``state``.
+
+    Raises whatever the stream raises, including :class:`StreamStalledError`
+    when ``idle`` seconds pass with no event. Does not retry.
+    """
+    clock = asyncio.get_running_loop().time
+    last_event_at = clock()
+    async with aclosing(
+        cast(
+            Any,
+            provider_stream(
+                provider,
+                state.provider_messages,
+                state.turn_tools,
+                model=state.ctx.model,
+                thinking_budget=state.stream_thinking,
+                vertex_google_search=vertex_google_search,
+                hints=hints,
+            ),
+        )
+    ) as stream:
+        stream_iter = stream.__aiter__()
+        while True:
+            try:
+                ev = await race_preempt(
+                    stream_iter.__anext__(),
+                    preempt,
+                    cancelled=cancelled,
+                    idle_timeout_s=idle,
+                )
+            except StopAsyncIteration:
+                break
+            now = clock()
+            stats.max_event_gap_s = max(stats.max_event_gap_s, now - last_event_at)
+            last_event_at = now
+            if isinstance(ev, UsageEvent):
+                _merge_usage_event(usage, ev)
+                usage.cost_usd += estimate_cost(
+                    state.ctx.model,
+                    ev.input_tokens,
+                    ev.output_tokens,
+                    cache_read_tokens=ev.cache_read_tokens,
+                    cache_creation_tokens=ev.cache_creation_tokens,
+                    cache_retention=hints.cache_retention,
+                )
+                stats.input_tokens += ev.input_tokens
+                stats.output_tokens += ev.output_tokens
+                stats.cached_tokens += ev.cached_tokens
+                stats.cache_read_tokens += ev.cache_read_tokens
+                stats.cache_creation_tokens += ev.cache_creation_tokens
+                continue
+            if isinstance(ev, Done):
+                for aev in _hold_or_pass_text(state, stream_mapper.map(ev)):
+                    yield aev
+                break
+            for aev in _hold_or_pass_text(state, stream_mapper.map(ev)):
+                yield aev
+    for aev in _hold_or_pass_text(state, stream_mapper.finish()):
+        yield aev
+    state.pending = stream_mapper.pending
+    state.assistant_text = stream_mapper.assistant_text
+    state.thinking_text = stream_mapper.thinking_text
+    state.thinking_signature = stream_mapper.thinking_signature
+    state.stream_truncated = stream_mapper.stream_truncated
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class _AttemptChoice:
+    """What the loop does with one failed provider attempt."""
+
+    action: Literal["retry", "resume", "give_up"]
+    retries_used: int
+    stall_retries_used: int
+    intervention: str = ""
+    detail: str = ""
+    notice: str = ""
+    attempt: int = 0
+    limit: int = 0
+    delay_s: float = 0.0
+
+
+def _recover_failed_attempt(
+    state: _TurnState,
+    exc: Exception,
+    *,
+    policy: Any,
+    stats: _StreamStats,
+    retries_used: int,
+    stall_retries_used: int,
+    stream_mapper: ProviderStreamMapper,
+) -> _AttemptChoice:
+    """Classify ``exc`` and count it against the retry or stall budget."""
+    if isinstance(exc, StreamStalledError):
+        stats.max_event_gap_s = max(stats.max_event_gap_s, exc.idle_timeout_s)
+    failure = classify(exc)
+    action = recovery(
+        failure,
+        policy,
+        retries_used=retries_used,
+        stall_retries_used=stall_retries_used,
+        resumes_used=state.provider_resumes_used,
+        text_reached_client=_text_reached_client(state, stream_mapper),
+    )
+    if action == "give_up":
+        return _AttemptChoice(
+            action="give_up",
+            retries_used=retries_used,
+            stall_retries_used=stall_retries_used,
+            detail=failure.kind,
+        )
+    if action == "resume":
+        return _AttemptChoice(
+            action="resume",
+            retries_used=retries_used,
+            stall_retries_used=stall_retries_used,
+            detail=failure.kind,
+        )
+    if failure.kind == "stall":
+        stall_retries_used += 1
+        attempt = stall_retries_used
+        limit = policy.stall_retries
+        intervention = "stream_stall"
+    else:
+        retries_used += 1
+        attempt = retries_used
+        limit = policy.max_retries
+        intervention = "provider_retry"
+    delay = policy.delay_s(attempt=attempt, failure=failure)
+    return _AttemptChoice(
+        action="retry",
+        retries_used=retries_used,
+        stall_retries_used=stall_retries_used,
+        intervention=intervention,
+        detail=failure.kind,
+        notice=retry_notice(failure, attempt=attempt, limit=limit, delay_s=delay),
+        attempt=attempt,
+        limit=limit,
+        delay_s=delay,
+    )
+
+
+async def _resume_failed_attempt(
+    state: _TurnState,
+    exc: Exception,
+    *,
+    hook_manager: HookManager | None,
+    stream_mapper: ProviderStreamMapper,
+    kind: str,
+) -> AsyncIterator[AgentEvent]:
+    """Keep text the client saw and tell the loop to continue it next turn."""
+    state.provider_resumes_used += 1
+    for aev in _hold_or_pass_text(state, stream_mapper.finish()):
+        yield aev
+    _sync_stream_mapper_text(state, stream_mapper)
+    state.provider_stream_failed = True
+    state.action = "resume"
+    error_text = _provider_error_text(exc)
+    await _fire_after_provider_response(
+        hook_manager,
+        ctx=state.ctx,
+        inner_turn=state.turn_index,
+        assistant_text=state.assistant_text,
+        thinking_text=state.thinking_text,
+        tool_requests=[
+            {"call_id": call.call_id, "name": call.name, "args": dict(call.args)}
+            for call in state.pending.values()
+        ],
+        provider_error=error_text,
+    )
+    yield HarnessIntervention(
+        request_id=state.ctx.request_id,
+        intervention="provider_resume",
+        inner_turn=state.turn_index,
+        detail=kind,
+    )
+    yield SystemNotificationEvent(
+        request_id=state.ctx.request_id,
+        notification_type="thinkingMessage",
+        msg=RESUME_NOTICE,
+    )
+    logger.warning(
+        "provider stream resume %s",
+        kv(
+            request_id=state.ctx.request_id,
+            thread_id=state.ctx.thread_id,
+            turn=state.turn_index,
+            kind=kind,
+            partial_chars=len(state.assistant_text or ""),
+            resumes_used=state.provider_resumes_used,
+            error=error_text,
+        ),
+    )
+
+
 async def _consume_provider_stream_body(
     state: _TurnState,
     *,
@@ -1177,91 +1438,122 @@ async def _consume_provider_stream_body(
     hook_manager: HookManager | None,
     transcript_writer: TranscriptWriter | None,
     vertex_google_search: bool,
-    stream_mapper: ProviderStreamMapper,
     cancelled: asyncio.Event | None = None,
     preempt: asyncio.Event | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Consume provider stream, write response transcript, fire after-response hook.
 
-    Sets ``state.action = "return"`` on cancel or provider error, and
-    ``state.action = "preempt"`` when a promoted steer aborts the stream.
+    A transient failure is sent again when no assistant text reached the client,
+    or kept and continued on the next inner turn when it did. Sets
+    ``state.action = "return"`` on cancel or a final provider error,
+    ``state.action = "preempt"`` when a promoted steer aborts the stream, and
+    ``state.action = "resume"`` when a failed attempt's text was shown.
     """
     from monkeybot.observability.spans import set_llm_io, set_llm_usage, span_llm
 
-    llm_input = 0
-    llm_output = 0
-    llm_cached = 0
-    llm_cache_read = 0
-    llm_cache_creation = 0
+    stats = _StreamStats()
     hints = _provider_call_hints(state.ctx)
+    policy = policy_for(state.ctx.config)
+    idle = idle_timeout_s(state.ctx.config)
+    stream_mapper = ProviderStreamMapper(state.ctx.request_id)
+    retries_used = 0
+    stall_retries_used = 0
     try:
         async with span_llm(ctx=state.ctx, vertex_google_search=vertex_google_search):
-            async with aclosing(
-                cast(
-                    Any,
-                    provider_stream(
-                        provider,
-                        state.provider_messages,
-                        state.turn_tools,
-                        model=state.ctx.model,
-                        thinking_budget=state.stream_thinking,
-                        vertex_google_search=vertex_google_search,
+            while True:
+                stream_mapper = ProviderStreamMapper(state.ctx.request_id)
+                try:
+                    async for aev in _one_provider_attempt(
+                        state,
+                        provider=provider,
+                        usage=usage,
+                        stream_mapper=stream_mapper,
                         hints=hints,
-                    ),
-                )
-            ) as stream:
-                stream_iter = stream.__aiter__()
-                while True:
-                    try:
-                        ev = await race_preempt(
-                            stream_iter.__anext__(),
-                            preempt,
-                            cancelled=cancelled,
-                        )
-                    except StopAsyncIteration:
-                        break
-                    if isinstance(ev, UsageEvent):
-                        _merge_usage_event(usage, ev)
-                        usage.cost_usd += estimate_cost(
-                            state.ctx.model,
-                            ev.input_tokens,
-                            ev.output_tokens,
-                            cache_read_tokens=ev.cache_read_tokens,
-                            cache_creation_tokens=ev.cache_creation_tokens,
-                            cache_retention=hints.cache_retention,
-                        )
-                        llm_input += ev.input_tokens
-                        llm_output += ev.output_tokens
-                        llm_cached += ev.cached_tokens
-                        llm_cache_read += ev.cache_read_tokens
-                        llm_cache_creation += ev.cache_creation_tokens
-                        continue
-                    if isinstance(ev, Done):
-                        for aev in _hold_or_pass_text(state, stream_mapper.map(ev)):
-                            yield aev
-                        break
-                    for aev in _hold_or_pass_text(state, stream_mapper.map(ev)):
+                        vertex_google_search=vertex_google_search,
+                        cancelled=cancelled,
+                        preempt=preempt,
+                        idle=idle,
+                        stats=stats,
+                    ):
                         yield aev
-            for aev in _hold_or_pass_text(state, stream_mapper.finish()):
-                yield aev
-            state.pending = stream_mapper.pending
-            state.assistant_text = stream_mapper.assistant_text
+                    break
+                except (asyncio.CancelledError, StepPreemptedError):
+                    raise
+                except Exception as exc:
+                    choice = _recover_failed_attempt(
+                        state,
+                        exc,
+                        policy=policy,
+                        stats=stats,
+                        stream_mapper=stream_mapper,
+                        retries_used=retries_used,
+                        stall_retries_used=stall_retries_used,
+                    )
+                    if choice.action == "give_up":
+                        raise
+                    if choice.action == "resume":
+                        async for aev in _resume_failed_attempt(
+                            state,
+                            exc,
+                            hook_manager=hook_manager,
+                            stream_mapper=stream_mapper,
+                            kind=choice.detail,
+                        ):
+                            yield aev
+                        return
+                    retries_used = choice.retries_used
+                    stall_retries_used = choice.stall_retries_used
+                    for aev in _thinking_close_events(stream_mapper):
+                        yield aev
+                    # A cancel or steer during the wait must not persist this attempt.
+                    _discard_held_text(state)
+                    stream_mapper = ProviderStreamMapper(state.ctx.request_id)
+                    yield HarnessIntervention(
+                        request_id=state.ctx.request_id,
+                        intervention=choice.intervention,
+                        inner_turn=state.turn_index,
+                        detail=choice.detail,
+                    )
+                    yield SystemNotificationEvent(
+                        request_id=state.ctx.request_id,
+                        notification_type="thinkingMessage",
+                        msg=choice.notice,
+                    )
+                    logger.warning(
+                        "provider stream retry %s",
+                        kv(
+                            request_id=state.ctx.request_id,
+                            thread_id=state.ctx.thread_id,
+                            turn=state.turn_index,
+                            kind=choice.detail,
+                            attempt=choice.attempt,
+                            max_attempts=choice.limit,
+                            delay_s=round(choice.delay_s, 3),
+                            max_event_gap_s=round(stats.max_event_gap_s, 3),
+                            error=_provider_error_text(exc),
+                        ),
+                    )
+                    await race_preempt(
+                        asyncio.sleep(choice.delay_s),
+                        preempt,
+                        cancelled=cancelled,
+                    )
+            # A completed send can recover from a later size rejection.
             state.overflow_recovered = False
-            state.thinking_text = stream_mapper.thinking_text
-            state.thinking_signature = stream_mapper.thinking_signature
-            state.stream_truncated = stream_mapper.stream_truncated
             set_llm_usage(
-                input_tokens=llm_input,
-                output_tokens=llm_output,
-                cached_tokens=llm_cached,
-                cache_read_tokens=llm_cache_read,
-                cache_creation_tokens=llm_cache_creation,
+                input_tokens=stats.input_tokens,
+                output_tokens=stats.output_tokens,
+                cached_tokens=stats.cached_tokens,
+                cache_read_tokens=stats.cache_read_tokens,
+                cache_creation_tokens=stats.cache_creation_tokens,
             )
             set_llm_io(
                 prompt=_provider_messages_prompt_summary(state.provider_messages),
                 completion=state.assistant_text or "",
             )
-            actual_prompt = llm_input + llm_cache_read + llm_cache_creation
+            actual_prompt = (
+                stats.input_tokens + stats.cache_read_tokens + stats.cache_creation_tokens
+            )
             if state.last_preflight_tokens > 0 and actual_prompt > 0:
                 if provider.name in ("bedrock", "claude", "vertex-claude"):
                     note_anthropic_token_estimate_observation(
@@ -1301,13 +1593,7 @@ async def _consume_provider_stream_body(
                     {"call_id": tc.call_id, "name": tc.name, "args": tc.args}
                     for tc in state.pending.values()
                 ],
-                usage={
-                    "input_tokens": llm_input,
-                    "output_tokens": llm_output,
-                    "cached_tokens": llm_cached,
-                    "cache_read_tokens": llm_cache_read,
-                    "cache_creation_tokens": llm_cache_creation,
-                },
+                usage=_stream_usage_payload(stats),
             )
         logger.debug(
             "provider stream done %s",
@@ -1315,10 +1601,11 @@ async def _consume_provider_stream_body(
                 request_id=state.ctx.request_id,
                 thread_id=state.ctx.thread_id,
                 turn=state.turn_index,
-                llm_input=llm_input,
-                llm_output=llm_output,
-                llm_cached=llm_cached,
+                llm_input=stats.input_tokens,
+                llm_output=stats.output_tokens,
+                llm_cached=stats.cached_tokens,
                 tool_calls=len(state.pending),
+                max_event_gap_s=round(stats.max_event_gap_s, 3),
             ),
         )
         await _fire_after_provider_response(
@@ -1331,13 +1618,7 @@ async def _consume_provider_stream_body(
                 {"call_id": tc.call_id, "name": tc.name, "args": dict(tc.args)}
                 for tc in state.pending.values()
             ],
-            usage={
-                "input_tokens": llm_input,
-                "output_tokens": llm_output,
-                "cached_tokens": llm_cached,
-                "cache_read_tokens": llm_cache_read,
-                "cache_creation_tokens": llm_cache_creation,
-            },
+            usage=cast(dict[str, int], _stream_usage_payload(stats)),
         )
     except asyncio.CancelledError:
         state.hold_assistant_text = False
@@ -1366,13 +1647,7 @@ async def _consume_provider_stream_body(
                     {"call_id": tc.call_id, "name": tc.name, "args": tc.args}
                     for tc in state.pending.values()
                 ],
-                usage={
-                    "input_tokens": llm_input,
-                    "output_tokens": llm_output,
-                    "cached_tokens": llm_cached,
-                    "cache_read_tokens": llm_cache_read,
-                    "cache_creation_tokens": llm_cache_creation,
-                },
+                usage=_stream_usage_payload(stats),
             )
         await _fire_after_provider_response(
             hook_manager,
@@ -1412,13 +1687,7 @@ async def _consume_provider_stream_body(
                     {"call_id": tc.call_id, "name": tc.name, "args": tc.args}
                     for tc in state.pending.values()
                 ],
-                usage={
-                    "input_tokens": llm_input,
-                    "output_tokens": llm_output,
-                    "cached_tokens": llm_cached,
-                    "cache_read_tokens": llm_cache_read,
-                    "cache_creation_tokens": llm_cache_creation,
-                },
+                usage=_stream_usage_payload(stats),
             )
         await _fire_after_provider_response(
             hook_manager,
@@ -1703,7 +1972,6 @@ async def _stream_provider_turn(
     if state.action == "return":
         return
     await _write_transcript_provider_request(state, transcript_writer=transcript_writer)
-    stream_mapper = ProviderStreamMapper(state.ctx.request_id)
     async for evt in _consume_provider_stream_body(
         state,
         provider=provider,
@@ -1711,7 +1979,6 @@ async def _stream_provider_turn(
         hook_manager=hook_manager,
         transcript_writer=transcript_writer,
         vertex_google_search=vertex_google_search,
-        stream_mapper=stream_mapper,
         cancelled=cancelled,
         preempt=preempt,
     ):
@@ -2315,6 +2582,19 @@ async def _run_inner_core(
                         call_id=call.call_id,
                         error=note,
                     )
+                state.action = None
+                continue
+            if state.action == "resume":
+                for evt in _release_held_text(state):
+                    yield evt
+                await _persist_partial_assistant_on_abort(
+                    state, history=history, last_assistant=last_assistant
+                )
+                state.provider_stream_failed = False
+                state.pre_tool_extra_next = _combine_extras(
+                    state.pre_tool_extra_next,
+                    RESUME_NOTE,
+                )
                 state.action = None
                 continue
             state.action = None

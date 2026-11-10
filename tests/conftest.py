@@ -86,6 +86,15 @@ def _reap_leaked_aiosqlite_after_test() -> Any:
 
 
 @pytest.fixture(autouse=True)
+def _fast_provider_retries() -> Any:
+    """Loop retries keep their counts, but tests do not sleep through the backoff."""
+    from monkeybot.core.runtime.provider_retry import testing_policy, use_retry_policy
+
+    with use_retry_policy(testing_policy()):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _clear_provider_sdk_clients() -> Any:
     """A patched SDK constructor must not be skipped by a client cached in an earlier test."""
     from monkeybot.providers._sdk_client import clear_sdk_clients
