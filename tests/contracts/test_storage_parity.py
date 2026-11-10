@@ -1,4 +1,4 @@
-"""Storage parity across sqlite, Postgres, and Firestore (T1-STORE-01 … 14).
+"""Storage parity across sqlite, Postgres, and Firestore (T1-STORE-01 … 16).
 
 Sqlite always runs. Postgres and Firestore skip unless
 ``MONKEYBOT_TEST_POSTGRES_URL`` / ``FIRESTORE_EMULATOR_HOST`` are set.
@@ -39,6 +39,7 @@ from monkeybot.core.runtime.history_rewrite import (
     fork_session,
     load_active_history,
 )
+from monkeybot.core.runtime.request_history import RequestHistory
 
 
 def _id(prefix: str) -> str:
@@ -543,3 +544,62 @@ async def test_waiting_goal_is_one_open_goal(open_backend: Any) -> None:
                 objective="Second",
             )
         )
+
+
+def _row_sig(messages: list[Message]) -> list[tuple[str, str | None, list[dict[str, object]]]]:
+    return [
+        (message.role, message.row_id, [block.to_dict() for block in message.content])
+        for message in messages
+    ]
+
+
+class _CountLoads:
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.loads = 0
+
+    async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
+        self.loads += 1
+        return await self._inner.load(thread_id, limit)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+@pytest.mark.case("T1-STORE-16")
+async def test_request_history_snapshot_matches_load(open_backend: Any) -> None:
+    backend = await open_backend(agent_scope="scope-a")
+    history = backend.history()
+    counted = _CountLoads(history)
+    thread = _id("thread")
+    message_id = _id("msg")
+    wrapped = RequestHistory.wrap(counted, thread_id=thread)
+    await wrapped.append(thread, Message.text("user", "one"))
+    await wrapped.append_with_outbox(
+        thread,
+        Message.text("assistant", "two"),
+        turn_id="turn-1",
+        message_id=message_id,
+        outbox=_outbox(
+            thread_id=thread,
+            message_id=message_id,
+            agent_id="agent-a",
+            palace_id="palace-a",
+        ),
+    )
+
+    snap = await wrapped.load(thread)
+    assert counted.loads == 1
+    assert _row_sig(snap) == _row_sig(await history.load(thread))
+    assert _row_sig(await wrapped.load(thread)) == _row_sig(snap)
+    assert counted.loads == 1
+
+    await wrapped.reset(
+        thread,
+        [Message.text("user", "kept"), Message.text("assistant", "tail")],
+    )
+    assert counted.loads == 1
+    reset = await wrapped.load(thread)
+    assert _row_sig(reset) == _row_sig(await history.load(thread))
+    assert [block.text for message in reset for block in message.content] == ["kept", "tail"]
+    assert counted.loads == 1
