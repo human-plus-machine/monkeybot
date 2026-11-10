@@ -9,11 +9,22 @@ from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.memory.ids import conversation_wing
 from monkeybot.core.memory.ingest import workspace_id_from_env
 from monkeybot.core.memory.observability import Timer, log_event, memory_span
-from monkeybot.core.memory.palace import CONVERSATION_ROOM, format_recall_lines
+from monkeybot.core.memory.palace import (
+    CONVERSATION_ROOM,
+    drawers_not_in_wake_up,
+    format_recall_lines,
+)
 
 logger = logging.getLogger(__name__)
 
 _DRAIN_TIMEOUT_S = 5.0
+
+
+def _wake_lines(raw: object) -> list[str]:
+    """Wake-up lines already on the context. Anything else means nothing to skip."""
+    if not isinstance(raw, list):
+        return []
+    return [line for line in raw if isinstance(line, str)]
 
 
 class MemoryHook:
@@ -49,12 +60,14 @@ class MemoryHook:
             except Exception as exc:
                 logger.warning("memory L2 recall failed: %r", exc)
                 return
-        lines = format_recall_lines(drawers)
+        fresh = drawers_not_in_wake_up(drawers, _wake_lines(payload.ctx.memory_index))
+        lines = format_recall_lines(fresh)
         log_event(
             "recall",
             memory_status="ok",
             memory_backend=self._memory.backend,
             memory_result_count=len(lines),
+            memory_recall_skipped=len(drawers) - len(fresh),
             memory_duration_ms=round(timer.ms(), 1),
         )
         if lines:

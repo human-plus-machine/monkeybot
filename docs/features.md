@@ -445,7 +445,7 @@ pricing:
 | Event | Behavior |
 |-------|----------|
 | History append | Enqueue user / final assistant text on the outbox (same transaction when the backend supports it) |
-| `PRE_TURN` | Inject L2 recall into `inject_memory_lines`. Shared across chats unless `MONKEYBOT_MEMORY_SHARE_THREADS` is off |
+| `PRE_TURN` | Inject L2 recall into `inject_memory_lines`, leaving out drawers the wake-up block already shows. Shared across chats unless `MONKEYBOT_MEMORY_SHARE_THREADS` is off |
 | `POST_TURN` | Wake the per-agent writer |
 | `SESSION_END` | Bounded outbox drain |
 
