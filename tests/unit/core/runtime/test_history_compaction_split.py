@@ -18,6 +18,7 @@ from monkeybot.core.runtime.history_compaction import (
 )
 from monkeybot.core.tools.spill_inventory import spill_budgets_from_window
 from monkeybot.core.types.content_blocks import (
+    IMAGE_TOKEN_ESTIMATE,
     File,
     Image,
     SystemNotification,
@@ -356,10 +357,12 @@ def test_estimate_ignores_summary_truncation_cap_for_large_tool_results() -> Non
 
 
 def test_estimate_counts_image_thinking_and_file_payloads() -> None:
-    """Multimodal / reasoning blocks must not collapse to type-name char counts.
+    """Thinking and file payloads stay at full length. An image is a fixed estimate.
 
-    A type-name fallback (~5–8 chars) would undercount base64 images, long
-    thinking traces, and file payloads against ``SUMMARY_KEEP_TAIL_RATIO``.
+    A type-name fallback (~5–8 chars) would undercount a long thinking trace or
+    a file against ``SUMMARY_KEEP_TAIL_RATIO``. Counting image base64 the same
+    way sizes one preview as tens of thousands of tokens, so an image is
+    ``IMAGE_TOKEN_ESTIMATE`` whatever its byte length.
     """
     image_data = "A" * 40_000
     thinking_text = "r" * 20_000
@@ -375,9 +378,39 @@ def test_estimate_counts_image_thinking_and_file_payloads() -> None:
         ],
     )
     tokens = _estimate_message_tokens(message)
-    # Type-name fallback would be ~5–8 tokens total; real payload is >> that.
-    min_chars = len(image_data) + len(thinking_text) + len(file_data)
-    assert tokens >= min_chars // 4
+    text_floor = (len(thinking_text) + len(file_data)) // 4
+    assert tokens >= text_floor + IMAGE_TOKEN_ESTIMATE
+    # The image's 40,000 base64 characters are not part of the count.
+    assert tokens < text_floor + IMAGE_TOKEN_ESTIMATE + len(image_data) // 4
+
+
+def _load_file_image(data: str) -> Message:
+    return Message(
+        role="user",
+        content=[
+            ToolResponse(
+                id="load-1",
+                tool_name="load_file",
+                result=[Image(mime_type="image/png", data=data)],
+            )
+        ],
+    )
+
+
+def test_image_estimate_ignores_base64_length() -> None:
+    small = _estimate_message_tokens(_load_file_image("A" * 1_000))
+    large = _estimate_message_tokens(_load_file_image("A" * 500_000))
+    assert small == IMAGE_TOKEN_ESTIMATE
+    assert large == IMAGE_TOKEN_ESTIMATE
+
+
+def test_large_image_stays_in_the_tail() -> None:
+    """A preview-sized image fits the tail. Counting its base64 would push it out."""
+    image = _load_file_image("A" * 500_000)
+    newest = Message(role="assistant", content=[Text(text="seen")])
+    messages = [*_msgs(6, chars=40), image, newest]
+    _, _, tail = split_messages_for_compaction(messages, window_tokens=200_000)
+    assert image in tail
 
 
 def test_estimate_ignores_completed_reply_thinking_and_ui_blocks() -> None:

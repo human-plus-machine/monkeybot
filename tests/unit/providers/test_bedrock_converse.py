@@ -17,6 +17,8 @@ from monkeybot.core.llm.provider import (
     UsageEvent,
 )
 from monkeybot.core.types.content_blocks import (
+    IMAGE_TOKEN_ESTIMATE,
+    ContentBlock,
     File,
     Image,
     RedactedThinking,
@@ -36,6 +38,7 @@ from monkeybot.providers._bedrock_converse import (
     messages_to_converse,
     uses_anthropic_bedrock,
 )
+from monkeybot.providers._utils import reset_anthropic_token_estimate_correction
 from monkeybot.providers.bedrock import BedrockProvider
 from monkeybot.providers.model_capabilities import supports_param
 from testkit.conversations import make_anthropic_stream_mock
@@ -775,6 +778,31 @@ def test_estimate_with_image_does_not_raise() -> None:
         [],
     )
     assert n >= 1
+
+
+def _converse_tokens(content: list[ContentBlock]) -> int:
+    reset_anthropic_token_estimate_correction()
+    return estimate_converse_input_tokens([Message(role="user", content=content)], [])
+
+
+def test_converse_image_estimate_is_fixed_at_top_level_and_in_a_tool_result() -> None:
+    text: list[ContentBlock] = [Text(text="see")]
+    small = _converse_tokens([*text, Image(mime_type="image/png", data="A" * 100)])
+    large = _converse_tokens([*text, Image(mime_type="image/png", data="A" * 500_000)])
+    assert small == large
+    added = small - _converse_tokens(text)
+    assert IMAGE_TOKEN_ESTIMATE <= added < IMAGE_TOKEN_ESTIMATE + 50
+
+    def result(data: str | None) -> list[ContentBlock]:
+        nested: list[ContentBlock] = [Text(text="ok")]
+        if data is not None:
+            nested.append(Image(mime_type="image/png", data=data))
+        return [ToolResponse(id="c1", tool_name="load_file", result=nested)]
+
+    nested_small = _converse_tokens(result("A" * 100))
+    assert nested_small == _converse_tokens(result("A" * 500_000))
+    nested_added = nested_small - _converse_tokens(result(None))
+    assert IMAGE_TOKEN_ESTIMATE <= nested_added < IMAGE_TOKEN_ESTIMATE + 50
 
 
 def test_estimate_attachment_uses_char_count_not_payload() -> None:

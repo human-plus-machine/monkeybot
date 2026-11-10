@@ -22,6 +22,7 @@ from monkeybot.core.llm.provider import (
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.prompts.headings import VOLATILE_SECTION_MARKERS, is_system_context_update
 from monkeybot.core.types.content_blocks import (
+    IMAGE_TOKEN_ESTIMATE,
     ContentBlock,
     File,
     Image,
@@ -800,27 +801,62 @@ def reset_anthropic_token_estimate_correction() -> None:
     _estimate_correction = 1.0
 
 
+def _without_image_payloads(value: object) -> tuple[object, int]:
+    """Drop image bytes and return how many images were found.
+
+    A provider bills an image by its pixels. The base64 must not enter the
+    character estimate, including when the image sits inside a tool result.
+    """
+    if isinstance(value, dict):
+        if value.get("type") == "image":
+            return {"type": "image"}, 1
+        count = 0
+        stripped: dict[object, object] = {}
+        for key, item in value.items():
+            child, found = _without_image_payloads(item)
+            count += found
+            stripped[key] = child
+        return stripped, count
+    if isinstance(value, list):
+        count = 0
+        items: list[object] = []
+        for item in value:
+            child, found = _without_image_payloads(item)
+            count += found
+            items.append(child)
+        return items, count
+    return value, 0
+
+
 def estimate_anthropic_input_tokens(
     *,
     system: str,
     messages: Sequence[dict[str, Any]],
     tools: Sequence[dict[str, Any]] | None,
 ) -> int:
-    """Rough prompt token estimate when provider ``count_tokens`` is unavailable (e.g. Bedrock)."""
+    """Rough prompt token estimate when provider ``count_tokens`` is unavailable (e.g. Bedrock).
+
+    Each image adds ``IMAGE_TOKEN_ESTIMATE`` after the character estimate. The
+    learned correction applies to the text part only.
+    """
+    image_count = 0
     parts: list[str] = [system]
     for msg in messages:
         content = msg.get("content")
         if isinstance(content, str):
             parts.append(content)
         elif isinstance(content, list):
-            parts.append(json.dumps(content, ensure_ascii=False))
+            stripped, found = _without_image_payloads(content)
+            image_count += found
+            parts.append(json.dumps(stripped if found else content, ensure_ascii=False))
         else:
             parts.append(str(content))
     if tools:
         parts.append(json.dumps(list(tools), ensure_ascii=False))
     char_count = sum(len(p) for p in parts)
     base = max(1, int(char_count / _ESTIMATE_CHARS_PER_TOKEN))
-    return max(1, int(base * _estimate_correction))
+    text_tokens = max(1, int(base * _estimate_correction))
+    return text_tokens + image_count * IMAGE_TOKEN_ESTIMATE
 
 
 __all__ = [

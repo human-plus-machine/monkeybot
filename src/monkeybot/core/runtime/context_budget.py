@@ -13,7 +13,13 @@ from monkeybot.core.context.tool_result_ingress import (
     skip_tool_result_sanitize,
 )
 from monkeybot.core.context.tool_shapers import shape_tool_text
-from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolResponse
+from monkeybot.core.types.content_blocks import (
+    IMAGE_TOKEN_ESTIMATE,
+    ContentBlock,
+    Image,
+    Text,
+    ToolResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +120,13 @@ def estimate_tokens_from_char_count(char_count: int) -> int:
 def estimate_tokens(text: str) -> int:
     """Cheap local token estimate (no network)."""
     return estimate_tokens_from_char_count(len(text))
+
+
+def _image_tokens(block: ContentBlock) -> int:
+    """Fixed cost of images a tool result still carries. Text trimming does not count them."""
+    if not isinstance(block, ToolResponse):
+        return 0
+    return sum(IMAGE_TOKEN_ESTIMATE for item in block.result if isinstance(item, Image))
 
 
 def _tool_response_with_text(block: ToolResponse, text: str) -> ToolResponse:
@@ -223,17 +236,20 @@ class ContextBudgeter:
             shaped = self._shape_tool_response(block)
             if shaped is None:
                 out.append(block)
+                self.used_tokens += _image_tokens(block)
                 continue
             block, text = shaped
             est = estimate_tokens(text)
             if est <= per_item:
-                out.append(_tool_response_with_text(block, text))
-                self.used_tokens += est
+                kept = _tool_response_with_text(block, text)
+                out.append(kept)
+                self.used_tokens += est + _image_tokens(kept)
                 continue
             needs_compaction = True
             trimmed = _trim_text_to_token_budget(text, per_item)
-            out.append(_tool_response_with_text(block, trimmed))
-            self.used_tokens += estimate_tokens(trimmed)
+            kept = _tool_response_with_text(block, trimmed)
+            out.append(kept)
+            self.used_tokens += estimate_tokens(trimmed) + _image_tokens(kept)
 
         return out, needs_compaction
 
@@ -275,11 +291,13 @@ class ContextBudgeter:
             shaped = self._shape_tool_response(block)
             if shaped is None:
                 out.append(block)
+                self.used_tokens += _image_tokens(block)
                 continue
             block, text = shaped
             trimmed = _trim_text_to_token_budget(text, per_item)
-            out.append(_tool_response_with_text(block, trimmed))
-            self.used_tokens += estimate_tokens(trimmed)
+            kept = _tool_response_with_text(block, trimmed)
+            out.append(kept)
+            self.used_tokens += estimate_tokens(trimmed) + _image_tokens(kept)
         return out
 
 
