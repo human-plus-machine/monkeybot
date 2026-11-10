@@ -28,6 +28,7 @@ from .history_compaction import (
     _intent_facts_from_ctx,
     _middle_summary_lines,
     rebuild_compacted_history,
+    replace_history_archiving,
     split_messages_for_compaction,
 )
 
@@ -384,7 +385,13 @@ async def apply_pending_summary(
         summary=summary,
         tail=[],
     ) + list(current[pending.cut :])
-    await history.reset(thread_id, merged)
+    await replace_history_archiving(
+        history,
+        thread_id,
+        merged,
+        reason="compaction",
+        summary=summary,
+    )
     logger.debug(
         "background summary applied %s",
         kv(

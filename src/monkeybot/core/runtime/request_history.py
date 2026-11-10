@@ -18,7 +18,7 @@ from typing import Any, cast
 
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.persistence.backends import HistoryStore
+from monkeybot.core.persistence.backends import ArchivedRow, HistoryStore
 from monkeybot.core.persistence.row_ids import new_row_id
 from monkeybot.core.persistence.thread_summary import ChatThreadSummary
 from monkeybot.core.types.content_blocks import ContentBlock
@@ -229,6 +229,64 @@ class RequestHistory:
                 lambda: self._inner.reset(thread_id, normalized),
                 remember,
             )
+
+    async def reset_archiving(
+        self,
+        thread_id: str,
+        messages: list[Message],
+        *,
+        reason: str,
+        summary_row_id: str | None,
+    ) -> int:
+        """Pass an archiving rewrite through, and keep the snapshot in step.
+
+        A store without the method is rewritten with ``reset``. The dropped
+        rows are not kept, and the warning says so.
+        """
+        archive = getattr(self._inner, "reset_archiving", None)
+        async with self._lock:
+            if not self._tracks(thread_id):
+                if not callable(archive):
+                    logger.warning(
+                        "history store has no archive; dropped rows will not be recoverable %s",
+                        kv(thread_id=thread_id, reason=reason),
+                    )
+                    await self._inner.reset(thread_id, messages)
+                    return 0
+                archived: int = await archive(
+                    thread_id,
+                    messages,
+                    reason=reason,
+                    summary_row_id=summary_row_id,
+                )
+                return archived
+            normalized = [_normalize(message) for message in messages]
+            try:
+                if not callable(archive):
+                    logger.warning(
+                        "history store has no archive; dropped rows will not be recoverable %s",
+                        kv(thread_id=thread_id, reason=reason),
+                    )
+                    await self._inner.reset(thread_id, normalized)
+                    archived = 0
+                else:
+                    archived = await archive(
+                        thread_id,
+                        normalized,
+                        reason=reason,
+                        summary_row_id=summary_row_id,
+                    )
+            except BaseException:
+                self._drop()
+                raise
+            self._rows = normalized
+            return archived
+
+    async def load_archive(self, thread_id: str) -> list[ArchivedRow]:
+        return await self._inner.load_archive(thread_id)
+
+    async def delete_archive(self, thread_id: str) -> int:
+        return await self._inner.delete_archive(thread_id)
 
     async def delete_rows(self, thread_id: str, row_ids: Collection[str]) -> int:
         async with self._lock:

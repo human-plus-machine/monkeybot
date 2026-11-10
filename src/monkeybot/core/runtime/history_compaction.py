@@ -8,7 +8,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 from monkeybot.core.attachments.text import parse_attachment_descriptor_text
@@ -30,6 +30,7 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.messages.tool_integrity import interrupted_tool_result_text
 from monkeybot.core.messages.transform_context import is_provider_visible, provider_visible_blocks
 from monkeybot.core.persistence.backends import HistoryStore
+from monkeybot.core.persistence.row_ids import new_row_id
 from monkeybot.core.persistence.thread_summary import CONTEXT_SUMMARY_PREFIX
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.context_budget import (
@@ -969,6 +970,64 @@ async def _stream_summary(
     )
 
 
+def _stamp_summary(
+    messages: list[Message], summary: Message | None
+) -> tuple[list[Message], str | None]:
+    """Give ``summary`` a row id and return the list with that object replaced.
+
+    The archive records this id, so the summary row has to carry it before the
+    store writes the replacement. ``None`` when this rewrite has no summary.
+    """
+    if summary is None:
+        return list(messages), None
+    row_id = summary.row_id or new_row_id()
+    stamped = summary if summary.row_id == row_id else replace(summary, row_id=row_id)
+    found = False
+    out: list[Message] = []
+    for message in messages:
+        if message is summary:
+            out.append(stamped)
+            found = True
+        else:
+            out.append(message)
+    if not found:
+        logger.warning("compaction summary was not in the replacement history")
+        return list(messages), None
+    return out, row_id
+
+
+async def replace_history_archiving(
+    history: HistoryStore,
+    thread_id: str,
+    messages: list[Message],
+    *,
+    reason: str,
+    summary: Message | None = None,
+) -> int:
+    """Replace the thread and archive the rows the replacement drops.
+
+    ``summary`` is the new summary row for a compaction. A store without
+    ``reset_archiving`` is rewritten with ``reset`` and the dropped rows are
+    not kept. Returns how many rows were archived.
+    """
+    stamped, summary_row_id = _stamp_summary(messages, summary)
+    archive = getattr(history, "reset_archiving", None)
+    if not callable(archive):
+        logger.warning(
+            "history store has no archive; dropped rows will not be recoverable %s",
+            kv(thread_id=thread_id, reason=reason),
+        )
+        await history.reset(thread_id, stamped)
+        return 0
+    archived: int = await archive(
+        thread_id,
+        stamped,
+        reason=reason,
+        summary_row_id=summary_row_id,
+    )
+    return archived
+
+
 def _finalize_summary_row(text: str, workspace_trailer: str | None) -> Message:
     """Build the stored summary row, including the apply-time workspace trailer."""
     summary_text = text.strip() or "(empty summary)"
@@ -1029,7 +1088,13 @@ async def _summarize_history(
         return 0
     summary_row = _finalize_summary_row(summary_text, workspace_trailer)
     merged = rebuild_compacted_history(messages, head=head, summary=summary_row, tail=tail)
-    await history.reset(thread_id, merged)
+    await replace_history_archiving(
+        history,
+        thread_id,
+        merged,
+        reason="compaction",
+        summary=summary_row,
+    )
     logger.debug(
         "history compaction reset %s",
         kv(

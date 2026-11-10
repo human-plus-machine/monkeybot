@@ -656,9 +656,13 @@ async def purge_session_branches(
     wiped: set[str] = set()
 
     async def _wipe(thread_id: str) -> None:
-        if thread_id not in wiped:
-            await history.reset(thread_id, [])
-            wiped.add(thread_id)
+        if thread_id in wiped:
+            return
+        await history.reset(thread_id, [])
+        delete_archive = getattr(history, "delete_archive", None)
+        if callable(delete_archive):
+            await delete_archive(thread_id)
+        wiped.add(thread_id)
 
     await _wipe(session_id)
     for record in await branches.list(session_id):
