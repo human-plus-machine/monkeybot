@@ -1,10 +1,10 @@
 id: regression/t3/trajectories/ctx/replay_live_compaction
 case: T3-CTX-01
 description: >
-  Recorded long session still compacts (3 turns summarized, usage drops).
-  The cassette's own prompt size is already in the moderate band on this
-  10000-token window, so the run compacts on the tool turn and does not
-  replay the recorded tail.
+  Recorded long session still compacts and usage drops. On this 10000-token
+  window the live count compacts when headroom falls under twice the
+  tool-result floor, summarizing 8 rows, and does not replay the recorded
+  tail. A background summary started in the band is not a cassette call.
 mode: replay
 driver: loop
 executor: recording
@@ -12,9 +12,8 @@ cassette: replay_live_compaction.cassette.json
 invariants_skip:
   - name: strict_script
     reason: >
-      The cassette reports 8107 prompt tokens on a 10000-token window, so the
-      tool turn compacts from the provider's count and the recorded tail is
-      not replayed.
+      Compaction rewrites history once headroom is under twice the tool-result
+      floor, so the recorded tail is not replayed.
 config:
   model.context_window: 10000
   model.max_turns: 25
@@ -45,7 +44,7 @@ assertions:
   events_sequence:
     - ContextSummarizing
     - type: ContextSummarized
-      turns_summarized: 3
+      turns_summarized: 8
   context_usage_drops: true
   history:
     summary_row: true

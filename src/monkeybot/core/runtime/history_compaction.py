@@ -414,6 +414,7 @@ def _split_accountable(
     messages: Sequence[Message],
     *,
     window_tokens: int,
+    keep_tail_tokens: int | None = None,
 ) -> tuple[list[Message], list[Message], list[Message]]:
     """Split history into (head, middle, tail) with a token-budgeted recent tail.
 
@@ -422,7 +423,10 @@ def _split_accountable(
     their neighbours for free. The newest visible row is always kept. The head
     and every older tail row stay verbatim only while they fit
     ``window_tokens * SUMMARY_KEEP_TAIL_RATIO``; past that they are summarized.
-    A transcript long enough still leaves at least one middle row.
+    ``keep_tail_tokens`` replaces that budget in the tail loop only, so a
+    background job can leave room for the rows that arrive before it is applied.
+    The head check always uses the inline budget. A transcript long enough still
+    leaves at least one middle row.
     """
     n = len(messages)
     visible = [is_provider_visible(m) for m in messages]
@@ -438,14 +442,15 @@ def _split_accountable(
             if seen == SUMMARY_KEEP_HEAD_COUNT:
                 head_end = i + 1
                 break
-    tail_budget = max(1, int(max(1, window_tokens) * SUMMARY_KEEP_TAIL_RATIO))
+    inline_tail_budget = max(1, int(max(1, window_tokens) * SUMMARY_KEEP_TAIL_RATIO))
+    tail_budget = inline_tail_budget if keep_tail_tokens is None else max(1, keep_tail_tokens)
     head = list(messages[:head_end])
     head_tokens = sum(
         _estimate_message_tokens(msg)
         for msg, is_visible in zip(head, visible[:head_end], strict=True)
         if is_visible
     )
-    if head_tokens > tail_budget:
+    if head_tokens > inline_tail_budget:
         head = []
         head_end = 0
     max_tail = n - head_end - 1  # leave ≥1 middle
@@ -480,10 +485,19 @@ def split_messages_for_compaction(
     messages: Sequence[Message],
     *,
     window_tokens: int,
+    keep_tail_tokens: int | None = None,
 ) -> tuple[list[Message], list[Message], list[Message]]:
-    """Split accountable rows only; pinned notification rows are spliced back later."""
+    """Split accountable rows only; pinned notification rows are spliced back later.
+
+    ``keep_tail_tokens`` is the tail budget for this split. Omit it to use
+    ``window_tokens * SUMMARY_KEEP_TAIL_RATIO``.
+    """
     accountable = [msg for msg in messages if not _is_pinned_history_row(msg)]
-    return _split_accountable(accountable, window_tokens=window_tokens)
+    return _split_accountable(
+        accountable,
+        window_tokens=window_tokens,
+        keep_tail_tokens=keep_tail_tokens,
+    )
 
 
 def rebuild_compacted_history(

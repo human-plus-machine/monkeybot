@@ -13,6 +13,9 @@ Staleness (§5.5.1) is checked against the tools the loop really advertises:
   schema → ``cassette_stale: tool <name> changed`` (the replay fails);
 * a digest differs → :class:`CassetteDigestWarning` (the replay continues).
 
+A compaction summary is not a recorded turn. The replay answers it itself and
+leaves the cassette cursor on the next chat call.
+
 ``run_transcript_roundtrip`` closes the T3 loop for T2-STORE-03: a scripted gateway
 run with ``runtime.transcript_enabled: true`` is converted with
 ``from_transcript`` and the cassette is replayed.
@@ -25,11 +28,12 @@ import json
 import tempfile
 import time
 import warnings
-from collections.abc import Iterator, Sequence
+from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from monkeybot.core.llm.provider import Done, TextDelta
 from monkeybot.core.persistence.transcript import TRANSCRIPT_FILENAME
 from monkeybot.core.persistence.transcript_reader import iter_session_dirs, load_records
 from monkeybot.core.testing.mocks_provider import ScriptedProvider
@@ -58,6 +62,9 @@ from testkit.verifier import CLASSIFIER_ROWS_ENV, JUDGE_SCRIPT_ENV
 _REPLAY_DRIVERS = frozenset({"loop", "gateway"})
 _PROBE_REQUEST_ID = "lock-check"
 _TRANSCRIPT_WAIT_S = 5.0
+# The summary system prompt. A call that carries it is the summarizer, not a
+# recorded chat turn, so it must not consume a cassette slot.
+_SUMMARY_MARK = "Output exactly the Markdown structure"
 
 
 class ReplayDriverError(LoopDriverError):
@@ -182,6 +189,10 @@ def _checked_provider(cassette: Cassette, stale: list[str]) -> Iterator[None]:
             tools: Sequence[Any],
             **kwargs: Any,
         ) -> Any:
+            if _is_summary_request(messages):
+                async for event in _summary_reply():
+                    yield event
+                return
             _check_call(cassette, self.stream_calls, messages, tools, stale)
             async for event in super().stream(messages, tools, **kwargs):
                 yield event
@@ -208,6 +219,10 @@ def _checked_gateway_provider(cassette: Cassette, stale: list[str]) -> Iterator[
         tools: Sequence[Any],
         **kwargs: Any,
     ) -> Any:
+        if _is_summary_request(messages):
+            async for event in _summary_reply():
+                yield event
+            return
         _check_call(cassette, self.stream_calls, messages, tools, stale)
         async for event in original(self, messages, tools, **kwargs):
             yield event
@@ -217,6 +232,22 @@ def _checked_gateway_provider(cassette: Cassette, stale: list[str]) -> Iterator[
         yield
     finally:
         ScriptedProvider.stream = original  # type: ignore[method-assign]
+
+
+def _is_summary_request(messages: Sequence[Any]) -> bool:
+    """True when ``messages`` is a compaction summary, not a recorded chat turn."""
+    for message in messages:
+        for block in getattr(message, "content", ()) or ():
+            text = getattr(block, "text", None)
+            if isinstance(text, str) and text.startswith(_SUMMARY_MARK):
+                return True
+    return False
+
+
+async def _summary_reply() -> AsyncIterator[TextDelta | Done]:
+    """A summary the cassette did not record. The chat script stays put."""
+    yield TextDelta(text="replay-summary")
+    yield Done()
 
 
 def _check_call(

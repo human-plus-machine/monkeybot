@@ -119,6 +119,37 @@ def test_compute_context_pressure_tier_thresholds() -> None:
     assert SUMMARY_TRIGGER_RATIO == 0.85
 
 
+def test_moderate_tier_does_not_force_compaction() -> None:
+    """The 85% bar is the only ratio trigger. 75% with a small result does not compact."""
+    budgeter = ContextBudgeter.for_window(window_tokens=100_000, used_tokens=75_000)
+    blocks = [
+        ToolResponse(id="1", tool_name="run_command", result=[Text(text="ok")]),
+    ]
+    _, needs = budgeter.fit_content_blocks(blocks)
+    assert budgeter.pressure_tier == "moderate"
+    assert not needs
+
+
+def test_trimmed_result_still_needs_compaction() -> None:
+    budgeter = ContextBudgeter.for_window(window_tokens=100_000, used_tokens=75_000)
+    blocks = [
+        ToolResponse(id="1", tool_name="run_command", result=[Text(text="x" * 200_000)]),
+    ]
+    trimmed, needs = budgeter.fit_content_blocks(blocks)
+    assert needs
+    assert "truncated for context budget" in _text(trimmed[0])
+
+
+def test_headroom_under_twice_the_floor_needs_compaction() -> None:
+    """3,000 tokens left is under twice the 2,000-token floor, so the batch compacts."""
+    budgeter = ContextBudgeter.for_window(window_tokens=100_000, used_tokens=97_000)
+    blocks = [
+        ToolResponse(id="1", tool_name="run_command", result=[Text(text="ok")]),
+    ]
+    _, needs = budgeter.fit_content_blocks(blocks)
+    assert needs
+
+
 def test_for_window_tightens_safety_fraction_under_pressure() -> None:
     from monkeybot.core.runtime.context_budget import ContextBudgeter
 
