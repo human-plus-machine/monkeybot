@@ -260,6 +260,13 @@ class Text(ContentBlock):
         return cls(text=_require_str(payload, "text", context="Text"))
 
 
+# Providers bill an image by its pixels, not its base64 length. Previews are
+# capped at 1200 px, and Anthropic charges ceil(edge / 28) squared: 43 * 43
+# = 1,849 tokens at that cap. 2,000 rounds up, so a local estimate compacts
+# early rather than overflowing.
+IMAGE_TOKEN_ESTIMATE = 2000
+
+
 @dataclass(frozen=True, kw_only=True)
 class Image(ContentBlock):
     """Base64 image payload."""
@@ -619,6 +626,7 @@ __all__ = [
     "ElicitationResponseAction",
     "File",
     "FrontendToolRequest",
+    "IMAGE_TOKEN_ESTIMATE",
     "Image",
     "RedactedThinking",
     "SystemNotification",

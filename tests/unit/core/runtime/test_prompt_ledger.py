@@ -5,7 +5,7 @@ from __future__ import annotations
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.runtime.loop_usage import reported_prompt_tokens
 from monkeybot.core.runtime.prompt_ledger import PromptTokenLedger, request_chars
-from monkeybot.core.types.content_blocks import Text
+from monkeybot.core.types.content_blocks import IMAGE_TOKEN_ESTIMATE, Image, Text, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
 
 
@@ -177,6 +177,25 @@ def test_invalidate_and_history_chars_are_stable() -> None:
     assert ledger.anchor_tokens is None
     assert not ledger.trusted
     assert ledger.post_batch_tokens(100_000) is None
+
+
+def test_request_chars_counts_an_image_once_whatever_its_bytes() -> None:
+    def image_message(n: int) -> Message:
+        return Message(
+            role="user",
+            content=[
+                ToolResponse(
+                    id="load-1",
+                    tool_name="load_file",
+                    result=[Image(mime_type="image/png", data="A" * n)],
+                )
+            ],
+        )
+
+    small = request_chars([image_message(1_000)], [])
+    large = request_chars([image_message(500_000)], [])
+    assert small == large
+    assert small == IMAGE_TOKEN_ESTIMATE * 4
 
 
 def test_reported_prompt_tokens_do_not_add_gemini_cache_twice() -> None:

@@ -747,7 +747,9 @@ def _estimate_block(block: ContentBlock) -> dict[str, Any]:
     if isinstance(block, RedactedThinking):
         return {"redactedThinking": {"chars": len(block.data)}}
     if isinstance(block, Image):
-        return {"image": block.mime_type, "chars": len(block.data)}
+        # No payload. ``estimate_anthropic_input_tokens`` bills each image at
+        # ``IMAGE_TOKEN_ESTIMATE`` instead of its base64 length.
+        return {"type": "image"}
     if isinstance(block, File):
         return {"file": block.mime_type, "chars": len(block.data)}
     if isinstance(block, ToolRequest):

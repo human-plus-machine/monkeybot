@@ -33,6 +33,7 @@ from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.persistence.thread_summary import CONTEXT_SUMMARY_PREFIX
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.context_budget import (
+    _CHARS_PER_TOKEN,
     ContextBudgeter,
     _head_and_tail,
     estimate_tokens,
@@ -40,6 +41,7 @@ from monkeybot.core.runtime.context_budget import (
     summary_input_budget,
 )
 from monkeybot.core.types.content_blocks import (
+    IMAGE_TOKEN_ESTIMATE,
     AttachmentRef,
     ContentBlock,
     File,
@@ -267,7 +269,11 @@ def _raw_block_char_count(block: ContentBlock) -> int:
         return len(json.dumps(block.args, sort_keys=True))
     if isinstance(block, ToolResponse):
         return sum(_raw_block_char_count(b) for b in block.result)
-    if isinstance(block, Image | File):
+    if isinstance(block, Image):
+        # Char form of the fixed image estimate. The token estimate divides by
+        # ``_CHARS_PER_TOKEN``, so this comes back out as ``IMAGE_TOKEN_ESTIMATE``.
+        return IMAGE_TOKEN_ESTIMATE * _CHARS_PER_TOKEN
+    if isinstance(block, File):
         return len(block.data) + len(block.mime_type)
     if isinstance(block, Thinking):
         return len(block.thinking) + len(block.signature)
@@ -291,9 +297,11 @@ def _raw_message_char_count(message: Message) -> int:
     Thinking are stripped before the provider call, so they must not shrink the
     token-budgeted tail).
 
-    Also counts ``Image`` / ``File`` base64 payloads and ``Thinking`` traces at
-    full length: falling back to ``type(block).__name__`` would report ~5–8
-    chars for multi-kilobyte multimodal / reasoning blocks and blow past
+    Counts ``File`` payloads and ``Thinking`` traces at full length, and an
+    ``Image`` at ``IMAGE_TOKEN_ESTIMATE``: its base64 is not text, and counting
+    those characters would size one preview as tens of thousands of tokens.
+    Falling back to ``type(block).__name__`` would report ~5–8 chars for a
+    multi-kilobyte file or reasoning block and blow past
     ``SUMMARY_KEEP_TAIL_RATIO``.
     """
     return sum(_raw_block_char_count(block) for block in provider_visible_blocks(message))
