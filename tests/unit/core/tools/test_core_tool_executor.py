@@ -755,7 +755,7 @@ async def test_grep_rg_counts_files_from_listing_when_summary_undercounts(
         lambda _name: "/usr/bin/rg",
     )
     monkeypatch.setattr(
-        "monkeybot.core.tools.workspace_service.subprocess.run",
+        "monkeybot.core.tools.workspace_service._spawn_rg",
         fake_run,
     )
     # Avoid accidental Python fallback if the fake run is mishandled.
@@ -900,7 +900,7 @@ async def test_grep_rg_timeout_is_incomplete_no_python_fallback(
 
     monkeypatch.setattr(WorkspaceFileService, "_grep_python", _track_python)
     monkeypatch.setattr(
-        "monkeybot.core.tools.workspace_service.subprocess.run",
+        "monkeybot.core.tools.workspace_service._spawn_rg",
         _timeout_run,
     )
     svc = WorkspaceFileService(root)

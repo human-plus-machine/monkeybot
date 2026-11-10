@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -16,7 +17,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from monkeybot.core.attachments.config import (
     ALLOWED_MIME_TYPES,
@@ -123,6 +124,7 @@ from monkeybot.core.tools.fs_isolation import (
     toolchain_cache_directory,
     toolchain_cache_env,
 )
+from monkeybot.core.tools.fs_worker import FsCancel, run_fs
 from monkeybot.core.tools.grant_store import PATH_GRANT_TOOLS, GrantStoreCache
 from monkeybot.core.tools.inspector import norm_run_command_line, parse_run_command
 from monkeybot.core.tools.read_ledger import FileReadLedger, WriteProblem, stamp_of
@@ -155,6 +157,12 @@ from monkeybot.core.types.content_blocks import File, Image
 from monkeybot.scheduler.interval import parse_interval_ms, parse_optional_duration_ms
 
 logger = logging.getLogger(__name__)
+
+# Workspace snapshot for the file-tool call running on a worker thread.
+# Unset on the event loop, so loop callers keep using the executor's service.
+_CALL_WORKSPACE: contextvars.ContextVar[WorkspaceFileService | None] = contextvars.ContextVar(
+    "monkeybot_call_workspace", default=None
+)
 
 _SUBAGENT_OTEL_SERVICE_NAME = "monkeybot-subagent"
 
@@ -1300,17 +1308,50 @@ class CoreToolExecutor(ToolExecutorPort):
             )
         return killed
 
+    def _ws(self) -> WorkspaceFileService:
+        """Workspace for this call: the per-call snapshot on a worker, else the shared one."""
+        current = _CALL_WORKSPACE.get()
+        return self._workspace if current is None else current
+
+    def _workspace_for_call(self, name: str, ctx: TurnContext) -> WorkspaceFileService:
+        """Granted read roots for this call, without mutating the shared service.
+
+        Read tools run concurrently, and each must keep the roots it started
+        with. A later call that drops a grant builds its own copy; it does not
+        clear the copy a scan is already walking. Tools that do not take path
+        grants share the executor's service, which has no extra roots.
+        """
+        if name not in PATH_GRANT_TOOLS:
+            return self._workspace
+        read_roots: set[str] = set(ctx.turn_path_grants)
+        if self._grants_cache is not None:
+            read_roots |= {p.path for p in self._grants_cache.get().paths}
+        return self._workspace.with_read_roots(read_roots)
+
+    async def _off_loop(
+        self,
+        fn: Callable[..., Any],
+        *args: Any,
+        workspace: WorkspaceFileService,
+        cancel: FsCancel,
+        **kwargs: Any,
+    ) -> Any:
+        """Run ``fn`` on the file-tool pool, with ``workspace`` visible as :meth:`_ws`."""
+
+        def _invoke() -> Any:
+            token = _CALL_WORKSPACE.set(workspace)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                _CALL_WORKSPACE.reset(token)
+
+        return await run_fs(_invoke, cancel=cancel)
+
     async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
         name = call.name
         args: dict[str, Any] = dict(call.args)
-        if name in PATH_GRANT_TOOLS:
-            read_roots: set[str] = set(ctx.turn_path_grants)
-            if self._grants_cache is not None:
-                read_roots |= {p.path for p in self._grants_cache.get().paths}
-            # Always sync, even when empty: sync_extra_read_roots now assigns
-            # rather than merges, so a revoked grant must clear the service's
-            # stale entry too, not just skip refreshing it.
-            self._workspace.sync_extra_read_roots(read_roots)
+        workspace = self._workspace_for_call(name, ctx)
+        cancel = FsCancel()
         egress_denial = await _scan_tool_args_for_egress(name, args, mcp=self._mcp, ctx=ctx)
         if egress_denial is not None:
             return egress_denial
@@ -1329,27 +1370,51 @@ class CoreToolExecutor(ToolExecutorPort):
         )
 
         preimages = (
-            capture_preimages(self._workspace, name, args)
+            await self._off_loop(
+                capture_preimages,
+                workspace,
+                name,
+                args,
+                workspace=workspace,
+                cancel=cancel,
+            )
             if name in ("write_file", "replace_in_file", "apply_patch")
             else []
         )
         try:
             if name == "load_file":
-                return self._tool_load_file(args, ctx)
+                loaded = await self._off_loop(
+                    self._tool_load_file, args, ctx, workspace=workspace, cancel=cancel
+                )
+                return cast(ToolExecutionResult, loaded)
             if name == "read_file":
-                result_text, err_text = self._tool_read_file(args, ctx)
+                result_text, err_text = await self._off_loop(
+                    self._tool_read_file, args, ctx, workspace=workspace, cancel=cancel
+                )
             elif name == "write_file":
-                result_text, err_text = self._tool_write_file(args)
+                result_text, err_text = await self._off_loop(
+                    self._tool_write_file, args, workspace=workspace, cancel=cancel
+                )
             elif name == "replace_in_file":
-                result_text, err_text = self._tool_replace_in_file(args)
+                result_text, err_text = await self._off_loop(
+                    self._tool_replace_in_file, args, workspace=workspace, cancel=cancel
+                )
             elif name == "glob":
-                result_text, err_text = self._tool_glob(args)
+                result_text, err_text = await self._off_loop(
+                    self._tool_glob, args, workspace=workspace, cancel=cancel
+                )
             elif name == "grep":
-                result_text, err_text = self._tool_grep(args)
+                result_text, err_text = await self._off_loop(
+                    self._tool_grep, args, workspace=workspace, cancel=cancel
+                )
             elif name == "list_dir":
-                result_text, err_text = self._tool_list_dir(args)
+                result_text, err_text = await self._off_loop(
+                    self._tool_list_dir, args, workspace=workspace, cancel=cancel
+                )
             elif name == "apply_patch":
-                result_text, err_text = self._tool_apply_patch(args)
+                result_text, err_text = await self._off_loop(
+                    self._tool_apply_patch, args, workspace=workspace, cancel=cancel
+                )
             elif name == "list_skills":
                 result_text, err_text = self._tool_list_skills(ctx)
             elif name == "task":
@@ -1497,11 +1562,13 @@ class CoreToolExecutor(ToolExecutorPort):
                 name not in _SPILL_SKIP_TOOLS and len(result_text) >= budgets.spill_threshold
             )
             if should_spill:
-                result_text = write_spill_with_inventory(
+                result_text = await run_fs(
+                    write_spill_with_inventory,
                     result_text,
                     self._workspace.repo_root,
                     ctx.session_id,
                     call.call_id,
+                    cancel=cancel,
                     tool_name=name,
                     inline_budget=budgets.inline_budget,
                 )
@@ -1520,9 +1587,12 @@ class CoreToolExecutor(ToolExecutorPort):
             return ToolExecutionResult.err(err_text)
         result = ToolExecutionResult.ok_text(result_text or "")
         if preimages:
-            records = commit_file_changes(
-                self._workspace,
+            records = await self._off_loop(
+                commit_file_changes,
+                workspace,
                 preimages,
+                workspace=workspace,
+                cancel=cancel,
                 session_id=ctx.session_id,
                 request_id=ctx.request_id,
                 call_id=call.call_id,
@@ -1585,7 +1655,7 @@ class CoreToolExecutor(ToolExecutorPort):
 
     def _load_file_from_path(self, path: str, ctx: TurnContext) -> ToolExecutionResult:
         try:
-            fp = self._workspace.resolve_read_path(path, label="path")
+            fp = self._ws().resolve_read_path(path, label="path")
         except WorkspaceError as exc:
             return ToolExecutionResult.err(_workspace_error_envelope(exc))
         if not fp.is_file():
@@ -1661,9 +1731,9 @@ class CoreToolExecutor(ToolExecutorPort):
         budgets = spill_budgets_from_window(ctx.context_window_tokens)
         # Budget content before JSON encoding (~10% headroom for escaping/envelope).
         max_chars = max(1, int(budgets.spill_read_budget * 0.9))
-        spill_path = _is_under_spill_path(self._workspace.repo_root, path)
+        spill_path = _is_under_spill_path(self._ws().repo_root, path)
         try:
-            payload = self._workspace.read_file(
+            payload = self._ws().read_file(
                 path,
                 offset=offset,
                 limit=limit,
@@ -1696,7 +1766,7 @@ class CoreToolExecutor(ToolExecutorPort):
         if guard is not None:
             return (None, guard)
         try:
-            payload = self._workspace.write_file(path, content)
+            payload = self._ws().write_file(path, content)
             self._note_write(path)
             return (_j(payload), None)
         except WorkspaceError as exc:
@@ -1738,7 +1808,7 @@ class CoreToolExecutor(ToolExecutorPort):
         if guard is not None:
             return (None, guard)
         try:
-            payload = self._workspace.replace_in_file(
+            payload = self._ws().replace_in_file(
                 path, old_string, new_string, replace_all=replace_all
             )
             self._note_write(path)
@@ -1749,8 +1819,8 @@ class CoreToolExecutor(ToolExecutorPort):
     def _ledger_key(self, path: str) -> tuple[str, Path] | None:
         """Ledger key and physical path for a writable workspace path, or ``None`` if invalid."""
         try:
-            fp = self._workspace.require_writable_path(path)
-            return self._workspace.repo_rel(fp), fp
+            fp = self._ws().require_writable_path(path)
+            return self._ws().repo_rel(fp), fp
         except WorkspaceError:
             return None
 
@@ -1759,8 +1829,8 @@ class CoreToolExecutor(ToolExecutorPort):
         if ledger is None:
             return
         try:
-            fp = self._workspace.resolve_read_path(path)
-            key = self._workspace.repo_rel(fp)
+            fp = self._ws().resolve_read_path(path)
+            key = self._ws().repo_rel(fp)
         except WorkspaceError:
             return
         ledger.record_read(key, stamp_of(fp))
@@ -1791,7 +1861,7 @@ class CoreToolExecutor(ToolExecutorPort):
     def _tool_list_dir(self, args: dict[str, Any]) -> tuple[str | None, str | None]:
         path = _str_arg(args, "path", "root", "dir") or "."
         try:
-            entries = self._workspace.list_directory(path)
+            entries = self._ws().list_directory(path)
         except WorkspaceError as exc:
             return (None, _workspace_error_envelope(exc))
         shown = entries[:_LIST_DIR_MAX_ENTRIES]
@@ -1820,7 +1890,7 @@ class CoreToolExecutor(ToolExecutorPort):
         root = _str_arg(args, "root")
         files_only = _bool_arg(args.get("files_only"), default=True)
         try:
-            payload = self._workspace.glob_paths(pattern, root=root, files_only=files_only)
+            payload = self._ws().glob_paths(pattern, root=root, files_only=files_only)
             return (_j(payload), None)
         except WorkspaceError as exc:
             if getattr(exc, "code", None) == "incomplete_scan":
@@ -1874,7 +1944,7 @@ class CoreToolExecutor(ToolExecutorPort):
         files_only = _bool_arg(args.get("files_only"), default=False)
         respect_gitignore = _bool_arg(args.get("respect_gitignore"), default=True)
         try:
-            payload = self._workspace.grep(
+            payload = self._ws().grep(
                 pattern,
                 root=root,
                 ignore_case=ignore_case,
@@ -1935,7 +2005,7 @@ class CoreToolExecutor(ToolExecutorPort):
                     guard = self._edit_guard(hunk.path)
                     if guard is not None:
                         return (None, guard)
-            payload = plan_and_apply_patch(self._workspace, hunks)
+            payload = plan_and_apply_patch(self._ws(), hunks)
             self._note_patch_applied(payload)
             return (_j(payload), None)
         except PatchError as exc:
