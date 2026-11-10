@@ -261,3 +261,76 @@ async def test_a_failing_summarizer_never_grows_the_request(tmp_path) -> None:
     _, middle, _ = split_messages_for_compaction(history.rows, window_tokens=window)
     lines = _middle_summary_lines(middle, window_tokens=window)
     assert _summary_request_tokens(lines, None) > budget
+
+
+class _TooLongError(Exception):
+    def __init__(self) -> None:
+        super().__init__("prompt is too long")
+
+
+class _RejectOnce(RecordingProvider):
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[object],
+        *,
+        model: str,
+        thinking_budget: int | None = None,
+        **kwargs: object,
+    ) -> AsyncIterator[TextDelta | Done]:
+        del tools, model, thinking_budget, kwargs
+        self.messages.append(list(messages))
+        self.calls += 1
+        if self.calls == 1:
+            raise _TooLongError()
+        yield TextDelta(text="shrunk")
+        yield Done()
+
+
+async def test_a_size_rejection_halves_the_chunk_and_retries() -> None:
+    middle = [Message(role="user", content=[Text(text="Q" * 200_000)])]
+    provider = _RejectOnce()
+    text = await _generate_summary_text(provider, "m", middle, window_tokens=WINDOW)
+    assert text == "shrunk"
+    assert provider.calls == 2
+    first = provider.messages[0][1].content[0].text  # type: ignore[union-attr]
+    second = provider.messages[1][1].content[0].text  # type: ignore[union-attr]
+    assert len(second) < len(first)
+    budget = summary_input_budget(WINDOW)
+    assert _request_tokens(provider.messages[1]) <= budget // 2
+
+
+class _AlwaysTooLong:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[object],
+        *,
+        model: str,
+        thinking_budget: int | None = None,
+        **kwargs: object,
+    ) -> AsyncIterator[TextDelta | Done]:
+        del messages, tools, model, thinking_budget, kwargs
+        self.calls += 1
+        raise _TooLongError()
+        yield TextDelta(text="")  # pragma: no cover - keeps this an async generator
+
+
+async def test_three_halvings_then_the_size_rejection_propagates() -> None:
+    history = FakeHistory(_rows(8, 16_000))
+    before = list(history.rows)
+    provider = _AlwaysTooLong()
+    with pytest.raises(_TooLongError):
+        await _summarize_history(
+            "t1",
+            history,  # type: ignore[arg-type]
+            provider,  # type: ignore[arg-type]
+            "m",
+            window_tokens=WINDOW,
+        )
+    assert provider.calls == 4
+    assert history.reset_calls == []
+    assert history.rows == before

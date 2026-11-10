@@ -16,6 +16,7 @@ from monkeybot.core.coding.verification_gate import last_proven_verification
 from monkeybot.core.context import TurnContext
 from monkeybot.core.context.epoch import ContextEpochTracker
 from monkeybot.core.hooks import HookEvent, HookManager
+from monkeybot.core.llm.context_overflow import is_context_overflow
 from monkeybot.core.llm.provider import (
     Done,
     Message,
@@ -660,6 +661,8 @@ async def _append_budgeted_tool_responses(
 
 _SUMMARY_LEAD = "Create a structured summary from the conversation segment below.\n\n"
 _SUMMARY_SEPARATOR = "\n\n---\n\n"
+# Extra attempts after a provider size rejection, for the whole summary.
+_MAX_SUMMARY_HALVINGS = 3
 
 
 def _summary_user_text(lines: Sequence[str], intent_facts: str | None) -> str:
@@ -761,26 +764,45 @@ async def _generate_summary_text(
 
     The middle is summarized in calls that each fit ``summary_input_budget``. A
     middle that fits is one call, with the same prompt as before. A larger middle
-    is folded: each later call starts from the summary so far. The workspace
-    trailer is not applied here. It is taken from the ledger when the summary is
-    written, so files touched after this call still appear.
+    is folded: each later call starts from the summary so far. A provider size
+    rejection halves that call and packs it again, at most three times for the
+    whole summary. The workspace trailer is not applied here. It is taken from
+    the ledger when the summary is written, so files touched after this call
+    still appear.
     """
-    lines = _middle_summary_lines(middle, window_tokens=window_tokens)
-    if not lines:
+    source = _middle_summary_lines(middle, window_tokens=window_tokens)
+    if not source:
         return None
     budget = summary_input_budget(window_tokens)
-    working = list(lines)
     summary: str | None = None
     index = 0
-    while index < len(working):
-        chunk, index = _pack_summary_chunk(
-            working,
-            index,
-            carry=summary,
-            budget=budget,
-            intent_facts=intent_facts,
-        )
-        summary = await _summarize_chunk(provider, model, chunk, intent_facts=intent_facts)
+    halvings = 0
+    while index < len(source):
+        call_budget = budget
+        while True:
+            # Pack from a copy so a rejected attempt's trim does not stick.
+            working = list(source)
+            chunk, next_index = _pack_summary_chunk(
+                working,
+                index,
+                carry=summary,
+                budget=call_budget,
+                intent_facts=intent_facts,
+            )
+            try:
+                summary = await _summarize_chunk(provider, model, chunk, intent_facts=intent_facts)
+            except Exception as exc:
+                if not is_context_overflow(exc) or halvings >= _MAX_SUMMARY_HALVINGS:
+                    raise
+                halvings += 1
+                call_budget = max(1, call_budget // 2)
+                logger.warning(
+                    "summary call exceeded the window; halving the chunk %s",
+                    kv(halving=halvings, budget=call_budget),
+                )
+                continue
+            index = next_index
+            break
     return summary
 
 
