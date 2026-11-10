@@ -155,6 +155,59 @@ def test_converse_cache_points_default_retention() -> None:
     assert _count_cache_points(kwargs) == 4
 
 
+_TAIL = (
+    "## System context update\n"
+    "The following replaces the prior current-request section for this conversation.\n\n"
+    "## Current request\nfix it"
+)
+
+
+def test_converse_cache_point_sits_before_context_tail() -> None:
+    messages = [
+        Message.text("system", "You are helpful."),
+        Message.text("user", "first"),
+        Message(role="assistant", content=[ToolRequest(id="c1", name="echo", args={})]),
+        Message(
+            role="user",
+            content=[
+                ToolResponse(id="c1", tool_name="echo", result=[Text(text="ok")], is_error=False),
+                Text(text=_TAIL),
+            ],
+        ),
+    ]
+    kwargs = converse_request_kwargs(
+        model=_NOVA,
+        messages=messages,
+        tools=[_ECHO],
+        max_tokens=256,
+        temperature=0.2,
+    )
+    content = kwargs["messages"][-1]["content"]
+    assert "toolResult" in content[0]
+    assert content[1] == {"cachePoint": {"type": "default"}}
+    assert content[2]["text"] == _TAIL
+
+
+def test_converse_cache_point_skips_a_tail_only_user_message() -> None:
+    messages = [
+        Message.text("system", "You are helpful."),
+        Message.text("user", "first"),
+        Message.text("assistant", "ok"),
+        Message.text("user", _TAIL),
+    ]
+    kwargs = converse_request_kwargs(
+        model=_NOVA,
+        messages=messages,
+        tools=[_ECHO],
+        max_tokens=256,
+        temperature=0.2,
+    )
+    user_msgs = [m for m in kwargs["messages"] if m["role"] == "user"]
+    assert user_msgs[0]["content"][-1] == {"cachePoint": {"type": "default"}}
+    assert all("cachePoint" not in block for block in user_msgs[-1]["content"])
+    assert user_msgs[-1]["content"][-1]["text"] == _TAIL
+
+
 def test_converse_cache_points_cap_with_long_history() -> None:
     kwargs = converse_request_kwargs(
         model=_GROK,

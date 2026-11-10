@@ -262,6 +262,50 @@ def test_mark_conversation_cache_breakpoints_advances_with_turns() -> None:
     assert "cache_control" in turn2[-2]["content"][0]
 
 
+_TAIL = (
+    "## System context update\n"
+    "The following replaces the prior current-request section for this conversation.\n\n"
+    "## Current request\nfix it"
+)
+
+
+def test_cache_breakpoint_sits_on_the_block_before_a_folded_tail() -> None:
+    messages = [
+        {"role": "user", "content": "u1"},
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "c1", "name": "run_command", "input": {}}],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "c1", "content": "ok"},
+                {"type": "text", "text": _TAIL},
+            ],
+        },
+    ]
+    marked = mark_conversation_cache_breakpoints(messages, max_breakpoints=2)
+    tool_result, tail = marked[-1]["content"]
+    assert tool_result["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in tail
+    assert tail["text"] == _TAIL
+    assert marked[-2]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in marked[0]
+
+
+def test_cache_breakpoint_skips_a_tail_only_message() -> None:
+    messages = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": _TAIL},
+    ]
+    marked = mark_conversation_cache_breakpoints(messages, max_breakpoints=2)
+    assert marked[-1] == {"role": "user", "content": _TAIL}
+    assert marked[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert marked[1]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert _count_cache_controls(marked) == 2
+
+
 def test_prepare_payload_total_breakpoints_within_limit() -> None:
     import anthropic
 

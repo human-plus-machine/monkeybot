@@ -2126,9 +2126,7 @@ def test_messages_for_provider_folds_update_into_trailing_user_message() -> None
         Message(role="assistant", content=[ToolRequest(id="c1", name="run_command", args={})]),
         tool_response_row,
     ]
-    out = _messages_for_provider(
-        system, history, mid_conversation_update="## System context update\n..."
-    )
+    out = _messages_for_provider(system, history, context_tail="## System context update\n...")
     roles = [m.role for m in out]
     assert all(a != b for a, b in zip(roles, roles[1:])), roles
     assert len(out) == len(history) + 1  # system + history rows, no extra message
@@ -2144,9 +2142,7 @@ def test_messages_for_provider_appends_update_after_trailing_assistant_message()
         Message(role="user", content=[Text(text="hi")]),
         Message(role="assistant", content=[Text(text="ok, thinking...")]),
     ]
-    out = _messages_for_provider(
-        system, history, mid_conversation_update="## System context update\n..."
-    )
+    out = _messages_for_provider(system, history, context_tail="## System context update\n...")
     roles = [m.role for m in out]
     assert roles == ["system", "user", "assistant", "user"]
     assert all(a != b for a, b in zip(roles, roles[1:]))
@@ -2275,6 +2271,148 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
     assert last.role == "user"
     assert any(isinstance(b, ToolResponse) for b in last.content)
     assert any(isinstance(b, Text) and "new memory from tool" in b.text for b in last.content)
+
+
+_TAIL_HEADING = "## System context update"
+_OLD_TODO = "OLD-TODO-AT-START"
+_NEW_TODO = "NEW-TODO-FROM-CALL-1"
+
+
+def _tail_texts(messages: Sequence[Message]) -> list[str]:
+    texts: list[str] = []
+    for message in messages:
+        for block in message.content:
+            if isinstance(block, Text) and _TAIL_HEADING in block.text:
+                texts.append(block.text)
+    return texts
+
+
+def _without_tail(messages: Sequence[Message]) -> list[dict[str, object]]:
+    """Provider messages with the live tail block removed, as stored history sees them."""
+    out: list[dict[str, object]] = []
+    for message in messages:
+        blocks = [
+            block
+            for block in message.content
+            if not (isinstance(block, Text) and _TAIL_HEADING in block.text)
+        ]
+        if not blocks:
+            continue
+        out.append(Message(role=message.role, content=blocks).to_dict())
+    return out
+
+
+class _AddTodoOnFirst(RecordingExecutor):
+    def __init__(self, store: Any) -> None:
+        super().__init__(ToolExecutionResult.ok_text("ok"))
+        self._store = store
+        self._calls = 0
+
+    async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
+        self._calls += 1
+        if self._calls == 1:
+            added = await self._store.add(_NEW_TODO)
+            assert not isinstance(added, str)
+        return await super().execute(call=call, ctx=ctx)
+
+
+def _tool_script(n: int) -> list[list[object]]:
+    steps: list[list[object]] = [
+        [ToolCall(call_id=f"c{i}", name="run_command", args={"command": f"step-{i}"}), Done()]
+        for i in range(1, n)
+    ]
+    steps.append([TextDelta(text="final answer"), Done()])
+    return steps
+
+
+@pytest.mark.asyncio
+async def test_context_tail_stays_on_every_later_call(tmp_path: Path) -> None:
+    """A todo change and the current-request anchor stay visible after the call that
+    first carried them, and no earlier message is rewritten (C1, P2).
+    """
+    from monkeybot.todo_list.store import TodoListStore
+
+    store = TodoListStore("tail", workspace_root=tmp_path, mirror_to_disk=False)
+    seeded = await store.add(_OLD_TODO)
+    assert not isinstance(seeded, str)
+    provider = FakeProvider(_tool_script(4))
+    ctx = dataclasses.replace(_ctx(workspace_root=tmp_path), todo_store=store, request_id="r1")
+    async for _event in run(
+        "please do the anchored task",
+        ctx,
+        provider=provider,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=_AddTodoOnFirst(store),
+        max_turns=6,
+    ):
+        pass
+
+    calls = provider.stream_messages
+    assert len(calls) == 4
+    assert _tail_texts(calls[0]) == []
+    systems = [_flatten_text_from_message(call[0]) for call in calls]
+    assert systems[0] == systems[1] == systems[2] == systems[3]
+    assert _OLD_TODO in systems[0]
+    assert _NEW_TODO not in systems[0]
+    stripped = [_without_tail(call) for call in calls]
+    for earlier, later in zip(stripped, stripped[1:], strict=False):
+        assert later[: len(earlier)] == earlier
+    for call in calls[1:]:
+        tails = _tail_texts(call)
+        assert len(tails) == 1
+        assert _NEW_TODO in tails[0]
+        assert _TAIL_HEADING in tails[0]
+        assert "## Current request" in tails[0]
+        assert "please do the anchored task" in tails[0]
+
+
+@pytest.mark.asyncio
+async def test_next_user_message_opens_without_a_tail(tmp_path: Path) -> None:
+    """The next user message starts a new epoch: no tail, and the previous
+    request's messages (minus the tail, which was never stored) are unchanged.
+    """
+    from monkeybot.todo_list.store import TodoListStore
+
+    store = TodoListStore("tail2", workspace_root=tmp_path, mirror_to_disk=False)
+    seeded = await store.add(_OLD_TODO)
+    assert not isinstance(seeded, str)
+    hist = FakeHistory()
+    first = FakeProvider(_tool_script(2))
+    ctx = dataclasses.replace(_ctx(workspace_root=tmp_path), todo_store=store, request_id="r1")
+    exe = _AddTodoOnFirst(store)
+    async for _event in run(
+        "please do the anchored task",
+        ctx,
+        provider=first,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=exe,
+        max_turns=4,
+    ):
+        pass
+    assert len(first.stream_messages) == 2
+    prior = _without_tail(first.stream_messages[-1])
+
+    second = FakeProvider([[TextDelta(text="second answer"), Done()]])
+    ctx2 = dataclasses.replace(ctx, request_id="r2")
+    async for _event in run(
+        "a follow-up question",
+        ctx2,
+        provider=second,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(ToolExecutionResult.ok_text("ok")),
+        max_turns=2,
+    ):
+        pass
+    assert len(second.stream_messages) == 1
+    opened = second.stream_messages[0]
+    assert _tail_texts(opened) == []
+    opened_body = _without_tail(opened)
+    assert opened_body[1 : 1 + (len(prior) - 1)] == prior[1:]
+    assert opened_body[-1]["role"] == "user"
+    assert _NEW_TODO in _flatten_text_from_message(opened[0])
 
 
 @pytest.mark.asyncio

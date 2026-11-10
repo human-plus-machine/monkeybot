@@ -126,6 +126,7 @@ from .loop_messages import (
     _messages_for_provider,
     _provider_messages_prompt_summary,
     _snapshot_system_message,
+    _split_context_tail,
     _system_message_from_text,
     _system_prompt_snapshot_text,
     _user_text_from_content,
@@ -739,7 +740,7 @@ async def _prepare_turn_context(
     state.provider_messages = _messages_for_provider(
         system_msg,
         state.resolved_messages,
-        mid_conversation_update=admit.mid_conversation_update,
+        context_tail=admit.context_tail,
     )
 
 
@@ -780,7 +781,7 @@ async def _refresh_prompt_after_history_change(
     state.provider_messages = _messages_for_provider(
         system_msg,
         state.resolved_messages,
-        mid_conversation_update=admit.mid_conversation_update,
+        context_tail=admit.context_tail,
     )
 
 
@@ -1059,7 +1060,7 @@ async def _apply_pressure_and_before_provider(
         state.provider_messages = _messages_for_provider(
             system_msg,
             state.resolved_messages,
-            mid_conversation_update=admit.mid_conversation_update,
+            context_tail=admit.context_tail,
         )
 
     before_payload = await _fire_hook(
@@ -1098,7 +1099,7 @@ async def _apply_pressure_and_before_provider(
         inner_turn=state.turn_index,
         text=_system_prompt_snapshot_text(
             _snapshot_system_message(state.provider_messages, system_msg),
-            admit.mid_conversation_update,
+            admit.context_tail,
         ),
     )
 
@@ -1171,12 +1172,15 @@ async def _write_transcript_provider_request(
     """Write provider-request transcript delta and clear tools_dirty when written."""
     if transcript_writer is None:
         return
-    if state.provider_messages_written >= len(state.provider_messages):
-        delta_messages = state.provider_messages
+    # The tail is not a history row. Counting it would make the next call,
+    # which rebuilds that row without the tail, look like a rewrite.
+    durable_messages, context_tail = _split_context_tail(state.provider_messages)
+    if state.provider_messages_written >= len(durable_messages):
+        delta_messages = durable_messages
         message_offset = 0
         messages_reset = state.provider_messages_written > 0
     else:
-        delta_messages = state.provider_messages[state.provider_messages_written :]
+        delta_messages = durable_messages[state.provider_messages_written :]
         message_offset = state.provider_messages_written
         messages_reset = False
     include_tools = state.turn_index == 1 or messages_reset or state.tools_dirty
@@ -1199,12 +1203,13 @@ async def _write_transcript_provider_request(
         messages=[m.to_dict() for m in delta_messages],
         message_offset=message_offset,
         messages_reset=messages_reset,
+        context_tail=context_tail,
         tools=[t.to_model_schema() for t in state.turn_tools] if include_tools else None,
         thinking_budget=state.stream_thinking,
         tools_include_reason=tools_include_reason,
         tools_dirty_reason=tools_dirty_reason,
     )
-    state.provider_messages_written = len(state.provider_messages)
+    state.provider_messages_written = len(durable_messages)
     state.tools_dirty = False
     state.tools_dirty_reason = None
 

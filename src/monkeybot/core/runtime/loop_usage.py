@@ -149,30 +149,27 @@ async def _prompt_input_tokens_for_history(
     """Provider-accurate prompt size for history rows already persisted (e.g. post-assistant).
 
     When ``epoch`` is supplied, the count reflects the true wire shape for the
-    *current* epoch state — leading (cached) baseline plus any pending
-    mid-conversation update — via a non-mutating :meth:`ContextEpochTracker.peek`.
-    Falls back to a flat stable+volatile concatenation when no tracker is given
-    (e.g. summarizer/curator calls that have no epoch of their own). Either way,
-    the live tracker is never mutated by a budget recount.
+    *current* epoch state — leading (cached) baseline plus the live tail — via
+    a non-mutating :meth:`ContextEpochTracker.peek`. Falls back to a flat
+    stable+volatile concatenation when no tracker is given (e.g. summarizer or
+    curator calls that have no epoch of their own). Either way, the live
+    tracker is never mutated by a budget recount.
     """
     catalog = attachment_catalog.list_records() if attachment_catalog is not None else None
     stable = compose_stable_baseline(ctx, attachment_catalog=catalog)
     volatile_parts = compose_volatile_tail_parts(ctx, chat_messages=chat_messages)
     volatile = "".join(volatile_parts.values())
-    mid_conversation_update = ""
+    context_tail = ""
     if epoch is not None:
-        volatile_content = "".join(
-            text for name, text in volatile_parts.items() if name != "current_date"
-        )
         admit = epoch.peek(
             stable_baseline=stable,
             volatile_text=volatile,
             stable_fingerprint=fingerprint_text(stable),
             volatile_fingerprint=fingerprint_text(volatile),
-            volatile_content_text=volatile_content,
+            volatile_parts=volatile_parts,
         )
         body = admit.leading_system_text
-        mid_conversation_update = admit.mid_conversation_update
+        context_tail = admit.context_tail
     else:
         body = stable + volatile
     system = _append_extra_system_text(_system_message_from_text(body), extra_system_text)
@@ -181,9 +178,7 @@ async def _prompt_input_tokens_for_history(
         attachment_store=attachment_store,
         session_id=ctx.session_id,
     )
-    provider_messages = _messages_for_provider(
-        system, resolved_messages, mid_conversation_update=mid_conversation_update
-    )
+    provider_messages = _messages_for_provider(system, resolved_messages, context_tail=context_tail)
     return await _provider_prompt_input_tokens(
         provider,
         provider_messages,

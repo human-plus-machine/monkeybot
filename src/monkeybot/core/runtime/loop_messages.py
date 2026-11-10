@@ -14,7 +14,7 @@ from monkeybot.core.llm.provider import Message
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.messages.transform_context import provider_visible_blocks, transform_context
 from monkeybot.core.persistence.backends import HistoryStore
-from monkeybot.core.prompts.headings import RUNTIME_NOTES_HEADING
+from monkeybot.core.prompts.headings import RUNTIME_NOTES_HEADING, is_system_context_update
 from monkeybot.core.prompts.prompt import (
     compose_stable_baseline,
     compose_volatile_tail_parts,
@@ -73,21 +73,12 @@ def _admit_system_context(
     stable = compose_stable_baseline(ctx, attachment_catalog=catalog)
     volatile_parts = compose_volatile_tail_parts(ctx, chat_messages=chat_messages)
     volatile = "".join(volatile_parts.values())
-    # Excludes "current_date": it is never empty (always today's date), so it
-    # must not count as "content" when deciding whether volatile sections were
-    # cleared for the "## System context update" mid-epoch message.
-    volatile_content = "".join(
-        text for name, text in volatile_parts.items() if name != "current_date"
-    )
     return epoch.reconcile(
         stable_baseline=stable,
         volatile_text=volatile,
         stable_fingerprint=fingerprint_text(stable),
         volatile_fingerprint=fingerprint_text(volatile),
-        volatile_part_fingerprints={
-            name: fingerprint_text(text) for name, text in volatile_parts.items()
-        },
-        volatile_content_text=volatile_content,
+        volatile_parts=volatile_parts,
     )
 
 
@@ -95,27 +86,53 @@ def _messages_for_provider(
     system: Message,
     history: Sequence[Message],
     *,
-    mid_conversation_update: str = "",
+    context_tail: str = "",
 ) -> list[Message]:
-    """Leading system + history + optional chronological system-context update.
+    """Leading system + history + the live volatile tail, when any section moved.
 
-    The update is user-role so all providers accept mid-conversation updates
-    (system is leading-only for Anthropic/Gemini/OpenAI adapters). When history
-    already ends in a ``user`` row (e.g. a tool-response turn), the update is
-    folded into that same message instead of appended as a new one — Anthropic
-    and Gemini both reject (or, for Anthropic, only sometimes silently coalesce)
-    two consecutive same-role messages.
+    The tail is user-role so all providers accept it (system is leading-only for
+    Anthropic/Gemini/OpenAI adapters). When history already ends in a ``user``
+    row (e.g. a tool-response turn), the tail is folded into that same message
+    instead of appended as a new one — Anthropic and Gemini both reject (or, for
+    Anthropic, only sometimes silently coalesce) two consecutive same-role messages.
+    The same tail is attached on every later call of the epoch, not only the call
+    that first observed the change.
     """
     out: list[Message] = [system, *list(history)]
-    update = mid_conversation_update.strip()
+    update = context_tail.strip()
     if not update:
         return out
-    update_block = Text(text=mid_conversation_update)
+    update_block = Text(text=context_tail)
     if out[-1].role == "user":
         out[-1] = Message(role="user", content=[*out[-1].content, update_block])
     else:
         out.append(Message(role="user", content=[update_block]))
     return out
+
+
+def _split_context_tail(messages: Sequence[Message]) -> tuple[list[Message], str]:
+    """Messages without the live tail, and the tail text.
+
+    The tail is attached at send time and is not part of stored history. The
+    transcript records it beside the request, so a later call's copy of the
+    same message stays byte-identical to what was written the first time.
+    """
+    if not messages:
+        return [], ""
+    last = messages[-1]
+    kept: list[ContentBlock] = []
+    tails: list[str] = []
+    for block in last.content:
+        if isinstance(block, Text) and is_system_context_update(block.text):
+            tails.append(block.text)
+        else:
+            kept.append(block)
+    if not tails:
+        return list(messages), ""
+    head = list(messages[:-1])
+    if kept:
+        head.append(Message(role=last.role, content=kept))
+    return head, "\n\n".join(tails)
 
 
 async def _load_agent_chat_history(history: HistoryStore, thread_id: str) -> list[Message]:
@@ -154,7 +171,7 @@ def _epoch_events(
             request_id=request_id,
             epoch_id=admit.epoch_id,
             changed_sources=list(admit.changed_sources),
-            text=admit.mid_conversation_update,
+            text=admit.context_tail,
         )
     ]
 
@@ -228,10 +245,10 @@ def _summary_line_for_message(m: Message, *, window_tokens: int | None = None) -
     return f"{m.role}: {' '.join(pieces)}"
 
 
-def _system_prompt_snapshot_text(system: Message, mid_conversation_update: str = "") -> str:
-    """Plain string for :class:`SystemPromptSnapshot` (composed prompt + mid-epoch update)."""
+def _system_prompt_snapshot_text(system: Message, context_tail: str = "") -> str:
+    """Plain string for :class:`SystemPromptSnapshot` (composed prompt + live tail)."""
     body = "".join(b.text for b in system.content if isinstance(b, Text))
-    update = mid_conversation_update.strip()
+    update = context_tail.strip()
     if not update:
         return body
     return f"{body}\n\n{update}"
