@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- History summarization and chat titles use `model.name`. `model.summarization_model` is ignored, and `CONTEXT_SUMMARIZATION_MODEL` is no longer read.
+
 ## [cli v0.13.1] - 2026-11-09
 
 ### Fixed

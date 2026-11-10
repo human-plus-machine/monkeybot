@@ -1569,10 +1569,7 @@ async def test_run_preserves_spill_across_turns(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_emits_context_summarize_events_when_over_cap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("CONTEXT_SUMMARIZATION_MODEL", raising=False)
+async def test_run_emits_context_summarize_events_when_over_cap(tmp_path: Path) -> None:
     preload = [
         Message(
             role="user" if i % 2 == 0 else "assistant",
@@ -1587,7 +1584,7 @@ async def test_run_emits_context_summarize_events_when_over_cap(
             [TextDelta(text="final"), Done()],
         ]
     )
-    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=1_600)
     events = []
     async for e in run(
         "hello",
@@ -1646,7 +1643,7 @@ async def _run_over_cap(tmp_path: Path, preload: list[Message]) -> FakeHistory:
     prov = FakeProvider(
         [[TextDelta(text=" compressed summary "), Done()], [TextDelta(text="final"), Done()]]
     )
-    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=1_600)
     async for _ in run(
         "hello",
         ctx,
@@ -1678,7 +1675,7 @@ async def test_compaction_records_the_raw_summary_call_on_the_transcript(tmp_pat
     writer = TranscriptWriter("sess-compact", workspace_root=tmp_path)
     async for _ in run(
         "hello",
-        _ctx(workspace_root=tmp_path, context_window_tokens=800),
+        _ctx(workspace_root=tmp_path, context_window_tokens=1_600),
         provider=prov,
         history=hist,
         inspectors=[],
@@ -1927,16 +1924,13 @@ async def test_run_emits_context_usage_after_tools_without_compaction() -> None:
 
 
 @pytest.mark.asyncio
-async def test_summarization_call_never_receives_vertex_google_search(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_summarization_call_never_receives_vertex_google_search(tmp_path: Path) -> None:
     """History summarization is an internal harness call, not an agent turn.
 
     Regression guard: even with ``vertex_google_search=True`` on the main run,
-    the summarization LLM call (``loop.py`` calling ``provider.stream`` directly
-    for the summarizer model) must never receive the flag.
+    the summarization LLM call (``loop.py`` calling ``provider.stream`` directly)
+    must never receive the flag. It uses the same model as the turn.
     """
-    monkeypatch.setenv("CONTEXT_SUMMARIZATION_MODEL", "summarizer-model-x")
     preload = [
         Message(
             role="user" if i % 2 == 0 else "assistant",
@@ -1952,7 +1946,7 @@ async def test_summarization_call_never_receives_vertex_google_search(
         ],
         name="gemini",
     )
-    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=1_600)
     async for _ in run(
         "hello",
         ctx,
@@ -1964,117 +1958,10 @@ async def test_summarization_call_never_receives_vertex_google_search(
         vertex_google_search=True,
     ):
         pass
-    assert prov.stream_models == ["summarizer-model-x", "gemini-2.5-flash"]
+    assert prov.stream_models == ["gemini-2.5-flash", "gemini-2.5-flash"]
     summarizer_call, main_turn_call = prov.vertex_google_search_calls
     assert summarizer_call is False
     assert main_turn_call is True
-
-
-@pytest.mark.asyncio
-async def test_run_summarization_uses_context_summarization_model_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("CONTEXT_SUMMARIZATION_MODEL", "summarizer-model-x")
-    preload = [
-        Message(
-            role="user" if i % 2 == 0 else "assistant",
-            content=[Text(text="z" * 600)],
-        )
-        for i in range(8)
-    ]
-    hist = FakeHistory(preload)
-    prov = FakeProvider(
-        [
-            [TextDelta(text=" compressed summary "), Done()],
-            [TextDelta(text="final"), Done()],
-        ]
-    )
-    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
-    async for _ in run(
-        "hello",
-        ctx,
-        provider=prov,
-        history=hist,
-        inspectors=[],
-        tool_executor=RecordingExecutor(),
-        max_turns=4,
-    ):
-        pass
-    assert prov.stream_models == ["summarizer-model-x", "gemini-2.5-flash"]
-
-
-@pytest.mark.asyncio
-async def test_run_summarization_uses_turn_context_when_env_unset(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("CONTEXT_SUMMARIZATION_MODEL", raising=False)
-    preload = [
-        Message(
-            role="user" if i % 2 == 0 else "assistant",
-            content=[Text(text="z" * 600)],
-        )
-        for i in range(8)
-    ]
-    hist = FakeHistory(preload)
-    prov = FakeProvider(
-        [
-            [TextDelta(text=" compressed summary "), Done()],
-            [TextDelta(text="final"), Done()],
-        ]
-    )
-    ctx = _ctx(
-        workspace_root=tmp_path,
-        context_window_tokens=800,
-        summarization_model="ctx-summ-model",
-    )
-    async for _ in run(
-        "hello",
-        ctx,
-        provider=prov,
-        history=hist,
-        inspectors=[],
-        tool_executor=RecordingExecutor(),
-        max_turns=4,
-    ):
-        pass
-    assert prov.stream_models == ["ctx-summ-model", "gemini-2.5-flash"]
-
-
-@pytest.mark.asyncio
-async def test_run_summarization_env_overrides_turn_context_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("CONTEXT_SUMMARIZATION_MODEL", "env-wins")
-    preload = [
-        Message(
-            role="user" if i % 2 == 0 else "assistant",
-            content=[Text(text="z" * 600)],
-        )
-        for i in range(8)
-    ]
-    hist = FakeHistory(preload)
-    prov = FakeProvider(
-        [
-            [TextDelta(text=" compressed summary "), Done()],
-            [TextDelta(text="final"), Done()],
-        ]
-    )
-    ctx = _ctx(
-        workspace_root=tmp_path,
-        context_window_tokens=800,
-        summarization_model="should-not-use",
-    )
-    async for _ in run(
-        "hello",
-        ctx,
-        provider=prov,
-        history=hist,
-        inspectors=[],
-        tool_executor=RecordingExecutor(),
-        max_turns=4,
-    ):
-        pass
-    assert prov.stream_models == ["env-wins", "gemini-2.5-flash"]
 
 
 @pytest.mark.asyncio
@@ -2108,11 +1995,8 @@ async def test_run_no_context_summarize_events_when_under_cap(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_run_does_not_compact_on_message_count_under_token_cap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_run_does_not_compact_on_message_count_under_token_cap(tmp_path: Path) -> None:
     """Long chatty threads under the token bar must not compact on row count alone."""
-    monkeypatch.delenv("CONTEXT_SUMMARIZATION_MODEL", raising=False)
     preload = [
         Message(
             role="user" if i % 2 == 0 else "assistant",
@@ -3496,7 +3380,7 @@ class _CodingCfg:
 
 def _ledger_ctx(tmp_path: Path, ledger: Any) -> TurnContext:
     return dataclasses.replace(
-        _ctx(workspace_root=tmp_path, context_window_tokens=800),
+        _ctx(workspace_root=tmp_path, context_window_tokens=1_600),
         read_ledger=ledger,
         config=_CodingCfg(),  # type: ignore[arg-type]
     )

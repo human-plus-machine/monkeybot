@@ -1222,7 +1222,6 @@ class GatewayLoopPort:
             storage_backend = getattr(serving.state, "storage", None)
             loops_available = storage_backend is not None
             loops_advertised = loops_available and loops_registry.advertised
-            summarization_model = env_value(cfg, "CONTEXT_SUMMARIZATION_MODEL", "").strip() or None
             supervisor = _ensure_subagent_supervisor(bus, session_id, storage_backend, self)
             if provenance == "human":
                 supervisor.note_human_turn()
@@ -1242,7 +1241,6 @@ class GatewayLoopPort:
                     skills_path=skills_resolved,
                     mcp_client=mcp,
                     model=model_name,
-                    summarization_model=summarization_model,
                     cancelled=cancel_event,
                     context_window_tokens=context_window_tokens(cfg),
                     workspace_root=workspace_root,

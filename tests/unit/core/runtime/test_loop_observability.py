@@ -105,10 +105,7 @@ async def test_loop_tool_span_on_execute(otel_memory_exporter) -> None:
 
 
 @pytest.mark.asyncio
-async def test_loop_summarize_span_when_over_cap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, otel_memory_exporter
-) -> None:
-    monkeypatch.delenv("CONTEXT_SUMMARIZATION_MODEL", raising=False)
+async def test_loop_summarize_span_when_over_cap(tmp_path: Path, otel_memory_exporter) -> None:
     preload = [
         Message(
             role="user" if i % 2 == 0 else "assistant",
@@ -122,7 +119,7 @@ async def test_loop_summarize_span_when_over_cap(
             [TextDelta(text="final"), Done()],
         ]
     )
-    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=1_600)
     async for _ in run(
         "hello",
         ctx,

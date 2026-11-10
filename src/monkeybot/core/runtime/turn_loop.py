@@ -21,6 +21,7 @@ from monkeybot.core.context import (
 from monkeybot.core.context.epoch import ContextEpochTracker, EpochAdmit
 from monkeybot.core.context.project_context import load_project_instructions
 from monkeybot.core.hooks import HookEvent, HookManager
+from monkeybot.core.llm.context_overflow import is_context_overflow
 from monkeybot.core.llm.provider import (
     Done,
     Message,
@@ -100,7 +101,6 @@ from .history_compaction import (
     _compact_history_if_needed,
     _fire_history_compacted,
     _intent_facts_from_ctx,
-    _summarization_model_id,
     _summarization_viable,
     _workspace_trailer_from_ctx,
     bind_summary_transcript,
@@ -156,8 +156,11 @@ logger = logging.getLogger("monkeybot.core.runtime.loop.turn_loop")
 # tool matches on this exact value to report ``exit_reason="max_turns"``, so it is
 # a contract between the loop and the subagent completion payload, not a message.
 MAX_TURNS_ERROR = "Max turns exceeded"
+CONTEXT_OVERFLOW_ERROR = (
+    "This request is too large for the model's context window. Send it in smaller pieces."
+)
 
-TurnAction = Literal["continue", "break", "return", "preempt", "resume"]
+TurnAction = Literal["continue", "break", "return", "preempt", "resume", "overflow"]
 
 _EMPTY_COMPLETION_RETRIES = 2
 _POST_TOOL_EMPTY_RETRIES = 1
@@ -614,6 +617,8 @@ class _TurnState:
     provider_stream_failed: bool = False
     # Resumes keep text the client already saw. Capped for the whole user request.
     provider_resumes_used: int = 0
+    # One size rejection per send is answered by compacting and sending again.
+    overflow_recovered: bool = False
     tools_dirty_reason: str | None = None
     tools_schema_hash: str = ""
 
@@ -866,7 +871,7 @@ async def _run_history_summarization(
                 thread_id=state.ctx.thread_id,
                 history=history,
                 provider=provider,
-                model=_summarization_model_id(state.ctx),
+                model=state.ctx.model,
                 window_tokens=state.ctx.context_window_tokens,
                 intent_facts=_intent_facts_from_ctx(state.ctx),
                 workspace_trailer=_workspace_trailer_from_ctx(state.ctx),
@@ -1533,6 +1538,8 @@ async def _consume_provider_stream_body(
                         preempt,
                         cancelled=cancelled,
                     )
+            # A completed send can recover from a later size rejection.
+            state.overflow_recovered = False
             set_llm_usage(
                 input_tokens=stats.input_tokens,
                 output_tokens=stats.output_tokens,
@@ -1697,6 +1704,8 @@ async def _consume_provider_stream_body(
             yield aev
         state.held_text_events.clear()
         _sync_stream_mapper_text(state, stream_mapper)
+        if _recover_context_overflow(state, exc, stream_mapper):
+            return
         logger.exception(
             "provider stream failed %s",
             kv(
@@ -1707,6 +1716,8 @@ async def _consume_provider_stream_body(
             ),
         )
         error_text = _provider_error_text(exc)
+        if is_context_overflow(exc) and not (stream_mapper.assistant_text or "").strip():
+            error_text = CONTEXT_OVERFLOW_ERROR
         await _fire_after_provider_response(
             hook_manager,
             ctx=state.ctx,
@@ -1720,6 +1731,36 @@ async def _consume_provider_stream_body(
         state.provider_stream_failed = True
         state.action = "return"
         return
+
+
+def _recover_context_overflow(
+    state: _TurnState,
+    exc: Exception,
+    stream_mapper: ProviderStreamMapper,
+) -> bool:
+    """True when a size rejection will be answered by compacting and sending again.
+
+    One recovery per send. A rejection that already produced assistant text, or a
+    second rejection of the same send, is reported by the caller. The raw provider
+    text is logged and is not the message the user sees.
+    """
+    if not is_context_overflow(exc):
+        return False
+    logger.warning(
+        "provider rejected the request for size %s",
+        kv(
+            request_id=state.ctx.request_id,
+            thread_id=state.ctx.thread_id,
+            turn=state.turn_index,
+            error=_provider_error_text(exc),
+        ),
+    )
+    if (stream_mapper.assistant_text or "").strip() or state.overflow_recovered:
+        return False
+    state.overflow_recovered = True
+    state.action = "overflow"
+    state.needs_followup_after_tools = False
+    return True
 
 
 def _provider_error_text(exc: Exception) -> str:
@@ -2470,6 +2511,38 @@ async def _run_inner_core(
                 preempt=_preempt_event(),
             ):
                 yield evt
+            if state.action == "overflow":
+                summarized = 0
+                async for evt in _run_history_summarization(
+                    state,
+                    history=history,
+                    provider=provider,
+                    usage=usage,
+                    attachment_store=attachment_store,
+                    attachment_catalog=attachment_catalog,
+                    vertex_google_search=vertex_google_search,
+                    estimated_tokens=state.last_preflight_tokens,
+                    recount_after=True,
+                    hook_manager=hook_manager,
+                ):
+                    if isinstance(evt, ContextSummarized):
+                        summarized = evt.turns_summarized
+                    yield evt
+                if summarized <= 0:
+                    yield Error(
+                        request_id=state.ctx.request_id,
+                        error=CONTEXT_OVERFLOW_ERROR,
+                    )
+                    state.needs_followup_after_tools = False
+                    break
+                yield HarnessIntervention(
+                    request_id=state.ctx.request_id,
+                    intervention="context_overflow_recovery",
+                    inner_turn=state.turn_index,
+                    detail=f"turns_summarized={summarized}",
+                )
+                state.action = None
+                continue
             if state.action == "return":
                 for evt in _release_held_text(state):
                     yield evt

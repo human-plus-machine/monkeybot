@@ -4,7 +4,7 @@
 #
 # Precedence: environment variables (and optional root `.env`) win over values here
 # except ``model.*`` (provider, name, temperature, max_tokens, thinking_budget,
-# reasoning_effort, context_window, summarization_model, max_turns, cache_retention)
+# reasoning_effort, context_window, max_turns, cache_retention)
 # which are YAML-only.
 #
 # Secrets are not committed here. Create a `.env` in the repo root when you need keys or
@@ -111,8 +111,6 @@ model:
   max_turns: 1000
   # Prompt-cache session hints: none | short | long (YAML-only)
   # cache_retention: short
-  # Optional cheaper model for sync history summarization; omit = main model
-  # summarization_model: gemini-3-flash
   # Ollama-local only (YAML). Default 24h so the KV prefix cache survives idle.
   # Set "0" to omit. Distinct from the Ollama daemon env OLLAMA_KEEP_ALIVE.
   # keep_alive: 24h

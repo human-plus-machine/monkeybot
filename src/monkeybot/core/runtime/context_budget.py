@@ -32,6 +32,26 @@ PRESSURE_AGGRESSIVE_RATIO = 0.85
 # one can apply it instead of waiting on the summarizer.
 SUMMARY_TRIGGER_RATIO = PRESSURE_AGGRESSIVE_RATIO
 RESULT_BUDGET_FRACTION = 0.8
+
+
+def request_token_limit(window_tokens: int) -> int:
+    """Largest input this harness will treat as fitting the model.
+
+    Today that is the configured window. An absolute ceiling or a reserve for
+    the provider's output budget would change only this function.
+    """
+    return max(1, int(window_tokens))
+
+
+def summary_input_budget(window_tokens: int) -> int:
+    """Largest summary request, in estimated tokens.
+
+    A summary is never larger than the largest request the main turn sends on
+    purpose, which is ``SUMMARY_TRIGGER_RATIO`` of the window.
+    """
+    return max(1, int(request_token_limit(window_tokens) * SUMMARY_TRIGGER_RATIO))
+
+
 RESULT_BUDGET_FLOOR_TOKENS = 2000
 
 

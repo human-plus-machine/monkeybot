@@ -21,7 +21,6 @@ from monkeybot.core.runtime.history_compaction import (
     _WORKSPACE_STATE_HEADING,
     _compact_history_if_needed,
     _finalize_summary_row,
-    _summarization_model_id,
 )
 from monkeybot.core.runtime.loop import run
 from monkeybot.core.types.content_blocks import SystemNotification, Text
@@ -160,7 +159,7 @@ async def _compact(
         thread_id=ctx.thread_id,
         history=history,  # type: ignore[arg-type]
         provider=provider,  # type: ignore[arg-type]
-        model=_summarization_model_id(ctx),
+        model=ctx.model,
         window_tokens=ctx.context_window_tokens,
         workspace_trailer=trailer if isinstance(trailer, str) else None,
     )

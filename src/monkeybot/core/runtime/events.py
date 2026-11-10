@@ -96,7 +96,8 @@ class HarnessIntervention:
     ``intervention`` is one of ``doom_loop``, ``truncated_batch``,
     ``empty_completion``, ``post_tool_empty``, ``background_jobs_nudge``,
     ``compaction_fallback``, ``max_turns``, ``verifier_replan``, ``final_answer_gate``,
-    ``provider_retry``, ``provider_resume``, ``stream_stall``.
+    ``provider_retry``, ``provider_resume``, ``stream_stall``,
+    ``context_overflow_recovery``.
     """
 
     kind: Literal["HarnessIntervention"] = "HarnessIntervention"

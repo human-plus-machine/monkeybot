@@ -1,11 +1,11 @@
 id: regression/t2/loop/scenarios/ctx/summarizer_model_override
 case: T2-CTX-07
-description: The summary call uses model.summarization_model and does not enable web search.
+description: The summary call uses model.name and does not enable web search.
 mode: scripted
 driver: loop
 config:
   model.context_window: 4000
-  model.summarization_model: summarizer-ctx-07
+  model.name: main-ctx-07
 messages:
 - go
 history:
@@ -36,7 +36,7 @@ assertions:
     summary_row: true
   provider_request:
   - n: 1
-    model: summarizer-ctx-07
+    model: main-ctx-07
     tools_empty: true
     no_vertex_google_search: true
     system_contains: Output exactly the Markdown structure
