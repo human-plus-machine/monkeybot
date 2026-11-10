@@ -135,8 +135,10 @@ from .loop_usage import (
     _provider_call_hints,
     _provider_prompt_input_tokens,
     _stream_thinking_budget,
+    reported_prompt_tokens,
 )
 from .preempt import StepPreemptedError, race_preempt
+from .prompt_ledger import PromptTokenLedger
 from .tool_dispatch import ToolBatchState, dispatch_tool_batch
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.turn_loop")
@@ -603,6 +605,7 @@ class _TurnState:
     thinking_signature: str | None = None
     stream_truncated: bool = False
     last_preflight_tokens: int = 0
+    prompt_ledger: PromptTokenLedger = dataclasses.field(default_factory=PromptTokenLedger)
     provider_stream_failed: bool = False
     # One size rejection per send is answered by compacting and sending again.
     overflow_recovered: bool = False
@@ -735,6 +738,7 @@ async def _refresh_prompt_after_history_change(
     begin_epoch: bool,
 ) -> AsyncIterator[AgentEvent]:
     """Reload chat history and rebuild system/provider messages after compaction."""
+    state.prompt_ledger.invalidate()
     if begin_epoch:
         state.epoch_tracker.begin_new_epoch()
     state.chat_messages = await _load_agent_chat_history(history, state.ctx.thread_id)
@@ -802,10 +806,30 @@ async def _preflight_prompt_tokens(
     provider: Provider,
     vertex_google_search: bool,
 ) -> int:
+    # Set even when the count is skipped: the stream still needs the budget.
     state.stream_thinking = _stream_thinking_budget(
         provider, state.resolved_messages, state.ctx.config
     )
-    return await _provider_prompt_input_tokens(
+    decision = state.prompt_ledger.consider(
+        state.provider_messages,
+        state.turn_tools,
+        window_tokens=state.ctx.context_window_tokens,
+    )
+    if not decision.needs_count:
+        state.prompt_ledger.note_estimate(decision)
+        logger.debug(
+            "prompt token estimate %s",
+            kv(
+                request_id=state.ctx.request_id,
+                thread_id=state.ctx.thread_id,
+                turn=state.turn_index,
+                estimated=decision.tokens,
+                lo=decision.lo,
+                hi=decision.hi,
+            ),
+        )
+        return decision.tokens
+    counted = await _provider_prompt_input_tokens(
         provider,
         state.provider_messages,
         state.turn_tools,
@@ -814,6 +838,8 @@ async def _preflight_prompt_tokens(
         vertex_google_search=vertex_google_search,
         hints=_provider_call_hints(state.ctx),
     )
+    state.prompt_ledger.note_real_count(counted)
+    return counted
 
 
 async def _run_history_summarization(
@@ -1261,9 +1287,37 @@ async def _consume_provider_stream_body(
                 prompt=_provider_messages_prompt_summary(state.provider_messages),
                 completion=state.assistant_text or "",
             )
-            actual_prompt = llm_input + llm_cache_read + llm_cache_creation
+            actual_prompt = reported_prompt_tokens(
+                provider.name,
+                input_tokens=llm_input,
+                cache_read_tokens=llm_cache_read,
+                cache_creation_tokens=llm_cache_creation,
+            )
+            trusted_before = state.prompt_ledger.trusted
+            state.prompt_ledger.observe(
+                prompt_tokens=actual_prompt,
+                output_tokens=llm_output,
+                messages=state.provider_messages,
+                tools=state.turn_tools,
+            )
+            if trusted_before and not state.prompt_ledger.trusted:
+                logger.debug(
+                    "prompt token ledger distrusted %s",
+                    kv(
+                        request_id=state.ctx.request_id,
+                        thread_id=state.ctx.thread_id,
+                        turn=state.turn_index,
+                        preflight=state.last_preflight_tokens,
+                        actual_prompt=actual_prompt,
+                        provider=provider.name,
+                    ),
+                )
             if state.last_preflight_tokens > 0 and actual_prompt > 0:
-                if provider.name in ("bedrock", "claude", "vertex-claude"):
+                if state.prompt_ledger.last_preflight_was_real and provider.name in (
+                    "bedrock",
+                    "claude",
+                    "vertex-claude",
+                ):
                     note_anthropic_token_estimate_observation(
                         estimated=state.last_preflight_tokens,
                         actual=actual_prompt,
@@ -1384,6 +1438,7 @@ async def _consume_provider_stream_body(
         )
         yield Error(request_id=state.ctx.request_id, error="Request cancelled")
         state.needs_followup_after_tools = False
+        state.prompt_ledger.invalidate()
         state.action = "return"
         return
     except StepPreemptedError:
@@ -1427,9 +1482,11 @@ async def _consume_provider_stream_body(
             assistant_text=state.assistant_text,
             thinking_text=state.thinking_text,
         )
+        state.prompt_ledger.invalidate()
         state.action = "preempt"
         return
     except Exception as exc:
+        state.prompt_ledger.invalidate()
         state.hold_assistant_text = False
         for aev in [*state.held_text_events, *stream_mapper.finish()]:
             yield aev
@@ -2057,6 +2114,7 @@ async def _append_tool_requests_and_dispatch(
         attachment_catalog=attachment_catalog,
         vertex_google_search=vertex_google_search,
         epoch_tracker=state.epoch_tracker,
+        prompt_ledger=state.prompt_ledger,
     ):
         yield evt
     state.ctx = batch_state.ctx

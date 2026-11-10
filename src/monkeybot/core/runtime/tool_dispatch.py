@@ -72,6 +72,7 @@ from .loop_hooks import (
 from .loop_messages import _blocks_to_sse_summary, _combine_extras, _load_agent_chat_history
 from .loop_ports import ToolExecutorPort
 from .loop_usage import _prompt_input_tokens_for_history
+from .prompt_ledger import PromptTokenLedger
 from .tool_batch import (
     _MAX_CONCURRENT_SUBAGENTS,
     _await_user_response_any,
@@ -1040,6 +1041,7 @@ async def _post_batch_budget_and_registry(
     epoch_tracker: ContextEpochTracker,
     inner_turn: int,
     hook_manager: HookManager | None = None,
+    prompt_ledger: PromptTokenLedger | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Doom-loop error, budgeted history append, and MCP/loops registry refresh."""
     ctx = state.ctx
@@ -1075,38 +1077,48 @@ async def _post_batch_budget_and_registry(
         # history is ≤ HISTORY_LOAD_MAX. Clamp the recount input defensively for
         # any pre-compact / failed-compact window so we never tokenize an
         # unbounded migrating thread on every tool batch.
-        chat_for_budget = await _load_agent_chat_history(history, ctx.thread_id)
-        if len(chat_for_budget) > HISTORY_LOAD_MAX:
-            logger.warning(
-                "post-batch budget history exceeds load max; recounting tail only %s",
-                kv(
-                    request_id=ctx.request_id,
-                    thread_id=ctx.thread_id,
-                    message_count=len(chat_for_budget),
-                    load_max=HISTORY_LOAD_MAX,
-                ),
-            )
-            chat_for_budget = truncate_history_preserving_pins(
-                chat_for_budget, max_rows=HISTORY_LOAD_MAX
-            )
-        budget_used = usage.estimated_prompt_tokens
-        try:
-            budget_used = await _prompt_input_tokens_for_history(
-                ctx=ctx,
-                chat_messages=chat_for_budget,
-                provider=provider,
-                attachment_store=attachment_store,
-                attachment_catalog=attachment_catalog,
-                extra_system_text=pre_turn_extra,
-                vertex_google_search=vertex_google_search,
-                epoch=epoch_tracker,
-            )
-        except Exception:
-            logger.warning(
-                "tool budget token recount failed %s; using estimated_prompt_tokens",
-                kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
-                exc_info=True,
-            )
+        if prompt_ledger is not None:
+            prompt_ledger.drop_if_tools_changed(ctx.tools)
+        fast_budget = (
+            None
+            if prompt_ledger is None
+            else prompt_ledger.post_batch_tokens(ctx.context_window_tokens)
+        )
+        if fast_budget is not None:
+            budget_used = fast_budget
+        else:
+            chat_for_budget = await _load_agent_chat_history(history, ctx.thread_id)
+            if len(chat_for_budget) > HISTORY_LOAD_MAX:
+                logger.warning(
+                    "post-batch budget history exceeds load max; recounting tail only %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        message_count=len(chat_for_budget),
+                        load_max=HISTORY_LOAD_MAX,
+                    ),
+                )
+                chat_for_budget = truncate_history_preserving_pins(
+                    chat_for_budget, max_rows=HISTORY_LOAD_MAX
+                )
+            budget_used = usage.estimated_prompt_tokens
+            try:
+                budget_used = await _prompt_input_tokens_for_history(
+                    ctx=ctx,
+                    chat_messages=chat_for_budget,
+                    provider=provider,
+                    attachment_store=attachment_store,
+                    attachment_catalog=attachment_catalog,
+                    extra_system_text=pre_turn_extra,
+                    vertex_google_search=vertex_google_search,
+                    epoch=epoch_tracker,
+                )
+            except Exception:
+                logger.warning(
+                    "tool budget token recount failed %s; using estimated_prompt_tokens",
+                    kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
+                    exc_info=True,
+                )
         usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, budget_used)
         budgeter = ContextBudgeter.for_window(
             window_tokens=ctx.context_window_tokens,
@@ -1122,6 +1134,7 @@ async def _post_batch_budget_and_registry(
             vertex_google_search=vertex_google_search,
             epoch=epoch_tracker,
             hook_manager=hook_manager,
+            prompt_ledger=prompt_ledger,
         ):
             yield budget_evt
 
@@ -1139,6 +1152,8 @@ async def _post_batch_budget_and_registry(
         if state.tools_dirty_reason is None:
             state.tools_dirty_reason = "mcp"
         doom_tracker.exempt_names = _doom_loop_exempt_names(ctx.tools)
+        if prompt_ledger is not None:
+            prompt_ledger.drop_if_tools_changed(ctx.tools)
         logger.info(
             "refreshed ctx.tools after MCP registry change %s",
             kv(
@@ -1156,6 +1171,8 @@ async def _post_batch_budget_and_registry(
         if state.tools_dirty_reason is None:
             state.tools_dirty_reason = "loops"
         doom_tracker.exempt_names = _doom_loop_exempt_names(ctx.tools)
+        if prompt_ledger is not None:
+            prompt_ledger.drop_if_tools_changed(ctx.tools)
         logger.info(
             "refreshed ctx.tools after loops registry change %s",
             kv(
@@ -1229,6 +1246,7 @@ async def dispatch_tool_batch(
     attachment_catalog: SessionAttachmentCatalog | None,
     vertex_google_search: bool,
     epoch_tracker: ContextEpochTracker,
+    prompt_ledger: PromptTokenLedger | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute one provider tool-call batch; yield events; update ``state`` in place.
 
@@ -1380,5 +1398,6 @@ async def dispatch_tool_batch(
         epoch_tracker=epoch_tracker,
         inner_turn=turn_index,
         hook_manager=hook_manager,
+        prompt_ledger=prompt_ledger,
     ):
         yield evt
