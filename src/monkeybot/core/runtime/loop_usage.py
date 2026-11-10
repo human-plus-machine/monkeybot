@@ -62,6 +62,24 @@ def _merge_usage_event(usage: Usage, ev: UsageEvent) -> None:
     usage.cache_creation_tokens += ev.cache_creation_tokens
 
 
+def reported_prompt_tokens(
+    provider_name: str,
+    *,
+    input_tokens: int,
+    cache_read_tokens: int,
+    cache_creation_tokens: int,
+) -> int:
+    """Total prompt size from one usage report.
+
+    Gemini's prompt count already includes cached content. Anthropic, Bedrock,
+    and the OpenAI-compatible adapters report uncached input separately from
+    cache read and cache creation.
+    """
+    if provider_name == "gemini":
+        return input_tokens
+    return input_tokens + cache_read_tokens + cache_creation_tokens
+
+
 _THINKING_BUDGET_PROVIDERS = frozenset(
     {"gemini", "claude", "ollama", "ollama-cloud", "ollama-local"}
 )

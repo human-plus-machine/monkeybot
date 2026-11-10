@@ -56,6 +56,7 @@ from .events import AgentEvent, ContextSummarized, ContextSummarizing, ContextUs
 from .loop_hooks import _HOOK_READ_TIMEOUT_S, _fire_hook
 from .loop_messages import _load_agent_chat_history, _summary_line_for_message
 from .loop_usage import _prompt_input_tokens_for_history
+from .prompt_ledger import PromptTokenLedger
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.history_compaction")
 
@@ -611,6 +612,7 @@ async def _append_budgeted_tool_responses(
     vertex_google_search: bool = False,
     epoch: ContextEpochTracker | None = None,
     hook_manager: HookManager | None = None,
+    prompt_ledger: PromptTokenLedger | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Budget tool results against remaining context, append, compact if needed."""
     trimmed, needs_compaction = budgeter.fit_content_blocks(chunk_responses)
@@ -651,6 +653,8 @@ async def _append_budgeted_tool_responses(
         if turns_summarized > 0:
             if epoch is not None:
                 epoch.begin_new_epoch()
+            if prompt_ledger is not None:
+                prompt_ledger.invalidate()
             chat_messages = await _load_agent_chat_history(history, ctx.thread_id)
             post = await _prompt_input_tokens_for_history(
                 ctx=ctx,

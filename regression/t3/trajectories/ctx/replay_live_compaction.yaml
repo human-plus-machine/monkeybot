@@ -1,10 +1,20 @@
 id: regression/t3/trajectories/ctx/replay_live_compaction
 case: T3-CTX-01
-description: Recorded long-session cassette compacts at the same call index.
+description: >
+  Recorded long session still compacts (3 turns summarized, usage drops).
+  The cassette's own prompt size is already in the moderate band on this
+  10000-token window, so the run compacts on the tool turn and does not
+  replay the recorded tail.
 mode: replay
 driver: loop
 executor: recording
 cassette: replay_live_compaction.cassette.json
+invariants_skip:
+  - name: strict_script
+    reason: >
+      The cassette reports 8107 prompt tokens on a 10000-token window, so the
+      tool turn compacts from the provider's count and the recorded tail is
+      not replayed.
 config:
   model.context_window: 10000
   model.max_turns: 25

@@ -53,6 +53,21 @@ def summary_input_budget(window_tokens: int) -> int:
 
 
 RESULT_BUDGET_FLOOR_TOKENS = 2000
+# Local prompt estimate from the last provider-reported size. The delta is the
+# only uncertain part: half the char estimate to three times it. An anchor is
+# trusted when the provider's report is within half to twice the real count,
+# and a char change over a quarter of that anchor is counted for real.
+PROMPT_ESTIMATE_CHARS_PER_TOKEN = 3.0
+PROMPT_ESTIMATE_DELTA_LO = 0.5
+PROMPT_ESTIMATE_DELTA_HI = 3.0
+# A small edit makes the ratio band only a few tokens wide. Tokenizer
+# disagreement on that edit is an absolute error, measured at about 40 tokens
+# on a short tool result. This slack keeps that inside the band. A pressure
+# bar still forces a real count when it falls inside the widened band.
+PROMPT_ESTIMATE_ABSOLUTE_SLACK = 256
+PROMPT_ANCHOR_TRUST_LO = 0.5
+PROMPT_ANCHOR_TRUST_HI = 2.0
+PROMPT_ANCHOR_MAX_DELTA_FRACTION = 0.25
 
 
 def compute_context_pressure_tier(
