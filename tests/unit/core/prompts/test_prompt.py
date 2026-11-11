@@ -10,6 +10,7 @@ from monkeybot.core.attachments.catalog import AttachmentRecord
 from monkeybot.core.context import SkillRef
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.prompts.headings import (
+    BACKGROUND_COMMANDS_HEADING,
     BACKGROUND_TASKS_HEADING,
     CURRENT_DATE_HEADING,
     CURRENT_REQUEST_HEADING,
@@ -472,6 +473,23 @@ def test_background_tasks_section_is_capped() -> None:
     assert compose_volatile_tail_parts(short)["background_tasks"] == (
         f"{BACKGROUND_TASKS_HEADING}one line\n"
     )
+
+
+def test_background_commands_section_is_capped() -> None:
+    huge = "y" * 5_000
+    ctx = replace(_minimal_ctx(), background_jobs_view=lambda: huge)
+    section = compose_volatile_tail_parts(ctx)["background_commands"]
+    assert section.startswith(BACKGROUND_COMMANDS_HEADING)
+    body = section[len(BACKGROUND_COMMANDS_HEADING) :]
+    assert body.endswith("\n")
+    assert len(body.strip()) <= SECTION_CHAR_CAPS["background_commands"]
+    assert "… [truncated]" in body
+
+    short = replace(_minimal_ctx(), background_jobs_view=lambda: "one command")
+    assert compose_volatile_tail_parts(short)["background_commands"] == (
+        f"{BACKGROUND_COMMANDS_HEADING}one command\n"
+    )
+    assert compose_volatile_tail_parts(_minimal_ctx())["background_commands"] == ""
 
 
 def test_harness_mentions_enable_loops_only_when_the_tool_is_advertised() -> None:

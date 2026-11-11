@@ -920,15 +920,34 @@ async def _preflight_prompt_tokens(
             ),
         )
         return decision.tokens
-    counted = await _provider_prompt_input_tokens(
-        provider,
-        state.provider_messages,
-        state.turn_tools,
-        model=state.ctx.model,
-        thinking_budget=state.stream_thinking,
-        vertex_google_search=vertex_google_search,
-        hints=_provider_call_hints(state.ctx),
-    )
+    try:
+        counted = await _provider_prompt_input_tokens(
+            provider,
+            state.provider_messages,
+            state.turn_tools,
+            model=state.ctx.model,
+            thinking_budget=state.stream_thinking,
+            vertex_google_search=vertex_google_search,
+            hints=_provider_call_hints(state.ctx),
+        )
+    except Exception:
+        estimated = state.prompt_ledger.fallback_tokens(
+            state.provider_messages,
+            state.turn_tools,
+        )
+        state.prompt_ledger.note_fallback(estimated)
+        logger.warning(
+            "prompt token count failed %s; using local estimate",
+            kv(
+                request_id=state.ctx.request_id,
+                thread_id=state.ctx.thread_id,
+                turn=state.turn_index,
+                provider=provider.name,
+                estimated=estimated,
+            ),
+            exc_info=True,
+        )
+        return estimated
     state.prompt_ledger.note_real_count(counted)
     return counted
 
@@ -1801,6 +1820,8 @@ async def _consume_provider_stream_body(
                 llm_input=stats.input_tokens,
                 llm_output=stats.output_tokens,
                 llm_cached=stats.cached_tokens,
+                llm_cache_read=stats.cache_read_tokens,
+                llm_cache_creation=stats.cache_creation_tokens,
                 tool_calls=len(state.pending),
                 max_event_gap_s=round(stats.max_event_gap_s, 3),
             ),

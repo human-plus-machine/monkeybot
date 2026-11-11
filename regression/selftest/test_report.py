@@ -13,7 +13,7 @@ from regression.t4.persistence import (
     build_suite_aggregate,
     save_run,
 )
-from regression.t4.report import compare_to_baseline, main
+from regression.t4.report import build_markdown_report, compare_to_baseline, main
 
 
 def _agg(**kwargs) -> ScenarioAggregate:
@@ -28,10 +28,11 @@ def _agg(**kwargs) -> ScenarioAggregate:
     return ScenarioAggregate(**base)
 
 
-def _record(scenarios: list[ScenarioAggregate]) -> RunRecord:
+def _record(scenarios: list[ScenarioAggregate], *, provider: str = "") -> RunRecord:
     return RunRecord(
         run_id="r",
         suite="smoke",
+        model_provider=provider,
         scenarios=scenarios,
         suite_aggregate=build_suite_aggregate(scenarios),
     )
@@ -65,6 +66,33 @@ def test_missing_baseline_hard_fails_when_required() -> None:
     hard, _ = compare_to_baseline(None, current, require_baseline=True)
     assert len(hard) == 1
     assert "baseline" in hard[0].lower()
+
+
+def _share_row(report: str) -> str:
+    for line in report.splitlines():
+        if line.startswith("| Cache-read share |"):
+            return line
+    raise AssertionError("scorecard has no cache-read share row")
+
+
+def test_cache_read_share_counts_cache_tokens_by_provider() -> None:
+    # 900 reads over 100 uncached + 900 read + 100 creation.
+    anthropic = [_agg(input_tokens=100, cache_read_tokens=900, cache_creation_tokens=100)]
+    baseline = _baseline([_agg(input_tokens=100, cache_read_tokens=100)])
+    report = build_markdown_report(_record(anthropic, provider="claude"), baseline, [], [])
+    assert _share_row(report) == "| Cache-read share | 50.0% | 81.8% | +31.8 pp |"
+
+    # Gemini's prompt count already includes the cached tokens, so 900 of 1,100.
+    gemini = [_agg(input_tokens=1100, cache_read_tokens=900)]
+    report = build_markdown_report(_record(gemini, provider="gemini"), None, [], [])
+    assert _share_row(report) == "| Cache-read share | — | 81.8% | — |"
+
+
+def test_cache_read_share_is_blank_when_the_prompt_is_empty() -> None:
+    report = build_markdown_report(
+        _record([_agg(input_tokens=0, output_tokens=0)], provider="claude"), None, [], []
+    )
+    assert _share_row(report) == "| Cache-read share | — | — | — |"
 
 
 def test_scenario_errored_is_hard_fail() -> None:

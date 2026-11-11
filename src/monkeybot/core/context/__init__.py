@@ -179,6 +179,8 @@ class TurnContext:
     """Installed skill the user explicitly invoked with a leading `/slug` this turn."""
     background_runs_view: Callable[[], str] | None = None
     """Optional text for the volatile Background subagents section. None when unused."""
+    background_jobs_view: Callable[[], str] | None = None
+    """Optional text for the volatile Background commands section. None when unused."""
     transcript_view: Callable[[], Sequence[Message]] | None = None
     """Live chat messages for the completion judge. None outside the turn loop."""
     session: str | None = None
@@ -572,6 +574,7 @@ def _core_tool_defs(
     subagent_type_names: Sequence[str] | None = None,
     catalog_mcp_servers: Sequence[str] | None = None,
     background_tasks_available: bool = False,
+    background_jobs_survive_turn: bool = False,
 ) -> list[ToolDef]:
     """Static core tools always available before MCP extensions."""
     default_lines = AGENT_READ_DEFAULT_LINES
@@ -753,6 +756,34 @@ def _core_tool_defs(
         },
         "required": ["patch_text"],
     }
+    if background_jobs_survive_turn:
+        background_field = (
+            "When true, start the command and return immediately with job_id and "
+            "log_path. The job keeps running after this turn. Tell the user it is "
+            "running and end the turn. A harness note wakes you when it finishes. "
+            "Stop it with kill_command."
+        )
+        background_run_text = (
+            "Set background true for a long command (image build, large test "
+            "suite, migration) so the call returns immediately with job_id and "
+            "log_path. The job keeps running after this turn. Tell the user it is "
+            "running and end the turn. A harness note wakes you when it finishes. "
+            "Pass timeout up to the job ceiling; a job that reaches the ceiling is killed."
+        )
+    else:
+        background_field = (
+            "When true, start the command and return immediately with job_id and "
+            "log_path. Poll with await_command or stop it with kill_command. "
+            "Do not finish the turn while the job is still running."
+        )
+        background_run_text = (
+            "Set background true for a long command (image build, large test "
+            "suite, migration) so the call returns immediately with job_id and "
+            "log_path. Then call await_command until it exits, or kill_command "
+            "to stop it. Do not end the turn while a background job is still "
+            "running — running jobs are killed when the turn ends. Pass timeout "
+            "up to the job ceiling; a job that reaches the ceiling is killed."
+        )
     run_schema: dict[str, object] = {
         "type": "object",
         "properties": {
@@ -778,11 +809,7 @@ def _core_tool_defs(
             "timeout": {"type": "integer"},
             "background": {
                 "type": "boolean",
-                "description": (
-                    "When true, start the command and return immediately with job_id and "
-                    "log_path. Poll with await_command or stop it with kill_command. "
-                    "Do not finish the turn while the job is still running."
-                ),
+                "description": background_field,
             },
         },
         "required": [],
@@ -908,12 +935,7 @@ def _core_tool_defs(
                 "workspace root unless cwd (workspace-relative) is set. "
                 "cd is a builtin and is not a valid command — pass cwd or "
                 "workspace-relative paths to the binary instead. "
-                "Set background true for a long command (image build, large test "
-                "suite, migration) so the call returns immediately with job_id and "
-                "log_path. Then call await_command until it exits, or kill_command "
-                "to stop it. Do not end the turn while a background job is still "
-                "running — running jobs are killed when the turn ends. Pass timeout "
-                "up to the job ceiling; a job that reaches the ceiling is killed."
+                f"{background_run_text}"
             ),
             run_schema,
         ),
@@ -1235,6 +1257,7 @@ async def build_context(
     include_ask_user: bool = True,
     include_enable_loops: bool = True,
     background_tasks_available: bool = False,
+    background_jobs_survive_turn: bool = False,
     cancelled: asyncio.Event | None = None,
     context_window_tokens: int = 200_000,
     workspace_root: Path | None = None,
@@ -1254,6 +1277,7 @@ async def build_context(
     read_ledger: FileReadLedger | None = None,
     skill_names: Sequence[str] | None = None,
     background_runs_view: Callable[[], str] | None = None,
+    background_jobs_view: Callable[[], str] | None = None,
     mcp_visibility: MCPSessionVisibility | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
@@ -1328,6 +1352,7 @@ async def build_context(
             subagent_type_names=type_names,
             catalog_mcp_servers=catalog_names,
             background_tasks_available=background_tasks_available,
+            background_jobs_survive_turn=background_jobs_survive_turn,
         )
     )
     if attachments_enabled_from_env():
@@ -1376,6 +1401,7 @@ async def build_context(
         read_ledger=read_ledger,
         session=session_id,
         background_runs_view=background_runs_view,
+        background_jobs_view=background_jobs_view,
     )
 
 

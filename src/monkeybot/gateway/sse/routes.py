@@ -232,6 +232,9 @@ def _schedule_turn(
             supervisor = getattr(bus, "subagent_supervisor", None)
             if supervisor is not None:
                 await supervisor.wake_if_idle()
+            session_jobs = getattr(bus, "session_jobs", None)
+            if session_jobs is not None:
+                await session_jobs.wake_if_idle()
             # Steers drain only at the top of each inner turn. A promote during
             # the final inner turn would otherwise sit in `_steer` until a later
             # turn (or vanish on cancel). Put those items back on the follow-up
@@ -252,6 +255,27 @@ def _schedule_turn(
             bus.active_turn_task = None
 
     task.add_done_callback(_clear)
+
+
+def _harness_wake_still_needed(item: FollowUpItem, supervisor: Any, session_jobs: Any) -> bool:
+    """True when a harness follow-up still has a run or a job the model has not awaited.
+
+    An empty id list on one side does not count. A job-only wake used to be
+    dropped because an empty run list looks like "nothing left to report".
+    """
+    runs = item.harness_run_ids
+    jobs = item.harness_job_ids
+    if not runs and not jobs:
+        if supervisor is None:
+            return True
+        return bool(supervisor.runs_still_need_wake(runs))
+    run_needed = False
+    if runs:
+        run_needed = supervisor is None or bool(supervisor.runs_still_need_wake(runs))
+    job_needed = False
+    if jobs:
+        job_needed = session_jobs is None or bool(session_jobs.jobs_still_need_wake(jobs))
+    return run_needed or job_needed
 
 
 async def _drain_follow_up(
@@ -319,6 +343,9 @@ async def _drain_follow_up(
                     request_id=item.request_id,
                     content=item.content,
                     first_lock_fail_at_ms=first_fail,
+                    provenance=item.provenance,
+                    harness_run_ids=item.harness_run_ids,
+                    harness_job_ids=item.harness_job_ids,
                 )
             )
             if not requeued:
@@ -347,10 +374,9 @@ async def _drain_follow_up(
         )
         return
     supervisor = getattr(bus, "subagent_supervisor", None)
-    if (
-        item.provenance == "harness"
-        and supervisor is not None
-        and not supervisor.runs_still_need_wake(item.harness_run_ids)
+    session_jobs = getattr(bus, "session_jobs", None)
+    if item.provenance == "harness" and not _harness_wake_still_needed(
+        item, supervisor, session_jobs
     ):
         if storage is not None:
             await storage.session_turns().release(session_id, item.request_id)

@@ -152,6 +152,9 @@ def test_converse_cache_points_default_retention() -> None:
         temperature=0.2,
     )
     assert kwargs["system"][-1] == {"cachePoint": {"type": "default"}}
+    assert [block for block in kwargs["system"] if "text" in block] == [
+        {"text": "You are helpful."}
+    ]
     assert kwargs["toolConfig"]["tools"][-1] == {"cachePoint": {"type": "default"}}
     user_msgs = [m for m in kwargs["messages"] if m["role"] == "user"]
     assert user_msgs[-2]["content"][-1] == {"cachePoint": {"type": "default"}}
@@ -275,10 +278,11 @@ def test_converse_cache_points_cap_with_long_history() -> None:
 
 
 def test_converse_cache_retention_none() -> None:
+    text = "You are helpful.\n\n## Skills\nread_file"
     kwargs = converse_request_kwargs(
         model=_NOVA,
         messages=[
-            Message.text("system", "sys"),
+            Message.text("system", text),
             Message.text("user", "hi"),
         ],
         tools=[_ECHO],
@@ -287,6 +291,64 @@ def test_converse_cache_retention_none() -> None:
         cache_retention="none",
     )
     assert _count_cache_points(kwargs) == 0
+    assert kwargs["system"] == [{"text": text}]
+
+
+def test_converse_system_cache_point_follows_the_stable_prefix() -> None:
+    stable = "You are helpful."
+    skills = "\n\n## Skills\nread_file"
+    changed = "\n\n## Skills\ngrep"
+    kwargs = converse_request_kwargs(
+        model=_NOVA,
+        messages=[Message.text("system", stable + skills), Message.text("user", "hi")],
+        tools=[_ECHO],
+        max_tokens=64,
+        temperature=0.2,
+    )
+    later = converse_request_kwargs(
+        model=_NOVA,
+        messages=[Message.text("system", stable + changed), Message.text("user", "hi")],
+        tools=[_ECHO],
+        max_tokens=64,
+        temperature=0.2,
+    )
+    assert kwargs["system"] == [
+        {"text": stable},
+        {"cachePoint": {"type": "default"}},
+        {"text": skills},
+    ]
+    assert later["system"][0] == kwargs["system"][0]
+    assert later["system"][2] == {"text": changed}
+    assert _count_cache_points(kwargs) <= 4
+
+
+def test_converse_system_that_starts_volatile_stays_one_block() -> None:
+    text = "\n\n## Skills\nread_file"
+    kwargs = converse_request_kwargs(
+        model=_NOVA,
+        messages=[Message.text("system", text), Message.text("user", "hi")],
+        tools=[],
+        max_tokens=64,
+        temperature=0.2,
+    )
+    assert [block for block in kwargs["system"] if "text" in block] == [{"text": text}]
+    assert kwargs["system"][-1] == {"cachePoint": {"type": "default"}}
+
+
+def test_converse_skills_split_stays_within_the_cache_point_cap() -> None:
+    messages = _long_user_history(20)
+    messages[0] = Message.text("system", "You are helpful.\n\n## Skills\nread_file")
+    kwargs = converse_request_kwargs(
+        model=_GROK,
+        messages=messages,
+        tools=[_ECHO],
+        max_tokens=256,
+        temperature=0.2,
+    )
+    assert _count_cache_points(kwargs) == 4
+    assert kwargs["system"][0] == {"text": "You are helpful."}
+    assert kwargs["system"][1] == {"cachePoint": {"type": "default"}}
+    assert kwargs["system"][2]["text"].startswith("\n\n## Skills\n")
 
 
 def test_converse_request_kwargs_does_not_mutate_messages() -> None:
@@ -726,6 +788,46 @@ async def test_iter_converse_stream_retries_without_cache_points(
         pass
     assert len(calls) == 1
     assert _count_cache_points(calls[0]) == 0
+
+
+@pytest.mark.asyncio
+async def test_cache_point_retry_keeps_both_system_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "monkeybot.providers._bedrock_converse._CACHEPOINT_UNSUPPORTED",
+        set(),
+    )
+    calls: list[dict[str, object]] = []
+
+    def converse_stream(**kwargs: object) -> dict[str, object]:
+        calls.append(dict(kwargs))
+        if _count_cache_points(kwargs) > 0:
+            raise CacheValidationError("cachePoint is not supported for this model")
+        return {"stream": iter(_text_stream())}
+
+    client = MagicMock()
+    client.converse_stream.side_effect = converse_stream
+    stable = "You are helpful."
+    skills = "\n\n## Skills\nread_file"
+    stream_kwargs = converse_request_kwargs(
+        model=_GROK,
+        messages=[Message.text("system", stable + skills), Message.text("user", "hi")],
+        tools=[_ECHO],
+        max_tokens=32,
+        temperature=0.2,
+    )
+    events = [
+        event
+        async for event in iter_converse_stream(
+            client,
+            stream_kwargs,
+            provider="bedrock",
+            error_message="err %s",
+        )
+    ]
+    assert calls[1]["system"] == [{"text": stable}, {"text": skills}]
+    assert any(isinstance(event, TextDelta) and event.text == "ok" for event in events)
 
 
 @pytest.mark.asyncio

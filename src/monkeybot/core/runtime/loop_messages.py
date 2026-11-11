@@ -78,8 +78,8 @@ def _stable_text_and_live_parts(
 
     The prefix is the cacheable baseline plus ``## Skills``. Skills are large and
     change rarely; a change still keeps the cache checkpoint that sits before
-    that heading. Date, memory, the todo list, and the current request change
-    between user messages, so they stay out of the system text.
+    that heading.     Date, memory, the todo list, background commands, and the current request
+    change between user messages, so they stay out of the system text.
     """
     records = attachment_catalog.list_records() if attachment_catalog is not None else None
     stable_parts = compose_stable_baseline_parts(ctx, attachment_catalog=records)

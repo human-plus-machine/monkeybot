@@ -149,6 +149,21 @@ def test_await_command_tool_flags() -> None:
     assert "background" in tools["run_command"].input_schema["properties"]
 
 
+def test_background_tool_text_depends_on_whether_jobs_survive_the_turn() -> None:
+    killed = {tool.name: tool for tool in _core_tool_defs()}
+    survive = {tool.name: tool for tool in _core_tool_defs(background_jobs_survive_turn=True)}
+    killed_text = killed["run_command"].description
+    survive_text = survive["run_command"].description
+    assert "killed when the turn ends" in killed_text
+    assert "killed when the turn ends" not in survive_text
+    assert "keeps running after this turn" in survive_text
+    assert "harness note wakes you" in survive_text
+    killed_field = killed["run_command"].input_schema["properties"]["background"]["description"]
+    survive_field = survive["run_command"].input_schema["properties"]["background"]["description"]
+    assert "Do not finish the turn" in killed_field
+    assert "keeps running after this turn" in survive_field
+
+
 @pytest.mark.asyncio
 async def test_terminal_background_echo_await_and_cursor(tmp_path: Path) -> None:
     executor = TerminalExecutor(max_background_jobs=2, max_job_seconds=30)

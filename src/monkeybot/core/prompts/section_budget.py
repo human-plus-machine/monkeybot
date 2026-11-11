@@ -10,6 +10,7 @@ from __future__ import annotations
 SECTION_CHAR_CAPS: dict[str, int] = {
     "todos": 6_000,
     "background_tasks": 2_000,
+    "background_commands": 2_000,
     "runtime_notes": 8_000,
     "repo_overview": 4_000,
 }

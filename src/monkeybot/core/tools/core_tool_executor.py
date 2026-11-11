@@ -129,6 +129,7 @@ from monkeybot.core.tools.grant_store import PATH_GRANT_TOOLS, GrantStoreCache
 from monkeybot.core.tools.inspector import norm_run_command_line, parse_run_command
 from monkeybot.core.tools.read_ledger import FileReadLedger, WriteProblem, stamp_of
 from monkeybot.core.tools.sandbox_executor import SandboxConfig, SandboxExecutor
+from monkeybot.core.tools.session_jobs import SessionJobs
 from monkeybot.core.tools.spill_inventory import (
     collapse_run_command_streams,
     partial_output_tail,
@@ -1102,6 +1103,7 @@ class CoreToolExecutor(ToolExecutorPort):
         grants_path: Path | None = None,
         read_ledger: FileReadLedger | None = None,
         completion_verifier: CompletionVerifier | None = None,
+        session_jobs: SessionJobs | None = None,
     ) -> None:
         ws_settings = workspace_settings_from_config()
         self._skills_path = Path(skills_path).resolve()
@@ -1128,6 +1130,9 @@ class CoreToolExecutor(ToolExecutorPort):
         self._config = config
         self._terminal: TerminalExecutor | SandboxExecutor
         self._host_terminal: TerminalExecutor | None = None
+        # Set only when this turn's shell uses the session job table. Sandbox
+        # jobs and an injected terminal keep their own tables.
+        self._session_jobs: SessionJobs | None = None
         if terminal is not None:
             cmds = tuple(terminal.allowed_commands)
             paths = tuple(terminal.allowed_path_prefixes)
@@ -1203,7 +1208,10 @@ class CoreToolExecutor(ToolExecutorPort):
                     hidden_paths=hidden_paths,
                     max_background_jobs=_job_cfg.max_background_jobs,
                     max_job_seconds=_job_cfg.max_job_seconds,
+                    jobs=session_jobs,
                 )
+                if session_jobs is not None:
+                    self._session_jobs = session_jobs
         if isinstance(self._terminal, TerminalExecutor):
             self._terminal.configure_background_limits(
                 max_jobs=_job_cfg.max_background_jobs,
@@ -1272,14 +1280,31 @@ class CoreToolExecutor(ToolExecutorPort):
         )
 
     def running_background_jobs(self) -> list[Any]:
-        """Jobs still running on the shell executor or the host memory executor."""
+        """Turn-owned jobs still running.
+
+        A session job table outlives the turn, so those jobs are not listed.
+        The turn-end nudge only exists to stop a finish that would kill a job
+        this turn owns.
+        """
         jobs: list[Any] = []
         for executor in (self._terminal, self._host_terminal):
+            if getattr(executor, "jobs_survive_turn", False):
+                continue
             running = getattr(executor, "running_jobs", None)
             if running is None:
                 continue
             jobs.extend(running())
         return jobs
+
+    def _job_scope_phrase(self, executor: object) -> str:
+        if getattr(executor, "jobs_survive_turn", False):
+            return "in this session"
+        return "in this turn"
+
+    def _mark_job_awaited(self, executor: object, job_id: str) -> None:
+        mark = getattr(executor, "mark_job_awaited", None)
+        if callable(mark):
+            mark(job_id)
 
     def _executor_for_job(self, job_id: str) -> BackgroundCommandExecutor:
         for executor in (self._terminal, self._host_terminal):
@@ -2764,10 +2789,13 @@ class CoreToolExecutor(ToolExecutorPort):
                 _built_in_tool_error(
                     "validation",
                     f"unknown background job {job_id!r}",
-                    "Use a job_id returned by run_command with background true in this turn.",
+                    "Use a job_id returned by run_command with background true "
+                    f"{self._job_scope_phrase(executor)}.",
                     {"job_id": job_id},
                 ),
             )
+        if payload.get("status") != "running":
+            self._mark_job_awaited(executor, job_id)
         log_path = payload.get("log_path")
         if isinstance(log_path, str) and log_path:
             payload["log_path"] = self._display_log_path(Path(log_path))
@@ -2786,6 +2814,7 @@ class CoreToolExecutor(ToolExecutorPort):
                 ),
             )
         executor = self._executor_for_job(job_id)
+        self._mark_job_awaited(executor, job_id)
         try:
             job = await executor.kill(job_id)
         except JobNotFoundError:
@@ -2794,7 +2823,8 @@ class CoreToolExecutor(ToolExecutorPort):
                 _built_in_tool_error(
                     "validation",
                     f"unknown background job {job_id!r}",
-                    "Use a job_id returned by run_command with background true in this turn.",
+                    "Use a job_id returned by run_command with background true "
+                    f"{self._job_scope_phrase(executor)}.",
                     {"job_id": job_id},
                 ),
             )

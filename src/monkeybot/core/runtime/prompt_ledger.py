@@ -3,7 +3,10 @@
 A real count runs on the first call of a request, after a history or tool-list
 change, and whenever the estimate cannot say which side of a pressure bar the
 prompt is on. Every accepted response replaces the anchor, so the error covers
-one turn of new text and cannot accumulate.
+one turn of new text and cannot accumulate. A failed count uses
+``fallback_tokens`` instead of aborting the turn. ``note_fallback`` checks the
+provider's later report against that guess, and a report within half to twice
+the guess becomes the anchor.
 """
 
 from __future__ import annotations
@@ -133,6 +136,26 @@ class PromptTokenLedger:
             return PromptSizeDecision(tokens=0, needs_count=True, lo=lo_i, hi=hi_i)
         return PromptSizeDecision(tokens=point_i, needs_count=False, lo=lo_i, hi=hi_i)
 
+    def fallback_tokens(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolDef],
+    ) -> int:
+        """Local size when ``count_input_tokens`` fails.
+
+        A trusted anchor with the same tool list keeps the point estimate, even
+        when the change is large or a pressure bar sits in the band. Otherwise
+        the whole request is sized at three characters per token.
+        """
+        chars = request_chars(messages, tools)
+        anchor = self.anchor_tokens
+        if self.trusted and anchor is not None and _tools_hash(tools) == self._anchor_tools:
+            delta_est = (chars - self.anchor_chars) / PROMPT_ESTIMATE_CHARS_PER_TOKEN
+            return max(0, int(round(anchor + delta_est)))
+        if chars <= 0:
+            return 0
+        return math.ceil(chars / PROMPT_ESTIMATE_CHARS_PER_TOKEN)
+
     def note_real_count(self, tokens: int) -> None:
         """Remember a count that was just performed, for the trust check on the reply."""
         self.last_preflight_was_real = True
@@ -147,6 +170,18 @@ class PromptTokenLedger:
         self._pending_lo = decision.lo
         self._pending_hi = decision.hi
 
+    def note_fallback(self, tokens: int) -> None:
+        """Remember a local estimate used because the provider count failed.
+
+        The reply is checked against this guess with the same half-to-twice
+        band as a real count. ``last_preflight_was_real`` stays false so a
+        guess is not recorded as a provider count.
+        """
+        self.last_preflight_was_real = False
+        self._pending_real = tokens
+        self._pending_lo = None
+        self._pending_hi = None
+
     def observe(
         self,
         *,
@@ -157,9 +192,9 @@ class PromptTokenLedger:
     ) -> None:
         """Accept the provider's prompt size when it agrees with the preflight.
 
-        A missing report, a real count the report disagrees with, or an estimate
-        the report falls outside of, drops the anchor for the rest of the request
-        until a later real count is confirmed.
+        A missing report, a real count or fallback the report disagrees with, or
+        an estimate the report falls outside of, drops the anchor for the rest
+        of the request until a later count is confirmed.
         """
         if prompt_tokens < 1:
             self.invalidate()

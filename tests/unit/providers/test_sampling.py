@@ -295,6 +295,61 @@ async def test_openai_retries_then_omits_rejected_effort(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
+async def test_openai_retries_then_omits_rejected_prompt_cache_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from monkeybot.core.llm.provider import ProviderCallHints, TextDelta
+    from monkeybot.providers.rejected_sampling import clear_rejected_sampling
+
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    monkeypatch.delenv("MODEL_REASONING_EFFORT", raising=False)
+    clear_rejected_sampling()
+    calls: list[dict[str, Any]] = []
+
+    async def fake_iter(_client: object, kwargs: dict[str, Any], **_rest: object):
+        calls.append(dict(kwargs))
+        if "prompt_cache_key" in kwargs:
+            raise RuntimeError("Error code: 400 - Unsupported parameter: 'prompt_cache_key'")
+        yield TextDelta(text="ok")
+
+    async def fake_messages(
+        _messages: list[Message], *, hints: object = None
+    ) -> tuple[None, list[dict[str, str]]]:
+        del hints
+        return None, [{"role": "user", "content": "hi"}]
+
+    fake_openai = ModuleType("openai")
+    fake_openai.AsyncOpenAI = lambda **_kwargs: object()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    monkeypatch.setattr("monkeybot.providers._openai_compat.iter_openai_compat_stream", fake_iter)
+    monkeypatch.setattr("monkeybot.providers.openai.messages_to_openai", fake_messages)
+
+    hints = ProviderCallHints(session_id="sess-1", cache_retention="short")
+    provider = OpenAIProvider()
+    model = "gpt-cache-key-reject"
+    first = [
+        event
+        async for event in provider.stream(
+            [Message.text("user", "hi")], [], model=model, hints=hints
+        )
+    ]
+    assert [event.text for event in first if isinstance(event, TextDelta)] == ["ok"]
+    assert calls[0]["prompt_cache_key"] == "sess-1"
+    assert "prompt_cache_key" not in calls[1]
+
+    calls.clear()
+    _ = [
+        event
+        async for event in provider.stream(
+            [Message.text("user", "hi")], [], model=model, hints=hints
+        )
+    ]
+    assert len(calls) == 1
+    assert "prompt_cache_key" not in calls[0]
+    clear_rejected_sampling()
+
+
+@pytest.mark.asyncio
 async def test_openai_auxiliary_call_omits_configured_effort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -13,6 +13,7 @@ from monkeybot.core.prompts.harness_prompt import (
     harness_fixed_context,
 )
 from monkeybot.core.prompts.headings import (
+    BACKGROUND_COMMANDS_HEADING,
     BACKGROUND_TASKS_HEADING,
     CURRENT_DATE_HEADING,
     CURRENT_REQUEST_HEADING,
@@ -170,6 +171,24 @@ def _background_tasks_section(ctx: TurnContext) -> str:
         note="… [truncated]",
     )
     return f"{BACKGROUND_TASKS_HEADING}{clipped}\n"
+
+
+def _background_commands_section(ctx: TurnContext) -> str:
+    view = ctx.background_jobs_view
+    if view is None:
+        return ""
+    try:
+        body = view()
+    except Exception:
+        return ""
+    if not isinstance(body, str) or not body.strip():
+        return ""
+    clipped = clip_lines(
+        body.strip(),
+        SECTION_CHAR_CAPS["background_commands"],
+        note="… [truncated]",
+    )
+    return f"{BACKGROUND_COMMANDS_HEADING}{clipped}\n"
 
 
 def _todo_line(item_id: str, status: str, text: str) -> str:
@@ -377,6 +396,7 @@ def compose_volatile_tail_parts(
         "invoked_skill": _invoked_skill_section(ctx),
         "todos": _todo_list_section(ctx),
         "background_tasks": _background_tasks_section(ctx),
+        "background_commands": _background_commands_section(ctx),
         "current_request": _current_request_block(chat_messages),
     }
 

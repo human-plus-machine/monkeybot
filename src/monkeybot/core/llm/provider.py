@@ -124,7 +124,8 @@ class ProviderCallHints:
     - Anthropic-family: ``short`` = 5m ephemeral, ``long`` = 1h ``ttl``,
       ``none`` = no ``cache_control`` markers.
     - OpenAI: ``long`` sets ``prompt_cache_retention=24h``; ``short``/``none``
-      leave the API default.
+      leave the API default. A session id is sent as ``prompt_cache_key``
+      unless retention is ``none``.
     """
 
     session_id: str | None = None
