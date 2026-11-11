@@ -1,6 +1,8 @@
 id: regression/t2/loop/scenarios/attachments/load_pdf
 case: T2-ATT-02
-description: load_file by attachment_id puts a PDF file block on the turn.
+description: >
+  load_file by attachment_id puts a PDF on the next provider call. History
+  keeps a descriptor, not the file bytes.
 mode: scripted
 driver: loop
 executor: real
@@ -19,6 +21,14 @@ script:
   - type: done
 assertions:
   provider_calls: 2
+  provider_request:
+  - n: 2
+    messages_contain: file application/pdf
+    messages_not_contain: attachmentRef
+  history:
+    blocks_include:
+    - type: toolResponse
+      text_contains: pdf shown earlier
   event_fields:
     FileBlock:
       mime_type: application/pdf

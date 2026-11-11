@@ -10,7 +10,14 @@ from typing import Any
 
 from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.testing.mocks_provider import HangStep, RaiseStep, _exception_class
-from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import (
+    AttachmentRef,
+    File,
+    Image,
+    Text,
+    ToolRequest,
+    ToolResponse,
+)
 from regression.drivers.bundles.protocol import LoopDriverError
 from regression.drivers.support.paths import (
     _GRANT_ROOT_TOKEN,
@@ -263,6 +270,8 @@ def _message_text(message: object) -> str:
 
     Adjacent ``Text`` blocks stay concatenated. Tool requests add their id,
     name, and metadata. Tool responses add their id, name, and result text.
+    An image, file, or attachment ref is named without its bytes, so a
+    scenario can tell a resolved preview from a ref that was not resolved.
     """
     content = getattr(message, "content", ())
     parts: list[str] = []
@@ -277,6 +286,12 @@ def _message_text(message: object) -> str:
 
 
 def _tool_block_text(block: object) -> str:
+    if isinstance(block, Image):
+        return f"image {block.mime_type}"
+    if isinstance(block, File):
+        return f"file {block.mime_type}"
+    if isinstance(block, AttachmentRef):
+        return f"attachmentRef {block.attachment_id}"
     if isinstance(block, ToolRequest):
         meta = block.metadata or {}
         extra = " ".join(f"{key}={value}" for key, value in meta.items() if value is not None)

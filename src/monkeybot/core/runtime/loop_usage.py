@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
+from monkeybot.core.attachments.resolve import MediaMemo
 from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.config.snapshot import RuntimeConfig, env_value_or_current
 from monkeybot.core.context import TurnContext
@@ -142,6 +143,7 @@ async def _prompt_input_tokens_for_history(
     extra_system_text: str | None = None,
     vertex_google_search: bool = False,
     epoch: ContextEpochTracker | None = None,
+    media_memo: MediaMemo | None = None,
 ) -> int:
     """Provider-accurate prompt size for history rows already persisted (e.g. post-assistant).
 
@@ -170,6 +172,7 @@ async def _prompt_input_tokens_for_history(
         chat_messages,
         attachment_store=attachment_store,
         session_id=ctx.session_id,
+        media_memo=media_memo,
     )
     provider_messages = _messages_for_provider(system, resolved_messages, context_tail=context_tail)
     return await _provider_prompt_input_tokens(

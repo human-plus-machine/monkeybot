@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
+from monkeybot.core.attachments.config import IMAGE_MIME_TYPES
 from monkeybot.core.attachments.store import attachment_workspace_path
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.logging_utils import kv
@@ -18,6 +19,7 @@ from monkeybot.core.tools.tool_hint import (
     truncate_wire_args,
 )
 from monkeybot.core.types.content_blocks import (
+    AttachmentRef,
     ContentBlock,
     Image,
     RedactedThinking,
@@ -174,7 +176,7 @@ def _text_from_blocks(blocks: list[ContentBlock], *, call_id: str) -> str:
         if isinstance(block, Text):
             if block.text.strip():
                 parts.append(block.text.strip())
-        elif isinstance(block, Image):
+        elif isinstance(block, (Image, AttachmentRef)):
             continue
         else:
             dropped += 1
@@ -252,11 +254,36 @@ def _image_rows_for_tool_response(
     """Emit image wire rows for a tool response, including post-freeze stubs.
 
     After a turn, ``freeze_attachments_in_history`` replaces Image blocks with a
-    short Text stub. Chat-history resume reconstructs from a durable path only
-    (never inline base64).
+    short Text stub. During the turn the stored block is an ``AttachmentRef``.
+    Chat-history resume reconstructs from a durable path only (never inline
+    base64).
     """
     rows: list[dict[str, Any]] = []
     for block in resp.result:
+        if isinstance(block, AttachmentRef):
+            if block.mime_type not in IMAGE_MIME_TYPES:
+                continue
+            meta = block.metadata or {}
+            resolved = _resolve_image_path(
+                path=meta.get("path"),
+                attachment_id=block.attachment_id,
+                thread_id=thread_id,
+            )
+            if not resolved:
+                logger.warning(
+                    "skipping image wire row without durable path %s",
+                    kv(
+                        attachment_id=block.attachment_id,
+                        filename=meta.get("filename")
+                        if isinstance(meta.get("filename"), str)
+                        else None,
+                    ),
+                )
+                continue
+            filename = meta.get("filename")
+            label = filename.strip() if isinstance(filename, str) and filename.strip() else resolved
+            rows.append(_image_row(path=resolved, mime_type=block.mime_type, label=label))
+            continue
         if not isinstance(block, Image):
             continue
         meta = block.metadata or {}
