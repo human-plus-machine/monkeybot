@@ -302,7 +302,8 @@ async def test_setup_failure_releases_lock_and_keeps_prompt() -> None:
             assert "AssistantDelta" not in kinds
             assert kinds[-1] == "TurnComplete"
             error = _frame(frames, "Error")
-            assert "AGENT.md" in str(error.get("error", ""))
+            assert error.get("error") == "The request failed (ValueError). (ref r1)"
+            assert "AGENT.md" not in str(error.get("error", ""))
             usage = frames[-1]["usage"]
             assert usage["input_tokens"] == 0
             assert usage["output_tokens"] == 0

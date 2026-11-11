@@ -87,6 +87,7 @@ from monkeybot.core.persistence.transcript import (
     TranscriptWriter,
     runtime_manifest_fields,
 )
+from monkeybot.core.runtime.error_text import client_error_text
 from monkeybot.core.runtime.events import (
     AgentEvent,
     HarnessIntervention,
@@ -1378,7 +1379,12 @@ class GatewayLoopPort:
                         model=model_name,
                     )
                 await bus.publish_data(
-                    event_to_json(AgentError(request_id=request_id, error=str(exc)))
+                    event_to_json(
+                        AgentError(
+                            request_id=request_id,
+                            error=client_error_text(exc, request_id=request_id),
+                        )
+                    )
                 )
                 await bus.publish_data(
                     event_to_json(TurnComplete(request_id=request_id, usage=UsageTotals()))

@@ -585,6 +585,8 @@ class ProviderRateLimitError(Exception):
     ``__cause__`` (see ``raise ... from exc``) for logs, not shown to the user.
     """
 
+    user_facing = True
+
     def __init__(self, provider: str, model: str, original: BaseException) -> None:
         super().__init__(
             f"{provider} is temporarily rate-limiting requests for model {model!r}. "
@@ -604,6 +606,8 @@ class ProviderServerError(Exception):
     ``str(self)`` is a user-facing message; the raw upstream error is chained via
     ``__cause__`` (see ``raise ... from exc``) for logs, not shown to the user.
     """
+
+    user_facing = True
 
     def __init__(self, provider: str, model: str, original: BaseException) -> None:
         super().__init__(

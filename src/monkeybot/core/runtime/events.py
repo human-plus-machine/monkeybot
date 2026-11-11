@@ -93,7 +93,7 @@ class Error:
 class HarnessIntervention:
     """Transcript-only record of a harness guard. Not published on the SSE wire.
 
-    ``intervention`` is one of ``doom_loop``, ``truncated_batch``,
+    ``intervention`` is one of ``doom_loop``, ``truncated_batch``, ``truncated_text``,
     ``empty_completion``, ``post_tool_empty``, ``background_jobs_nudge``,
     ``compaction_fallback``, ``max_turns``, ``verifier_replan``, ``final_answer_gate``,
     ``provider_retry``, ``provider_resume``, ``stream_stall``,

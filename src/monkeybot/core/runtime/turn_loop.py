@@ -80,6 +80,7 @@ from .doom_loop import (
     _DoomLoopTracker,
     _effective_doom_loop_threshold,
 )
+from .error_text import client_error_text
 from .events import (
     AgentEvent,
     AssistantDelta,
@@ -169,6 +170,10 @@ MAX_TURNS_ERROR = "Max turns exceeded"
 CONTEXT_OVERFLOW_ERROR = (
     "This request is too large for the model's context window. Send it in smaller pieces."
 )
+# A text answer that hit the output limit is continued this many times, then
+# delivered with a notice. Separate from the resume budget for a failed stream.
+_TRUNCATED_TEXT_CONTINUES = 2
+TRUNCATED_ANSWER_NOTICE = "This answer was cut off at the model's output limit."
 
 TurnAction = Literal["continue", "break", "return", "preempt", "resume", "overflow"]
 
@@ -685,6 +690,10 @@ class _TurnState:
     provider_stream_failed: bool = False
     # Resumes keep text the client already saw. Capped for the whole user request.
     provider_resumes_used: int = 0
+    # Text answers cut off at the output limit. The prefix is every segment
+    # already shown; the next call continues it, up to the budget above.
+    truncated_text_continues_left: int = _TRUNCATED_TEXT_CONTINUES
+    truncated_reply_prefix: str = ""
     # One size rejection per send is answered by compacting and sending again.
     overflow_recovered: bool = False
     tools_dirty_reason: str | None = None
@@ -1954,7 +1963,10 @@ async def _consume_provider_stream_body(
             thinking_text=state.thinking_text,
             provider_error=error_text,
         )
-        yield Error(request_id=state.ctx.request_id, error=error_text)
+        yield Error(
+            request_id=state.ctx.request_id,
+            error=client_error_text(exc, request_id=state.ctx.request_id),
+        )
         state.needs_followup_after_tools = False
         state.provider_stream_failed = True
         state.action = "return"
@@ -2340,6 +2352,54 @@ async def _gate_final_answer(
     state.action = "continue"
 
 
+def _joined_reply(prefix: str, segment: str) -> str:
+    """Segments of one answer, kept apart by a newline so a later join stays readable."""
+    if not prefix:
+        return segment
+    return f"{prefix}\n{segment}"
+
+
+async def _continue_truncated_answer(
+    state: _TurnState,
+    *,
+    history: HistoryStore,
+    last_assistant: list[str],
+    segment: str,
+) -> AsyncIterator[AgentEvent]:
+    """Show the cut-off segment and ask the model to finish it on the next call."""
+    for evt in _release_held_text(state):
+        yield evt
+    await _persist_partial_assistant_on_abort(state, history=history, last_assistant=last_assistant)
+    state.truncated_reply_prefix = _joined_reply(state.truncated_reply_prefix, segment)
+    state.turn_output_text = state.truncated_reply_prefix
+    last_assistant[0] = state.truncated_reply_prefix
+    state.truncated_text_continues_left -= 1
+    state.pre_tool_extra_next = _combine_extras(state.pre_tool_extra_next, RESUME_NOTE)
+    yield HarnessIntervention(
+        request_id=state.ctx.request_id,
+        intervention="truncated_text",
+        inner_turn=state.turn_index,
+        detail="continue",
+    )
+    yield SystemNotificationEvent(
+        request_id=state.ctx.request_id,
+        notification_type="thinkingMessage",
+        msg=RESUME_NOTICE,
+    )
+    logger.warning(
+        "truncated text answer; continuing %s",
+        kv(
+            request_id=state.ctx.request_id,
+            thread_id=state.ctx.thread_id,
+            turn=state.turn_index,
+            continues_left=state.truncated_text_continues_left,
+            chars=len(segment),
+        ),
+    )
+    state.needs_followup_after_tools = False
+    state.action = "continue"
+
+
 async def _handle_empty_or_final_text(
     state: _TurnState,
     *,
@@ -2353,6 +2413,22 @@ async def _handle_empty_or_final_text(
     async for evt in _nudge_or_error_on_background_jobs(state, tool_executor):
         yield evt
     if state.action in ("continue", "break"):
+        return
+    # A cut-off text answer is not finished. Continue it while the budget and
+    # the turn limit allow; otherwise the final path below says it was cut off.
+    if (
+        cleaned_text
+        and state.stream_truncated
+        and state.truncated_text_continues_left > 0
+        and state.turn_index < state.effective_max
+    ):
+        async for evt in _continue_truncated_answer(
+            state,
+            history=history,
+            last_assistant=last_assistant,
+            segment=cleaned_text,
+        ):
+            yield evt
         return
     # A write-without-read reminder stays until that path is read. Ending on the
     # text reply would drop the later inner turns that still have to read it.
@@ -2381,7 +2457,8 @@ async def _handle_empty_or_final_text(
         state.needs_followup_after_tools = False
         state.action = "continue"
         return
-    async for evt in _gate_final_answer(state, hook_manager=hook_manager, candidate=cleaned_text):
+    full_answer = _joined_reply(state.truncated_reply_prefix, cleaned_text) if cleaned_text else ""
+    async for evt in _gate_final_answer(state, hook_manager=hook_manager, candidate=full_answer):
         yield evt
     if state.action == "continue":
         return
@@ -2407,9 +2484,22 @@ async def _handle_empty_or_final_text(
                 ingest=True,
             )
         )
-        last_assistant[0] = cleaned_text
-        state.turn_output_text = cleaned_text
+        last_assistant[0] = full_answer
+        state.turn_output_text = full_answer
         state.needs_followup_after_tools = False
+        if state.stream_truncated:
+            yield HarnessIntervention(
+                request_id=state.ctx.request_id,
+                intervention="truncated_text",
+                inner_turn=state.turn_index,
+                detail="exhausted",
+            )
+            yield SystemNotificationEvent(
+                request_id=state.ctx.request_id,
+                notification_type="inlineMessage",
+                msg=TRUNCATED_ANSWER_NOTICE,
+                data={"kind": "responseTruncated"},
+            )
         state.action = "break"
         return
     # Model returned no text (or only whitespace) and no tool calls.

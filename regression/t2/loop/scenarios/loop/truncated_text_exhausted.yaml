@@ -1,0 +1,48 @@
+id: regression/t2/loop/scenarios/loop/truncated_text_exhausted
+case: T2-LOOP-51
+description: After two continuations a still-truncated text answer is delivered with a cut-off notice.
+mode: scripted
+driver: loop
+messages:
+- write a long answer
+script:
+- - type: text
+    text: first third
+  - type: done
+    truncated: true
+- - type: text
+    text: second third
+  - type: done
+    truncated: true
+- - type: text
+    text: last third
+  - type: done
+    truncated: true
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 3
+  response_contains_all:
+  - first third
+  - second third
+  - last third
+  interventions:
+  - intervention: truncated_text
+    detail: continue
+  - intervention: truncated_text
+    detail: continue
+  - intervention: truncated_text
+    detail: exhausted
+  events_sequence:
+  - type: SystemNotificationEvent
+    notification_type: inlineMessage
+    msg:
+      regex: cut off at the model's output limit
+    data:
+      kind: responseTruncated
+  history:
+    roles:
+    - user
+    - assistant
+    - assistant
+    - assistant
