@@ -25,6 +25,7 @@ from monkeybot.core.prompts.headings import (
     VOLATILE_SECTION_MARKERS,
     heading_marker,
 )
+from monkeybot.core.runtime.loop_messages import _send_tail
 from monkeybot.providers._utils import (
     build_cached_system_blocks,
     mark_conversation_cache_breakpoints,
@@ -291,6 +292,51 @@ def test_cache_breakpoint_sits_on_the_block_before_a_folded_tail() -> None:
     assert tail["text"] == _TAIL
     assert marked[-2]["content"][-1]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in marked[0]
+
+
+def test_cache_breakpoint_sits_before_a_note_only_tail() -> None:
+    tail = _send_tail("", "Read the file before editing.")
+    assert tail.startswith("## System context update")
+    assert "## Runtime notes" in tail
+    messages = [
+        {"role": "user", "content": "u1"},
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "c1", "name": "run_command", "input": {}}],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "c1", "content": "ok"},
+                {"type": "text", "text": tail},
+            ],
+        },
+    ]
+    marked = mark_conversation_cache_breakpoints(messages, max_breakpoints=2)
+    tool_result, marked_tail = marked[-1]["content"]
+    assert tool_result["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in marked_tail
+    assert "Read the file before editing." in marked_tail["text"]
+
+
+def test_cache_breakpoint_sits_before_a_tail_that_also_carries_a_note() -> None:
+    tail = _send_tail(_TAIL, "Read the file before editing.")
+    assert tail.index("## Current request") < tail.index("## Runtime notes")
+    messages = [
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "u2"}, {"type": "text", "text": tail}],
+        },
+    ]
+    marked = mark_conversation_cache_breakpoints(messages, max_breakpoints=2)
+    prior, marked_tail = marked[-1]["content"]
+    assert prior["cache_control"] == {"type": "ephemeral"}
+    assert prior["text"] == "u2"
+    assert "cache_control" not in marked_tail
+    assert "## Current request" in marked_tail["text"]
+    assert "Read the file before editing." in marked_tail["text"]
 
 
 def test_cache_breakpoint_skips_a_tail_only_message() -> None:

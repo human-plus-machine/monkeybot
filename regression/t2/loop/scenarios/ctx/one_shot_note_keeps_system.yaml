@@ -1,0 +1,50 @@
+id: regression/t2/loop/scenarios/ctx/one_shot_note_keeps_system
+case: T2-CTX-21
+description: A one-shot note is in the messages on one call, and the system text
+  is the same on the call before it, the call that carries it, and the call after.
+mode: scripted
+driver: loop
+executor: recording
+workspace_fixture: drift_ws
+hooks:
+  - evidence_guard
+messages:
+  - Cite a missing file.
+script:
+  - - type: text
+      text: "Evidence: missing.py"
+    - type: tool_call
+      call_id: c1
+      name: read_file
+      args:
+        path: DONE.txt
+    - type: done
+  - - type: text
+      text: Looking.
+    - type: tool_call
+      call_id: c2
+      name: read_file
+      args:
+        path: DONE.txt
+    - type: done
+  - - type: text
+      text: Done.
+    - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 3
+  provider_request:
+    - n: 1
+      messages_not_contain: "## Evidence path correction"
+      system_not_contains: "## Evidence path correction"
+    - n: 2
+      messages_contain: "## Evidence path correction"
+      system_not_contains: "## Evidence path correction"
+      system_same_as: 1
+    - n: 2
+      messages_contain: missing.py
+    - n: 3
+      messages_not_contain: "## Evidence path correction"
+      system_not_contains: "## Evidence path correction"
+      system_same_as: 1

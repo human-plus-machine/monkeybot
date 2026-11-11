@@ -58,12 +58,22 @@ async def test_run_retries_thinking_only_empty_completion() -> None:
     ]
     assert [e.detail for e in retries] == ["retry"]
 
-    # Recovery note injected into the second provider call's system message.
+    # Recovery note is on the second call's tail, not in the system text.
     second_msgs = prov.stream_messages[1]
     system_text = "".join(
         b.text for m in second_msgs if m.role == "system" for b in m.content if hasattr(b, "text")
     )
-    assert _EMPTY_COMPLETION_RECOVERY_NOTE in system_text
+    sent = "".join(b.text for m in second_msgs for b in m.content if hasattr(b, "text") and b.text)
+    assert _EMPTY_COMPLETION_RECOVERY_NOTE in sent
+    assert _EMPTY_COMPLETION_RECOVERY_NOTE not in system_text
+    first_system = "".join(
+        b.text
+        for m in prov.stream_messages[0]
+        if m.role == "system"
+        for b in m.content
+        if hasattr(b, "text")
+    )
+    assert system_text == first_system
     assert any(
         getattr(b, "text", None) == "Here is a real answer."
         for m in hist.rows
@@ -138,15 +148,16 @@ async def test_run_empty_after_tools_recovers_without_error() -> None:
     assert prov.stream_calls == 3
     assert isinstance(events[-1], TurnComplete)
     assert not any(isinstance(e, Error) for e in events)
+    followup = prov.stream_messages[2]
     followup_system = "".join(
-        b.text
-        for m in prov.stream_messages[2]
-        if m.role == "system"
-        for b in m.content
-        if hasattr(b, "text")
+        b.text for m in followup if m.role == "system" for b in m.content if hasattr(b, "text")
     )
-    assert _POST_TOOL_EMPTY_COMPLETION_NOTE in followup_system
-    assert _EMPTY_COMPLETION_RECOVERY_NOTE not in followup_system
+    followup_sent = "".join(
+        b.text for m in followup for b in m.content if hasattr(b, "text") and b.text
+    )
+    assert _POST_TOOL_EMPTY_COMPLETION_NOTE in followup_sent
+    assert _POST_TOOL_EMPTY_COMPLETION_NOTE not in followup_system
+    assert _EMPTY_COMPLETION_RECOVERY_NOTE not in followup_sent
 
 
 @pytest.mark.asyncio

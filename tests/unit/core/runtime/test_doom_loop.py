@@ -440,12 +440,13 @@ async def test_run_does_not_trigger_doom_loop_when_args_change(
 
 
 @pytest.mark.asyncio
-async def test_run_injects_doom_loop_system_note(
+async def test_run_injects_doom_loop_note(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("DOOM_LOOP_THRESHOLD", "2")
     fail = [_failing_call("c1"), Done()]
     snapshots: list[str] = []
+    systems: list[str] = []
 
     class SnapshotProvider(ToolsRecordingProvider):
         async def stream(
@@ -458,9 +459,20 @@ async def test_run_injects_doom_loop_system_note(
             vertex_google_search: bool = False,
         ) -> AsyncIterator[ProviderEvent]:
             system = next((m for m in messages if m.role == "system"), None)
+            system_text = ""
             if system is not None:
-                text = "".join(getattr(b, "text", "") for b in system.content if hasattr(b, "text"))
-                snapshots.append(text)
+                system_text = "".join(
+                    getattr(b, "text", "") for b in system.content if hasattr(b, "text")
+                )
+            systems.append(system_text)
+            snapshots.append(
+                "\n".join(
+                    getattr(b, "text", "")
+                    for message in messages
+                    for b in message.content
+                    if hasattr(b, "text")
+                )
+            )
             async for ev in super().stream(
                 messages,
                 tools,
@@ -489,6 +501,7 @@ async def test_run_injects_doom_loop_system_note(
         pass
 
     assert any("Doom loop detected" in s for s in snapshots)
+    assert all("Doom loop detected" not in s for s in systems)
     assert prov.stream_tools[-1] == []
 
 

@@ -263,6 +263,15 @@ def test_provider_request_matchers() -> None:
     )
 
 
+def test_provider_request_system_same_as() -> None:
+    same = ProviderRequest(system="same", messages=["a"])
+    also = ProviderRequest(system="same", messages=["b"])
+    other = ProviderRequest(system="other", messages=["c"])
+    run = RunView(provider_requests=[same, also, other])
+    _ok({"provider_request": [{"n": 2, "system_same_as": 1}]}, run)
+    _bad({"provider_request": [{"n": 3, "system_same_as": 1}]}, run, "provider_request")
+
+
 def test_required_and_forbidden_tools() -> None:
     run = _run(*_call("c1", "read_file", {"path": "README.md"}))
     _ok({"required_tools": ["read_file"]}, run)

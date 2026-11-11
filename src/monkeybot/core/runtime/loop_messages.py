@@ -14,7 +14,12 @@ from monkeybot.core.llm.provider import Message
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.messages.transform_context import provider_visible_blocks, transform_context
 from monkeybot.core.persistence.backends import HistoryStore
-from monkeybot.core.prompts.headings import RUNTIME_NOTES_HEADING, is_system_context_update
+from monkeybot.core.prompts.headings import (
+    RUNTIME_NOTES_HEADING,
+    SYSTEM_CONTEXT_UPDATE_HEADING,
+    heading_marker,
+    is_system_context_update,
+)
 from monkeybot.core.prompts.prompt import (
     compose_stable_baseline,
     compose_volatile_tail_parts,
@@ -80,6 +85,49 @@ def _admit_system_context(
         volatile_fingerprint=fingerprint_text(volatile),
         volatile_parts=volatile_parts,
     )
+
+
+def _send_tail(context_tail: str, notes: str | None) -> str:
+    """Context tail plus this call's one-shot notes, inside the same block.
+
+    The notes used to be appended to the system text, which changed it for one
+    call and changed it back on the next. Both changes sit before the messages,
+    so the cache could not reuse anything after the stable system block. The
+    tail is already outside that prefix: cache markers, the transcript, and
+    :func:`_split_context_tail` treat a block starting with ``## System context
+    update`` as send-time only. With no notes the tail is returned unchanged.
+    """
+    if not notes or not notes.strip():
+        return context_tail
+    head = context_tail.strip() or heading_marker(SYSTEM_CONTEXT_UPDATE_HEADING).strip()
+    return f"{head}{RUNTIME_NOTES_HEADING}{notes.strip()}\n"
+
+
+def _append_notice_to_send_tail(messages: list[Message], notice: str) -> list[Message]:
+    """Put a one-shot notice in the send-time tail of ``messages``.
+
+    ``BEFORE_PROVIDER_REQUEST`` hooks run after the tail is attached. A notice
+    spliced onto the system message would change that text for one call. The
+    notice goes into the existing tail block, or into a new one when this call
+    has no tail yet.
+    """
+    note = notice.strip()
+    if not note:
+        return messages
+    addition = _send_tail("", note)
+    if not messages:
+        return [Message(role="user", content=[Text(text=addition)])]
+    last = messages[-1]
+    blocks = list(last.content)
+    for index in range(len(blocks) - 1, -1, -1):
+        block = blocks[index]
+        if isinstance(block, Text) and is_system_context_update(block.text):
+            blocks[index] = Text(text=_send_tail(block.text, note))
+            return [*messages[:-1], Message(role=last.role, content=blocks)]
+    extra = Text(text=addition)
+    if last.role == "user":
+        return [*messages[:-1], Message(role="user", content=[*blocks, extra])]
+    return [*messages, Message(role="user", content=[extra])]
 
 
 def _messages_for_provider(

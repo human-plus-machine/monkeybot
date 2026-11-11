@@ -140,8 +140,10 @@ assertions:
   provider_calls: 21
   provider_request:
     - n: 10
-      system_contains: "Todo list unchanged for 8 tool calls"
-    - n: 11
+      messages_contain: "Todo list unchanged for 8 tool calls"
       system_not_contains: "Todo list unchanged for 8 tool calls"
+    - n: 11
+      messages_not_contain: "Todo list unchanged for 8 tool calls"
     - n: 21
-      system_contains: "Todo list unchanged for 8 tool calls"
+      messages_contain: "Todo list unchanged for 8 tool calls"
+      system_not_contains: "Todo list unchanged for 8 tool calls"

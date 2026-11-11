@@ -5,7 +5,7 @@ Verifies that:
 * Lifecycle hook events fire at the expected points.
 * ``PRE_TURN.inject_text`` lands in the system prompt for the current turn.
 * ``PRE_TURN.inject_memory_lines`` are added to ``ctx.memory_index``.
-* ``PRE_TOOL.inject_text`` lands in the **next** system prompt (not the tool result).
+* ``PRE_TOOL.inject_text`` lands in the **next** request's send-time tail (not the tool result).
 * Tool results sent to the provider are unmodified (ground truth).
 * ``TOOL_DEFINITION`` can filter tools before the provider call.
 * ``BEFORE_PROVIDER_REQUEST`` can rewrite provider messages.
@@ -43,6 +43,13 @@ from testkit.executors import RecordingExecutor
 from testkit.history import HookFakeHistory as FakeHistory
 from testkit.inspectors import AllowInspector
 from testkit.provider import CapturingProvider
+
+
+def _call_text(messages: list[Message]) -> str:
+    """All text the provider saw on one call, including the send-time tail."""
+    return "\n".join(
+        block.text for message in messages for block in message.content if isinstance(block, Text)
+    )
 
 
 @pytest.mark.asyncio
@@ -269,9 +276,9 @@ async def test_pre_tool_fires_before_post_tool_and_carries_args() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pre_tool_injection_lands_on_next_system_prompt_only() -> None:
-    """PRE_TOOL.inject_text must appear in the NEXT provider call's system prompt,
-    not in the tool result, and must clear after one use."""
+async def test_pre_tool_injection_lands_on_next_request_only() -> None:
+    """PRE_TOOL.inject_text must appear in the NEXT provider call's tail,
+    not in the tool result or the system text, and must clear after one use."""
     mgr = HookManager()
 
     async def inject(p: HookPayload) -> None:
@@ -304,8 +311,10 @@ async def test_pre_tool_injection_lands_on_next_system_prompt_only() -> None:
         pass
 
     assert len(prov.system_texts) == 2
-    assert "ABOUT THIS FILE" not in prov.system_texts[0], "must not appear before tool call"
-    assert "ABOUT THIS FILE" in prov.system_texts[1], "must appear in next provider call"
+    assert prov.system_texts[0] == prov.system_texts[1]
+    assert "ABOUT THIS FILE" not in _call_text(prov.message_snapshots[0])
+    assert "ABOUT THIS FILE" in _call_text(prov.message_snapshots[1])
+    assert "ABOUT THIS FILE" not in prov.system_texts[1]
 
     # Tool result in history must be the raw executor output, unmodified.
     tool_response = next(
@@ -320,7 +329,7 @@ async def test_pre_tool_injection_lands_on_next_system_prompt_only() -> None:
 
 @pytest.mark.asyncio
 async def test_pre_tool_extra_clears_after_one_use() -> None:
-    """A PRE_TOOL injection on turn 1 must NOT leak into turn 3's system prompt."""
+    """A PRE_TOOL injection on turn 1 must NOT leak into turn 3, and must not change the system text."""
     mgr = HookManager()
     call_count = {"n": 0}
 
@@ -354,15 +363,19 @@ async def test_pre_tool_extra_clears_after_one_use() -> None:
         pass
 
     assert len(prov.system_texts) == 3
-    assert "FIRST-TOOL-MEMORY" not in prov.system_texts[0]
-    assert "FIRST-TOOL-MEMORY" in prov.system_texts[1]
-    assert "FIRST-TOOL-MEMORY" not in prov.system_texts[2], "transient extra must clear"
+    assert prov.system_texts[0] == prov.system_texts[1] == prov.system_texts[2]
+    assert "FIRST-TOOL-MEMORY" not in _call_text(prov.message_snapshots[0])
+    assert "FIRST-TOOL-MEMORY" in _call_text(prov.message_snapshots[1])
+    assert "FIRST-TOOL-MEMORY" not in _call_text(prov.message_snapshots[2])
+    assert "FIRST-TOOL-MEMORY" not in prov.system_texts[1]
 
 
 @pytest.mark.asyncio
 async def test_history_refresh_keeps_this_turn_runtime_notes() -> None:
-    """Compaction rebuilds the system prompt after PRE_TOOL notes were already
-    folded in. Those notes are for this provider call and must survive the rebuild.
+    """Compaction rebuilds the prompt after one-shot notes were already attached.
+
+    Those notes are for this provider call and must survive the rebuild, in the
+    tail. The request-long note stays in the system text.
     """
     state = _TurnState(
         ctx=_ctx(),
@@ -371,8 +384,7 @@ async def test_history_refresh_keeps_this_turn_runtime_notes() -> None:
         doom_tracker=_DoomLoopTracker(threshold=3),
     )
     state.pre_turn_extra = "from the start of the message"
-    state.turn_runtime_notes = (
-        "from the start of the message\n\n"
+    state.turn_one_shot_notes = (
         "Todo list unchanged for 8 tool calls: mark finished items done and `start` the next."
     )
     async for _evt in _refresh_prompt_after_history_change(
@@ -384,9 +396,12 @@ async def test_history_refresh_keeps_this_turn_runtime_notes() -> None:
     ):
         pass
     assert state.system is not None
-    text = "".join(block.text for block in state.system.content if isinstance(block, Text))
-    assert "from the start of the message" in text
-    assert "Todo list unchanged for 8 tool calls" in text
+    system_text = "".join(block.text for block in state.system.content if isinstance(block, Text))
+    sent = _call_text(state.provider_messages)
+    assert "from the start of the message" in system_text
+    assert "Todo list unchanged for 8 tool calls" not in system_text
+    assert "Todo list unchanged for 8 tool calls" in sent
+    assert "## System context update" in sent
 
 
 @pytest.mark.asyncio
@@ -777,9 +792,11 @@ async def test_pre_final_answer_rejection_discards_held_text_and_asks_again() ->
     assert _deltas(events) == "Ran pytest: 5 passed."  # the refused answer was never streamed
     (gate_event,) = _gate_events(events)
     assert gate_event.detail == "[Harness] Run the tests first."
-    assert "[Harness] Run the tests first." in prov.system_texts[1]
-    assert "## Runtime notes" in prov.system_texts[1]
-    assert "Run the tests first" not in prov.system_texts[0]
+    assert prov.system_texts[0] == prov.system_texts[1]
+    assert "[Harness] Run the tests first." in _call_text(prov.message_snapshots[1])
+    assert "## Runtime notes" in _call_text(prov.message_snapshots[1])
+    assert "Run the tests first" not in prov.system_texts[1]
+    assert "Run the tests first" not in _call_text(prov.message_snapshots[0])
     assistants = [m for m in hist.rows if m.role == "assistant"]
     assert [b.text for m in assistants for b in m.content if isinstance(b, Text)] == [
         "Ran pytest: 5 passed."

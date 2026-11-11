@@ -58,6 +58,7 @@ assertions:
   provider_request:
   - n: 4
     tools_empty: true
-    system_contains: Do not call tools this turn.
+    messages_contain: Do not call tools this turn.
+    system_not_contains: Do not call tools this turn.
   - n: 5
     tools_empty: false

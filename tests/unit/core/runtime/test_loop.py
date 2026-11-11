@@ -1099,8 +1099,12 @@ async def test_run_empty_model_after_tools_retries_then_succeeds() -> None:
     system_text = "".join(
         b.text for m in followup_msgs if m.role == "system" for b in m.content if hasattr(b, "text")
     )
-    assert _POST_TOOL_EMPTY_COMPLETION_NOTE in system_text
-    assert _EMPTY_COMPLETION_RECOVERY_NOTE not in system_text
+    sent = "".join(
+        b.text for m in followup_msgs for b in m.content if hasattr(b, "text") and b.text
+    )
+    assert _POST_TOOL_EMPTY_COMPLETION_NOTE in sent
+    assert _POST_TOOL_EMPTY_COMPLETION_NOTE not in system_text
+    assert _EMPTY_COMPLETION_RECOVERY_NOTE not in sent
 
 
 @pytest.mark.asyncio

@@ -126,6 +126,7 @@ from .loop_messages import (
     _load_agent_chat_history,
     _messages_for_provider,
     _provider_messages_prompt_summary,
+    _send_tail,
     _snapshot_system_message,
     _split_context_tail,
     _system_message_from_text,
@@ -583,10 +584,12 @@ class _TurnState:
     assistant_write_task: asyncio.Task[None] | None = None
     pre_turn_extra: str | None = None
     pre_tool_extra_next: str | None = None
-    # Runtime notes already folded into this inner turn's system prompt.
-    # History compaction rebuilds that prompt; it must reapply these notes or
-    # a one-shot PRE_TOOL reminder is dropped before the model sees it.
-    turn_runtime_notes: str | None = None
+    # One-shot notes for this provider call (PRE_TOOL, doom loop, replan, and
+    # the recovery nudges). They ride the send-time tail, not the system text,
+    # so the system prefix stays byte-identical. History compaction rebuilds
+    # that tail; it must reattach these notes or a PRE_TOOL reminder is dropped
+    # before the model sees it.
+    turn_one_shot_notes: str | None = None
     empty_completion_retries_left: int = _EMPTY_COMPLETION_RETRIES
     post_tool_empty_retries_left: int = _POST_TOOL_EMPTY_RETRIES
     background_job_nudges_left: int = _BACKGROUND_JOB_NUDGES
@@ -693,7 +696,6 @@ async def _prepare_turn_context(
     ):
         yield epoch_evt
     system = _system_message_from_text(state.admit.leading_system_text)
-    combined_extra = _combine_extras(state.pre_turn_extra, state.pre_tool_extra_next)
     replan_note = _arm_replan_from_mailbox(state)
     if replan_note:
         yield HarnessIntervention(
@@ -704,9 +706,10 @@ async def _prepare_turn_context(
         )
     force_no_tools, doom_loop_note = state.doom_tracker.consume_recovery()
     state.tools_suppressed = force_no_tools
-    combined_extra = _combine_extras(combined_extra, doom_loop_note)
-    state.turn_runtime_notes = combined_extra
-    state.system = _append_extra_system_text(system, combined_extra)
+    # PRE_TURN stays in the system text for the whole request. One-shot notes
+    # would change that text for a single call and invalidate the message cache.
+    state.turn_one_shot_notes = _combine_extras(state.pre_tool_extra_next, doom_loop_note)
+    state.system = _append_extra_system_text(system, state.pre_turn_extra)
     state.pre_tool_extra_next = None
     state.turn_tools = () if force_no_tools else state.ctx.tools
     tool_def_payload = await _fire_hook(
@@ -741,7 +744,7 @@ async def _prepare_turn_context(
     state.provider_messages = _messages_for_provider(
         system_msg,
         state.resolved_messages,
-        context_tail=admit.context_tail,
+        context_tail=_send_tail(admit.context_tail, state.turn_one_shot_notes),
     )
 
 
@@ -771,7 +774,7 @@ async def _refresh_prompt_after_history_change(
         yield epoch_evt
     state.system = _append_extra_system_text(
         _system_message_from_text(state.admit.leading_system_text),
-        state.turn_runtime_notes if state.turn_runtime_notes is not None else state.pre_turn_extra,
+        state.pre_turn_extra,
     )
     state.resolved_messages = convert_to_provider(
         state.chat_messages,
@@ -782,7 +785,7 @@ async def _refresh_prompt_after_history_change(
     state.provider_messages = _messages_for_provider(
         system_msg,
         state.resolved_messages,
-        context_tail=admit.context_tail,
+        context_tail=_send_tail(admit.context_tail, state.turn_one_shot_notes),
     )
 
 
@@ -1073,7 +1076,7 @@ async def _apply_pressure_and_before_provider(
         state.provider_messages = _messages_for_provider(
             system_msg,
             state.resolved_messages,
-            context_tail=admit.context_tail,
+            context_tail=_send_tail(admit.context_tail, state.turn_one_shot_notes),
         )
 
     before_payload = await _fire_hook(
@@ -1107,12 +1110,15 @@ async def _apply_pressure_and_before_provider(
             ),
         )
 
+    # Prefer the tail on the messages. A before-provider hook may have extended
+    # it, and a recomputed tail would miss that text.
+    _, attached_tail = _split_context_tail(state.provider_messages)
     yield SystemPromptSnapshot(
         request_id=state.ctx.request_id,
         inner_turn=state.turn_index,
         text=_system_prompt_snapshot_text(
             _snapshot_system_message(state.provider_messages, system_msg),
-            admit.context_tail,
+            attached_tail or _send_tail(admit.context_tail, state.turn_one_shot_notes),
         ),
     )
 
