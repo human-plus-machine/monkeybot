@@ -16,7 +16,7 @@ This block is injected by the host every turn. Prefer the **active JSON tool lis
 
 ### Runtime paths
 - workspace root (cwd): `/agents/demo/workspace` — file and shell tools start here; `run_command` may set a workspace-relative `cwd`.
-- `run_command`: **Execution:** via **OpenSandbox** (Docker-backed session container). The workspace root is bind-mounted at the **same absolute path**; still confined to the workspace and subject to the binary allowlist.
+- `run_command`: **Execution:** via **OpenSandbox** (Docker-backed session container). The workspace root is bind-mounted at the **same absolute path**; still confined to the workspace and subject to the binary allowlist. The container lasts for the session. A background job keeps running after this turn, and a harness note wakes you when it finishes.
 - runtime (inside workspace): `.monkeybot/` — spill and transcripts. Not memory.
 - memory storage: `local:///agents/demo/memory` — MemPalace root (verbatim conversation drawers). **Outside** the workspace root. Prefer `mempalace search` via `run_command` for past-session recall. Do not `read_file` palace paths.
 - workspace `data/` (if present) is ordinary project files — **not** the memory store.

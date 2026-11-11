@@ -6,8 +6,8 @@ process to this table. The table outlives that turn. ``await_command`` and
 whatever is still running.
 
 A private table (no ``on_wake``) is what a turn-scoped executor creates for
-itself. ``aclose`` on that executor kills its jobs, which is the Lambda, voice,
-and sandbox-host behaviour.
+itself. ``aclose`` on that executor kills its jobs. That is the Lambda and
+voice behaviour, and a sandbox executor that was not given the session table.
 """
 
 from __future__ import annotations
@@ -15,9 +15,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, Protocol
 
 from monkeybot.core.runtime.wake_budget import WakeBudget
 from monkeybot.core.subprocess_groups import (
@@ -45,6 +47,17 @@ _WAKE_DEBOUNCE_S = 2.0
 _MAX_FINISHED_LINES = 8
 
 WakeCallback = Callable[[list[tuple[str, str]]], Awaitable[bool]]
+REMOTE_POLL_SECONDS = 2.0
+
+
+class RemoteJobDriver(Protocol):
+    """Status, logs, and interrupt for a command running outside this process."""
+
+    async def status(self, remote_id: str) -> Any: ...
+
+    async def pull_logs(self, job: BackgroundJob) -> None: ...
+
+    async def interrupt(self, remote_id: str) -> None: ...
 
 
 async def wait_for_exit(process: asyncio.subprocess.Process, timeout: float) -> bool:
@@ -90,6 +103,19 @@ class _LocalProcess:
 
 
 @dataclass
+class _RemoteProcess:
+    """One background command running in a sandbox, polled by ``_watch_remote``."""
+
+    driver: RemoteJobDriver
+    remote_id: str
+    poll_interval: float
+    done: asyncio.Event
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    kill_requested: bool = False
+    watcher: asyncio.Task[None] | None = None
+
+
+@dataclass
 class _JobMeta:
     awaited: bool = False
     woken: bool = False
@@ -105,6 +131,7 @@ class SessionJobs:
     wake_debounce_s: float = _WAKE_DEBOUNCE_S
     _registry: JobRegistry = field(init=False)
     _procs: dict[str, _LocalProcess] = field(init=False)
+    _remotes: dict[str, _RemoteProcess] = field(init=False)
     _meta: dict[str, _JobMeta] = field(init=False)
     _budget: WakeBudget = field(init=False)
     _wake_task: asyncio.Task[None] | None = field(init=False, default=None)
@@ -113,6 +140,7 @@ class SessionJobs:
     def __post_init__(self) -> None:
         self._registry = JobRegistry(max_jobs=max(1, self.max_jobs))
         self._procs = {}
+        self._remotes = {}
         self._meta = {}
         self._budget = self.wake_budget if self.wake_budget is not None else WakeBudget()
 
@@ -228,8 +256,69 @@ class SessionJobs:
             raise
         return job
 
-    async def get_status(self, job_id: str) -> BackgroundJob:
+    def allocate(
+        self,
+        command: str,
+        args: Sequence[str],
+        *,
+        effective: int,
+        hit_ceiling: bool,
+        log_dir: Path | None,
+    ) -> BackgroundJob:
+        """Register a job before its remote process exists. The caller attaches it."""
+        if self._closed:
+            raise JobCapExceededError(self._registry.max_jobs)
+        job = allocate_background_job(
+            self._registry,
+            command,
+            args,
+            effective=effective,
+            hit_ceiling=hit_ceiling,
+            log_dir=log_dir,
+        )
+        self._meta[job.job_id] = _JobMeta()
+        return job
+
+    def get(self, job_id: str) -> BackgroundJob:
         return self._registry.get(job_id)
+
+    async def adopt_remote(
+        self,
+        job: BackgroundJob,
+        driver: RemoteJobDriver,
+        *,
+        poll_interval: float = REMOTE_POLL_SECONDS,
+    ) -> BackgroundJob:
+        """Watch a command that is already running on ``driver``.
+
+        The first status read waits one poll interval, so a caller can observe
+        "still starting" before the watcher asks the remote. ``get_status``
+        reads immediately.
+        """
+        if not job.remote_id:
+            raise OSError("remote background command returned no execution id")
+        remote = _RemoteProcess(
+            driver=driver,
+            remote_id=job.remote_id,
+            poll_interval=max(0.0, poll_interval),
+            done=asyncio.Event(),
+        )
+        self._remotes[job.job_id] = remote
+        remote.watcher = asyncio.create_task(
+            self._watch_remote(job, remote),
+            name=f"remote-job-{job.job_id}",
+        )
+        return job
+
+    async def get_status(self, job_id: str) -> BackgroundJob:
+        job = self._registry.get(job_id)
+        remote = self._remotes.get(job_id)
+        if remote is None or job.status is not JobStatus.RUNNING:
+            return job
+        async with remote.lock:
+            if job.status is JobStatus.RUNNING:
+                await self._refresh_remote(job, remote)
+        return job
 
     async def read_output(self, job_id: str, cursor: int) -> tuple[str, int]:
         job = self._registry.get(job_id)
@@ -239,6 +328,11 @@ class SessionJobs:
         """Block until the job leaves ``running`` or ``timeout`` seconds elapse."""
         job = self._registry.get(job_id)
         if job.status is not JobStatus.RUNNING:
+            return
+        remote = self._remotes.get(job_id)
+        if remote is not None:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(remote.done.wait(), timeout=max(0.0, timeout))
             return
         local = self._procs.get(job_id)
         if local is None:
@@ -250,6 +344,9 @@ class SessionJobs:
         job = self._registry.get(job_id)
         if job.status is not JobStatus.RUNNING:
             return job
+        remote = self._remotes.get(job_id)
+        if remote is not None:
+            return await self._kill_remote(job, remote, reason=reason or "killed")
         local = self._procs.get(job_id)
         job.error = job.error or reason or "killed"
         if local is None:
@@ -312,6 +409,10 @@ class SessionJobs:
                 "killed background jobs %s",
                 extra={"component": "session_jobs", "reason": reason, "jobs": len(killed)},
             )
+        for remote in self._remotes.values():
+            watcher = remote.watcher
+            if watcher is not None and not watcher.done():
+                watcher.cancel()
         return killed
 
     async def wake_if_idle(self) -> None:
@@ -327,6 +428,166 @@ class SessionJobs:
             await self._emit_wake()
         except Exception:
             logger.warning("background command wake failed", exc_info=True)
+
+    async def _kill_remote(
+        self, job: BackgroundJob, remote: _RemoteProcess, *, reason: str
+    ) -> BackgroundJob:
+        async with remote.lock:
+            if job.status is not JobStatus.RUNNING:
+                return job
+            remote.kill_requested = True
+            try:
+                await remote.driver.interrupt(remote.remote_id)
+            except Exception:
+                job.status = JobStatus.LOST
+                job.error = reason
+                logger.warning(
+                    "sandbox interrupt failed",
+                    extra={"component": "session_jobs", "job_id": job.job_id},
+                    exc_info=True,
+                )
+                self._note_settled(job)
+                return job
+            job.status = JobStatus.KILLED
+            job.error = reason
+            if job.exit_code is None:
+                job.exit_code = -1
+            append_log(job.log_path, f"\n[{reason}]\n")
+            logger.info(
+                "background job killed",
+                extra={
+                    "component": "session_jobs",
+                    "job_id": job.job_id,
+                    "exit_code": job.exit_code,
+                },
+            )
+            self._note_settled(job)
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(remote.done.wait(), timeout=STREAM_DRAIN_TIMEOUT_SEC)
+        return job
+
+    async def _refresh_remote(self, job: BackgroundJob, remote: _RemoteProcess) -> None:
+        """One status read. Caller holds ``remote.lock``."""
+        if job.status is not JobStatus.RUNNING:
+            return
+        remaining = job.started_at + job.timeout_seconds - time.monotonic()
+        if remaining <= 0:
+            await self._expire_remote(job, remote)
+            return
+        try:
+            status = await remote.driver.status(remote.remote_id)
+        except Exception as exc:
+            logger.warning(
+                "sandbox command status failed",
+                extra={"component": "session_jobs", "job_id": job.job_id},
+                exc_info=True,
+            )
+            # Status is unknown, so stop the remote process. Interrupt failure
+            # marks the job lost; a successful interrupt is still a kill because
+            # the outcome was not observed.
+            reason = str(exc) or "sandbox command status failed"
+            try:
+                await remote.driver.interrupt(remote.remote_id)
+            except Exception:
+                job.status = JobStatus.LOST
+                job.error = reason
+                logger.warning(
+                    "sandbox interrupt failed",
+                    extra={"component": "session_jobs", "job_id": job.job_id},
+                    exc_info=True,
+                )
+                self._note_settled(job)
+                return
+            job.status = JobStatus.KILLED
+            job.error = reason
+            if job.exit_code is None:
+                job.exit_code = -1
+            append_log(job.log_path, f"\n[{reason}]\n")
+            self._note_settled(job)
+            return
+        try:
+            await remote.driver.pull_logs(job)
+        except Exception:
+            logger.warning(
+                "sandbox background log read failed",
+                extra={"component": "session_jobs", "job_id": job.job_id},
+                exc_info=True,
+            )
+        running = getattr(status, "running", None)
+        exit_code = getattr(status, "exit_code", None)
+        if running:
+            return
+        if exit_code is None and not getattr(status, "error", None):
+            job.status = JobStatus.LOST
+            job.error = "sandbox command ended without an exit code"
+            logger.warning(
+                "background job lost",
+                extra={"component": "session_jobs", "job_id": job.job_id},
+            )
+            self._note_settled(job)
+            return
+        job.exit_code = exit_code if exit_code is not None else 0
+        job.status = JobStatus.EXITED
+        error = getattr(status, "error", None)
+        if error and job.exit_code != 0:
+            job.error = str(error)
+        logger.info(
+            "background job exited",
+            extra={
+                "component": "session_jobs",
+                "job_id": job.job_id,
+                "exit_code": job.exit_code,
+            },
+        )
+        self._note_settled(job)
+
+    async def _expire_remote(self, job: BackgroundJob, remote: _RemoteProcess) -> None:
+        reason = timeout_failure_message(
+            timeout_seconds=job.timeout_seconds,
+            hit_ceiling=job.hit_ceiling,
+        )
+        try:
+            await remote.driver.interrupt(remote.remote_id)
+        except Exception:
+            job.status = JobStatus.LOST
+            job.error = reason
+            self._note_settled(job)
+            return
+        job.status = JobStatus.KILLED
+        job.error = reason
+        if job.exit_code is None:
+            job.exit_code = -1
+        append_log(job.log_path, f"\n[{reason}]\n")
+        self._note_settled(job)
+
+    async def _watch_remote(self, job: BackgroundJob, remote: _RemoteProcess) -> None:
+        try:
+            while job.status is JobStatus.RUNNING:
+                remaining = job.started_at + job.timeout_seconds - time.monotonic()
+                if remaining <= 0:
+                    async with remote.lock:
+                        if job.status is JobStatus.RUNNING:
+                            await self._expire_remote(job, remote)
+                    return
+                await asyncio.sleep(min(remote.poll_interval, remaining))
+                async with remote.lock:
+                    if job.status is not JobStatus.RUNNING:
+                        return
+                    await self._refresh_remote(job, remote)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "background job watcher failed",
+                extra={"component": "session_jobs", "job_id": job.job_id},
+                exc_info=True,
+            )
+            if job.status is JobStatus.RUNNING:
+                job.status = JobStatus.LOST
+                job.error = job.error or "background job lost"
+                self._note_settled(job)
+        finally:
+            remote.done.set()
 
     async def _spawn_local(
         self,

@@ -160,6 +160,8 @@ class SubagentEnvelope:
     """Folders the parent session may already read. The child cannot ask for these."""
     command_grants: tuple[str, ...] = ()
     """Commands the parent session may already run."""
+    sandbox_id: str | None = None
+    """Parent OpenSandbox container to attach to. The child must not kill it."""
 
     def to_json(self) -> str:
         """Serialize to a compact JSON object for stdin (UTF-8)."""
@@ -186,6 +188,8 @@ class SubagentEnvelope:
             payload["path_grants"] = list(self.path_grants)
         if self.command_grants:
             payload["command_grants"] = list(self.command_grants)
+        if self.sandbox_id is not None:
+            payload["sandbox_id"] = self.sandbox_id
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     @classmethod
@@ -212,6 +216,7 @@ class SubagentEnvelope:
             skills=_opt_str_tuple(decoded, "skills"),
             path_grants=_opt_str_tuple(decoded, "path_grants"),
             command_grants=_opt_str_tuple(decoded, "command_grants"),
+            sandbox_id=_opt_str_field(decoded, "sandbox_id"),
         )
 
 

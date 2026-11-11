@@ -51,6 +51,7 @@ class TestSandboxConfigFromEnv:
             "SANDBOX_TTL_SECONDS",
             "SANDBOX_USE_SERVER_PROXY",
             "SANDBOX_SHARED_FILESYSTEM",
+            "SANDBOX_PREWARM",
         ):
             monkeypatch.delenv(key, raising=False)
 
@@ -63,6 +64,12 @@ class TestSandboxConfigFromEnv:
         assert cfg.ttl_seconds == 1800
         assert cfg.use_server_proxy is True
         assert cfg.shared_filesystem is True
+        assert cfg.prewarm is True
+
+    @pytest.mark.case("T1-SBX-12")
+    def test_prewarm_false_when_env_disabled(self, monkeypatch):
+        monkeypatch.setenv("SANDBOX_PREWARM", "false")
+        assert SandboxConfig.from_env().prewarm is False
 
     def test_use_server_proxy_false_when_env_disabled(self, monkeypatch):
         for key in (
@@ -636,6 +643,7 @@ class TestSandboxExecutorCleanup:
         )
         return SandboxExecutor(cfg, tmp_path)
 
+    @pytest.mark.case("T1-SBX-13")
     @pytest.mark.asyncio
     async def test_aclose_calls_kill_and_clears_sandbox(self, tmp_path):
         executor = self._executor(tmp_path)

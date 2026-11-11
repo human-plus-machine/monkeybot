@@ -85,6 +85,7 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("sandbox", "renew_interval_seconds"): "SANDBOX_RENEW_INTERVAL_SECONDS",
     ("sandbox", "await_default_wait_seconds"): "SANDBOX_AWAIT_DEFAULT_WAIT_SECONDS",
     ("sandbox", "await_max_wait_seconds"): "SANDBOX_AWAIT_MAX_WAIT_SECONDS",
+    ("sandbox", "prewarm"): "SANDBOX_PREWARM",
     ("scheduler", "enabled"): "MONKEYBOT_SCHEDULER_ENABLED",
     ("fake_provider", "events_json"): "MONKEYBOT_FAKE_PROVIDER_EVENTS",
     ("emission", "style"): "MONKEYBOT_EMISSION_STYLE",
@@ -184,6 +185,7 @@ ENV_SPEC: dict[str, tuple[ConfigTier, str]] = {
         "tools.sandbox_await_default_wait_seconds",
     ),
     "SANDBOX_AWAIT_MAX_WAIT_SECONDS": (ConfigTier.REBUILD, "tools.sandbox_await_max_wait_seconds"),
+    "SANDBOX_PREWARM": (ConfigTier.REBUILD, "tools.sandbox_prewarm"),
     "MONKEYBOT_SCHEDULER_ENABLED": (ConfigTier.REBUILD, "tools.scheduler_enabled"),
     "MONKEYBOT_FAKE_PROVIDER_EVENTS": (ConfigTier.REBUILD, "model.fake_provider_events"),
     # RECONNECT_MCP — diff-based MCP reconnect; path *or* file content.

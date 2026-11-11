@@ -69,6 +69,36 @@ _BUILTIN_RUN_LOOP = run_loop
 logger = logging.getLogger(__name__)
 
 
+def _attached_sandbox_session(
+    envelope: SubagentEnvelope,
+    cfg: Any,
+    *,
+    workspace: Path,
+    skills: Path,
+    artifacts: Path | None,
+) -> Any | None:
+    """A client for the parent's container. Closing it does not kill the container.
+
+    No id means the worker keeps the private container ``CoreToolExecutor``
+    builds for itself. The OpenSandbox SDK can reconnect by id (``Sandbox.connect``).
+    """
+    if not envelope.sandbox_id:
+        return None
+    from monkeybot.core.tools.sandbox_executor import SandboxConfig
+    from monkeybot.core.tools.sandbox_session import SandboxSession
+
+    config = SandboxConfig.from_env(cfg)
+    if not config.enabled:
+        return None
+    return SandboxSession(
+        config,
+        workspace,
+        skills_path=skills,
+        artifacts_path=artifacts,
+        attach_id=envelope.sandbox_id,
+    )
+
+
 def _subagent_memory_uri(envelope: SubagentEnvelope) -> str:
     """Envelope URI is authoritative; empty means no memory (ignore ambient env)."""
     return envelope.memory_storage_uri.strip()
@@ -337,6 +367,7 @@ async def _async_main() -> None:
     )
     mcp: MCPClient | None = None
     executor: CoreToolExecutor | None = None
+    sandbox_session: Any | None = None
 
     try:
         await backend.open(run_schema=auto_schema_enabled_from_config(config_path))
@@ -457,6 +488,9 @@ async def _async_main() -> None:
         ctx.turn_path_grants.update(envelope.path_grants)
         ctx.turn_command_grants.update(envelope.command_grants)
 
+        sandbox_session = _attached_sandbox_session(
+            envelope, cfg, workspace=ws, skills=skills, artifacts=artifacts
+        )
         executor = CoreToolExecutor(
             workspace_root=ws,
             memory=memory,
@@ -469,6 +503,7 @@ async def _async_main() -> None:
             config=cfg,
             grants_path=grants_path,
             read_ledger=read_ledger,
+            sandbox_session=sandbox_session,
         )
         history = backend.history()
 
@@ -530,6 +565,8 @@ async def _async_main() -> None:
         async def _close_worker() -> None:
             if executor is not None:
                 await executor.aclose()
+            if sandbox_session is not None:
+                await sandbox_session.aclose()
             if mcp is not None:
                 await mcp.disconnect_all()
             await backend.close()

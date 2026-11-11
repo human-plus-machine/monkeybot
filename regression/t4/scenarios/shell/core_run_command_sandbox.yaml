@@ -10,8 +10,20 @@
 # use the opensandbox.docker.toml scaffold referenced above for the backend setup.
 # `echo` succeeding here proves the sandbox actually created a container and
 # executed a real command inside it, not just that config parsing works.
+#
+# The runner boots its own gateway from this env, so the default smoke gateway
+# can stay on SANDBOX_ENABLED=false. OpenSandbox must already be listening on
+# SANDBOX_SERVER_URL, and Docker must be running: the server creates a real
+# container. The workspace is not bind-mounted (the default OpenSandbox config
+# only allows host paths under /tmp, and this command does not read the workspace).
 case: T4-SHELL-02
 mode: live
+config:
+  env:
+    SANDBOX_ENABLED: "true"
+    SANDBOX_SERVER_URL: http://127.0.0.1:8090
+    SANDBOX_SHARED_FILESYSTEM: "false"
+    SANDBOX_PREWARM: "false"
 description: "Agent runs a trivial shell command via run_command with SANDBOX_ENABLED=true (real OpenSandbox/Docker backend)"
 tags: [tools, local-only]
 messages:

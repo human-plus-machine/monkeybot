@@ -8,10 +8,11 @@ The workspace directory is mounted read-write into the sandbox container at
 the same absolute path, so file writes from run_command persist to the host
 filesystem immediately and all relative agent paths resolve identically.
 
-One sandbox is created per SandboxExecutor instance (session-scoped) and
-reused across all run_command calls in that session. The sandbox is created
-lazily on the first execute() call so there is zero overhead when run_command
-is never invoked.
+The container lives on a :class:`~monkeybot.core.tools.sandbox_session.SandboxSession`.
+The SSE gateway passes the session (and the session job table) so one container
+serves every turn and background jobs outlive the turn. With neither given,
+this executor owns a private session and job table and destroys both on
+``aclose`` — voice, Lambda, and subagent workers.
 
 Configuration (all via env vars or monkeybot.yaml sandbox.*):
     SANDBOX_ENABLED            - "true" to activate (default: "false")
@@ -47,13 +48,9 @@ from monkeybot.core.tools.background_jobs import (
     DEFAULT_MAX_JOB_SECONDS,
     DEFAULT_RENEW_INTERVAL_SECONDS,
     BackgroundJob,
-    JobRegistry,
     JobStatus,
-    allocate_background_job,
     append_log,
     clamp_job_timeout,
-    read_log_from,
-    timeout_failure_message,
 )
 from monkeybot.core.tools.terminal import (
     ALLOWED_COMMANDS,
@@ -62,7 +59,6 @@ from monkeybot.core.tools.terminal import (
     SecurityError,
     _path_candidates,
     _resolved_path,
-    build_skill_runtime_env,
     validate_mempalace_subcommand,
 )
 
@@ -125,6 +121,7 @@ class SandboxConfig:
     renew_interval_seconds: int = DEFAULT_RENEW_INTERVAL_SECONDS
     await_default_wait_seconds: int = DEFAULT_AWAIT_WAIT_SECONDS
     await_max_wait_seconds: int = DEFAULT_AWAIT_MAX_WAIT_SECONDS
+    prewarm: bool = True
 
     @classmethod
     def from_env(cls, config: RuntimeConfig | None = None) -> SandboxConfig:
@@ -141,6 +138,8 @@ class SandboxConfig:
             env_value_or_current(config, "SANDBOX_SHARED_FILESYSTEM", "true").strip().lower()
         )
         shared_filesystem = shared_raw not in ("0", "false", "no", "off")
+        prewarm_raw = env_value_or_current(config, "SANDBOX_PREWARM", "true").strip().lower()
+        prewarm = prewarm_raw not in ("0", "false", "no", "off")
         max_jobs = _int_at_least(
             env_value_or_current(
                 config, "SANDBOX_MAX_BACKGROUND_JOBS", str(DEFAULT_MAX_BACKGROUND_JOBS)
@@ -189,6 +188,7 @@ class SandboxConfig:
             renew_interval_seconds=renew_interval,
             await_default_wait_seconds=await_default,
             await_max_wait_seconds=await_max,
+            prewarm=prewarm,
         )
 
 
@@ -199,13 +199,13 @@ class SandboxExecutor:
     terminal.py is applied before dispatch (defense-in-depth — the container
     provides OS-level isolation, the allowlist enforces the command policy).
 
-    The sandbox is created lazily on the first execute() call and reused for
-    the lifetime of this instance (session-scoped). The workspace directory is
-    mounted read-write at its absolute path inside the container so file writes
-    persist to the host filesystem immediately.
+    The container is owned by ``session`` when the caller passes one (the SSE
+    gateway, one container per chat). Otherwise this executor builds a private
+    session and destroys it in ``aclose``. The same split applies to ``jobs``:
+    a passed-in table outlives the turn; a private table is killed here.
 
-    Call aclose() to destroy the sandbox early; otherwise it expires after
-    ttl_seconds automatically.
+    Call aclose() on a private executor to destroy the sandbox early; otherwise
+    the session reaps it after ttl_seconds with no command and no running job.
     """
 
     def __init__(
@@ -217,18 +217,33 @@ class SandboxExecutor:
         artifacts_path: Path | None = None,
         allowed_commands: Sequence[str] | None = None,
         allowed_path_prefixes: Sequence[str] | None = None,
+        session: Any | None = None,
+        jobs: Any | None = None,
     ) -> None:
+        # Lazy import: sandbox_session imports SandboxConfig from this module.
+        from monkeybot.core.tools.sandbox_session import SandboxSession
+        from monkeybot.core.tools.session_jobs import SessionJobs
+
         self._config = config
         self._workspace_root = Path(workspace_root).resolve()
         self._skills_path = Path(skills_path).resolve() if skills_path is not None else None
         self._artifacts_path = (
             Path(artifacts_path).resolve() if artifacts_path is not None else None
         )
-        self._sandbox: Any = None
-        self._jobs = JobRegistry(max_jobs=max(1, config.max_background_jobs))
+        self._owns_session = session is None
+        self._session: SandboxSession = session or SandboxSession(
+            config,
+            self._workspace_root,
+            skills_path=self._skills_path,
+            artifacts_path=self._artifacts_path,
+        )
+        self._owns_jobs = jobs is None
+        self._jobs: SessionJobs = jobs or SessionJobs(max_jobs=max(1, config.max_background_jobs))
+        if self._owns_session:
+            self._session.bind_jobs(lambda: bool(self._jobs.running()))
+        # Status refresh and kill share this lock. A caller that holds it
+        # (tests, and any future critical section) delays the remote interrupt.
         self._lock = asyncio.Lock()
-        self._renew_task: asyncio.Task[None] | None = None
-        self._timeout_tasks: dict[str, asyncio.Task[None]] = {}
         self._allowed_commands: tuple[str, ...] = (
             tuple(allowed_commands) if allowed_commands is not None else tuple(ALLOWED_COMMANDS)
         )
@@ -241,6 +256,19 @@ class SandboxExecutor:
     @property
     def allowed_commands(self) -> tuple[str, ...]:
         return self._allowed_commands
+
+    @property
+    def jobs_survive_turn(self) -> bool:
+        """True when the caller owns the job table. ``aclose`` leaves those jobs running."""
+        return not self._owns_jobs
+
+    @property
+    def _sandbox(self) -> Any:
+        return self._session.sandbox
+
+    @property
+    def _renew_task(self) -> asyncio.Task[None] | None:
+        return self._session.renew_task
 
     @property
     def allowed_path_prefixes(self) -> tuple[str, ...]:
@@ -302,128 +330,32 @@ class SandboxExecutor:
                         return True
         return False
 
-    async def _ensure_sandbox(self) -> None:
-        if self._sandbox is not None:
-            return
+    def _workdir(self, cwd: Path | str | None) -> str:
+        if cwd is not None and self._config.shared_filesystem:
+            return str(Path(cwd).resolve())
+        return "/tmp"
 
-        try:
-            from opensandbox import Sandbox
-            from opensandbox.config import ConnectionConfig
-            from opensandbox.models.sandboxes import Host, Volume
-        except ImportError as exc:
-            raise RuntimeError(
-                "opensandbox SDK is required for sandbox execution but is not installed. "
-                "Install it with: pip install 'monkeybot[sandbox]'"
-            ) from exc
+    async def _open_for_command(self) -> tuple[Any, bool, bool, bool]:
+        """Ensure the container and report whether this command reused it."""
+        return await self._session.ensure()
 
-        workspace_str = str(self._workspace_root)
-        logger.info(
-            "Creating sandbox: image=%s ttl=%ss workspace=%s",
-            self._config.image,
-            self._config.ttl_seconds,
-            workspace_str,
-        )
-
-        # Parse server_url into domain + protocol for ConnectionConfig.
-        # server_url format: "http://host:port" or "https://host:port"
-        match = re.fullmatch(r"(https?)://(.+)", self._config.server_url.rstrip("/"))
-        if not match:
-            raise ValueError(
-                f"SANDBOX_SERVER_URL must be http(s)://host[:port], got: {self._config.server_url!r}"
-            )
-        protocol, domain = match.group(1), match.group(2)
-
-        connection_config = ConnectionConfig(
-            domain=domain,
-            api_key=self._config.api_key,
-            protocol=protocol,
-            use_server_proxy=self._config.use_server_proxy,
-        )
-
-        runtime_env = build_skill_runtime_env(cwd=self._workspace_root)
-        volumes: list[Any] = []
-        mounted_paths: set[str] = set()
-        if self._config.shared_filesystem:
-            volumes.append(
-                Volume(
-                    name=_volume_name(workspace_str, "workspace"),
-                    host=Host(path=workspace_str),
-                    mountPath=workspace_str,
-                    readOnly=False,
-                )
-            )
-            mounted_paths.add(workspace_str)
-            if self._skills_path is not None:
-                skills_str = str(self._skills_path)
-                volumes.append(
-                    Volume(
-                        name=_volume_name(skills_str, "skills"),
-                        host=Host(path=skills_str),
-                        mountPath=skills_str,
-                        readOnly=True,
-                    )
-                )
-                mounted_paths.add(skills_str)
-            if self._artifacts_path is not None:
-                artifacts_str = str(self._artifacts_path)
-                volumes.append(
-                    Volume(
-                        name=_volume_name(artifacts_str, "artifacts"),
-                        host=Host(path=artifacts_str),
-                        mountPath=artifacts_str,
-                        readOnly=False,
-                    )
-                )
-                mounted_paths.add(artifacts_str)
-            for cred_env in ("GOOGLE_APPLICATION_CREDENTIALS", "GCP_AUTH_FILE"):
-                cred_path = runtime_env.get(cred_env, "").strip()
-                if not cred_path or cred_path in mounted_paths:
-                    continue
-                if not Path(cred_path).is_file():
-                    continue
-                volumes.append(
-                    Volume(
-                        name=_volume_name(cred_path, "gcp-creds"),
-                        host=Host(path=cred_path),
-                        mountPath=cred_path,
-                        readOnly=True,
-                    )
-                )
-                mounted_paths.add(cred_path)
-        else:
-            # A remote OpenSandbox cannot read host paths.  Avoid exporting
-            # invalid credentials or layout paths as though they were mounted.
-            runtime_env.update(
-                {
-                    "MONKEYBOT_WORKSPACE_ROOT": "/tmp",
-                    "WORKSPACE_ROOT": "/tmp",
-                }
-            )
-            for key in (
-                "GOOGLE_APPLICATION_CREDENTIALS",
-                "GCP_AUTH_FILE",
-                "MONKEYBOT_AGENT_ROOT",
-                "SKILLS_PATH",
-                "AGENT_MD",
-                "MCP_CONFIG",
-                "COMMAND_ALLOWLIST_CONFIG",
-                "PERMISSION_CONFIG",
-            ):
-                runtime_env.pop(key, None)
-
-        # MemPalace stays on the host. Do not leak the palace path into the
-        # sandbox (it is not mounted, and mempalace search runs on the host).
-        for key in ("MEMPALACE_PALACE_PATH", "MEMORY_STORAGE_URI", "MEMORY_PATH"):
-            runtime_env.pop(key, None)
-
-        self._sandbox = await Sandbox.create(
-            self._config.image,
-            connection_config=connection_config,
-            timeout=timedelta(seconds=self._config.ttl_seconds),
-            env=runtime_env,
-            volumes=volumes,
-        )
-        logger.info("Sandbox created: id=%s", getattr(self._sandbox, "id", "unknown"))
+    def _log_command(
+        self,
+        *,
+        reused: bool,
+        prewarmed: bool,
+        first: bool,
+        started: float,
+    ) -> None:
+        extra: dict[str, Any] = {
+            "sandbox_reused": reused,
+            "sandbox_prewarmed": prewarmed,
+            "sandbox_first_command_ms": None,
+        }
+        if first:
+            extra["sandbox_first_command_ms"] = (self._session.now() - started) * 1000.0
+        self._session.note_command()
+        logger.info("sandbox command", extra=extra)
 
     async def execute(
         self,
@@ -444,25 +376,22 @@ class SandboxExecutor:
         """
         self._screen_command(command, args, cwd=cwd, extra_allowed_commands=extra_allowed_commands)
 
-        await self._ensure_sandbox()
+        sandbox, reused, prewarmed, first = await self._open_for_command()
 
         full_cmd = " ".join([command] + [shlex.quote(a) for a in args])
         logger.info("Sandbox execute: %s", full_cmd)
 
         from opensandbox.models.execd import RunCommandOpts
 
-        workdir = (
-            str(Path(cwd).resolve())
-            if cwd is not None and self._config.shared_filesystem
-            else "/tmp"
-        )
-        execution = await self._sandbox.commands.run(
+        started = self._session.now()
+        execution = await sandbox.commands.run(
             full_cmd,
             opts=RunCommandOpts(
                 timeout=timedelta(seconds=timeout),
-                working_directory=workdir,
+                working_directory=self._workdir(cwd),
             ),
         )
+        self._log_command(reused=reused, prewarmed=prewarmed, first=first, started=started)
 
         stdout_entries = execution.logs.stdout or []
         stderr_entries = execution.logs.stderr or []
@@ -479,7 +408,13 @@ class SandboxExecutor:
         return self._jobs.running()
 
     def has_job(self, job_id: str) -> bool:
-        return job_id in self._jobs
+        return self._jobs.has_job(job_id)
+
+    def mark_job_awaited(self, job_id: str) -> None:
+        self._jobs.mark_awaited(job_id)
+
+    async def wait_until_settled(self, job_id: str, *, timeout: float) -> None:
+        await self._jobs.wait_until_settled(job_id, timeout=timeout)
 
     def _log_job(
         self,
@@ -507,12 +442,13 @@ class SandboxExecutor:
         full_cmd: str,
         workdir: str,
         effective: int,
+        sandbox: Any,
     ) -> Any:
         logger.info("Sandbox background execute: %s", full_cmd)
         try:
             from opensandbox.models.execd import RunCommandOpts
 
-            return await self._sandbox.commands.run(
+            return await sandbox.commands.run(
                 full_cmd,
                 opts=RunCommandOpts(
                     background=True,
@@ -544,9 +480,8 @@ class SandboxExecutor:
         """Start a detached sandbox command. Same allowlist as ``execute``."""
         effective, hit_ceiling = clamp_job_timeout(timeout, ceiling=self._config.max_job_seconds)
         self._screen_command(command, args, cwd=cwd, extra_allowed_commands=extra_allowed_commands)
-        await self._ensure_sandbox()
-        job = allocate_background_job(
-            self._jobs,
+        sandbox, reused, prewarmed, first = await self._open_for_command()
+        job = self._jobs.allocate(
             command,
             args,
             effective=effective,
@@ -554,81 +489,55 @@ class SandboxExecutor:
             log_dir=log_dir,
         )
         full_cmd = " ".join([command] + [shlex.quote(a) for a in args])
-        workdir = (
-            str(Path(cwd).resolve())
-            if cwd is not None and self._config.shared_filesystem
-            else "/tmp"
-        )
-        execution = await self._run_remote_background(job, full_cmd, workdir, effective)
+        started = self._session.now()
+        try:
+            execution = await self._run_remote_background(
+                job, full_cmd, self._workdir(cwd), effective, sandbox
+            )
+        except Exception:
+            # The caller sees the start error. Do not also wake the session.
+            self._jobs.mark_awaited(job.job_id)
+            raise
+        self._log_command(reused=reused, prewarmed=prewarmed, first=first, started=started)
         remote_id = getattr(execution, "id", None)
         if not remote_id:
             job.status = JobStatus.LOST
             job.error = "sandbox background command returned no execution id"
+            self._jobs.mark_awaited(job.job_id)
             self._log_job(job, "sandbox background job lost", failed=True)
             raise OSError(job.error)
         job.remote_id = str(remote_id)
         # ``complete`` is set at launch. Leave the job running so status and
         # logs are read later; do not invent exit code 0 from a missing one.
         self._capture_execution_logs(job, execution)
-        self._ensure_renew_loop()
-        self._timeout_tasks[job.job_id] = asyncio.create_task(
-            self._enforce_timeout(job.job_id),
-            name=f"sandbox-job-timeout-{job.job_id}",
-        )
+        await self._jobs.adopt_remote(job, self._session)
+        self._session.poke_renew()
         self._log_job(job, "sandbox background job started")
         return job
 
     async def get_status(self, job_id: str) -> BackgroundJob:
         async with self._lock:
-            job = self._jobs.get(job_id)
-            await self._refresh_unlocked(job)
-            return job
+            return await self._jobs.get_status(job_id)
 
     async def read_output(self, job_id: str, cursor: int) -> tuple[str, int]:
-        job = self._jobs.get(job_id)
-        return read_log_from(job.log_path, cursor, final=job.status is not JobStatus.RUNNING)
+        return await self._jobs.read_output(job_id, cursor)
 
     async def kill(self, job_id: str) -> BackgroundJob:
-        job = self._jobs.get(job_id)
         async with self._lock:
-            if job.status is JobStatus.RUNNING:
-                await self._stop_remote(job, reason="killed")
-        return job
+            return await self._jobs.kill(job_id, reason="killed")
 
     async def aclose(self) -> list[BackgroundJob]:
-        """Interrupt remaining jobs, then destroy the sandbox.
+        """Release this executor.
 
-        Safe to call multiple times. Exceptions from kill() are swallowed so
-        the gateway finally block always completes. Returns jobs that were
-        still running (now killed or lost).
+        A private job table is killed and a private container is destroyed.
+        A session-owned table and container are left running. Safe to call
+        twice. Returns jobs this call killed.
         """
-        self._cancel_renew()
         killed: list[BackgroundJob] = []
-        for job in list(self._jobs.running()):
-            try:
-                killed.append(await self.kill(job.job_id))
-            except Exception:
-                logger.warning(
-                    "failed to interrupt background job during aclose",
-                    extra={"job_id": job.job_id},
-                    exc_info=True,
-                )
-                if job.status is JobStatus.RUNNING:
-                    job.status = JobStatus.LOST
-                    job.error = job.error or "lost during shutdown"
-                killed.append(job)
-        for task in list(self._timeout_tasks.values()):
-            task.cancel()
-        self._timeout_tasks.clear()
-        if self._sandbox is None:
-            return killed
-        sandbox = self._sandbox
-        self._sandbox = None
-        try:
-            await sandbox.kill()
-            logger.info("Sandbox destroyed")
-        except Exception:
-            logger.warning("Failed to destroy sandbox", exc_info=True)
+        if self._owns_jobs:
+            killed = await self._jobs.aclose("turn end")
+        if self._owns_session:
+            await self._session.aclose()
         return killed
 
     def _screen_command(
@@ -672,134 +581,3 @@ class SandboxExecutor:
             append_log(job.log_path, stdout if stdout.endswith("\n") else stdout + "\n")
         if stderr:
             append_log(job.log_path, stderr if stderr.endswith("\n") else stderr + "\n")
-
-    async def _refresh_unlocked(self, job: BackgroundJob) -> None:
-        if job.status is not JobStatus.RUNNING or not job.remote_id or self._sandbox is None:
-            return
-        try:
-            status = await self._sandbox.commands.get_command_status(job.remote_id)
-        except Exception as exc:
-            self._log_job(job, "sandbox command status failed", failed=True, exc_info=True)
-            # Status is unknown, so stop the remote process rather than leave it
-            # running unseen; ``_stop_remote`` marks the job lost if that fails too.
-            await self._stop_remote(job, reason=str(exc) or "sandbox command status failed")
-            return
-        await self._pull_remote_logs(job)
-        running = getattr(status, "running", None)
-        exit_code = getattr(status, "exit_code", None)
-        if running:
-            return
-        self._cancel_timeout(job.job_id)
-        if exit_code is None and not getattr(status, "error", None):
-            job.status = JobStatus.LOST
-            job.error = "sandbox command ended without an exit code"
-            self._log_job(job, "sandbox background job lost", failed=True)
-            return
-        job.exit_code = exit_code if exit_code is not None else 0
-        job.status = JobStatus.EXITED
-        error = getattr(status, "error", None)
-        if error and job.exit_code != 0:
-            job.error = str(error)
-        self._log_job(job, "sandbox background job exited")
-
-    async def _pull_remote_logs(self, job: BackgroundJob) -> None:
-        if self._sandbox is None or not job.remote_id:
-            return
-        try:
-            logs = await self._sandbox.commands.get_background_command_logs(
-                job.remote_id, cursor=job.remote_cursor
-            )
-        except Exception:
-            logger.warning(
-                "sandbox background log read failed",
-                extra={"job_id": job.job_id, "remote_id": job.remote_id},
-                exc_info=True,
-            )
-            return
-        content = getattr(logs, "content", "") or ""
-        if content:
-            append_log(job.log_path, content if content.endswith("\n") else content + "\n")
-        cursor = getattr(logs, "cursor", None)
-        if cursor is not None:
-            job.remote_cursor = int(cursor)
-
-    async def _stop_remote(self, job: BackgroundJob, *, reason: str) -> None:
-        self._cancel_timeout(job.job_id)
-        if job.status is not JobStatus.RUNNING:
-            return
-        if self._sandbox is not None and job.remote_id:
-            try:
-                await self._sandbox.commands.interrupt(job.remote_id)
-            except Exception:
-                job.status = JobStatus.LOST
-                job.error = reason
-                self._log_job(job, "sandbox interrupt failed", failed=True, exc_info=True)
-                return
-        job.status = JobStatus.KILLED
-        job.error = reason
-        if job.exit_code is None:
-            job.exit_code = -1
-        append_log(job.log_path, f"\n[{reason}]\n")
-        self._log_job(job, "sandbox background job killed")
-
-    async def _enforce_timeout(self, job_id: str) -> None:
-        job = self._jobs.get(job_id)
-        try:
-            await asyncio.sleep(job.timeout_seconds)
-        except asyncio.CancelledError:
-            return
-        async with self._lock:
-            if job.status is JobStatus.RUNNING:
-                await self._stop_remote(
-                    job,
-                    reason=timeout_failure_message(
-                        timeout_seconds=job.timeout_seconds,
-                        hit_ceiling=job.hit_ceiling,
-                    ),
-                )
-
-    def _cancel_timeout(self, job_id: str) -> None:
-        task = self._timeout_tasks.pop(job_id, None)
-        if task is not None and task is not asyncio.current_task():
-            task.cancel()
-
-    def _ensure_renew_loop(self) -> None:
-        if self._renew_task is not None and not self._renew_task.done():
-            return
-        self._renew_task = asyncio.create_task(self._renew_while_jobs(), name="sandbox-renew")
-
-    def _cancel_renew(self) -> None:
-        task = self._renew_task
-        self._renew_task = None
-        if task is not None and not task.done():
-            task.cancel()
-
-    async def _renew_while_jobs(self) -> None:
-        """Extend the worker while any background job is still running.
-
-        Renews once immediately, then every ``renew_interval_seconds``. An
-        interval of 0 renews once and returns (useful when the server rejects
-        further renews). Failures are logged; the local job ceiling still applies.
-        """
-        try:
-            await self._renew_once()
-            interval = self._config.renew_interval_seconds
-            while interval > 0 and self.running_jobs() and self._sandbox is not None:
-                await asyncio.sleep(interval)
-                if not self.running_jobs() or self._sandbox is None:
-                    return
-                await self._renew_once()
-        except asyncio.CancelledError:
-            return
-
-    async def _renew_once(self) -> None:
-        if self._sandbox is None:
-            return
-        try:
-            await self._sandbox.renew(timedelta(seconds=self._config.ttl_seconds))
-            logger.info(
-                "sandbox renewed while background jobs run",
-                extra={"ttl_seconds": self._config.ttl_seconds},
-            )
-        except Exception:
-            logger.warning("sandbox renew failed while background jobs run", exc_info=True)

@@ -127,11 +127,13 @@ class SessionBus:
         self.subagent_supervisor: Any | None = None
         """Background subagents for this session. Outlives individual turns."""
         self.session_jobs: Any | None = None
-        """Local background commands for this session. Outlives individual turns."""
+        """Local and sandbox background commands for this session. Outlives turns."""
+        self.sandbox_session: Any | None = None
+        """OpenSandbox container for this chat. Outlives individual turns."""
         self.wake_budget: Any | None = None
         """Shared cap on harness wakes from subagents and background commands."""
         self.background_jobs_survive_turn: bool | None = None
-        """Fixed for the session: local background commands outlive the turn."""
+        """Fixed for the session: background commands outlive the turn."""
         self.active_turn_task: asyncio.Task[None] | None = None
         """Background turn task scheduled by ``_schedule_turn``; awaited on DELETE."""
 
@@ -407,6 +409,16 @@ class SessionRegistry:
                 except Exception:
                     logger.warning(
                         "session jobs close failed %s",
+                        kv(session_id=session_id),
+                        exc_info=True,
+                    )
+            sandbox_session = getattr(bus, "sandbox_session", None)
+            if sandbox_session is not None:
+                try:
+                    await sandbox_session.aclose()
+                except Exception:
+                    logger.warning(
+                        "sandbox session close failed %s",
                         kv(session_id=session_id),
                         exc_info=True,
                     )
