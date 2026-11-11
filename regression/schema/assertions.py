@@ -152,6 +152,7 @@ _REQUEST_KEYS = frozenset(
         "tools_empty",
         "system_contains",
         "system_not_contains",
+        "system_same_as",
         "messages_contain",
         "messages_not_contain",
         "no_vertex_google_search",
@@ -1032,7 +1033,25 @@ def _check_provider_request(active: Mapping[str, Any], run: RunView) -> list[str
             failures.append(f"provider_request: no request {number}")
             continue
         failures.extend(_match_provider_request(number, matcher, run.provider_requests[number - 1]))
+        failures.extend(_match_system_same_as(number, matcher, run.provider_requests))
     return failures
+
+
+def _match_system_same_as(
+    number: int, matcher: Mapping[str, Any], requests: Sequence[ProviderRequest]
+) -> list[str]:
+    """Fail when this call's system text is not byte-identical to another call's."""
+    same = matcher.get("system_same_as")
+    if same is None:
+        return []
+    label = f"provider_request[{number}]"
+    if isinstance(same, bool) or not isinstance(same, int) or same < 1:
+        return [f"{label}: system_same_as must be a 1-based index"]
+    if same > len(requests):
+        return [f"{label}: system_same_as request {same} does not exist"]
+    if requests[number - 1].system != requests[same - 1].system:
+        return [f"{label}: system text differs from request {same}"]
+    return []
 
 
 def _match_provider_request(

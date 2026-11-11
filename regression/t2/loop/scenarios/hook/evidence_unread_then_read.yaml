@@ -39,12 +39,13 @@ assertions:
   provider_calls: 4
   provider_request:
     - n: 2
-      system_contains: "## Evidence verification required"
+      messages_contain: "## Evidence verification required"
+      system_not_contains: "## Evidence verification required"
     - n: 2
-      system_contains: src/models.py
+      messages_contain: src/models.py
     - n: 3
-      system_not_contains: "## Evidence verification required"
+      messages_not_contain: "## Evidence verification required"
     - n: 4
-      system_not_contains: "## Evidence verification required"
+      messages_not_contain: "## Evidence verification required"
   turn_completed: true
   no_errors: true

@@ -407,11 +407,16 @@ async def test_guard_puts_notice_on_the_next_provider_request(tmp_path: Path) ->
     assert first.provider_messages is not None
     system = first.provider_messages[0]
     assert system.role == "system"
+    assert all(
+        not (isinstance(block, Text) and "Evidence path correction" in block.text)
+        for block in system.content
+    )
     assert any(
         isinstance(block, Text)
+        and block.text.lstrip().startswith("## System context update")
         and "Evidence path correction" in block.text
         and "missing.py" in block.text
-        for block in system.content
+        for block in first.provider_messages[-1].content
     )
     second = _payload(
         HookEvent.BEFORE_PROVIDER_REQUEST,
@@ -422,7 +427,8 @@ async def test_guard_puts_notice_on_the_next_provider_request(tmp_path: Path) ->
     assert second.provider_messages is not None
     assert all(
         not (isinstance(block, Text) and "Evidence path correction" in block.text)
-        for block in second.provider_messages[0].content
+        for message in second.provider_messages
+        for block in message.content
     )
 
 

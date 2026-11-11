@@ -16,6 +16,7 @@ from monkeybot.core.llm.provider import (
     ToolInputDelta,
     UsageEvent,
 )
+from monkeybot.core.runtime.loop_messages import _send_tail
 from monkeybot.core.types.content_blocks import (
     IMAGE_TOKEN_ESTIMATE,
     ContentBlock,
@@ -189,6 +190,57 @@ def test_converse_cache_point_sits_before_context_tail() -> None:
     assert "toolResult" in content[0]
     assert content[1] == {"cachePoint": {"type": "default"}}
     assert content[2]["text"] == _TAIL
+
+
+def test_converse_cache_point_sits_before_a_note_only_tail() -> None:
+    tail = _send_tail("", "Read the file before editing.")
+    messages = [
+        Message.text("system", "You are helpful."),
+        Message.text("user", "first"),
+        Message(role="assistant", content=[ToolRequest(id="c1", name="echo", args={})]),
+        Message(
+            role="user",
+            content=[
+                ToolResponse(id="c1", tool_name="echo", result=[Text(text="ok")], is_error=False),
+                Text(text=tail),
+            ],
+        ),
+    ]
+    kwargs = converse_request_kwargs(
+        model=_NOVA,
+        messages=messages,
+        tools=[_ECHO],
+        max_tokens=256,
+        temperature=0.2,
+    )
+    content = kwargs["messages"][-1]["content"]
+    assert "toolResult" in content[0]
+    assert content[1] == {"cachePoint": {"type": "default"}}
+    assert "Read the file before editing." in content[2]["text"]
+    assert content[2]["text"].startswith("## System context update")
+
+
+def test_converse_cache_point_sits_before_a_tail_that_also_carries_a_note() -> None:
+    tail = _send_tail(_TAIL, "Read the file before editing.")
+    assert tail.index("## Current request") < tail.index("## Runtime notes")
+    messages = [
+        Message.text("system", "You are helpful."),
+        Message.text("user", "first"),
+        Message.text("assistant", "ok"),
+        Message(role="user", content=[Text(text="second"), Text(text=tail)]),
+    ]
+    kwargs = converse_request_kwargs(
+        model=_NOVA,
+        messages=messages,
+        tools=[_ECHO],
+        max_tokens=256,
+        temperature=0.2,
+    )
+    content = kwargs["messages"][-1]["content"]
+    assert content[0]["text"] == "second"
+    assert content[1] == {"cachePoint": {"type": "default"}}
+    assert "## Current request" in content[2]["text"]
+    assert "Read the file before editing." in content[2]["text"]
 
 
 def test_converse_cache_point_skips_a_tail_only_user_message() -> None:
