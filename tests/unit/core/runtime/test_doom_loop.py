@@ -8,6 +8,7 @@ import pytest
 
 from monkeybot.core.llm.provider import Done, Message, ProviderEvent, TextDelta, ToolCall
 from monkeybot.core.runtime.doom_loop import (
+    _cycle_doom_loop_texts,
     _doom_loop_texts,
     _DoomLoopTracker,
     _effective_doom_loop_threshold,
@@ -672,6 +673,161 @@ def test_apply_patch_retries_on_one_file_trip_the_path_streak() -> None:
         tracker.record("apply_patch", _patch(spelling, old), failed=True)
     assert tracker.triggered
     assert "calc/ops.py" in (tracker.take_error() or "")
+
+
+# --- the same two or three calls repeating ---
+
+
+def _alternate(i: int) -> tuple[str, dict[str, object]]:
+    if i % 2 == 0:
+        return "read_file", {"path": "notes.txt"}
+    return "run_command", {"command": "pytest"}
+
+
+def test_alternating_calls_trip_on_the_sixth() -> None:
+    tracker = _DoomLoopTracker(threshold=3)
+    for i in range(5):
+        name, args = _alternate(i)
+        tracker.record(name, args)
+    assert not tracker.triggered
+    name, args = _alternate(5)
+    tracker.record(name, args)
+    error, note = _cycle_doom_loop_texts(("read_file", "run_command"), 2, 3)
+    assert tracker.take_error() == error
+    assert tracker.recovery_note == note
+    assert "Alternating between the same calls is not making progress" in note
+    assert tracker.triggered_tool == "read_file, run_command"
+    assert tracker.force_no_tools is True
+
+
+def test_three_call_cycle_trips_on_the_ninth() -> None:
+    tracker = _DoomLoopTracker(threshold=3)
+    calls = (
+        ("read_file", {"path": "notes.txt"}),
+        ("replace_in_file", {"path": "notes.txt", "old_string": "a", "new_string": "b"}),
+        ("run_command", {"command": "pytest"}),
+    )
+    for i in range(8):
+        name, args = calls[i % 3]
+        tracker.record(name, args)
+    assert not tracker.triggered
+    name, args = calls[8 % 3]
+    tracker.record(name, args)
+    error = tracker.take_error() or ""
+    assert error.startswith("Doom loop detected: the same 3 tool calls (")
+    assert error.endswith(" repeated 3 times")
+    assert "'read_file', 'replace_in_file', 'run_command'" in error
+    assert tracker.triggered_tool == "read_file, replace_in_file, run_command"
+
+
+def test_changed_arg_does_not_complete_a_cycle() -> None:
+    tracker = _DoomLoopTracker(threshold=3)
+    tracker.record("read_file", {"path": "notes.txt"})
+    tracker.record("run_command", {"command": "pytest"})
+    tracker.record("read_file", {"path": "other.txt"})
+    tracker.record("run_command", {"command": "pytest"})
+    tracker.record("read_file", {"path": "notes.txt"})
+    tracker.record("run_command", {"command": "pytest"})
+    assert not tracker.triggered
+
+
+def test_exempt_poll_does_not_hide_or_trip_a_cycle() -> None:
+    tracker = _DoomLoopTracker(threshold=3, exempt_names=frozenset({"loop_status"}))
+    for i in range(5):
+        name, args = _alternate(i)
+        tracker.record(name, args)
+        tracker.record("loop_status", {"loop_id": "x"}, failed=i % 2 == 0)
+    assert not tracker.triggered
+    name, args = _alternate(5)
+    tracker.record(name, args)
+    assert tracker.triggered
+    assert "repeated 3 times" in (tracker.take_error() or "")
+
+
+def test_cycle_counts_successes_and_failures_together() -> None:
+    tracker = _DoomLoopTracker(threshold=2)
+    for i in range(3):
+        name, args = _alternate(i)
+        tracker.record(name, args, failed=i % 2 == 0)
+        assert not tracker.triggered
+    name, args = _alternate(3)
+    tracker.record(name, args, failed=False)
+    assert tracker.triggered
+
+
+def test_cycle_rearms_after_recovery() -> None:
+    tracker = _DoomLoopTracker(threshold=2)
+    for i in range(4):
+        name, args = _alternate(i)
+        tracker.record(name, args)
+    assert tracker.take_error() is not None
+    force, note = tracker.consume_recovery()
+    assert force is True and note is not None
+    assert tracker.triggered is False
+    assert len(tracker.recent) == 0
+    for i in range(3):
+        name, args = _alternate(i)
+        tracker.record(name, args)
+    assert not tracker.triggered
+    name, args = _alternate(3)
+    tracker.record(name, args)
+    assert tracker.take_error() is not None
+
+
+def test_cycle_disabled_when_threshold_zero() -> None:
+    tracker = _DoomLoopTracker(threshold=0)
+    for i in range(12):
+        name, args = _alternate(i)
+        tracker.record(name, args, failed=True)
+    assert tracker.triggered is False
+    assert tracker.take_error() is None
+
+
+def test_identical_streak_is_not_reported_as_a_cycle() -> None:
+    tracker = _DoomLoopTracker(threshold=3)
+    for _ in range(3):
+        tracker.record("read_file", {"path": "notes.txt"})
+    assert tracker.take_error() == _doom_loop_texts("read_file", 3)[0]
+
+
+@pytest.mark.asyncio
+async def test_run_doom_loop_on_alternating_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DOOM_LOOP_THRESHOLD", "3")
+    paths = ("notes.txt", "other.txt")
+    scripts: list[list[ProviderEvent]] = [
+        [ToolCall(call_id=f"c{i}", name="read_file", args={"path": paths[i % 2]}), Done()]
+        for i in range(6)
+    ]
+    scripts.append([TextDelta(text="I will stop alternating."), Done()])
+    prov = ToolsRecordingProvider(scripts)
+    events = [
+        e
+        async for e in run(
+            "u",
+            _ctx(),
+            provider=prov,
+            history=FakeHistory(),
+            inspectors=[AllowInspector()],
+            tool_executor=RecordingExecutor(ToolExecutionResult.ok_text("ok")),
+            max_turns=10,
+        )
+    ]
+    doom_errors = [
+        e for e in events if isinstance(e, Error) and e.error.startswith("Doom loop detected:")
+    ]
+    assert len(doom_errors) == 1
+    assert doom_errors[0].error == (
+        "Doom loop detected: the same 2 tool calls ('read_file', 'read_file') repeated 3 times"
+    )
+    gates = [
+        e for e in events if isinstance(e, HarnessIntervention) and e.intervention == "doom_loop"
+    ]
+    assert len(gates) == 1
+    assert gates[0].detail == doom_errors[0].error
+    assert prov.stream_tools[-1] == []
+    assert isinstance(events[-1], TurnComplete)
 
 
 def test_multi_file_patch_breaks_a_single_file_streak() -> None:
