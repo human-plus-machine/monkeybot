@@ -28,7 +28,10 @@ from monkeybot.providers._utils import (
     split_leading_system,
     suppress_thinking_for_auxiliary_call,
 )
-from monkeybot.providers.request_budget import trim_message_media_for_byte_budget
+from monkeybot.providers.request_budget import (
+    request_bytes_sliced,
+    trim_message_media_for_byte_budget,
+)
 from monkeybot.providers.sampling import resolve_model_sampling
 
 _log = logging.getLogger(__name__)
@@ -112,11 +115,13 @@ class BedrockProvider:
         hints: ProviderCallHints | None = None,
     ) -> int:
         del thinking_budget, hints
+        size = await request_bytes_sliced(messages, tools)
         messages = trim_message_media_for_byte_budget(
             messages,
             tools,
             provider=self.name,
             raise_if_oversized=False,
+            known_bytes=size,
         )
         if not uses_anthropic_bedrock(model):
             return estimate_converse_input_tokens(messages, tools)
@@ -163,7 +168,10 @@ class BedrockProvider:
         # thinking_budget is not forwarded: Converse has no budget field, and the
         # Claude path sends reasoning_effort instead of a manual budget.
         del thinking_budget
-        messages = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
+        size = await request_bytes_sliced(messages, tools)
+        messages = trim_message_media_for_byte_budget(
+            messages, tools, provider=self.name, known_bytes=size
+        )
         if not uses_anthropic_bedrock(model):
             if self._reasoning_effort and model not in _CONVERSE_EFFORT_WARNED:
                 _CONVERSE_EFFORT_WARNED.add(model)

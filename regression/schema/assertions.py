@@ -152,8 +152,10 @@ _REQUEST_KEYS = frozenset(
         "tools_empty",
         "system_contains",
         "system_not_contains",
+        "system_same_as",
         "messages_contain",
         "messages_not_contain",
+        "messages_count",
         "no_vertex_google_search",
         "thinking_budget",
         "model",
@@ -1032,7 +1034,25 @@ def _check_provider_request(active: Mapping[str, Any], run: RunView) -> list[str
             failures.append(f"provider_request: no request {number}")
             continue
         failures.extend(_match_provider_request(number, matcher, run.provider_requests[number - 1]))
+        failures.extend(_match_system_same_as(number, matcher, run.provider_requests))
     return failures
+
+
+def _match_system_same_as(
+    number: int, matcher: Mapping[str, Any], requests: Sequence[ProviderRequest]
+) -> list[str]:
+    """Fail when this call's system text is not byte-identical to another call's."""
+    same = matcher.get("system_same_as")
+    if same is None:
+        return []
+    label = f"provider_request[{number}]"
+    if isinstance(same, bool) or not isinstance(same, int) or same < 1:
+        return [f"{label}: system_same_as must be a 1-based index"]
+    if same > len(requests):
+        return [f"{label}: system_same_as request {same} does not exist"]
+    if requests[number - 1].system != requests[same - 1].system:
+        return [f"{label}: system text differs from request {same}"]
+    return []
 
 
 def _match_provider_request(
@@ -1089,6 +1109,20 @@ def _match_provider_request(
         failures.append(f"{label}: messages_not_contain {messages_absent!r} was in the messages")
     elif messages_absent is not None and not isinstance(messages_absent, str):
         failures.append(f"{label}: messages_not_contain must be a string")
+    counts = matcher.get("messages_count")
+    if counts is not None:
+        if not isinstance(counts, dict):
+            failures.append(f"{label}: messages_count must be a mapping of text to a count")
+        else:
+            for needle, expected in counts.items():
+                if not isinstance(needle, str) or type(expected) is not int:
+                    failures.append(f"{label}: messages_count entries must map text to an integer")
+                    break
+                actual = blob.count(needle)
+                if actual != expected:
+                    failures.append(
+                        f"{label}: messages_count {needle!r} appeared {actual} times, not {expected}"
+                    )
     expected_model = matcher.get("model")
     if isinstance(expected_model, str) and request.model != expected_model:
         failures.append(f"{label}: model {request.model!r} != {expected_model!r}")

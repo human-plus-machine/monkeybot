@@ -63,8 +63,7 @@ This block is injected by the host every turn. Prefer the **active JSON tool lis
 
 ### MCP
 {catalog_mcp_line}- MCP errors are plain text (not structured JSON). HTTP 4xx/5xx, "not found", "unauthorized", "forbidden", or similar means the tool **did not return usable data** — state what failed; do not fabricate content.
-- Call `enable_loops` before scheduled-loop tools appear.
-- `/goal` uses `create_goal` / `update_goal`. Recurring "every …" work uses `/loop`.
+{enable_loops_line}- `/goal` uses `create_goal` / `update_goal`. Recurring "every …" work uses `/loop`.
 
 ### Skills
 - Installed skill names are listed under `## Skills` in this prompt. When a task matches one, use `list_skills` to get the skills root, then `read_file` that skill's `SKILL.md` before following it."""
@@ -170,6 +169,7 @@ def harness_fixed_context(
     emission_style: bool = False,
     memory_on: bool = True,
     catalog_mcp_servers: Sequence[str] | None = None,
+    include_enable_loops: bool = True,
 ) -> str:
     """Runtime-owned protocol, paths, MCP naming, and strict tool-call rules.
 
@@ -189,6 +189,8 @@ def harness_fixed_context(
     The model must use this list (and the ``enable_mcp`` tool schema); it must not
     read control-plane config files.
     The editing & verification protocol is always appended (coding mode is always on).
+    ``include_enable_loops`` keeps the line that tells the model to call ``enable_loops``.
+    Pass false when that tool is not in the list sent to the model.
     """
     exec_note = (
         _RUN_COMMAND_EXEC_NOTE_SANDBOX if run_command_opensandbox else _RUN_COMMAND_EXEC_NOTE_HOST
@@ -208,9 +210,15 @@ def harness_fixed_context(
             "- Names look like `server__tool` (double underscore). Do not read or "
             "search for MCP config files.\n"
         )
+    enable_loops_line = (
+        "- Call `enable_loops` before scheduled-loop tools appear.\n"
+        if include_enable_loops
+        else ""
+    )
     body = _HARNESS_BODY.format(
         run_command_exec_note=exec_note,
         catalog_mcp_line=catalog_mcp_line,
+        enable_loops_line=enable_loops_line,
         memory_paths_line=_memory_paths_line(
             memory_on=memory_on,
             memory_storage_uri=memory_storage_uri,

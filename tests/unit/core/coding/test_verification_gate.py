@@ -15,6 +15,7 @@ from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
 from monkeybot.core.llm.provider import Done, TextDelta, ToolCall
 from monkeybot.core.runtime.loop import run
 from monkeybot.core.tools.types import ToolExecutionResult
+from monkeybot.core.types.content_blocks import Text
 from monkeybot.todo_list.store import TodoListStore
 from testkit.context import _ctx
 from testkit.executors import RecordingExecutor
@@ -366,7 +367,15 @@ async def test_loop_rejects_an_unverified_final_answer_then_accepts_the_verified
     ]
     assert len(gates) == 1 and "a.py" in gates[0].detail
     assert prov._idx == 4
-    assert "You changed 1 file (a.py)" in prov.system_texts[2]
+    note = "You changed 1 file (a.py)"
+    assert note in "\n".join(
+        block.text
+        for message in prov.message_snapshots[2]
+        for block in message.content
+        if isinstance(block, Text)
+    )
+    assert all(note not in text for text in prov.system_texts)
+    assert prov.system_texts[0] == prov.system_texts[2]
     assert events[-1].kind == "TurnComplete"
 
 

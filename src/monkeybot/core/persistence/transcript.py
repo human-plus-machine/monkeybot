@@ -38,6 +38,7 @@ from monkeybot.core.path_safety import (
     path_contained_under,
     sanitize_path_component,
 )
+from monkeybot.core.prompts.headings import is_system_context_update
 from monkeybot.core.runtime.events import (
     AgentEvent,
     AssistantTextEnded,
@@ -72,6 +73,10 @@ _DIFF_CONTEXT_LINES = 1
 _STUB_FORMAT: dict[str, str] = {
     "doc": "Repeated bytes are written once and referenced by seq. Look up the cited record.",
     "text_seq": "text is the `text` of that record",
+    "context_tail_seq": (
+        "context_tail is the `text` of that record, or its `context_tail` when "
+        "that record is a ProviderRequest"
+    ),
     "result_seq": "result is the `result` of that ToolCallResult",
     "schema_seq": "full tool schema is the `tools` of that ProviderRequest",
     "content_seq": (
@@ -389,6 +394,37 @@ def _debug_fields(event: AgentEvent) -> dict[str, Any]:
     return extra
 
 
+def _lift_context_tail(messages: list[dict[str, object]]) -> tuple[list[dict[str, object]], str]:
+    """Drop a trailing context tail from the last message and return its text.
+
+    The tail is send-time only. Leaving it in the message would make a later
+    call, which rebuilds that message without the tail, disagree with this record.
+    """
+    if not messages:
+        return messages, ""
+    last = messages[-1]
+    content = last.get("content")
+    if isinstance(content, str):
+        if is_system_context_update(content):
+            return messages[:-1], content
+        return messages, ""
+    if not isinstance(content, list):
+        return messages, ""
+    kept: list[object] = []
+    tails: list[str] = []
+    for block in content:
+        text = block.get("text") if isinstance(block, dict) else None
+        if isinstance(text, str) and is_system_context_update(text):
+            tails.append(text)
+            continue
+        kept.append(block)
+    if not tails:
+        return messages, ""
+    if not kept:
+        return messages[:-1], "\n\n".join(tails)
+    return [*messages[:-1], {**last, "content": kept}], "\n\n".join(tails)
+
+
 class TranscriptWriter:
     """Append-only NDJSON transcript writer for one gateway session.
 
@@ -686,12 +722,18 @@ class TranscriptWriter:
         messages: list[dict[str, object]],
         message_offset: int = 0,
         messages_reset: bool = False,
+        context_tail: str = "",
         tools: list[dict[str, object]] | None = None,
         thinking_budget: int | None,
         tools_include_reason: str | None = None,
         tools_dirty_reason: str | None = None,
         exchange_id: str | None = None,
     ) -> None:
+        # A tail folded into the last message would be replayed as if later
+        # calls still sent it. Lift it onto this record; point at the first
+        # record that already holds the same text.
+        messages, lifted = _lift_context_tail(messages)
+        tail = context_tail.strip() or lifted
         stubbed, owned = self._stub_messages(messages)
         record: dict[str, Any] = {
             "ts": now_iso(),
@@ -703,6 +745,15 @@ class TranscriptWriter:
             "messages": stubbed,
             "thinking_budget": thinking_budget,
         }
+        tail_is_new = False
+        if tail:
+            known = self._known_text_seq(tail)
+            if known is None:
+                record["context_tail"] = tail
+                tail_is_new = True
+            else:
+                record["context_tail_seq"] = known
+                record["context_tail_chars"] = len(tail)
         if messages_reset:
             record["messages_reset"] = True
         if exchange_id:
@@ -725,6 +776,15 @@ class TranscriptWriter:
         if payload is not None:
             self._last_schema_hash = digest
             self._last_schema_seq = seq if isinstance(payload, list) else schema_seq
+        if tail_is_new:
+            self._last_text_by_kind["context_tail"] = (tail, seq)
+
+    def _known_text_seq(self, text: str) -> int | None:
+        """Seq of a record that already stored this exact text, if any."""
+        for known, seq in self._last_text_by_kind.values():
+            if known == text:
+                return seq
+        return None
 
     async def write_provider_response(
         self,

@@ -13,7 +13,13 @@ from monkeybot.core.context.tool_result_ingress import (
     skip_tool_result_sanitize,
 )
 from monkeybot.core.context.tool_shapers import shape_tool_text
-from monkeybot.core.types.content_blocks import ContentBlock, Text, ToolResponse
+from monkeybot.core.types.content_blocks import (
+    IMAGE_TOKEN_ESTIMATE,
+    ContentBlock,
+    Image,
+    Text,
+    ToolResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +32,47 @@ _DIFF_GIT_RE = re.compile(r"^diff --git a/.+ b/(.+)$", re.MULTILINE)
 PRESSURE_LIGHT_RATIO = 0.50
 PRESSURE_MODERATE_RATIO = 0.70
 PRESSURE_AGGRESSIVE_RATIO = 0.85
-# Inline history summarization fires at the same bar as aggressive tool-result
-# shaping — row count is otherwise unbounded until this token bar is hit.
-# A background summary starts at the moderate bar so the turn that crosses this
-# one can apply it instead of waiting on the summarizer.
+# The only token-ratio compaction trigger. A background summary starts at the
+# moderate bar so the turn that crosses this one can apply it instead of
+# waiting on the summarizer. The post-tool budgeter does not compact on a tier.
 SUMMARY_TRIGGER_RATIO = PRESSURE_AGGRESSIVE_RATIO
 RESULT_BUDGET_FRACTION = 0.8
+
+
+def request_token_limit(window_tokens: int) -> int:
+    """Largest input this harness will treat as fitting the model.
+
+    Today that is the configured window. An absolute ceiling or a reserve for
+    the provider's output budget would change only this function.
+    """
+    return max(1, int(window_tokens))
+
+
+def summary_input_budget(window_tokens: int) -> int:
+    """Largest summary request, in estimated tokens.
+
+    A summary is never larger than the largest request the main turn sends on
+    purpose, which is ``SUMMARY_TRIGGER_RATIO`` of the window.
+    """
+    return max(1, int(request_token_limit(window_tokens) * SUMMARY_TRIGGER_RATIO))
+
+
 RESULT_BUDGET_FLOOR_TOKENS = 2000
+# Local prompt estimate from the last provider-reported size. The delta is the
+# only uncertain part: half the char estimate to three times it. An anchor is
+# trusted when the provider's report is within half to twice the real count,
+# and a char change over a quarter of that anchor is counted for real.
+PROMPT_ESTIMATE_CHARS_PER_TOKEN = 3.0
+PROMPT_ESTIMATE_DELTA_LO = 0.5
+PROMPT_ESTIMATE_DELTA_HI = 3.0
+# A small edit makes the ratio band only a few tokens wide. Tokenizer
+# disagreement on that edit is an absolute error, measured at about 40 tokens
+# on a short tool result. This slack keeps that inside the band. A pressure
+# bar still forces a real count when it falls inside the widened band.
+PROMPT_ESTIMATE_ABSOLUTE_SLACK = 256
+PROMPT_ANCHOR_TRUST_LO = 0.5
+PROMPT_ANCHOR_TRUST_HI = 2.0
+PROMPT_ANCHOR_MAX_DELTA_FRACTION = 0.25
 
 
 def compute_context_pressure_tier(
@@ -79,6 +119,13 @@ def estimate_tokens_from_char_count(char_count: int) -> int:
 def estimate_tokens(text: str) -> int:
     """Cheap local token estimate (no network)."""
     return estimate_tokens_from_char_count(len(text))
+
+
+def _image_tokens(block: ContentBlock) -> int:
+    """Fixed cost of images a tool result still carries. Text trimming does not count them."""
+    if not isinstance(block, ToolResponse):
+        return 0
+    return sum(IMAGE_TOKEN_ESTIMATE for item in block.result if isinstance(item, Image))
 
 
 def _tool_response_with_text(block: ToolResponse, text: str) -> ToolResponse:
@@ -180,25 +227,26 @@ class ContextBudgeter:
         pool = max(1, int(remaining * self.safety_fraction))
         per_item = max(1, pool // len(blocks))
         needs_compaction = remaining < self.floor_tokens * 2
-        if self.pressure_tier in ("moderate", "aggressive"):
-            needs_compaction = True
 
         out: list[ContentBlock] = []
         for block in blocks:
             shaped = self._shape_tool_response(block)
             if shaped is None:
                 out.append(block)
+                self.used_tokens += _image_tokens(block)
                 continue
             block, text = shaped
             est = estimate_tokens(text)
             if est <= per_item:
-                out.append(_tool_response_with_text(block, text))
-                self.used_tokens += est
+                kept = _tool_response_with_text(block, text)
+                out.append(kept)
+                self.used_tokens += est + _image_tokens(kept)
                 continue
             needs_compaction = True
             trimmed = _trim_text_to_token_budget(text, per_item)
-            out.append(_tool_response_with_text(block, trimmed))
-            self.used_tokens += estimate_tokens(trimmed)
+            kept = _tool_response_with_text(block, trimmed)
+            out.append(kept)
+            self.used_tokens += estimate_tokens(trimmed) + _image_tokens(kept)
 
         return out, needs_compaction
 
@@ -240,11 +288,13 @@ class ContextBudgeter:
             shaped = self._shape_tool_response(block)
             if shaped is None:
                 out.append(block)
+                self.used_tokens += _image_tokens(block)
                 continue
             block, text = shaped
             trimmed = _trim_text_to_token_budget(text, per_item)
-            out.append(_tool_response_with_text(block, trimmed))
-            self.used_tokens += estimate_tokens(trimmed)
+            kept = _tool_response_with_text(block, trimmed)
+            out.append(kept)
+            self.used_tokens += estimate_tokens(trimmed) + _image_tokens(kept)
         return out
 
 

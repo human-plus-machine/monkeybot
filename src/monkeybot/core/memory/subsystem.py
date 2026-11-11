@@ -253,7 +253,7 @@ class MemorySubsystem:
             memory_duration_ms=round(timer.ms(), 1),
         )
         try:
-            status = self._palace.status()
+            status = await asyncio.to_thread(self._palace.status)
             log_event(
                 "palace_status",
                 memory_status="ok",

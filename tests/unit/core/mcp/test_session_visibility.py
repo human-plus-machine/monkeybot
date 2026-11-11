@@ -76,11 +76,44 @@ def test_filter_tools_keeps_other_servers_and_core_tools() -> None:
     assert kept == ["list_dir", "wiki__search"]
 
 
-def test_idle_note_names_the_server_and_the_limit() -> None:
+def test_idle_note_names_the_server() -> None:
     text = idle_note(["browser"])
     assert "MCP server `browser`" in text
-    assert f"after {IDLE_INNER_TURNS} turns without use" in text
+    assert "because it went unused" in text
     assert "Call `enable_mcp` with name `browser`" in text
+    assert "turns" not in text
+
+
+def test_due_server_stays_listed_until_taken() -> None:
+    visibility = MCPSessionVisibility()
+    for _ in range(IDLE_INNER_TURNS + 2):
+        _offered(visibility, "browser")
+    tools = [ToolDef("browser__goto", "Go", {}), ToolDef("list_dir", "List", {})]
+    assert [tool.name for tool in visibility.filter_tools(tools, ["browser"])] == [
+        "browser__goto",
+        "list_dir",
+    ]
+    assert visibility.servers_due() == ["browser"]
+    assert visibility.take_newly_idle() == ["browser"]
+    assert [tool.name for tool in visibility.filter_tools(tools, ["browser"])] == ["list_dir"]
+
+
+def test_use_before_the_take_cancels_the_hide() -> None:
+    visibility = MCPSessionVisibility()
+    for _ in range(IDLE_INNER_TURNS):
+        _offered(visibility, "browser")
+    visibility.note_inner_turn({"browser"}, {"browser"})
+    assert visibility.take_newly_idle() == []
+    assert not visibility.is_hidden("browser")
+
+
+def test_note_is_queued_once() -> None:
+    visibility = MCPSessionVisibility()
+    visibility.queue_note(["browser"])
+    note = visibility.take_note()
+    assert "browser" in note
+    assert "enable_mcp" in note
+    assert visibility.take_note() == ""
 
 
 def test_advertised_and_used_prefer_the_longest_server_name() -> None:

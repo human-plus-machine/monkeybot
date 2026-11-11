@@ -1,6 +1,6 @@
 id: regression/t2/loop/scenarios/mcp/enable_other_keeps_hidden
 case: T2-MCP-18
-description: Enabling one server does not bring back a different server this chat has hidden.
+description: Enabling one server does not bring back a different server compaction hid from this chat.
 mode: scripted
 driver: loop
 executor: real
@@ -9,8 +9,17 @@ messages:
 config:
   model:
     max_turns: 30
+    context_window: 12000
   env:
     MCP_CONFIG: regression/fixtures/configs/mcp.two_prefix.json
+steps:
+- action: touch_file
+  path: big.txt
+  size: 20000
+  fill: Q
+  when:
+    event: tool_result
+    nth: 1
 script:
 - - type: tool_call
     call_id: e0
@@ -73,6 +82,24 @@ script:
       text: n9
   - type: done
 - - type: tool_call
+    call_id: read-big
+    name: read_file
+    args:
+      path: big.txt
+  - type: done
+- - type: text
+    text: idle-summary-body
+  - type: done
+- - type: tool_call
+    call_id: between
+    name: fix__echo
+    args:
+      text: between
+  - type: done
+- - type: text
+    text: "Still calling."
+  - type: done
+- - type: tool_call
     call_id: again
     name: enable_mcp
     args:
@@ -82,9 +109,9 @@ script:
     text: "The other server stays hidden."
   - type: done
 assertions:
-  provider_calls: 12
+  provider_calls: 16
   provider_request:
-  - n: 12
+  - n: 16
     tools_include:
     - fix__echo
     tools_exclude:

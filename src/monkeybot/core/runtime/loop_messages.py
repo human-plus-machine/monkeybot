@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.context import TurnContext
@@ -14,11 +14,17 @@ from monkeybot.core.llm.provider import Message
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.messages.transform_context import provider_visible_blocks, transform_context
 from monkeybot.core.persistence.backends import HistoryStore
-from monkeybot.core.prompts.headings import RUNTIME_NOTES_HEADING
+from monkeybot.core.prompts.headings import (
+    RUNTIME_NOTES_HEADING,
+    SYSTEM_CONTEXT_UPDATE_HEADING,
+    heading_marker,
+    is_system_context_update,
+)
 from monkeybot.core.prompts.prompt import (
-    compose_stable_baseline,
+    compose_stable_baseline_parts,
     compose_volatile_tail_parts,
 )
+from monkeybot.core.prompts.section_budget import SECTION_CHAR_CAPS, clip_head_and_tail
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
     File,
@@ -28,7 +34,8 @@ from monkeybot.core.types.content_blocks import (
     ToolResponse,
 )
 
-from .events import AgentEvent, ContextEpochStarted, SystemContextUpdated
+from .context_budget import estimate_tokens_from_char_count
+from .events import AgentEvent, ContextEpochStarted, PromptSection, SystemContextUpdated
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.loop_messages")
 
@@ -61,6 +68,29 @@ def _system_message_from_text(body: str) -> Message:
     return Message(role="system", content=[Text(text=body)])
 
 
+def _stable_text_and_live_parts(
+    ctx: TurnContext,
+    chat_messages: Sequence[Message],
+    *,
+    attachment_catalog: SessionAttachmentCatalog | None = None,
+) -> tuple[str, dict[str, str], dict[str, str]]:
+    """System prefix, the sections that ride the tail, and the prefix split by name.
+
+    The prefix is the cacheable baseline plus ``## Skills``. Skills are large and
+    change rarely; a change still keeps the cache checkpoint that sits before
+    that heading.     Date, memory, the todo list, background commands, and the current request
+    change between user messages, so they stay out of the system text.
+    """
+    records = attachment_catalog.list_records() if attachment_catalog is not None else None
+    stable_parts = compose_stable_baseline_parts(ctx, attachment_catalog=records)
+    parts = compose_volatile_tail_parts(ctx, chat_messages=chat_messages)
+    skills = parts.get("skills", "")
+    if skills:
+        stable_parts = {**stable_parts, "skills": skills}
+    live = {name: text for name, text in parts.items() if name != "skills"}
+    return "".join(stable_parts.values()), live, stable_parts
+
+
 def _admit_system_context(
     epoch: ContextEpochTracker,
     ctx: TurnContext,
@@ -68,54 +98,123 @@ def _admit_system_context(
     *,
     attachment_catalog: SessionAttachmentCatalog | None = None,
 ) -> EpochAdmit:
-    """Compose stable/volatile tails and reconcile against the current context epoch."""
-    catalog = attachment_catalog.list_records() if attachment_catalog is not None else None
-    stable = compose_stable_baseline(ctx, attachment_catalog=catalog)
-    volatile_parts = compose_volatile_tail_parts(ctx, chat_messages=chat_messages)
-    volatile = "".join(volatile_parts.values())
-    # Excludes "current_date": it is never empty (always today's date), so it
-    # must not count as "content" when deciding whether volatile sections were
-    # cleared for the "## System context update" mid-epoch message.
-    volatile_content = "".join(
-        text for name, text in volatile_parts.items() if name != "current_date"
+    """Reconcile the system prefix and the live sections against the context epoch."""
+    stable, live_parts, stable_parts = _stable_text_and_live_parts(
+        ctx, chat_messages, attachment_catalog=attachment_catalog
     )
+    live = "".join(live_parts.values())
     return epoch.reconcile(
         stable_baseline=stable,
-        volatile_text=volatile,
+        volatile_text=live,
         stable_fingerprint=fingerprint_text(stable),
-        volatile_fingerprint=fingerprint_text(volatile),
-        volatile_part_fingerprints={
-            name: fingerprint_text(text) for name, text in volatile_parts.items()
-        },
-        volatile_content_text=volatile_content,
+        volatile_fingerprint=fingerprint_text(live),
+        volatile_parts=live_parts,
+        stable_parts=stable_parts,
     )
+
+
+def _send_tail(context_tail: str, notes: str | None) -> str:
+    """Context tail plus this call's one-shot notes, inside the same block.
+
+    The notes used to be appended to the system text, which changed it for one
+    call and changed it back on the next. Both changes sit before the messages,
+    so the cache could not reuse anything after the stable system block. The
+    tail is already outside that prefix: cache markers, the transcript, and
+    :func:`_split_context_tail` treat a block starting with ``## System context
+    update`` as send-time only. With no notes the tail is returned unchanged.
+    """
+    if not notes or not notes.strip():
+        return context_tail
+    raw = notes.strip()
+    body = _clipped_runtime_notes(notes)
+    cap = SECTION_CHAR_CAPS["runtime_notes"]
+    if len(raw) > cap:
+        logger.warning(
+            "runtime notes truncated %s",
+            kv(chars=len(raw), cap=cap),
+        )
+    head = context_tail.strip() or heading_marker(SYSTEM_CONTEXT_UPDATE_HEADING).strip()
+    return f"{head}{RUNTIME_NOTES_HEADING}{body}\n"
+
+
+def _append_notice_to_send_tail(messages: list[Message], notice: str) -> list[Message]:
+    """Put a one-shot notice in the send-time tail of ``messages``.
+
+    ``BEFORE_PROVIDER_REQUEST`` hooks run after the tail is attached. A notice
+    spliced onto the system message would change that text for one call. The
+    notice goes into the existing tail block, or into a new one when this call
+    has no tail yet.
+    """
+    note = notice.strip()
+    if not note:
+        return messages
+    addition = _send_tail("", note)
+    if not messages:
+        return [Message(role="user", content=[Text(text=addition)])]
+    last = messages[-1]
+    blocks = list(last.content)
+    for index in range(len(blocks) - 1, -1, -1):
+        block = blocks[index]
+        if isinstance(block, Text) and is_system_context_update(block.text):
+            blocks[index] = Text(text=_send_tail(block.text, note))
+            return [*messages[:-1], Message(role=last.role, content=blocks)]
+    extra = Text(text=addition)
+    if last.role == "user":
+        return [*messages[:-1], Message(role="user", content=[*blocks, extra])]
+    return [*messages, Message(role="user", content=[extra])]
 
 
 def _messages_for_provider(
     system: Message,
     history: Sequence[Message],
     *,
-    mid_conversation_update: str = "",
+    context_tail: str = "",
 ) -> list[Message]:
-    """Leading system + history + optional chronological system-context update.
+    """Leading system + history + the live tail, whenever that tail has text.
 
-    The update is user-role so all providers accept mid-conversation updates
-    (system is leading-only for Anthropic/Gemini/OpenAI adapters). When history
-    already ends in a ``user`` row (e.g. a tool-response turn), the update is
-    folded into that same message instead of appended as a new one — Anthropic
-    and Gemini both reject (or, for Anthropic, only sometimes silently coalesce)
-    two consecutive same-role messages.
+    The tail is user-role so all providers accept it (system is leading-only for
+    Anthropic/Gemini/OpenAI adapters). When history already ends in a ``user``
+    row (e.g. a tool-response turn), the tail is folded into that same message
+    instead of appended as a new one — Anthropic and Gemini both reject (or, for
+    Anthropic, only sometimes silently coalesce) two consecutive same-role messages.
+    It is attached on every call, including the first of a user message, and it
+    is not stored, so the system text and the history stay a stable prefix.
     """
     out: list[Message] = [system, *list(history)]
-    update = mid_conversation_update.strip()
+    update = context_tail.strip()
     if not update:
         return out
-    update_block = Text(text=mid_conversation_update)
+    update_block = Text(text=context_tail)
     if out[-1].role == "user":
         out[-1] = Message(role="user", content=[*out[-1].content, update_block])
     else:
         out.append(Message(role="user", content=[update_block]))
     return out
+
+
+def _split_context_tail(messages: Sequence[Message]) -> tuple[list[Message], str]:
+    """Messages without the live tail, and the tail text.
+
+    The tail is attached at send time and is not part of stored history. The
+    transcript records it beside the request, so a later call's copy of the
+    same message stays byte-identical to what was written the first time.
+    """
+    if not messages:
+        return [], ""
+    last = messages[-1]
+    kept: list[ContentBlock] = []
+    tails: list[str] = []
+    for block in last.content:
+        if isinstance(block, Text) and is_system_context_update(block.text):
+            tails.append(block.text)
+        else:
+            kept.append(block)
+    if not tails:
+        return list(messages), ""
+    head = list(messages[:-1])
+    if kept:
+        head.append(Message(role=last.role, content=kept))
+    return head, "\n\n".join(tails)
 
 
 async def _load_agent_chat_history(history: HistoryStore, thread_id: str) -> list[Message]:
@@ -154,7 +253,7 @@ def _epoch_events(
             request_id=request_id,
             epoch_id=admit.epoch_id,
             changed_sources=list(admit.changed_sources),
-            text=admit.mid_conversation_update,
+            text=admit.context_tail,
         )
     ]
 
@@ -177,6 +276,27 @@ def _provider_messages_prompt_summary(messages: Sequence[Message]) -> str:
     return "\n".join(lines)
 
 
+def _clipped_runtime_notes(extra: str | None) -> str:
+    """Runtime-note body within its character cap, or ``""`` when there is nothing to add."""
+    if not extra:
+        return ""
+    body = extra.strip()
+    if not body:
+        return ""
+    cap = SECTION_CHAR_CAPS["runtime_notes"]
+    if len(body) <= cap:
+        return body
+    return clip_head_and_tail(body, cap)
+
+
+def _runtime_notes_piece(extra: str | None) -> str:
+    """On-wire text appended for runtime notes, including the heading. Empty when unused."""
+    body = _clipped_runtime_notes(extra)
+    if not body:
+        return ""
+    return f"{RUNTIME_NOTES_HEADING}\n{body}\n"
+
+
 def _append_extra_system_text(system: Message, extra: str | None) -> Message:
     """Return a new system Message with ``extra`` under a ``## Runtime notes`` section.
 
@@ -186,9 +306,18 @@ def _append_extra_system_text(system: Message, extra: str | None) -> Message:
     """
     if not extra:
         return system
+    raw = extra.strip()
+    piece = _runtime_notes_piece(extra)
+    if not piece:
+        return system
+    cap = SECTION_CHAR_CAPS["runtime_notes"]
+    if len(raw) > cap:
+        logger.warning(
+            "runtime notes truncated %s",
+            kv(chars=len(raw), cap=cap),
+        )
     base = "".join(b.text for b in system.content if isinstance(b, Text))
-    wrapped = f"{base}{RUNTIME_NOTES_HEADING}\n{extra.strip()}\n"
-    return Message(role="system", content=[Text(text=wrapped)])
+    return Message(role="system", content=[Text(text=f"{base}{piece}")])
 
 
 def _combine_extras(*parts: str | None) -> str | None:
@@ -228,13 +357,65 @@ def _summary_line_for_message(m: Message, *, window_tokens: int | None = None) -
     return f"{m.role}: {' '.join(pieces)}"
 
 
-def _system_prompt_snapshot_text(system: Message, mid_conversation_update: str = "") -> str:
-    """Plain string for :class:`SystemPromptSnapshot` (composed prompt + mid-epoch update)."""
+def _system_prompt_snapshot_text(system: Message, context_tail: str = "") -> str:
+    """Plain string for :class:`SystemPromptSnapshot` (composed prompt + live tail)."""
     body = "".join(b.text for b in system.content if isinstance(b, Text))
-    update = mid_conversation_update.strip()
+    update = context_tail.strip()
     if not update:
         return body
     return f"{body}\n\n{update}"
+
+
+def _prompt_section(name: str, chars: int) -> PromptSection:
+    """One section row. ``chars`` is the on-wire contribution, heading included.
+
+    ``cap_chars`` is the body cap, so a capped section can read a few characters
+    over its cap because of the heading that introduces it.
+    """
+    return PromptSection(
+        name=name,
+        chars=chars,
+        est_tokens=estimate_tokens_from_char_count(chars),
+        cap_chars=SECTION_CHAR_CAPS.get(name),
+    )
+
+
+def build_prompt_sections(
+    *,
+    stable_parts: Mapping[str, str],
+    volatile_parts: Mapping[str, str],
+    runtime_notes: str | None,
+    context_tail: str,
+    tools_chars: int,
+    snapshot_text: str,
+) -> tuple[PromptSection, ...]:
+    """Per-section size of the prompt that was just snapshotted.
+
+    System sections sum to ``snapshot_text`` when the system message is the one
+    the epoch composed. A hook that rewrote that message leaves ``unattributed``
+    for the text the parts no longer explain. ``tools`` is the tool-schema JSON,
+    which is not part of the snapshot text.
+    """
+    pieces: list[tuple[str, str]] = [
+        *stable_parts.items(),
+        *volatile_parts.items(),
+        ("runtime_notes", _runtime_notes_piece(runtime_notes)),
+    ]
+    update = context_tail.strip()
+    if update:
+        pieces.append(("context_tail", f"\n\n{update}"))
+    expected = "".join(text for _name, text in pieces)
+    sections = [_prompt_section(name, len(text)) for name, text in pieces if text]
+    if snapshot_text != expected:
+        if snapshot_text.startswith(expected):
+            gap = snapshot_text[len(expected) :]
+        else:
+            sections = []
+            gap = snapshot_text
+        if gap:
+            sections.append(_prompt_section("unattributed", len(gap)))
+    sections.append(_prompt_section("tools", tools_chars))
+    return tuple(sections)
 
 
 def _snapshot_system_message(provider_messages: Sequence[Message], fallback: Message) -> Message:

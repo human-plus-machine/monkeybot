@@ -20,15 +20,16 @@ assertions:
   provider_calls: 1
   provider_request:
     - n: 1
-      system_contains: "## Runtime notes"
+      messages_contain: "## Runtime notes"
+      system_not_contains: "## Runtime notes"
     - n: 1
-      system_contains: "git: branch workspace-branch"
+      messages_contain: "git: branch workspace-branch"
     - n: 1
-      system_contains: only_workspace.py
+      messages_contain: only_workspace.py
     - n: 1
-      system_not_contains: other-branch
+      messages_not_contain: other-branch
     - n: 1
-      system_not_contains: only_other.py
+      messages_not_contain: only_other.py
   response_contains: Noted the workspace branch.
   turn_completed: true
   no_errors: true

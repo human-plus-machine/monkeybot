@@ -114,8 +114,6 @@ class TurnContext:
     user_id: str | None
     parent_run_id: str | None
     model: str
-    summarization_model: str | None = None
-    """Optional model id for history compression; env ``CONTEXT_SUMMARIZATION_MODEL`` overrides when set."""
     cancelled: asyncio.Event | None = None
     """When set by the parent run (e.g. gateway Stop), tool code may stop side effects early."""
     context_window_tokens: int = 200_000
@@ -181,6 +179,8 @@ class TurnContext:
     """Installed skill the user explicitly invoked with a leading `/slug` this turn."""
     background_runs_view: Callable[[], str] | None = None
     """Optional text for the volatile Background subagents section. None when unused."""
+    background_jobs_view: Callable[[], str] | None = None
+    """Optional text for the volatile Background commands section. None when unused."""
     transcript_view: Callable[[], Sequence[Message]] | None = None
     """Live chat messages for the completion judge. None outside the turn loop."""
     session: str | None = None
@@ -529,6 +529,25 @@ def refresh_tools_after_mcp_change(
     return ctx
 
 
+def hide_due_mcp_servers(ctx: TurnContext, mcp_client: Any) -> list[str]:
+    """Hide MCP servers that reached the idle limit and queue the note.
+
+    Returns the names hidden by this call. A server used since it became due
+    is not in that list: its idle count is already zero. The tool list is
+    unchanged when nothing is due. The caller invokes this only while history
+    is being rewritten, so the cache prefix is already being replaced.
+    """
+    visibility = ctx.mcp_visibility
+    if visibility is None or mcp_client is None:
+        return []
+    newly = visibility.take_newly_idle()
+    if not newly:
+        return []
+    refresh_tools_after_mcp_change(ctx, mcp_client)
+    visibility.queue_note(newly)
+    return newly
+
+
 def refresh_tools_after_loops_change(
     ctx: TurnContext,
     *,
@@ -550,9 +569,12 @@ def refresh_tools_after_loops_change(
 def _core_tool_defs(
     *,
     include_task_tool: bool = True,
+    include_ask_user: bool = True,
+    include_enable_loops: bool = True,
     subagent_type_names: Sequence[str] | None = None,
     catalog_mcp_servers: Sequence[str] | None = None,
     background_tasks_available: bool = False,
+    background_jobs_survive_turn: bool = False,
 ) -> list[ToolDef]:
     """Static core tools always available before MCP extensions."""
     default_lines = AGENT_READ_DEFAULT_LINES
@@ -734,6 +756,34 @@ def _core_tool_defs(
         },
         "required": ["patch_text"],
     }
+    if background_jobs_survive_turn:
+        background_field = (
+            "When true, start the command and return immediately with job_id and "
+            "log_path. The job keeps running after this turn. Tell the user it is "
+            "running and end the turn. A harness note wakes you when it finishes. "
+            "Stop it with kill_command."
+        )
+        background_run_text = (
+            "Set background true for a long command (image build, large test "
+            "suite, migration) so the call returns immediately with job_id and "
+            "log_path. The job keeps running after this turn. Tell the user it is "
+            "running and end the turn. A harness note wakes you when it finishes. "
+            "Pass timeout up to the job ceiling; a job that reaches the ceiling is killed."
+        )
+    else:
+        background_field = (
+            "When true, start the command and return immediately with job_id and "
+            "log_path. Poll with await_command or stop it with kill_command. "
+            "Do not finish the turn while the job is still running."
+        )
+        background_run_text = (
+            "Set background true for a long command (image build, large test "
+            "suite, migration) so the call returns immediately with job_id and "
+            "log_path. Then call await_command until it exits, or kill_command "
+            "to stop it. Do not end the turn while a background job is still "
+            "running — running jobs are killed when the turn ends. Pass timeout "
+            "up to the job ceiling; a job that reaches the ceiling is killed."
+        )
     run_schema: dict[str, object] = {
         "type": "object",
         "properties": {
@@ -759,11 +809,7 @@ def _core_tool_defs(
             "timeout": {"type": "integer"},
             "background": {
                 "type": "boolean",
-                "description": (
-                    "When true, start the command and return immediately with job_id and "
-                    "log_path. Poll with await_command or stop it with kill_command. "
-                    "Do not finish the turn while the job is still running."
-                ),
+                "description": background_field,
             },
         },
         "required": [],
@@ -889,12 +935,7 @@ def _core_tool_defs(
                 "workspace root unless cwd (workspace-relative) is set. "
                 "cd is a builtin and is not a valid command — pass cwd or "
                 "workspace-relative paths to the binary instead. "
-                "Set background true for a long command (image build, large test "
-                "suite, migration) so the call returns immediately with job_id and "
-                "log_path. Then call await_command until it exits, or kill_command "
-                "to stop it. Do not end the turn while a background job is still "
-                "running — running jobs are killed when the turn ends. Pass timeout "
-                "up to the job ceiling; a job that reaches the ceiling is killed."
+                f"{background_run_text}"
             ),
             run_schema,
         ),
@@ -1111,16 +1152,19 @@ def _core_tool_defs(
                 ),
             ]
         )
-    tools.append(
-        ToolDef(
-            "enable_loops",
-            "Advertise scheduled-loop tools (`start_loop`, `loop_status`, "
-            "`pause_loop`, `resume_loop`, `stop_loop`, `disable_loops`) on the "
-            "next model step this turn. Requires durable storage (DB_URL). "
-            "Prefer the loop skill for procedure before starting a loop.",
-            {"type": "object", "properties": {}, "required": []},
-        ),
-    )
+    if include_enable_loops:
+        tools.append(
+            ToolDef(
+                "enable_loops",
+                "Advertise scheduled-loop tools (`start_loop`, `loop_status`, "
+                "`pause_loop`, `resume_loop`, `stop_loop`, `disable_loops`) on the "
+                "next model step this turn. Requires durable storage (DB_URL). "
+                "Prefer the loop skill for procedure before starting a loop.",
+                {"type": "object", "properties": {}, "required": []},
+            ),
+        )
+    if not include_ask_user:
+        tools = [tool for tool in tools if tool.name != "ask_user"]
     return tools
 
 
@@ -1194,6 +1238,15 @@ def _load_agent_md(agent_md_path: Path) -> str:
     return content
 
 
+def _load_agent_and_skills(agent_md_path: Path, skills_path: Path) -> tuple[str, list[SkillRef]]:
+    """Read AGENT.md and the skill folders. Called from a worker thread.
+
+    Both are disk reads, and a slow or network filesystem has no upper bound.
+    One hop covers both, and an empty AGENT.md still raises before anything else.
+    """
+    return _load_agent_md(agent_md_path), _discover_skills(skills_path)
+
+
 def _coding_project_context(workspace_root: Path, names: Sequence[str]) -> tuple[str, str]:
     return load_project_instructions(workspace_root, names), repo_overview(workspace_root)
 
@@ -1209,9 +1262,11 @@ async def build_context(
     user_id: str | None = None,
     parent_run_id: str | None = None,
     model: str = "gemini-2.5-flash",
-    summarization_model: str | None = None,
     include_task_tool: bool = True,
+    include_ask_user: bool = True,
+    include_enable_loops: bool = True,
     background_tasks_available: bool = False,
+    background_jobs_survive_turn: bool = False,
     cancelled: asyncio.Event | None = None,
     context_window_tokens: int = 200_000,
     workspace_root: Path | None = None,
@@ -1231,6 +1286,7 @@ async def build_context(
     read_ledger: FileReadLedger | None = None,
     skill_names: Sequence[str] | None = None,
     background_runs_view: Callable[[], str] | None = None,
+    background_jobs_view: Callable[[], str] | None = None,
     mcp_visibility: MCPSessionVisibility | None = None,
 ) -> TurnContext:
     """Assemble a TurnContext from filesystem paths and the MCP client snapshot.
@@ -1248,10 +1304,10 @@ async def build_context(
             background autoConnect still in flight is included in this turn.
         user_id: Optional authenticated user.
         parent_run_id: Optional parent run for subagent linkage.
-        model: Model id for this turn.
-        summarization_model: Optional model id for sync history summarization; overridden by
-            ``CONTEXT_SUMMARIZATION_MODEL`` when that env var is non-empty.
+        model: Model id for this turn. History summarization and chat titles use it too.
         include_task_tool: When False, omit the ``task`` tool (used by the subagent worker).
+        include_ask_user: When False, omit ``ask_user``. A subagent has no chat to ask.
+        include_enable_loops: When False, omit ``enable_loops``. A subagent has no loop store.
         cancelled: Optional cooperative-cancel handle for the parent turn (gateway / CLI).
         context_window_tokens: Model context budget for pre-flight and summarization triggers.
         workspace_root: Optional workspace root for tools/spill paths (``paths.workspace_root``).
@@ -1286,9 +1342,8 @@ async def build_context(
     Raises:
         ValueError: When AGENT.md is missing or empty after normalization.
     """
-    agent_md = _load_agent_md(agent_md_path)
+    agent_md, skills = await asyncio.to_thread(_load_agent_and_skills, agent_md_path, skills_path)
     memory_index = await memory.load_index(thread_id=thread_id) if memory is not None else []
-    skills = _discover_skills(skills_path)
     if skill_names is not None:
         allowed = {name for name in skill_names if name}
         skills = [skill for skill in skills if skill.name in allowed]
@@ -1300,9 +1355,12 @@ async def build_context(
     tools = list(
         _core_tool_defs(
             include_task_tool=include_task_tool,
+            include_ask_user=include_ask_user,
+            include_enable_loops=include_enable_loops,
             subagent_type_names=type_names,
             catalog_mcp_servers=catalog_names,
             background_tasks_available=background_tasks_available,
+            background_jobs_survive_turn=background_jobs_survive_turn,
         )
     )
     if attachments_enabled_from_env():
@@ -1330,7 +1388,6 @@ async def build_context(
         user_id=user_id,
         parent_run_id=parent_run_id,
         model=model,
-        summarization_model=summarization_model,
         cancelled=cancelled,
         context_window_tokens=context_window_tokens,
         workspace_root=workspace_root,
@@ -1352,6 +1409,7 @@ async def build_context(
         read_ledger=read_ledger,
         session=session_id,
         background_runs_view=background_runs_view,
+        background_jobs_view=background_jobs_view,
     )
 
 

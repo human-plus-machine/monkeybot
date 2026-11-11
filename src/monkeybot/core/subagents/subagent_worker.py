@@ -230,6 +230,7 @@ def _event_for_ndjson_pipe(evt: AgentEvent) -> AgentEvent:
             request_id=evt.request_id,
             inner_turn=evt.inner_turn,
             text=f"[omitted {len(evt.text)} chars]",
+            sections=evt.sections,
         )
     return evt
 
@@ -444,6 +445,8 @@ async def _async_main() -> None:
             parent_run_id=envelope.parent_run_id,
             model=envelope.model,
             include_task_tool=False,
+            include_ask_user=False,
+            include_enable_loops=False,
             workspace_root=ws,
             context_window_tokens=window_tokens,
             extra_tools=extra_tools,

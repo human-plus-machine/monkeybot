@@ -8,15 +8,18 @@ import logging
 import uuid
 from collections.abc import AsyncIterator, Sequence
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
+from monkeybot.core.attachments.config import IMAGE_MIME_TYPES
+from monkeybot.core.attachments.refs import tool_media_to_refs
+from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.attachments.text import parse_attachment_descriptor_text
 from monkeybot.core.coding.verification_gate import last_proven_verification
-from monkeybot.core.config.snapshot import current_env, env_value
 from monkeybot.core.context import TurnContext
 from monkeybot.core.context.epoch import ContextEpochTracker
 from monkeybot.core.hooks import HookEvent, HookManager
+from monkeybot.core.llm.context_overflow import is_context_overflow
 from monkeybot.core.llm.provider import (
     Done,
     Message,
@@ -30,13 +33,20 @@ from monkeybot.core.logging_utils import kv
 from monkeybot.core.messages.tool_integrity import interrupted_tool_result_text
 from monkeybot.core.messages.transform_context import is_provider_visible, provider_visible_blocks
 from monkeybot.core.persistence.backends import HistoryStore
+from monkeybot.core.persistence.row_ids import new_row_id
 from monkeybot.core.persistence.thread_summary import CONTEXT_SUMMARY_PREFIX
 from monkeybot.core.persistence.transcript import TranscriptWriter
 from monkeybot.core.runtime.context_budget import (
+    _CHARS_PER_TOKEN,
     ContextBudgeter,
+    _head_and_tail,
+    estimate_tokens,
     estimate_tokens_from_char_count,
+    summary_input_budget,
 )
+from monkeybot.core.runtime.read_dedupe import remember_stored_reads, replace_repeated_reads
 from monkeybot.core.types.content_blocks import (
+    IMAGE_TOKEN_ESTIMATE,
     AttachmentRef,
     ContentBlock,
     File,
@@ -53,6 +63,7 @@ from .events import AgentEvent, ContextSummarized, ContextSummarizing, ContextUs
 from .loop_hooks import _HOOK_READ_TIMEOUT_S, _fire_hook
 from .loop_messages import _load_agent_chat_history, _summary_line_for_message
 from .loop_usage import _prompt_input_tokens_for_history
+from .prompt_ledger import PromptTokenLedger
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.history_compaction")
 
@@ -175,7 +186,8 @@ HISTORY_LOAD_MAX = 5000
 SUMMARY_KEEP_HEAD_COUNT = 1
 # Keep newest rows until they consume this fraction of the model context window.
 SUMMARY_KEEP_TAIL_RATIO = 0.20
-# Floor so a user/assistant (or tool) pair survives even on tiny windows.
+# A transcript shorter than head + this many newest rows + one middle row is not split.
+# Only the single newest row is kept when it does not fit the tail budget.
 SUMMARY_KEEP_TAIL_MIN = 2
 
 # Fixed Markdown template for middle-history compression.
@@ -262,13 +274,27 @@ def _raw_block_char_count(block: ContentBlock) -> int:
         return len(json.dumps(block.args, sort_keys=True))
     if isinstance(block, ToolResponse):
         return sum(_raw_block_char_count(b) for b in block.result)
-    if isinstance(block, Image | File):
+    if isinstance(block, Image):
+        # Char form of the fixed image estimate. The token estimate divides by
+        # ``_CHARS_PER_TOKEN``, so this comes back out as ``IMAGE_TOKEN_ESTIMATE``.
+        return IMAGE_TOKEN_ESTIMATE * _CHARS_PER_TOKEN
+    if isinstance(block, File):
         return len(block.data) + len(block.mime_type)
     if isinstance(block, Thinking):
         return len(block.thinking) + len(block.signature)
     if isinstance(block, RedactedThinking):
         return len(block.data)
     if isinstance(block, AttachmentRef):
+        # An image ref resolves to a preview billed at the fixed estimate.
+        # A file ref records the base64 length it replaced, so the estimate
+        # matches the bytes the provider will be sent. Anything else (a user
+        # upload that is not an image, a ref with no recorded length) stays
+        # the small id-and-mime count.
+        if block.mime_type in IMAGE_MIME_TYPES:
+            return IMAGE_TOKEN_ESTIMATE * _CHARS_PER_TOKEN
+        recorded = (block.metadata or {}).get("base64_chars")
+        if isinstance(recorded, int) and not isinstance(recorded, bool) and recorded >= 0:
+            return recorded + len(block.mime_type)
         return len(block.attachment_id) + len(block.mime_type)
     return len(type(block).__name__)
 
@@ -286,9 +312,13 @@ def _raw_message_char_count(message: Message) -> int:
     Thinking are stripped before the provider call, so they must not shrink the
     token-budgeted tail).
 
-    Also counts ``Image`` / ``File`` base64 payloads and ``Thinking`` traces at
-    full length: falling back to ``type(block).__name__`` would report ~5–8
-    chars for multi-kilobyte multimodal / reasoning blocks and blow past
+    Counts ``File`` payloads and ``Thinking`` traces at full length, and an
+    ``Image`` at ``IMAGE_TOKEN_ESTIMATE``: its base64 is not text, and counting
+    those characters would size one preview as tens of thousands of tokens.
+    An image ``AttachmentRef`` uses that same estimate. A file ref uses the
+    ``base64_chars`` it recorded when the bytes were left out of the row.
+    Falling back to ``type(block).__name__`` would report ~5–8 chars for a
+    multi-kilobyte file or reasoning block and blow past
     ``SUMMARY_KEEP_TAIL_RATIO``.
     """
     return sum(_raw_block_char_count(block) for block in provider_visible_blocks(message))
@@ -351,47 +381,69 @@ def _extend_tail_to_keep_tool_pairs(
     The minimum tail can fill up on a huge response plus a newer row, then stop
     before the request. That stores a response with no request. The request is
     small; the pair stays together in the tail.
+
+    Only the pair straddling the cut counts: results in the rows that follow
+    the assistant turn, requests in that turn. The turn can itself be split by
+    the cut, because two adjacent assistant rows are one turn to the provider.
+    A result later in the tail with no request in the tail is already unpaired,
+    and a result whose id was answered by an older request is already answered.
+    Neither pulls the tail back. One such result used to make this give up, and
+    a real request was summarized away.
     """
     if not tail:
         return tail
     start = len(messages) - len(tail)
     if start <= 0:
         return tail
-    request_ids: set[str] = set()
-    response_ids: set[str] = set()
+    before = next((m for m in reversed(messages[:start]) if is_provider_visible(m)), None)
+    # Two adjacent assistant rows are one turn to the provider. The cut can land between them.
+    in_split_turn = before is not None and before.role == "assistant"
+    wanted: set[str] = set()
     for message in tail:
-        requests, responses = _message_tool_ids(message)
-        request_ids |= requests
-        response_ids |= responses
-    missing = response_ids - request_ids
-    if not missing:
-        return tail
-    found_at: int | None = None
-    for index in range(start - 1, -1, -1):
-        requests, _responses = _message_tool_ids(messages[index])
-        if not requests & missing:
+        if not is_provider_visible(message):
             continue
-        missing -= requests
-        found_at = index
-        if not missing:
+        if message.role == "assistant":
+            if in_split_turn:
+                continue
             break
-    if found_at is None or missing:
+        in_split_turn = False
+        wanted |= _message_tool_ids(message)[1]
+    if not wanted:
         return tail
-    return list(messages[found_at:])
+    keep_from: int | None = None
+    in_assistant_turn = False
+    for index in range(start - 1, -1, -1):
+        message = messages[index]
+        if not is_provider_visible(message):
+            continue
+        if message.role == "assistant":
+            in_assistant_turn = True
+            if _message_tool_ids(message)[0] & wanted:
+                keep_from = index
+        elif in_assistant_turn:
+            break
+    if keep_from is None:
+        return tail
+    return list(messages[keep_from:])
 
 
 def _split_accountable(
     messages: Sequence[Message],
     *,
     window_tokens: int,
+    keep_tail_tokens: int | None = None,
 ) -> tuple[list[Message], list[Message], list[Message]]:
     """Split history into (head, middle, tail) with a token-budgeted recent tail.
 
     Head and tail slots (and the tail budget) are counted over rows with
     provider-visible content; UI-only / thinking-only raw rows ride along with
-    their neighbours for free. Tail grows from the newest message until it reaches
-    ``window_tokens * SUMMARY_KEEP_TAIL_RATIO`` (at least ``SUMMARY_KEEP_TAIL_MIN``
-    visible rows), leaving ≥1 middle row whenever the transcript is long enough.
+    their neighbours for free. The newest visible row is always kept. The head
+    and every older tail row stay verbatim only while they fit
+    ``window_tokens * SUMMARY_KEEP_TAIL_RATIO``; past that they are summarized.
+    ``keep_tail_tokens`` replaces that budget in the tail loop only, so a
+    background job can leave room for the rows that arrive before it is applied.
+    The head check always uses the inline budget. A transcript long enough still
+    leaves at least one middle row.
     """
     n = len(messages)
     visible = [is_provider_visible(m) for m in messages]
@@ -407,8 +459,17 @@ def _split_accountable(
             if seen == SUMMARY_KEEP_HEAD_COUNT:
                 head_end = i + 1
                 break
+    inline_tail_budget = max(1, int(max(1, window_tokens) * SUMMARY_KEEP_TAIL_RATIO))
+    tail_budget = inline_tail_budget if keep_tail_tokens is None else max(1, keep_tail_tokens)
     head = list(messages[:head_end])
-    tail_budget = max(1, int(max(1, window_tokens) * SUMMARY_KEEP_TAIL_RATIO))
+    head_tokens = sum(
+        _estimate_message_tokens(msg)
+        for msg, is_visible in zip(head, visible[:head_end], strict=True)
+        if is_visible
+    )
+    if head_tokens > inline_tail_budget:
+        head = []
+        head_end = 0
     max_tail = n - head_end - 1  # leave ≥1 middle
 
     tail_rev: list[Message] = []
@@ -420,7 +481,8 @@ def _split_accountable(
         msg = messages[i]
         if visible[i]:
             tok = _estimate_message_tokens(msg)
-            if visible_in_tail >= SUMMARY_KEEP_TAIL_MIN and used + tok > tail_budget:
+            # The newest visible row is kept even when it is larger than the budget.
+            if visible_in_tail >= 1 and used + tok > tail_budget:
                 break
             used += tok
             visible_in_tail += 1
@@ -440,10 +502,19 @@ def split_messages_for_compaction(
     messages: Sequence[Message],
     *,
     window_tokens: int,
+    keep_tail_tokens: int | None = None,
 ) -> tuple[list[Message], list[Message], list[Message]]:
-    """Split accountable rows only; pinned notification rows are spliced back later."""
+    """Split accountable rows only; pinned notification rows are spliced back later.
+
+    ``keep_tail_tokens`` is the tail budget for this split. Omit it to use
+    ``window_tokens * SUMMARY_KEEP_TAIL_RATIO``.
+    """
     accountable = [msg for msg in messages if not _is_pinned_history_row(msg)]
-    return _split_accountable(accountable, window_tokens=window_tokens)
+    return _split_accountable(
+        accountable,
+        window_tokens=window_tokens,
+        keep_tail_tokens=keep_tail_tokens,
+    )
 
 
 def rebuild_compacted_history(
@@ -547,29 +618,6 @@ def _summarization_viable(
     return bool(_middle_summary_lines(middle, window_tokens=window_tokens))
 
 
-def _summarization_model_id(ctx: TurnContext) -> str:
-    """Model id for history compression.
-
-    When ``ctx.config`` is pinned, do not re-read process env (turn isolation).
-    Without a snapshot, env still overrides ``ctx.summarization_model`` as before.
-    """
-    if ctx.config is not None:
-        ctx_sm = (ctx.summarization_model or "").strip()
-        if ctx_sm:
-            return ctx_sm
-        from_cfg = env_value(ctx.config, "CONTEXT_SUMMARIZATION_MODEL", "").strip()
-        if from_cfg:
-            return from_cfg
-        return ctx.model
-    from_env = current_env("CONTEXT_SUMMARIZATION_MODEL", "").strip()
-    if from_env:
-        return from_env
-    ctx_sm = (ctx.summarization_model or "").strip()
-    if ctx_sm:
-        return ctx_sm
-    return ctx.model
-
-
 async def _compact_history_if_needed(
     *,
     thread_id: str,
@@ -620,13 +668,32 @@ async def _append_budgeted_tool_responses(
     vertex_google_search: bool = False,
     epoch: ContextEpochTracker | None = None,
     hook_manager: HookManager | None = None,
+    prompt_ledger: PromptTokenLedger | None = None,
+    attachment_store: AttachmentStore | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Budget tool results against remaining context, append, compact if needed."""
-    trimmed, needs_compaction = budgeter.fit_content_blocks(chunk_responses)
+    # A confirmed repeat is a short stub before the budget runs, so the budget
+    # and the stored row both see one copy of the file.
+    prepared, decisions = await replace_repeated_reads(
+        chunk_responses,
+        history=history,
+        thread_id=ctx.thread_id,
+        ledger=ctx.read_ledger,
+    )
+    trimmed, needs_compaction = budgeter.fit_content_blocks(prepared)
+    # The budget saw the media blocks. The stored row keeps a reference when
+    # the bytes are already in the attachment store, so later loads do not
+    # carry the base64. The live tool event was built from the original blocks.
+    stored = tool_media_to_refs(
+        trimmed,
+        attachment_store=attachment_store,
+        session_id=ctx.session_id,
+    )
     await history.append(
         ctx.thread_id,
-        Message(role="user", content=trimmed),
+        Message(role="user", content=stored),
     )
+    remember_stored_reads(trimmed, decisions, ctx.read_ledger)
     usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, budgeter.used_tokens)
     current = budgeter.used_tokens
     if needs_compaction:
@@ -640,7 +707,7 @@ async def _append_budgeted_tool_responses(
                 thread_id=ctx.thread_id,
                 history=history,
                 provider=provider,
-                model=_summarization_model_id(ctx),
+                model=ctx.model,
                 window_tokens=ctx.context_window_tokens,
                 intent_facts=_intent_facts_from_ctx(ctx),
                 workspace_trailer=_workspace_trailer_from_ctx(ctx),
@@ -660,12 +727,14 @@ async def _append_budgeted_tool_responses(
         if turns_summarized > 0:
             if epoch is not None:
                 epoch.begin_new_epoch()
+            if prompt_ledger is not None:
+                prompt_ledger.invalidate()
             chat_messages = await _load_agent_chat_history(history, ctx.thread_id)
             post = await _prompt_input_tokens_for_history(
                 ctx=ctx,
                 chat_messages=chat_messages,
                 provider=provider,
-                attachment_store=None,
+                attachment_store=attachment_store,
                 attachment_catalog=None,
                 vertex_google_search=vertex_google_search,
                 epoch=epoch,
@@ -679,6 +748,99 @@ async def _append_budgeted_tool_responses(
     )
 
 
+_SUMMARY_LEAD = "Create a structured summary from the conversation segment below.\n\n"
+_SUMMARY_SEPARATOR = "\n\n---\n\n"
+# Extra attempts after a provider size rejection, for the whole summary.
+_MAX_SUMMARY_HALVINGS = 3
+
+
+def _summary_user_text(lines: Sequence[str], intent_facts: str | None) -> str:
+    """The user message for one summary call. One chunk is the old single prompt."""
+    user_text = _SUMMARY_LEAD + _SUMMARY_SEPARATOR.join(lines)
+    if intent_facts:
+        user_text = intent_facts + "\n\n" + user_text
+    return user_text
+
+
+def _summary_request_tokens(lines: Sequence[str], intent_facts: str | None) -> int:
+    return estimate_tokens(_COMPACTION_SUMMARY_SYSTEM) + estimate_tokens(
+        _summary_user_text(lines, intent_facts)
+    )
+
+
+def _summary_fits(lines: Sequence[str], intent_facts: str | None, budget: int) -> bool:
+    return _summary_request_tokens(lines, intent_facts) <= budget
+
+
+def _trim_line_to_budget(
+    prefix: Sequence[str],
+    line: str,
+    *,
+    budget: int,
+    intent_facts: str | None,
+) -> str:
+    """Shorten ``line`` until it fits after ``prefix``, keeping its head and tail."""
+    if _summary_fits([*prefix, line], intent_facts, budget):
+        return line
+    lo = 1
+    hi = len(line)
+    best = ""
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        trimmed = _head_and_tail(line, mid)
+        if trimmed and _summary_fits([*prefix, trimmed], intent_facts, budget):
+            best = trimmed
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    if best:
+        return best
+    # The fixed prompt already fills the budget. One character keeps the fold moving.
+    return line[:1] or line
+
+
+def _carry_line(summary: str) -> str:
+    """Previous summary, in the same shape a stored summary row is re-summarized."""
+    return f"assistant: {CONTEXT_SUMMARY_PREFIX}\n{summary}"
+
+
+def _pack_summary_chunk(
+    lines: list[str],
+    index: int,
+    *,
+    carry: str | None,
+    budget: int,
+    intent_facts: str | None,
+) -> tuple[list[str], int]:
+    """Lines for one summary call, and the index of the first line not taken.
+
+    ``carry`` is the summary of the lines already consumed. A line that does not
+    fit in a call by itself is trimmed, so the index always advances.
+    """
+    chunk: list[str] = []
+    if carry:
+        chunk.append(_carry_line(carry))
+        if not _summary_fits(chunk, intent_facts, budget):
+            chunk[0] = _trim_line_to_budget([], chunk[0], budget=budget, intent_facts=intent_facts)
+    start = index
+    while index < len(lines):
+        if _summary_fits([*chunk, lines[index]], intent_facts, budget):
+            chunk.append(lines[index])
+            index += 1
+            continue
+        if index > start:
+            break
+        lines[index] = _trim_line_to_budget(
+            chunk, lines[index], budget=budget, intent_facts=intent_facts
+        )
+        chunk.append(lines[index])
+        index += 1
+        break
+    if index == start:
+        raise RuntimeError("summary packing did not advance")
+    return chunk, index
+
+
 async def _generate_summary_text(
     provider: Provider,
     model: str,
@@ -689,16 +851,58 @@ async def _generate_summary_text(
 ) -> str | None:
     """Stream a summary of ``middle``. ``None`` when those rows have nothing to compact.
 
-    The workspace trailer is not applied here. It is taken from the ledger when the
-    summary is written, so files touched after this call still appear.
+    The middle is summarized in calls that each fit ``summary_input_budget``. A
+    middle that fits is one call, with the same prompt as before. A larger middle
+    is folded: each later call starts from the summary so far. A provider size
+    rejection halves that call and packs it again, at most three times for the
+    whole summary. The workspace trailer is not applied here. It is taken from
+    the ledger when the summary is written, so files touched after this call
+    still appear.
     """
-    lines = _middle_summary_lines(middle, window_tokens=window_tokens)
-    if not lines:
+    source = _middle_summary_lines(middle, window_tokens=window_tokens)
+    if not source:
         return None
-    blob = "\n\n---\n\n".join(lines)
-    user_text = "Create a structured summary from the conversation segment below.\n\n" + blob
-    if intent_facts:
-        user_text = intent_facts + "\n\n" + user_text
+    budget = summary_input_budget(window_tokens)
+    summary: str | None = None
+    index = 0
+    halvings = 0
+    while index < len(source):
+        call_budget = budget
+        while True:
+            # Pack from a copy so a rejected attempt's trim does not stick.
+            working = list(source)
+            chunk, next_index = _pack_summary_chunk(
+                working,
+                index,
+                carry=summary,
+                budget=call_budget,
+                intent_facts=intent_facts,
+            )
+            try:
+                summary = await _summarize_chunk(provider, model, chunk, intent_facts=intent_facts)
+            except Exception as exc:
+                if not is_context_overflow(exc) or halvings >= _MAX_SUMMARY_HALVINGS:
+                    raise
+                halvings += 1
+                call_budget = max(1, call_budget // 2)
+                logger.warning(
+                    "summary call exceeded the window; halving the chunk %s",
+                    kv(halving=halvings, budget=call_budget),
+                )
+                continue
+            index = next_index
+            break
+    return summary
+
+
+async def _summarize_chunk(
+    provider: Provider,
+    model: str,
+    lines: Sequence[str],
+    *,
+    intent_facts: str | None,
+) -> str:
+    """One summary call. The caller keeps the returned text only if every call succeeds."""
     summarize_messages = [
         Message(
             role="system",
@@ -706,7 +910,7 @@ async def _generate_summary_text(
         ),
         Message(
             role="user",
-            content=[Text(text=user_text)],
+            content=[Text(text=_summary_user_text(lines, intent_facts))],
         ),
     ]
     binding = _summary_transcript.get()
@@ -800,6 +1004,64 @@ async def _stream_summary(
     )
 
 
+def _stamp_summary(
+    messages: list[Message], summary: Message | None
+) -> tuple[list[Message], str | None]:
+    """Give ``summary`` a row id and return the list with that object replaced.
+
+    The archive records this id, so the summary row has to carry it before the
+    store writes the replacement. ``None`` when this rewrite has no summary.
+    """
+    if summary is None:
+        return list(messages), None
+    row_id = summary.row_id or new_row_id()
+    stamped = summary if summary.row_id == row_id else replace(summary, row_id=row_id)
+    found = False
+    out: list[Message] = []
+    for message in messages:
+        if message is summary:
+            out.append(stamped)
+            found = True
+        else:
+            out.append(message)
+    if not found:
+        logger.warning("compaction summary was not in the replacement history")
+        return list(messages), None
+    return out, row_id
+
+
+async def replace_history_archiving(
+    history: HistoryStore,
+    thread_id: str,
+    messages: list[Message],
+    *,
+    reason: str,
+    summary: Message | None = None,
+) -> int:
+    """Replace the thread and archive the rows the replacement drops.
+
+    ``summary`` is the new summary row for a compaction. A store without
+    ``reset_archiving`` is rewritten with ``reset`` and the dropped rows are
+    not kept. Returns how many rows were archived.
+    """
+    stamped, summary_row_id = _stamp_summary(messages, summary)
+    archive = getattr(history, "reset_archiving", None)
+    if not callable(archive):
+        logger.warning(
+            "history store has no archive; dropped rows will not be recoverable %s",
+            kv(thread_id=thread_id, reason=reason),
+        )
+        await history.reset(thread_id, stamped)
+        return 0
+    archived: int = await archive(
+        thread_id,
+        stamped,
+        reason=reason,
+        summary_row_id=summary_row_id,
+    )
+    return archived
+
+
 def _finalize_summary_row(text: str, workspace_trailer: str | None) -> Message:
     """Build the stored summary row, including the apply-time workspace trailer."""
     summary_text = text.strip() or "(empty summary)"
@@ -860,7 +1122,13 @@ async def _summarize_history(
         return 0
     summary_row = _finalize_summary_row(summary_text, workspace_trailer)
     merged = rebuild_compacted_history(messages, head=head, summary=summary_row, tail=tail)
-    await history.reset(thread_id, merged)
+    await replace_history_archiving(
+        history,
+        thread_id,
+        merged,
+        reason="compaction",
+        summary=summary_row,
+    )
     logger.debug(
         "history compaction reset %s",
         kv(

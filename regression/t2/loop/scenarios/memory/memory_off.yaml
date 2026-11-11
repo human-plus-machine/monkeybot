@@ -40,8 +40,10 @@ assertions:
   - n: 1
     system_contains: "memory storage: disabled"
   - n: 1
+    messages_not_contain: "## Memory wake-up"
     system_not_contains: "## Memory wake-up"
   - n: 1
+    messages_not_contain: would-have-woken-alpha
     system_not_contains: would-have-woken-alpha
   turn_completed: true
   no_errors: true

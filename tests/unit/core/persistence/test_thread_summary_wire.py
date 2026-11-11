@@ -169,6 +169,58 @@ def test_messages_to_wire_includes_image_rows_from_load_file() -> None:
     assert wire[3] == {"role": "assistant", "text": "Here is your cat."}
 
 
+def test_messages_to_wire_includes_image_rows_from_attachment_ref() -> None:
+    from monkeybot.core.types.content_blocks import AttachmentRef
+
+    wire = messages_to_wire(
+        [
+            Message(role="user", content=[Text(text="make a cat")]),
+            Message(
+                role="assistant",
+                content=[
+                    ToolRequest(
+                        id="c_img",
+                        name="load_file",
+                        args={"path": "./generated-media/images/cat.png"},
+                    ),
+                ],
+            ),
+            Message(
+                role="user",
+                content=[
+                    ToolResponse(
+                        id="c_img",
+                        tool_name="load_file",
+                        result=[
+                            AttachmentRef(
+                                attachment_id="att_cat",
+                                mime_type="image/png",
+                                metadata={
+                                    "path": "./generated-media/images/cat.png",
+                                    "filename": "cat.png",
+                                    "attachment_id": "att_cat",
+                                },
+                            )
+                        ],
+                    )
+                ],
+            ),
+            Message(role="assistant", content=[Text(text="Here is your cat.")]),
+        ]
+    )
+    assert wire[1]["role"] == "tool"
+    assert wire[1]["tool"] == "load_file"
+    assert "result" not in wire[1]
+    assert wire[2] == {
+        "role": "image",
+        "text": "cat.png",
+        "mime_type": "image/png",
+        "path": "./generated-media/images/cat.png",
+        "filename": "cat.png",
+    }
+    assert "data" not in wire[2]
+
+
 def test_messages_to_wire_image_without_path_uses_attachment_layout() -> None:
     from monkeybot.core.types.content_blocks import Image
 

@@ -1,0 +1,53 @@
+id: regression/t2/loop/scenarios/ctx/overflow_summary_fails
+case: T2-CTX-25
+description: A size rejection whose summary also fails is the fixed overflow error.
+mode: scripted
+driver: loop
+config:
+  model.context_window: 100000
+messages:
+- hello
+history:
+- role: user
+  content:
+  - type: text
+    text: row-0
+- role: assistant
+  content:
+  - type: text
+    text: row-1
+- role: user
+  content:
+  - type: text
+    text: row-2
+- role: assistant
+  content:
+  - type: text
+    text: row-3
+- role: user
+  content:
+  - type: text
+    text: row-4
+- role: assistant
+  content:
+  - type: text
+    text: row-5
+script:
+- - type: raise
+    error: RuntimeError
+    message: 'prompt is too long: 9000 tokens > 8000 maximum'
+- - type: raise
+    error: RuntimeError
+    message: summarizer down
+assertions:
+  turn_completed: true
+  error_contains: This request is too large for the model's context window.
+  provider_calls: 2
+  events_sequence:
+  - ContextSummarizing
+  - type: ContextSummarized
+    turns_summarized: 0
+  - type: Error
+    error: This request is too large for the model's context window. Send it in smaller pieces.
+  history:
+    summary_row: false

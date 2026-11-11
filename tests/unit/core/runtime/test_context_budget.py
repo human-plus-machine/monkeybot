@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from monkeybot.core.runtime.context_budget import ContextBudgeter, estimate_tokens
-from monkeybot.core.types.content_blocks import Text, ToolResponse
+from monkeybot.core.types.content_blocks import IMAGE_TOKEN_ESTIMATE, Image, Text, ToolResponse
 
 
 def test_estimate_tokens_char_div_four() -> None:
@@ -119,6 +119,37 @@ def test_compute_context_pressure_tier_thresholds() -> None:
     assert SUMMARY_TRIGGER_RATIO == 0.85
 
 
+def test_moderate_tier_does_not_force_compaction() -> None:
+    """The 85% bar is the only ratio trigger. 75% with a small result does not compact."""
+    budgeter = ContextBudgeter.for_window(window_tokens=100_000, used_tokens=75_000)
+    blocks = [
+        ToolResponse(id="1", tool_name="run_command", result=[Text(text="ok")]),
+    ]
+    _, needs = budgeter.fit_content_blocks(blocks)
+    assert budgeter.pressure_tier == "moderate"
+    assert not needs
+
+
+def test_trimmed_result_still_needs_compaction() -> None:
+    budgeter = ContextBudgeter.for_window(window_tokens=100_000, used_tokens=75_000)
+    blocks = [
+        ToolResponse(id="1", tool_name="run_command", result=[Text(text="x" * 200_000)]),
+    ]
+    trimmed, needs = budgeter.fit_content_blocks(blocks)
+    assert needs
+    assert "truncated for context budget" in _text(trimmed[0])
+
+
+def test_headroom_under_twice_the_floor_needs_compaction() -> None:
+    """3,000 tokens left is under twice the 2,000-token floor, so the batch compacts."""
+    budgeter = ContextBudgeter.for_window(window_tokens=100_000, used_tokens=97_000)
+    blocks = [
+        ToolResponse(id="1", tool_name="run_command", result=[Text(text="ok")]),
+    ]
+    _, needs = budgeter.fit_content_blocks(blocks)
+    assert needs
+
+
 def test_for_window_tightens_safety_fraction_under_pressure() -> None:
     from monkeybot.core.runtime.context_budget import ContextBudgeter
 
@@ -165,6 +196,28 @@ def test_fit_still_sanitizes_run_command_blob_json_fields() -> None:
     parsed = json.loads(out)
     assert parsed["stdout"] == "x" * 2000
     assert "omitted" in parsed["data"]
+
+
+def test_fit_counts_an_image_without_trimming_it() -> None:
+    image = Image(mime_type="image/png", data="A" * 500_000)
+    block = ToolResponse(id="1", tool_name="load_file", result=[image])
+    budgeter = ContextBudgeter(window_tokens=200_000, used_tokens=10_000, safety_fraction=0.8)
+    trimmed, needs = budgeter.fit_content_blocks([block])
+    assert not needs
+    assert trimmed == [block]
+    assert budgeter.used_tokens == 10_000 + IMAGE_TOKEN_ESTIMATE
+
+    # The floor path trims text and still has to count an image it leaves in place.
+    tight = ContextBudgeter(
+        window_tokens=10_000,
+        used_tokens=9_500,
+        safety_fraction=0.8,
+        floor_tokens=2_000,
+    )
+    trimmed, needs = tight.fit_content_blocks([block])
+    assert needs
+    assert trimmed == [block]
+    assert tight.used_tokens == 9_500 + IMAGE_TOKEN_ESTIMATE
 
 
 def test_trim_keeps_head_and_tail_so_the_end_of_output_survives() -> None:

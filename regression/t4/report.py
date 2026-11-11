@@ -19,6 +19,7 @@ import sys
 import uuid
 from pathlib import Path
 
+from monkeybot.core.runtime.loop_usage import reported_prompt_tokens
 from regression.t4 import preflight
 from regression.t4.assertions import evaluate_assertions, live_invariant_failures
 from regression.t4.gateway import (
@@ -374,11 +375,50 @@ def _fmt_delta(current: float, base: float | None, fmt: str = "{:.0f}") -> str:
     return fmt.format(current - base)
 
 
+def _cache_read_share(provider: str, scenarios: list[ScenarioAggregate]) -> float | None:
+    """Cache-read tokens over the provider's prompt total, or None when that total is 0.
+
+    Gemini's prompt count already includes cached tokens. The other providers
+    report uncached input separately, so the total adds the cache fields.
+    """
+    reads = 0
+    prompt = 0
+    for scenario in scenarios:
+        reads += scenario.cache_read_tokens
+        prompt += reported_prompt_tokens(
+            provider,
+            input_tokens=scenario.input_tokens,
+            cache_read_tokens=scenario.cache_read_tokens,
+            cache_creation_tokens=scenario.cache_creation_tokens,
+        )
+    if prompt <= 0:
+        return None
+    return reads / prompt
+
+
+def _fmt_share(share: float | None) -> str:
+    if share is None:
+        return "—"
+    return f"{share * 100:.1f}%"
+
+
+def _fmt_share_delta(current: float | None, base: float | None) -> str:
+    if current is None or base is None:
+        return "—"
+    return f"{(current - base) * 100:+.1f} pp"
+
+
 def build_markdown_report(
     record: RunRecord, baseline: BaselineFile | None, hard: list[str], warn: list[str]
 ) -> str:
     cur = record.suite_aggregate
     base = baseline.suite_aggregate if baseline else None
+    current_share = _cache_read_share(record.model_provider, record.scenarios)
+    # A baseline file does not record its provider. The comparison is one agent,
+    # so both columns use the current provider's counting rule.
+    base_share = (
+        None if baseline is None else _cache_read_share(record.model_provider, baseline.scenarios)
+    )
     verdict = "FAIL" if hard else "PASS"
     mean_quality = (
         sum(cur.mean_quality_by_metric.values()) / len(cur.mean_quality_by_metric)
@@ -423,6 +463,10 @@ def build_markdown_report(
         (
             f"| Total tokens | {base.total_tokens if base else '—'} | {cur.total_tokens} | "
             f"{_fmt_delta(cur.total_tokens, base.total_tokens if base else None)} |"
+        ),
+        (
+            f"| Cache-read share | {_fmt_share(base_share)} | {_fmt_share(current_share)} | "
+            f"{_fmt_share_delta(current_share, base_share)} |"
         ),
         (
             f"| Cost | {f'${base.total_cost_usd:.4f}' if base else '—'} | ${cur.total_cost_usd:.4f} | "

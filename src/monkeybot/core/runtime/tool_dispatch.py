@@ -12,10 +12,12 @@ from pathlib import Path
 from typing import cast
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
+from monkeybot.core.attachments.resolve import MediaMemo
 from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.config.snapshot import env_value_or_current
 from monkeybot.core.context import (
     TurnContext,
+    hide_due_mcp_servers,
     refresh_tools_after_loops_change,
     refresh_tools_after_mcp_change,
 )
@@ -29,7 +31,6 @@ from monkeybot.core.hooks import HookEvent, HookManager
 from monkeybot.core.llm.provider import Provider, ToolCall
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.mcp.session_visibility import idle_note
 from monkeybot.core.messages.tool_integrity import (
     cancelled_tool_result_text,
     preempted_tool_result_text,
@@ -50,6 +51,7 @@ from monkeybot.core.types.content_blocks import ContentBlock, File, Image, Text,
 from .doom_loop import _doom_loop_exempt_names, _DoomLoopTracker
 from .events import (
     AgentEvent,
+    ContextSummarized,
     Error,
     FileBlock,
     FileChange,
@@ -72,6 +74,7 @@ from .loop_hooks import (
 from .loop_messages import _blocks_to_sse_summary, _combine_extras, _load_agent_chat_history
 from .loop_ports import ToolExecutorPort
 from .loop_usage import _prompt_input_tokens_for_history
+from .prompt_ledger import PromptTokenLedger
 from .tool_batch import (
     _MAX_CONCURRENT_SUBAGENTS,
     _await_user_response_any,
@@ -973,30 +976,45 @@ async def _execute_allowed_chunk(
             yield evt
 
 
-def _hide_idle_mcp_servers(
+def _attach_queued_idle_note(
     state: ToolBatchState,
     all_tool_responses: list[ContentBlock],
-    *,
-    tool_executor: ToolExecutorPort,
-    doom_tracker: _DoomLoopTracker,
 ) -> None:
-    """Hide servers that reached the idle limit and note that in the last result.
+    """Put a note queued by an earlier hide into the last tool result.
 
-    Runs only for a batch that will be written. A cancelled batch leaves the
-    connection and this session's tool list alone. The note is a text block
-    inside the last tool result, not a separate user message.
+    The note is a text block inside that result, not a separate user message.
+    A batch with no tool result leaves the note queued for a later one.
     """
     visibility = state.ctx.mcp_visibility
     if visibility is None:
         return
-    newly = visibility.take_newly_idle()
-    if not newly:
-        return
-    note = idle_note(newly)
+    target: ToolResponse | None = None
     for block in reversed(all_tool_responses):
         if isinstance(block, ToolResponse):
-            block.result.append(Text(text=note))
+            target = block
             break
+    if target is None:
+        return
+    note = visibility.take_note()
+    if note:
+        target.result.append(Text(text=note))
+
+
+def _hide_mcp_servers_after_rewrite(
+    state: ToolBatchState,
+    *,
+    tool_executor: ToolExecutorPort,
+    doom_tracker: _DoomLoopTracker,
+    prompt_ledger: PromptTokenLedger | None,
+) -> None:
+    """Hide due servers now that this batch's compaction rewrote history.
+
+    A cancelled batch does not call this. The note waits for the next tool
+    result, so this batch's already-appended rows stay unchanged.
+    """
+    visibility = state.ctx.mcp_visibility
+    if visibility is None or not visibility.servers_due():
+        return
     mcp_client = getattr(tool_executor, "mcp", None)
     if mcp_client is None:
         logger.error(
@@ -1004,20 +1022,23 @@ def _hide_idle_mcp_servers(
             kv(request_id=state.ctx.request_id, thread_id=state.ctx.thread_id),
         )
         return
-    ctx = refresh_tools_after_mcp_change(state.ctx, mcp_client)
-    state.ctx = ctx
+    newly = hide_due_mcp_servers(state.ctx, mcp_client)
+    if not newly:
+        return
     state.tools_dirty = True
     if state.tools_dirty_reason is None:
         state.tools_dirty_reason = "mcp_idle"
-    doom_tracker.exempt_names = _doom_loop_exempt_names(ctx.tools)
+    doom_tracker.exempt_names = _doom_loop_exempt_names(state.ctx.tools)
+    if prompt_ledger is not None:
+        prompt_ledger.drop_if_tools_changed(state.ctx.tools)
     logger.info(
         "mcp idle hide %s",
         kv(
-            request_id=ctx.request_id,
-            thread_id=ctx.thread_id,
-            session=ctx.session_id,
+            request_id=state.ctx.request_id,
+            thread_id=state.ctx.thread_id,
+            session=state.ctx.session_id,
             servers=",".join(newly),
-            tool_count=len(ctx.tools),
+            tool_count=len(state.ctx.tools),
         ),
     )
 
@@ -1040,6 +1061,9 @@ async def _post_batch_budget_and_registry(
     epoch_tracker: ContextEpochTracker,
     inner_turn: int,
     hook_manager: HookManager | None = None,
+    prompt_ledger: PromptTokenLedger | None = None,
+    prompt_tokens: int = 0,
+    media_memo: MediaMemo | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Doom-loop error, budgeted history append, and MCP/loops registry refresh."""
     ctx = state.ctx
@@ -1063,50 +1087,64 @@ async def _post_batch_budget_and_registry(
         yield Error(request_id=ctx.request_id, error=doom_msg)
 
     if all_tool_responses and not state.aborted:
-        _hide_idle_mcp_servers(
-            state,
-            all_tool_responses,
-            tool_executor=tool_executor,
-            doom_tracker=doom_tracker,
-        )
+        _attach_queued_idle_note(state, all_tool_responses)
 
+    summarized = 0
     if all_tool_responses:
         # Compaction + load-max run before every provider call, so steady-state
         # history is ≤ HISTORY_LOAD_MAX. Clamp the recount input defensively for
         # any pre-compact / failed-compact window so we never tokenize an
         # unbounded migrating thread on every tool batch.
-        chat_for_budget = await _load_agent_chat_history(history, ctx.thread_id)
-        if len(chat_for_budget) > HISTORY_LOAD_MAX:
-            logger.warning(
-                "post-batch budget history exceeds load max; recounting tail only %s",
-                kv(
-                    request_id=ctx.request_id,
-                    thread_id=ctx.thread_id,
-                    message_count=len(chat_for_budget),
-                    load_max=HISTORY_LOAD_MAX,
-                ),
-            )
-            chat_for_budget = truncate_history_preserving_pins(
-                chat_for_budget, max_rows=HISTORY_LOAD_MAX
-            )
-        budget_used = usage.estimated_prompt_tokens
-        try:
-            budget_used = await _prompt_input_tokens_for_history(
-                ctx=ctx,
-                chat_messages=chat_for_budget,
-                provider=provider,
-                attachment_store=attachment_store,
-                attachment_catalog=attachment_catalog,
-                extra_system_text=pre_turn_extra,
-                vertex_google_search=vertex_google_search,
-                epoch=epoch_tracker,
-            )
-        except Exception:
-            logger.warning(
-                "tool budget token recount failed %s; using estimated_prompt_tokens",
-                kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
-                exc_info=True,
-            )
+        if prompt_ledger is not None:
+            prompt_ledger.drop_if_tools_changed(ctx.tools)
+        fast_budget = (
+            None
+            if prompt_ledger is None
+            else prompt_ledger.post_batch_tokens(ctx.context_window_tokens)
+        )
+        if fast_budget is not None:
+            budget_used = fast_budget
+        else:
+            chat_for_budget = await _load_agent_chat_history(history, ctx.thread_id)
+            if len(chat_for_budget) > HISTORY_LOAD_MAX:
+                logger.warning(
+                    "post-batch budget history exceeds load max; recounting tail only %s",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        message_count=len(chat_for_budget),
+                        load_max=HISTORY_LOAD_MAX,
+                    ),
+                )
+                chat_for_budget = truncate_history_preserving_pins(
+                    chat_for_budget, max_rows=HISTORY_LOAD_MAX
+                )
+            # A failed recount must not fall back to the request peak. That peak
+            # stays high after a compaction, and a moderate tier here trims the
+            # new results and forces another compaction.
+            budget_used = prompt_tokens if prompt_tokens > 0 else usage.estimated_prompt_tokens
+            try:
+                budget_used = await _prompt_input_tokens_for_history(
+                    ctx=ctx,
+                    chat_messages=chat_for_budget,
+                    provider=provider,
+                    attachment_store=attachment_store,
+                    attachment_catalog=attachment_catalog,
+                    extra_system_text=pre_turn_extra,
+                    vertex_google_search=vertex_google_search,
+                    epoch=epoch_tracker,
+                    media_memo=media_memo,
+                )
+            except Exception:
+                logger.warning(
+                    "tool budget token recount failed %s; using last prompt count",
+                    kv(
+                        request_id=ctx.request_id,
+                        thread_id=ctx.thread_id,
+                        prompt_tokens=budget_used,
+                    ),
+                    exc_info=True,
+                )
         usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, budget_used)
         budgeter = ContextBudgeter.for_window(
             window_tokens=ctx.context_window_tokens,
@@ -1122,8 +1160,19 @@ async def _post_batch_budget_and_registry(
             vertex_google_search=vertex_google_search,
             epoch=epoch_tracker,
             hook_manager=hook_manager,
+            prompt_ledger=prompt_ledger,
+            attachment_store=attachment_store,
         ):
+            if isinstance(budget_evt, ContextSummarized):
+                summarized = budget_evt.turns_summarized
             yield budget_evt
+        if summarized > 0 and not state.aborted:
+            _hide_mcp_servers_after_rewrite(
+                state,
+                tool_executor=tool_executor,
+                doom_tracker=doom_tracker,
+                prompt_ledger=prompt_ledger,
+            )
 
     if mcp_registry_mutated:
         mcp_client = getattr(tool_executor, "mcp", None)
@@ -1139,6 +1188,8 @@ async def _post_batch_budget_and_registry(
         if state.tools_dirty_reason is None:
             state.tools_dirty_reason = "mcp"
         doom_tracker.exempt_names = _doom_loop_exempt_names(ctx.tools)
+        if prompt_ledger is not None:
+            prompt_ledger.drop_if_tools_changed(ctx.tools)
         logger.info(
             "refreshed ctx.tools after MCP registry change %s",
             kv(
@@ -1156,6 +1207,8 @@ async def _post_batch_budget_and_registry(
         if state.tools_dirty_reason is None:
             state.tools_dirty_reason = "loops"
         doom_tracker.exempt_names = _doom_loop_exempt_names(ctx.tools)
+        if prompt_ledger is not None:
+            prompt_ledger.drop_if_tools_changed(ctx.tools)
         logger.info(
             "refreshed ctx.tools after loops registry change %s",
             kv(
@@ -1229,6 +1282,9 @@ async def dispatch_tool_batch(
     attachment_catalog: SessionAttachmentCatalog | None,
     vertex_google_search: bool,
     epoch_tracker: ContextEpochTracker,
+    prompt_ledger: PromptTokenLedger | None = None,
+    prompt_tokens: int = 0,
+    media_memo: MediaMemo | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute one provider tool-call batch; yield events; update ``state`` in place.
 
@@ -1380,5 +1436,8 @@ async def dispatch_tool_batch(
         epoch_tracker=epoch_tracker,
         inner_turn=turn_index,
         hook_manager=hook_manager,
+        prompt_ledger=prompt_ledger,
+        prompt_tokens=prompt_tokens,
+        media_memo=media_memo,
     ):
         yield evt

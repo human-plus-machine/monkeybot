@@ -197,6 +197,31 @@ def test_agent_event_roundtrip_system_prompt_snapshot() -> None:
     from monkeybot.core.runtime.events import SystemPromptSnapshot
 
     ev = SystemPromptSnapshot(request_id="r1", inner_turn=2, text="## Agent\n\nHello")
+    raw = event_to_json(ev)
+    assert event_from_json(raw) == ev
+    assert "sections" not in json.loads(raw)
+
+
+def test_agent_event_roundtrip_system_prompt_snapshot_sections() -> None:
+    from monkeybot.core.runtime.events import PromptSection, SystemPromptSnapshot
+
+    ev = SystemPromptSnapshot(
+        request_id="r1",
+        inner_turn=2,
+        text="## Agent\n\nHello",
+        sections=(
+            PromptSection(name="todos", chars=10, est_tokens=2, cap_chars=6000),
+            PromptSection(name="agent_md", chars=4, est_tokens=1),
+        ),
+    )
+    payload = json.loads(event_to_json(ev))
+    assert payload["sections"][0] == {
+        "name": "todos",
+        "chars": 10,
+        "est_tokens": 2,
+        "cap_chars": 6000,
+    }
+    assert "cap_chars" not in payload["sections"][1]
     assert event_from_json(event_to_json(ev)) == ev
 
 

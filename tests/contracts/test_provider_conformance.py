@@ -1172,6 +1172,7 @@ async def _cache_observation(
         return {
             "cache_controls": _cache_controls(sent),
             "prompt_cache_retention": sent.get("prompt_cache_retention"),
+            "prompt_cache_key": sent.get("prompt_cache_key"),
             "session_affinity": headers.get("x-session-affinity"),
         }
 
@@ -1200,6 +1201,7 @@ async def _cache_observation(
         return {
             "cache_controls": _cache_controls(sent),
             "prompt_cache_retention": sent.get("prompt_cache_retention"),
+            "prompt_cache_key": sent.get("prompt_cache_key"),
             "session_affinity": headers.get("x-session-affinity"),
         }
 
@@ -1214,6 +1216,7 @@ async def _cache_observation(
         return {
             "cache_controls": _cache_controls(sent),
             "prompt_cache_retention": sent.get("prompt_cache_retention"),
+            "prompt_cache_key": sent.get("prompt_cache_key"),
             "session_affinity": headers.get("x-session-affinity"),
         }
 
@@ -1261,6 +1264,7 @@ async def _cache_observation(
         "prompt_cache_retention": None
         if not isinstance(config, dict)
         else config.get("prompt_cache_retention"),
+        "prompt_cache_key": None,
         "session_affinity": None,
     }
 
@@ -1283,6 +1287,10 @@ async def test_cache_hints(adapter: str, retention: str, monkeypatch: pytest.Mon
         assert observed["prompt_cache_retention"] == "24h"
     else:
         assert observed["prompt_cache_retention"] is None
+    if adapter == "openai" and retention != "none":
+        assert observed["prompt_cache_key"] == "sess-1"
+    else:
+        assert observed["prompt_cache_key"] is None
     if adapter in {"openai", "claude"} and retention != "none":
         assert observed["session_affinity"] == "sess-1"
     else:

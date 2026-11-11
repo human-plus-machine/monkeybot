@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from collections.abc import Collection, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -23,6 +24,7 @@ from monkeybot.core.llm.usage import (
     UsageSeriesPoint,
     UsageSummary,
 )
+from monkeybot.core.loop_yield import LoopYield
 from monkeybot.core.memory.ids import outbox_id, utc_now_iso
 from monkeybot.core.memory.outbox import (
     STATUS_COMMITTED,
@@ -32,6 +34,8 @@ from monkeybot.core.memory.outbox import (
     backoff_iso,
     is_permanent_error,
 )
+from monkeybot.core.persistence.archive import archived_row, kept_row_ids, unmatched_indexes
+from monkeybot.core.persistence.backends import ArchivedRow
 from monkeybot.core.persistence.branches import (
     BRANCH_COLUMNS,
     ROOT_BRANCH_ID,
@@ -47,6 +51,12 @@ from monkeybot.core.persistence.durable_runs import (
 )
 from monkeybot.core.persistence.errors import AmbiguousCommitError
 from monkeybot.core.persistence.row_ids import loaded_row_id, row_id_for_insert, split_row_ids
+from monkeybot.core.persistence.row_meta import (
+    RowMeta,
+    carry_created_at,
+    match_stored,
+    stored_text,
+)
 from monkeybot.core.persistence.scheduled_loops import (
     _SCHEDULED_LOOP_COLUMNS,
     GOAL_MAX_CONSECUTIVE_ERRORS,
@@ -126,6 +136,24 @@ _SCHEMA_DDLS: tuple[str, ...] = (
     "ALTER TABLE conversation_history ADD COLUMN IF NOT EXISTS agent_scope TEXT NOT NULL DEFAULT ''",
     """CREATE INDEX IF NOT EXISTS idx_history_scope_thread
     ON conversation_history(agent_scope, thread_id, created_at DESC, id DESC)""",
+    """CREATE TABLE IF NOT EXISTS conversation_history_archive (
+    id BIGSERIAL PRIMARY KEY,
+    agent_scope TEXT NOT NULL DEFAULT '',
+    thread_id TEXT NOT NULL,
+    row_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at BIGINT NOT NULL,
+    turn_id TEXT,
+    message_id TEXT,
+    archive_id TEXT NOT NULL,
+    summary_row_id TEXT,
+    reason TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    archived_at BIGINT NOT NULL
+)""",
+    """CREATE INDEX IF NOT EXISTS idx_history_archive_thread
+    ON conversation_history_archive(agent_scope, thread_id, archived_at, position)""",
     """CREATE TABLE IF NOT EXISTS scheduled_loops (
     loop_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
@@ -370,11 +398,15 @@ class PostgresHistoryStore:
         *,
         turn_id: str | None = None,
         message_id: str | None = None,
+        created_at: int | None = None,
+        strict: bool = False,
     ) -> None:
         role = message.role
         if role not in _VALID_ROLES:
             raise ValueError(f"invalid role: {role!r}")
-        if message_id:
+        # A rewrite re-inserts ids it just deleted. Skipping the dedupe check
+        # lets a unique collision abort the transaction instead of dropping the row.
+        if message_id and not strict:
             existing = await conn.fetchval(
                 "SELECT 1 FROM conversation_history WHERE message_id = $1 LIMIT 1",
                 message_id,
@@ -386,7 +418,8 @@ class PostgresHistoryStore:
             separators=(",", ":"),
             ensure_ascii=False,
         )
-        created_at = int(time.time() * 1000)
+        if created_at is None:
+            created_at = int(time.time() * 1000)
         await conn.execute(
             """
             INSERT INTO conversation_history(
@@ -464,6 +497,9 @@ class PostgresHistoryStore:
                     limit,
                 )
                 rows_chrono = list(reversed(rows))
+        # Decoding holds the GIL. Yield between rows so a long thread does not
+        # stall every other session for the whole load.
+        pace = LoopYield()
         out: list[Message] = []
         for row in rows_chrono:
             db_id = int(row["id"])
@@ -491,6 +527,7 @@ class PostgresHistoryStore:
                     row_id=loaded_row_id(row["row_id"], db_id),
                 )
             )
+            await pace.tick()
         return out
 
     async def clear(self, thread_id: str) -> None:
@@ -502,15 +539,196 @@ class PostgresHistoryStore:
             )
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
-        """Replace thread history atomically (single transaction)."""
+        """Replace thread history atomically (single transaction).
+
+        A row whose ``row_id`` is already stored keeps that row's ``created_at``,
+        ``turn_id``, and ``message_id``.
+        """
+        now_ms = int(time.time() * 1000)
         async with self._pool.acquire() as conn, conn.transaction():
+            deleted = await conn.fetch(
+                """
+                DELETE FROM conversation_history
+                WHERE thread_id = $1 AND agent_scope = $2
+                RETURNING id, row_id, created_at, turn_id, message_id
+                """,
+                thread_id,
+                self._agent_scope,
+            )
+            deleted = sorted(deleted, key=lambda row: (int(row["created_at"]), int(row["id"])))
+            stored: list[tuple[str, RowMeta]] = [
+                (
+                    loaded_row_id(row["row_id"], row["id"]),
+                    RowMeta(
+                        created_at=int(row["created_at"]),
+                        turn_id=stored_text(row["turn_id"]),
+                        message_id=stored_text(row["message_id"]),
+                    ),
+                )
+                for row in deleted
+            ]
+            matched = match_stored(messages, stored)
+            stamps = carry_created_at(
+                [stored[index][1].created_at if index is not None else None for index in matched],
+                now_ms=now_ms,
+                step=0,
+            )
+            for message, index, created_at in zip(messages, matched, stamps, strict=True):
+                meta = stored[index][1] if index is not None else None
+                await self._insert_message(
+                    conn,
+                    thread_id,
+                    message,
+                    turn_id=meta.turn_id if meta is not None else None,
+                    message_id=meta.message_id if meta is not None else None,
+                    created_at=created_at,
+                    strict=True,
+                )
+
+    async def reset_archiving(
+        self,
+        thread_id: str,
+        messages: list[Message],
+        *,
+        reason: str,
+        summary_row_id: str | None,
+    ) -> int:
+        """Replace the thread and keep every dropped row in the archive.
+
+        The copy and the rewrite commit together. A failure leaves both tables
+        as they were.
+        """
+        archive_id = uuid.uuid4().hex
+        now_ms = int(time.time() * 1000)
+        async with self._pool.acquire() as conn, conn.transaction():
+            rows = await conn.fetch(
+                """
+                SELECT id, row_id, created_at, turn_id, message_id
+                FROM conversation_history
+                WHERE thread_id = $1 AND agent_scope = $2
+                ORDER BY created_at ASC, id ASC
+                """,
+                thread_id,
+                self._agent_scope,
+            )
+            stored: list[tuple[str, RowMeta]] = [
+                (
+                    loaded_row_id(row["row_id"], row["id"]),
+                    RowMeta(
+                        created_at=int(row["created_at"]),
+                        turn_id=stored_text(row["turn_id"]),
+                        message_id=stored_text(row["message_id"]),
+                    ),
+                )
+                for row in rows
+            ]
+            dropped = unmatched_indexes(
+                [row_id for row_id, _meta in stored], kept_row_ids(messages)
+            )
+            if dropped:
+                await conn.execute(
+                    """
+                    INSERT INTO conversation_history_archive (
+                        agent_scope, thread_id, row_id, role, content, created_at,
+                        turn_id, message_id, archive_id, summary_row_id, reason,
+                        position, archived_at
+                    )
+                    SELECT h.agent_scope, h.thread_id,
+                           CASE
+                               WHEN COALESCE(h.row_id, '') = '' THEN 'legacy:' || h.id::text
+                               ELSE h.row_id
+                           END,
+                           h.role, h.content, h.created_at, h.turn_id, h.message_id,
+                           $3, $4, $5, v.position, $6
+                    FROM conversation_history h
+                    JOIN unnest($1::bigint[], $2::integer[]) AS v(id, position)
+                      ON h.id = v.id
+                    WHERE h.thread_id = $7 AND h.agent_scope = $8
+                    """,
+                    [int(rows[index]["id"]) for index in dropped],
+                    dropped,
+                    archive_id,
+                    summary_row_id,
+                    reason,
+                    now_ms,
+                    thread_id,
+                    self._agent_scope,
+                )
+            matched = match_stored(messages, stored)
+            stamps = carry_created_at(
+                [stored[index][1].created_at if index is not None else None for index in matched],
+                now_ms=now_ms,
+                step=0,
+            )
             await conn.execute(
                 "DELETE FROM conversation_history WHERE thread_id = $1 AND agent_scope = $2",
                 thread_id,
                 self._agent_scope,
             )
-            for msg in messages:
-                await self._insert_message(conn, thread_id, msg)
+            for message, index, created_at in zip(messages, matched, stamps, strict=True):
+                meta = stored[index][1] if index is not None else None
+                await self._insert_message(
+                    conn,
+                    thread_id,
+                    message,
+                    turn_id=meta.turn_id if meta is not None else None,
+                    message_id=meta.message_id if meta is not None else None,
+                    created_at=created_at,
+                    strict=True,
+                )
+        return len(dropped)
+
+    async def load_archive(self, thread_id: str) -> list[ArchivedRow]:
+        """Archived rows for this scope and thread, oldest rewrite first."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT role, content, created_at, turn_id, message_id, row_id,
+                       archive_id, summary_row_id, reason, position, archived_at
+                FROM conversation_history_archive
+                WHERE thread_id = $1 AND agent_scope = $2
+                ORDER BY archived_at ASC, archive_id ASC, position ASC, id ASC
+                """,
+                thread_id,
+                self._agent_scope,
+            )
+        out: list[ArchivedRow] = []
+        for row in rows:
+            try:
+                out.append(
+                    archived_row(
+                        role=str(row["role"]),
+                        content_blob=str(row["content"]),
+                        row_id=str(row["row_id"]),
+                        created_at=int(row["created_at"]),
+                        turn_id=None if row["turn_id"] is None else str(row["turn_id"]),
+                        message_id=None if row["message_id"] is None else str(row["message_id"]),
+                        archive_id=str(row["archive_id"]),
+                        summary_row_id=(
+                            None if row["summary_row_id"] is None else str(row["summary_row_id"])
+                        ),
+                        reason=str(row["reason"]),
+                        position=int(row["position"]),
+                        archived_at=int(row["archived_at"]),
+                    )
+                )
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                raise ValueError(f"archive row unparseable: {exc}") from exc
+        return out
+
+    async def delete_archive(self, thread_id: str) -> int:
+        """Delete this scope's archived rows for ``thread_id``."""
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                DELETE FROM conversation_history_archive
+                WHERE thread_id = $1 AND agent_scope = $2
+                RETURNING id
+                """,
+                thread_id,
+                self._agent_scope,
+            )
+        return len(rows)
 
     async def delete_rows(self, thread_id: str, row_ids: Collection[str]) -> int:
         """Delete the rows whose loaded ``row_id`` is in ``row_ids`` in one statement."""

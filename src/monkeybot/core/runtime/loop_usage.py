@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
+from monkeybot.core.attachments.resolve import MediaMemo
 from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.config.snapshot import RuntimeConfig, env_value_or_current
 from monkeybot.core.context import TurnContext
@@ -19,17 +20,14 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.messages import convert_to_provider
-from monkeybot.core.prompts.prompt import (
-    compose_stable_baseline,
-    compose_volatile_tail_parts,
-)
 from monkeybot.core.types.types_tools import ToolDef
 
 from .events import UsageTotals
 from .loop_messages import (
-    _append_extra_system_text,
     _is_routine_resume_turn,
     _messages_for_provider,
+    _send_tail,
+    _stable_text_and_live_parts,
     _system_message_from_text,
 )
 
@@ -60,6 +58,24 @@ def _merge_usage_event(usage: Usage, ev: UsageEvent) -> None:
     usage.cached_tokens += ev.cached_tokens
     usage.cache_read_tokens += ev.cache_read_tokens
     usage.cache_creation_tokens += ev.cache_creation_tokens
+
+
+def reported_prompt_tokens(
+    provider_name: str,
+    *,
+    input_tokens: int,
+    cache_read_tokens: int,
+    cache_creation_tokens: int,
+) -> int:
+    """Total prompt size from one usage report.
+
+    Gemini's prompt count already includes cached content. Anthropic, Bedrock,
+    and the OpenAI-compatible adapters report uncached input separately from
+    cache read and cache creation.
+    """
+    if provider_name == "gemini":
+        return input_tokens
+    return input_tokens + cache_read_tokens + cache_creation_tokens
 
 
 _THINKING_BUDGET_PROVIDERS = frozenset(
@@ -127,45 +143,38 @@ async def _prompt_input_tokens_for_history(
     extra_system_text: str | None = None,
     vertex_google_search: bool = False,
     epoch: ContextEpochTracker | None = None,
+    media_memo: MediaMemo | None = None,
 ) -> int:
     """Provider-accurate prompt size for history rows already persisted (e.g. post-assistant).
 
-    When ``epoch`` is supplied, the count reflects the true wire shape for the
-    *current* epoch state — leading (cached) baseline plus any pending
-    mid-conversation update — via a non-mutating :meth:`ContextEpochTracker.peek`.
-    Falls back to a flat stable+volatile concatenation when no tracker is given
-    (e.g. summarizer/curator calls that have no epoch of their own). Either way,
-    the live tracker is never mutated by a budget recount.
+    The count is the wire shape: the stable prefix (baseline plus skills) plus
+    the live tail. When ``epoch`` is supplied that shape comes from a
+    non-mutating :meth:`ContextEpochTracker.peek`; otherwise a fresh tracker is
+    peeked, which is the shape of the first call of a user message. Notes in
+    ``extra_system_text`` are counted in the tail, where the request sends them.
+    The live tracker is never mutated by a budget recount.
     """
-    catalog = attachment_catalog.list_records() if attachment_catalog is not None else None
-    stable = compose_stable_baseline(ctx, attachment_catalog=catalog)
-    volatile_parts = compose_volatile_tail_parts(ctx, chat_messages=chat_messages)
-    volatile = "".join(volatile_parts.values())
-    mid_conversation_update = ""
-    if epoch is not None:
-        volatile_content = "".join(
-            text for name, text in volatile_parts.items() if name != "current_date"
-        )
-        admit = epoch.peek(
-            stable_baseline=stable,
-            volatile_text=volatile,
-            stable_fingerprint=fingerprint_text(stable),
-            volatile_fingerprint=fingerprint_text(volatile),
-            volatile_content_text=volatile_content,
-        )
-        body = admit.leading_system_text
-        mid_conversation_update = admit.mid_conversation_update
-    else:
-        body = stable + volatile
-    system = _append_extra_system_text(_system_message_from_text(body), extra_system_text)
+    stable, live_parts, stable_parts = _stable_text_and_live_parts(
+        ctx, chat_messages, attachment_catalog=attachment_catalog
+    )
+    live = "".join(live_parts.values())
+    admit = (epoch or ContextEpochTracker()).peek(
+        stable_baseline=stable,
+        volatile_text=live,
+        stable_fingerprint=fingerprint_text(stable),
+        volatile_fingerprint=fingerprint_text(live),
+        volatile_parts=live_parts,
+        stable_parts=stable_parts,
+    )
+    system = _system_message_from_text(admit.leading_system_text)
+    context_tail = _send_tail(admit.context_tail, extra_system_text)
     resolved_messages = convert_to_provider(
         chat_messages,
         attachment_store=attachment_store,
         session_id=ctx.session_id,
+        media_memo=media_memo,
     )
-    provider_messages = _messages_for_provider(
-        system, resolved_messages, mid_conversation_update=mid_conversation_update
-    )
+    provider_messages = _messages_for_provider(system, resolved_messages, context_tail=context_tail)
     return await _provider_prompt_input_tokens(
         provider,
         provider_messages,

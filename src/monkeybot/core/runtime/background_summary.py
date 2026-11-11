@@ -26,9 +26,9 @@ from .history_compaction import (
     _finalize_summary_row,
     _generate_summary_text,
     _intent_facts_from_ctx,
-    _summarization_model_id,
-    _summarization_viable,
+    _middle_summary_lines,
     rebuild_compacted_history,
+    replace_history_archiving,
     split_messages_for_compaction,
 )
 
@@ -94,8 +94,8 @@ def _prefix_matches(pending: PendingSummary, raw: Sequence[Message]) -> bool:
 def _suffix_within_limit(pending: PendingSummary, raw: Sequence[Message]) -> bool:
     """True when rows after the cut have not outgrown the tail this job can keep.
 
-    The split keeps at least two recent rows even when they already exceed the
-    token budget. That tail is fresh until new rows push it further: restarting
+    The split keeps the newest row even when it already exceeds the token
+    budget. That tail is fresh until new rows push it further: restarting
     on every in-band turn would cancel the same summary before it finishes.
     A tail that fit the budget may still grow up to the budget. A shorter
     history has lost rows, so this cut is no longer the one a new split would use.
@@ -232,13 +232,18 @@ async def maybe_start(
     if floor >= cap or preflight < floor or preflight >= cap:
         return
     raw = await history.load(ctx.thread_id)
-    model = _summarization_model_id(ctx)
+    model = ctx.model
     existing = _pending.get(ctx.thread_id)
     if existing is not None and _is_fresh(existing, raw, model=model, window=window):
         return
-    if not _summarization_viable(raw, window_tokens=window):
+    # Rows appended before the bar join the tail. Keep less now so the tail is
+    # the inline budget when the summary is applied.
+    start_tail = max(1, _tail_budget(window) - (cap - preflight))
+    head, middle, tail = split_messages_for_compaction(
+        raw, window_tokens=window, keep_tail_tokens=start_tail
+    )
+    if not _middle_summary_lines(middle, window_tokens=window):
         return
-    head, middle, tail = split_messages_for_compaction(raw, window_tokens=window)
     cut = _first_tail_index(raw, tail)
     if not tail or cut <= 0 or cut >= len(raw):
         return
@@ -380,7 +385,13 @@ async def apply_pending_summary(
         summary=summary,
         tail=[],
     ) + list(current[pending.cut :])
-    await history.reset(thread_id, merged)
+    await replace_history_archiving(
+        history,
+        thread_id,
+        merged,
+        reason="compaction",
+        summary=summary,
+    )
     logger.debug(
         "background summary applied %s",
         kv(

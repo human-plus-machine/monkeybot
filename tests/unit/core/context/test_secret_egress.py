@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError
@@ -450,6 +451,135 @@ def test_scanner_fails_closed_when_json_escaping_exceeds_cap(
     hits = scanner.scan([quoted])
     assert hits == [Hit(index=0, kind="secret")]
     assert calls == []
+
+
+def test_scanner_timeout_opens_breaker_until_cooldown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A hung bridge is paid once. The next scan in the window is not sent
+    and is not remembered as clean. After the window, the text is scanned again."""
+    _publish_bridge(tmp_path, monkeypatch)
+    calls = {"n": 0}
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeResponse:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TimeoutError("timed out")
+        return _FakeResponse({"hits": []})
+
+    monkeypatch.setattr("monkeybot.core.context.secret_egress._LOOPBACK_OPENER.open", fake_open)
+    clock = {"t": 0.0}
+    scanner = SecretScanner(clock=lambda: clock["t"])
+
+    with caplog.at_level(logging.INFO):
+        assert scanner.scan(["secret-text"]) == []
+        assert calls["n"] == 1
+        assert scanner._clean_digests == {}
+
+        assert scanner.scan(["secret-text"]) == []
+        assert calls["n"] == 1
+        assert scanner._clean_digests == {}
+
+        from monkeybot.core.context.secret_egress import _BRIDGE_DOWN_COOLDOWN_S
+
+        clock["t"] += _BRIDGE_DOWN_COOLDOWN_S
+        assert scanner.scan(["secret-text"]) == []
+        assert calls["n"] == 2
+
+    opened = [r for r in caplog.records if "skipping scans" in r.getMessage()]
+    assert len(opened) == 1
+    assert opened[0].levelno == logging.WARNING
+    recovered = [r for r in caplog.records if "reachable again" in r.getMessage()]
+    assert len(recovered) == 1
+    assert recovered[0].levelno == logging.INFO
+
+
+def test_scanner_new_bridge_token_ignores_open_breaker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A restarted Spaces app publishes a new token, so the next scan is sent."""
+    _publish_bridge(tmp_path, monkeypatch)
+    calls = {"n": 0}
+
+    def fake_open(req: Request, timeout: object = None) -> None:
+        calls["n"] += 1
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("monkeybot.core.context.secret_egress._LOOPBACK_OPENER.open", fake_open)
+    scanner = SecretScanner()
+    assert scanner.scan(["secret-text"]) == []
+    assert calls["n"] == 1
+
+    (tmp_path / "in-app-cdp-token").write_text("other-token", encoding="utf-8")
+    assert scanner.scan(["secret-text"]) == []
+    assert calls["n"] == 2
+
+
+def test_scanner_http_500_does_not_open_breaker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An HTTP status means the bridge answered, so the next scan still asks it."""
+    _publish_bridge(tmp_path, monkeypatch)
+    calls = {"n": 0}
+
+    def fake_open(req: Request, timeout: object = None) -> None:
+        calls["n"] += 1
+        raise HTTPError(req.full_url, 500, "boom", hdrs=None, fp=BytesIO(b""))  # type: ignore[arg-type]
+
+    monkeypatch.setattr("monkeybot.core.context.secret_egress._LOOPBACK_OPENER.open", fake_open)
+    scanner = SecretScanner()
+    assert scanner.scan(["maybe-secret"]) == []
+    assert scanner.scan(["maybe-secret"]) == []
+    assert calls["n"] == 2
+    assert scanner._clean_digests == {}
+
+
+def test_scanner_timeout_skips_remaining_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first timed-out batch opens the breaker. The rest of that scan is not sent."""
+    _publish_bridge(tmp_path, monkeypatch)
+    one_item = len(json.dumps({"texts": ["aaaaaa"]}).encode("utf-8"))
+    monkeypatch.setattr("monkeybot.core.context.secret_egress._SCAN_MAX_BATCH_BYTES", one_item)
+    calls: list[list[str]] = []
+
+    def fake_open(req: Request, timeout: object = None) -> None:
+        calls.append(json.loads(req.data.decode("utf-8"))["texts"])
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr("monkeybot.core.context.secret_egress._LOOPBACK_OPENER.open", fake_open)
+    scanner = SecretScanner()
+    assert scanner.scan(["aaaaaa", "bbbbbb", "cccccc"]) == []
+    assert calls == [["aaaaaa"]]
+
+
+def test_argument_scan_and_outbound_tool_request_share_one_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tool-argument scan and the later provider scan serialize args the same way,
+    so the clean-text cache makes the second one free."""
+    _publish_bridge(tmp_path, monkeypatch)
+    calls = {"n": 0}
+    args = {"command": "echo hi"}
+
+    def fake_open(req: Request, timeout: object = None) -> _FakeResponse:
+        calls["n"] += 1
+        return _FakeResponse({"hits": []})
+
+    monkeypatch.setattr("monkeybot.core.context.secret_egress._LOOPBACK_OPENER.open", fake_open)
+    scanner = SecretScanner()
+    assert scanner.scan([json.dumps(args, ensure_ascii=False)]) == []
+    outcome = scan_and_redact(
+        [
+            Message(
+                role="assistant",
+                content=[ToolRequest(id="c1", name="run_command", args=args)],
+            )
+        ],
+        scanner=scanner,
+    )
+    assert calls["n"] == 1
+    assert outcome.hits == []
 
 
 def test_scanner_fails_closed_on_http_413(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

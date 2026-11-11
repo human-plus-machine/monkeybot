@@ -159,7 +159,7 @@ assertions:
   - n: 21
     tools_include:
     - fixture__echo
-    messages_not_contain: "was hidden after 10 turns without use"
+    messages_not_contain: "because it went unused"
   events_sequence:
   - type: ToolCallResult
     tool: fixture__echo

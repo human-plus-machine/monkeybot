@@ -7,7 +7,8 @@ job exits, is killed, or ``aclose`` runs. MonkeyBot does not talk to the
 build broker itself.
 
 ``aclose`` returns the jobs it killed. An empty list means nothing was still
-running. A second call is a no-op and returns an empty list.
+running, or this executor does not own the job table (a session-scoped table
+is closed with the session). A second call is a no-op and returns an empty list.
 """
 
 from __future__ import annotations

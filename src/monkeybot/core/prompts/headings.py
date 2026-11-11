@@ -29,6 +29,7 @@ MEMORY_NUDGE_HEADING = "\n\n## Memory\n"
 SKILLS_HEADING = "\n\n## Skills\n"
 TODO_LIST_HEADING = "\n\n## Todo list\n"
 BACKGROUND_TASKS_HEADING = "\n\n## Background subagents\n"
+BACKGROUND_COMMANDS_HEADING = "\n\n## Background commands\n"
 INVOKED_SKILL_HEADING = "\n\n## Invoked skill\n"
 CURRENT_REQUEST_HEADING = "\n\n## Current request\n"
 RUNTIME_NOTES_HEADING = "\n\n## Runtime notes\n"
@@ -48,6 +49,7 @@ VOLATILE_SECTION_HEADINGS = (
     SKILLS_HEADING,
     TODO_LIST_HEADING,
     BACKGROUND_TASKS_HEADING,
+    BACKGROUND_COMMANDS_HEADING,
     INVOKED_SKILL_HEADING,
     CURRENT_REQUEST_HEADING,
     RUNTIME_NOTES_HEADING,
@@ -63,6 +65,17 @@ def heading_marker(heading: str) -> str:
     boundary detection.
     """
     return heading[: heading.index("\n", 2) + 1]
+
+
+def is_system_context_update(text: str) -> bool:
+    """True when ``text`` is a live context tail, not a later mention of the heading.
+
+    The tail block starts with the ``## System context update`` title line.
+    Cache markers sit on the block before it, so a message that only quotes the
+    heading further down is left alone.
+    """
+    title = heading_marker(SYSTEM_CONTEXT_UPDATE_HEADING).strip()
+    return text.lstrip("\n").startswith(title)
 
 
 #: Title-line-only markers for locating the volatile tail in a composed prompt.

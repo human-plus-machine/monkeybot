@@ -15,12 +15,11 @@ import json
 import logging
 import re
 from collections import OrderedDict
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from monkeybot.core.hooks import HookEvent, HookManager, HookPayload
-from monkeybot.core.llm.provider import Message
-from monkeybot.core.types.content_blocks import Text
+from monkeybot.core.runtime.loop_messages import _append_notice_to_send_tail
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +97,7 @@ def format_evidence_correction(missing: list[str]) -> str:
 
 
 def format_verification_notice(unread: list[str]) -> str:
-    """System-injection text telling the model to read unopened citations."""
+    """One-shot notice telling the model to read unopened citations."""
     bullets = "\n".join(f"- `{p}`" for p in unread)
     return (
         f"{_VERIFICATION_HEADING}\n"
@@ -131,8 +130,9 @@ class EvidencePathGuard:
     ``AFTER_PROVIDER_RESPONSE`` is fire-and-forget, so the scan usually finishes
     at the settlement barrier, after ``PRE_TOOL`` of the citing step has already
     run. ``BEFORE_PROVIDER_REQUEST`` is the next awaited point, and that is the
-    request the notice belongs on. ``PRE_TURN`` and ``PRE_TOOL`` still inject
-    when the notice is already queued.
+    request the notice belongs on. The notice is appended to the send-time tail,
+    not the system text, so it does not change the cached system prefix.
+    ``PRE_TURN`` and ``PRE_TOOL`` still inject when the notice is already queued.
 
     Tracks ``read_file`` / ``glob`` confirmations so citations sourced only
     from ``grep`` match lines trigger a one-shot read-and-verify notice (F22).
@@ -247,7 +247,9 @@ class EvidencePathGuard:
         notice = self._inject(payload)
         if not notice or payload.provider_messages is None:
             return
-        payload.provider_messages = _splice_system_notice(list(payload.provider_messages), notice)
+        payload.provider_messages = _append_notice_to_send_tail(
+            list(payload.provider_messages), notice
+        )
 
     def _inject(self, payload: HookPayload) -> str | None:
         state = self._state(payload.thread_id)
@@ -260,21 +262,6 @@ class EvidencePathGuard:
         else:
             payload.inject_text = notice
         return notice
-
-
-def _splice_system_notice(messages: list[Message], notice: str) -> list[Message]:
-    """Append ``notice`` to the leading system message of this provider request."""
-    updated: list[Message] = []
-    applied = False
-    for message in messages:
-        if not applied and message.role == "system":
-            updated.append(replace(message, content=[*message.content, Text(text=f"\n\n{notice}")]))
-            applied = True
-        else:
-            updated.append(message)
-    if not applied:
-        updated.insert(0, Message(role="system", content=[Text(text=notice)]))
-    return updated
 
 
 def _paths_from_glob_result(result: str | None) -> list[str]:

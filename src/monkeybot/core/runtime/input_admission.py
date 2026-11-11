@@ -63,6 +63,7 @@ class FollowUpItem:
     first_lock_fail_at_ms: int | None = None
     provenance: str = "human"
     harness_run_ids: tuple[str, ...] = ()
+    harness_job_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -143,6 +144,7 @@ class InputAdmission:
         *,
         provenance: str = "human",
         harness_run_ids: tuple[str, ...] = (),
+        harness_job_ids: tuple[str, ...] = (),
     ) -> int:
         """Append a follow-up prompt; return 0-based queue position."""
         if not request_id.strip():
@@ -157,6 +159,7 @@ class InputAdmission:
                 content=list(content),
                 provenance=provenance,
                 harness_run_ids=harness_run_ids,
+                harness_job_ids=harness_job_ids,
             )
         )
         return len(self._follow_up) - 1

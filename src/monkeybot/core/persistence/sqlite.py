@@ -176,6 +176,24 @@ SCHEMA_DDLS: Final[tuple[str, ...]] = (
     "CREATE INDEX IF NOT EXISTS idx_history_thread ON conversation_history(thread_id, created_at)",
     """CREATE INDEX IF NOT EXISTS idx_history_thread_last
     ON conversation_history(thread_id, created_at DESC, id DESC)""",
+    """CREATE TABLE IF NOT EXISTS conversation_history_archive (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_scope TEXT NOT NULL DEFAULT '',
+    thread_id TEXT NOT NULL,
+    row_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    turn_id TEXT,
+    message_id TEXT,
+    archive_id TEXT NOT NULL,
+    summary_row_id TEXT,
+    reason TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    archived_at INTEGER NOT NULL
+)""",
+    """CREATE INDEX IF NOT EXISTS idx_history_archive_thread
+    ON conversation_history_archive(agent_scope, thread_id, archived_at, position)""",
     "CREATE INDEX IF NOT EXISTS idx_runs_parent ON subagent_runs(parent_run_id)",
     """CREATE INDEX IF NOT EXISTS idx_runs_status ON subagent_runs(status)
     WHERE status IN ('pending','running')""",

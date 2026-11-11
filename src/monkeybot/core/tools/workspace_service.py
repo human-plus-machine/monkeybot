@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import NotRequired, TypedDict
 
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.tools.fs_worker import FsCancelledError, current_cancel
 from monkeybot.core.tools.gitignore import GitignoreRules
 from monkeybot.core.tools.text_normalize import normalize_unicode_punctuation
 
@@ -58,6 +59,63 @@ _GREP_SKIPPED_PATHS_CAP = 20
 # Wall-clock budget for the optional ripgrep accelerator. On expiry we fail closed
 # (incomplete_scan) instead of falling back to an unbounded Python walk.
 _RG_TIMEOUT_SEC = 120
+
+
+def _raise_if_cancelled() -> None:
+    """Stop a walk when the calling task has been cancelled.
+
+    A worker thread cannot be cancelled from outside. The executor sets the
+    flag and kills any ripgrep child; the walk checks too, so a cancelled
+    grep does not fall through to the Python walker in an abandoned thread.
+    """
+    cancel = current_cancel()
+    if cancel is not None and cancel.cancelled():
+        raise FsCancelledError()
+
+
+def _spawn_rg(
+    cmd: list[str],
+    *,
+    cwd: str,
+    timeout: float,
+) -> subprocess.CompletedProcess[str]:
+    """Run one ripgrep command, killing it if this file-tool call is cancelled.
+
+    Same contract as ``subprocess.run(..., capture_output=True, text=True)``:
+    exit codes are left for the caller, and a timeout raises
+    ``subprocess.TimeoutExpired`` after the child has been killed. A cancel
+    raises :class:`FsCancelledError` instead, including when it races the timeout.
+    """
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=cwd,
+    )
+    cancel = current_cancel()
+    try:
+        if cancel is not None:
+            cancel.attach(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            if cancel is not None and cancel.cancelled():
+                raise FsCancelledError() from None
+            raise
+        if cancel is not None and cancel.cancelled():
+            raise FsCancelledError()
+    finally:
+        if cancel is not None:
+            cancel.detach(proc)
+    return subprocess.CompletedProcess(
+        cmd,
+        proc.returncode if proc.returncode is not None else 1,
+        stdout,
+        stderr,
+    )
 
 
 # One-level or nested ``{a,b}`` groups in filename globs (fnmatch has no brace expansion).
@@ -777,11 +835,10 @@ class WorkspaceFileService:
     def sync_extra_read_roots(self, roots: Iterable[Path | str]) -> None:
         """Replace the granted-folder set with ``roots``.
 
-        Called at the top of every read-tool dispatch (see
-        ``CoreToolExecutor.execute``) with the union of this turn's grants
-        and the durable store's current contents, so a grant approved mid-
-        session — or by another agent, for the durable case — takes effect
-        on the very next call without reconstructing this service.
+        ``CoreToolExecutor`` calls :meth:`with_read_roots` per file-tool call
+        instead of mutating the shared service, so a grant approved mid-
+        session takes effect on the next call and a scan already running
+        keeps the roots it started with.
 
         Assigns rather than merges: a grant revoked in Settings must stop
         being readable on the very next call too. The realtime path builds
@@ -791,6 +848,22 @@ class WorkspaceFileService:
         once" survive an entire voice session after the user revoked it.
         """
         self._extra_read_roots = tuple(dict.fromkeys(Path(p).resolve() for p in roots))
+
+    def with_read_roots(self, roots: Iterable[Path | str]) -> WorkspaceFileService:
+        """A copy of this service whose granted read roots are exactly ``roots``.
+
+        Parallel file tools each scan through their own copy. A grant revoked
+        on a later call replaces the roots on that call's copy only, so it
+        cannot widen a scan that is already running.
+        """
+        clone = WorkspaceFileService(
+            self._root,
+            self._settings,
+            skills_root=self._skills_root,
+            artifacts_root=self._artifacts_root,
+        )
+        clone.sync_extra_read_roots(roots)
+        return clone
 
     @property
     def repo_root(self) -> Path:
@@ -1275,6 +1348,7 @@ class WorkspaceFileService:
         explicit = {seg for seg in segments if not _GLOB_MAGIC_RE.search(seg)}
 
         def children(directory: Path) -> list[os.DirEntry[str]]:
+            _raise_if_cancelled()
             if time.monotonic() > deadline:
                 raise _GlobTimeout
             try:
@@ -1390,6 +1464,8 @@ class WorkspaceFileService:
                 if len(paths) >= max_paths:
                     stop_reason = "max_paths"
                     break
+        except FsCancelledError:
+            raise
         except _GlobTimeout:
             stop_reason = "timeout"
         except OSError as e:
@@ -1493,9 +1569,13 @@ class WorkspaceFileService:
                     files_only=files_only,
                     respect_gitignore=respect_gitignore,
                 )
+            except FsCancelledError:
+                raise
             except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
                 # Fall back to the pure-Python walker; do not change match semantics
                 # by failing closed when an optional accelerator is broken.
+                # ``FsCancelledError`` is not a broken rg: the caller already gave up,
+                # and falling back would walk the tree in an abandoned thread.
                 logger.warning("grep rg fallback %s", kv(error=str(exc)))
 
         return self._grep_python(
@@ -1630,6 +1710,7 @@ class WorkspaceFileService:
         unreadable: list[str] = []
 
         for fp, rel in self._iter_grep_candidates(base, globs, respect_gitignore=respect_gitignore):
+            _raise_if_cancelled()
             kind, data = _grep_classify(fp, max_file_bytes)
             if kind == "binary":
                 continue
@@ -1699,14 +1780,9 @@ class WorkspaceFileService:
         stays ``incomplete_scan`` and does not fall back.
         """
         try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=_RG_TIMEOUT_SEC,
-                check=False,
-                cwd=cwd,
-            )
+            proc = _spawn_rg(cmd, cwd=cwd, timeout=_RG_TIMEOUT_SEC)
+        except FsCancelledError:
+            raise
         except subprocess.TimeoutExpired as exc:
             # Do not fall back to unbounded Python walk after already spending the budget.
             logger.warning(

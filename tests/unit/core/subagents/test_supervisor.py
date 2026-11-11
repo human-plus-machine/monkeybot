@@ -118,3 +118,49 @@ async def test_finished_snapshot_still_requires_await_before_reporting() -> None
     assert note.endswith("Call await_task before reporting. Do not spin-poll.")
     assert "Answer the user." not in note
     await supervisor.aclose("test")
+
+
+@pytest.mark.asyncio
+async def test_snapshot_lists_every_running_child_and_caps_finished() -> None:
+    async def _inline(**kwargs: object) -> dict[str, object]:
+        run_id = str(kwargs["run_id"])
+        if run_id.startswith("fin"):
+            return {
+                "ok": True,
+                "exit_reason": "completed",
+                "final_message": "done",
+                "run_id": run_id,
+                "child_thread_id": kwargs["child_thread_id"],
+                "subagent_type": None,
+            }
+        cancelled = kwargs["cancelled"]
+        assert isinstance(cancelled, asyncio.Event)
+        await cancelled.wait()
+        return {
+            "ok": False,
+            "exit_reason": kwargs["cancel_exit_reason"],
+            "errors": [kwargs["cancel_message"]],
+            "final_message": "",
+            "run_id": run_id,
+            "child_thread_id": kwargs["child_thread_id"],
+            "subagent_type": None,
+        }
+
+    supervisor = SubagentSupervisor(
+        session_id="sess", run_store=None, max_background=4, run_inline=_inline
+    )
+    for index in range(20):
+        run_id = f"fin-{index}"
+        await supervisor.spawn(_spec(run_id))
+        task = supervisor._runs[run_id].task
+        assert task is not None
+        await asyncio.wait_for(task, timeout=1)
+    for index in range(4):
+        await supervisor.spawn(_spec(f"run-{index}"))
+
+    note = supervisor.snapshot_text()
+    assert note.count(" finished (") == 8
+    assert note.count(" running (") == 4
+    assert "(+12 more finished; listed once those above are awaited)" in note
+    assert "Answer the user." in note
+    await supervisor.aclose("test")

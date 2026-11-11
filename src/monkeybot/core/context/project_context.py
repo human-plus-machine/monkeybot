@@ -19,6 +19,7 @@ from pathlib import Path
 
 from monkeybot.core.config.settings import DEFAULT_PROJECT_INSTRUCTIONS_FILES
 from monkeybot.core.prompts.headings import VOLATILE_SECTION_HEADINGS, heading_marker
+from monkeybot.core.prompts.section_budget import SECTION_CHAR_CAPS, clip_lines
 
 MAX_INSTRUCTIONS_CHARS = 12_000
 _MAX_INSTRUCTIONS_BYTES = MAX_INSTRUCTIONS_CHARS * 4
@@ -262,15 +263,40 @@ def repo_overview(workspace_root: Path) -> str:
         for sub in _child_dirs(root, child)[:_MAX_SUBDIRS_PER_KEY_DIR]:
             entries.append(f"  {sub}/")
     entries.extend(name for name in _ROOT_FILES if _regular_file(root, name) is not None)
-    shown = entries[:_MAX_OVERVIEW_ENTRIES]
-    if not lines and not shown:
+    if not lines and not entries:
         return ""
+    return _neutralize_volatile_headings(_fit_overview(lines, entries))
+
+
+def _overview_text(toolchain: list[str], entries: list[str], shown: int) -> str:
+    """Toolchain plus the first ``shown`` layout entries. The rest is one count."""
     out: list[str] = []
-    if lines:
-        out.append("Toolchain: " + "; ".join(lines))
-    if shown:
+    if toolchain:
+        out.append("Toolchain: " + "; ".join(toolchain))
+    visible = entries[:shown]
+    hidden = len(entries) - len(visible)
+    if visible or hidden:
         out.append("Layout (workspace root):")
-        out.extend(f"  {entry}" for entry in shown)
-        if len(entries) > len(shown):
-            out.append(f"  … (+{len(entries) - len(shown)} more)")
-    return _neutralize_volatile_headings("\n".join(out))
+        out.extend(f"  {entry}" for entry in visible)
+        if hidden:
+            out.append(f"  … (+{hidden} more)")
+    return "\n".join(out)
+
+
+def _fit_overview(toolchain: list[str], entries: list[str]) -> str:
+    """Most entries that fit the character cap, never more than ``_MAX_OVERVIEW_ENTRIES``."""
+    cap = SECTION_CHAR_CAPS["repo_overview"]
+    limit = min(len(entries), _MAX_OVERVIEW_ENTRIES)
+    best = 0
+    lo, hi = 0, limit
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if len(_overview_text(toolchain, entries, mid)) <= cap:
+            best = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    text = _overview_text(toolchain, entries, best)
+    if len(text) <= cap:
+        return text
+    return clip_lines(text, cap, note="… [truncated]")

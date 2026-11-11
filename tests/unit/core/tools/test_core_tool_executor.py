@@ -755,7 +755,7 @@ async def test_grep_rg_counts_files_from_listing_when_summary_undercounts(
         lambda _name: "/usr/bin/rg",
     )
     monkeypatch.setattr(
-        "monkeybot.core.tools.workspace_service.subprocess.run",
+        "monkeybot.core.tools.workspace_service._spawn_rg",
         fake_run,
     )
     # Avoid accidental Python fallback if the fake run is mishandled.
@@ -900,7 +900,7 @@ async def test_grep_rg_timeout_is_incomplete_no_python_fallback(
 
     monkeypatch.setattr(WorkspaceFileService, "_grep_python", _track_python)
     monkeypatch.setattr(
-        "monkeybot.core.tools.workspace_service.subprocess.run",
+        "monkeybot.core.tools.workspace_service._spawn_rg",
         _timeout_run,
     )
     svc = WorkspaceFileService(root)
@@ -2625,8 +2625,8 @@ async def test_task_tool_aggregates_subagent_stream(
     assert err is None and out is not None
     payload = json.loads(out)
     assert payload["ok"] is True
-    assert payload["assistant_text"] == "partial answer"
     assert payload["final_message"] == "partial answer"
+    assert "assistant_text" not in payload
     assert payload["tool_call_count"] == 1
     assert payload["tool_results"] == [{"tool": "search", "snippet": "hit one"}]
     assert payload["usage"]["input_tokens"] == 3
@@ -4695,7 +4695,8 @@ async def test_task_tool_noop_publish_when_publisher_none(
     assert err is None and out is not None
     payload = json.loads(out)
     assert payload["ok"] is True
-    assert payload["assistant_text"] == "ok"
+    assert payload["final_message"] == "ok"
+    assert "assistant_text" not in payload
     assert isinstance(payload.get("child_thread_id"), str)
     assert payload["child_thread_id"].startswith("subagent:t:")
     assert "run_id" in payload

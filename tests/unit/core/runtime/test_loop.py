@@ -1099,8 +1099,12 @@ async def test_run_empty_model_after_tools_retries_then_succeeds() -> None:
     system_text = "".join(
         b.text for m in followup_msgs if m.role == "system" for b in m.content if hasattr(b, "text")
     )
-    assert _POST_TOOL_EMPTY_COMPLETION_NOTE in system_text
-    assert _EMPTY_COMPLETION_RECOVERY_NOTE not in system_text
+    sent = "".join(
+        b.text for m in followup_msgs for b in m.content if hasattr(b, "text") and b.text
+    )
+    assert _POST_TOOL_EMPTY_COMPLETION_NOTE in sent
+    assert _POST_TOOL_EMPTY_COMPLETION_NOTE not in system_text
+    assert _EMPTY_COMPLETION_RECOVERY_NOTE not in sent
 
 
 @pytest.mark.asyncio
@@ -1492,7 +1496,8 @@ async def test_run_provider_raises_wrapped_as_error() -> None:
     assert isinstance(events[0], Thinking)
     assert any(isinstance(e, SystemPromptSnapshot) for e in events)
     err = next(e for e in events if isinstance(e, Error))
-    assert "boom" in err.error
+    assert err.error == "The request failed (RuntimeError). (ref r1)"
+    assert "boom" not in err.error
     assert isinstance(events[-1], TurnComplete)
 
 
@@ -1569,10 +1574,7 @@ async def test_run_preserves_spill_across_turns(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_emits_context_summarize_events_when_over_cap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("CONTEXT_SUMMARIZATION_MODEL", raising=False)
+async def test_run_emits_context_summarize_events_when_over_cap(tmp_path: Path) -> None:
     preload = [
         Message(
             role="user" if i % 2 == 0 else "assistant",
@@ -1587,7 +1589,7 @@ async def test_run_emits_context_summarize_events_when_over_cap(
             [TextDelta(text="final"), Done()],
         ]
     )
-    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=1_600)
     events = []
     async for e in run(
         "hello",
@@ -1646,7 +1648,7 @@ async def _run_over_cap(tmp_path: Path, preload: list[Message]) -> FakeHistory:
     prov = FakeProvider(
         [[TextDelta(text=" compressed summary "), Done()], [TextDelta(text="final"), Done()]]
     )
-    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=1_600)
     async for _ in run(
         "hello",
         ctx,
@@ -1678,7 +1680,7 @@ async def test_compaction_records_the_raw_summary_call_on_the_transcript(tmp_pat
     writer = TranscriptWriter("sess-compact", workspace_root=tmp_path)
     async for _ in run(
         "hello",
-        _ctx(workspace_root=tmp_path, context_window_tokens=800),
+        _ctx(workspace_root=tmp_path, context_window_tokens=1_600),
         provider=prov,
         history=hist,
         inspectors=[],
@@ -1927,16 +1929,13 @@ async def test_run_emits_context_usage_after_tools_without_compaction() -> None:
 
 
 @pytest.mark.asyncio
-async def test_summarization_call_never_receives_vertex_google_search(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_summarization_call_never_receives_vertex_google_search(tmp_path: Path) -> None:
     """History summarization is an internal harness call, not an agent turn.
 
     Regression guard: even with ``vertex_google_search=True`` on the main run,
-    the summarization LLM call (``loop.py`` calling ``provider.stream`` directly
-    for the summarizer model) must never receive the flag.
+    the summarization LLM call (``loop.py`` calling ``provider.stream`` directly)
+    must never receive the flag. It uses the same model as the turn.
     """
-    monkeypatch.setenv("CONTEXT_SUMMARIZATION_MODEL", "summarizer-model-x")
     preload = [
         Message(
             role="user" if i % 2 == 0 else "assistant",
@@ -1952,7 +1951,7 @@ async def test_summarization_call_never_receives_vertex_google_search(
         ],
         name="gemini",
     )
-    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
+    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=1_600)
     async for _ in run(
         "hello",
         ctx,
@@ -1964,117 +1963,10 @@ async def test_summarization_call_never_receives_vertex_google_search(
         vertex_google_search=True,
     ):
         pass
-    assert prov.stream_models == ["summarizer-model-x", "gemini-2.5-flash"]
+    assert prov.stream_models == ["gemini-2.5-flash", "gemini-2.5-flash"]
     summarizer_call, main_turn_call = prov.vertex_google_search_calls
     assert summarizer_call is False
     assert main_turn_call is True
-
-
-@pytest.mark.asyncio
-async def test_run_summarization_uses_context_summarization_model_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("CONTEXT_SUMMARIZATION_MODEL", "summarizer-model-x")
-    preload = [
-        Message(
-            role="user" if i % 2 == 0 else "assistant",
-            content=[Text(text="z" * 600)],
-        )
-        for i in range(8)
-    ]
-    hist = FakeHistory(preload)
-    prov = FakeProvider(
-        [
-            [TextDelta(text=" compressed summary "), Done()],
-            [TextDelta(text="final"), Done()],
-        ]
-    )
-    ctx = _ctx(workspace_root=tmp_path, context_window_tokens=800)
-    async for _ in run(
-        "hello",
-        ctx,
-        provider=prov,
-        history=hist,
-        inspectors=[],
-        tool_executor=RecordingExecutor(),
-        max_turns=4,
-    ):
-        pass
-    assert prov.stream_models == ["summarizer-model-x", "gemini-2.5-flash"]
-
-
-@pytest.mark.asyncio
-async def test_run_summarization_uses_turn_context_when_env_unset(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("CONTEXT_SUMMARIZATION_MODEL", raising=False)
-    preload = [
-        Message(
-            role="user" if i % 2 == 0 else "assistant",
-            content=[Text(text="z" * 600)],
-        )
-        for i in range(8)
-    ]
-    hist = FakeHistory(preload)
-    prov = FakeProvider(
-        [
-            [TextDelta(text=" compressed summary "), Done()],
-            [TextDelta(text="final"), Done()],
-        ]
-    )
-    ctx = _ctx(
-        workspace_root=tmp_path,
-        context_window_tokens=800,
-        summarization_model="ctx-summ-model",
-    )
-    async for _ in run(
-        "hello",
-        ctx,
-        provider=prov,
-        history=hist,
-        inspectors=[],
-        tool_executor=RecordingExecutor(),
-        max_turns=4,
-    ):
-        pass
-    assert prov.stream_models == ["ctx-summ-model", "gemini-2.5-flash"]
-
-
-@pytest.mark.asyncio
-async def test_run_summarization_env_overrides_turn_context_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("CONTEXT_SUMMARIZATION_MODEL", "env-wins")
-    preload = [
-        Message(
-            role="user" if i % 2 == 0 else "assistant",
-            content=[Text(text="z" * 600)],
-        )
-        for i in range(8)
-    ]
-    hist = FakeHistory(preload)
-    prov = FakeProvider(
-        [
-            [TextDelta(text=" compressed summary "), Done()],
-            [TextDelta(text="final"), Done()],
-        ]
-    )
-    ctx = _ctx(
-        workspace_root=tmp_path,
-        context_window_tokens=800,
-        summarization_model="should-not-use",
-    )
-    async for _ in run(
-        "hello",
-        ctx,
-        provider=prov,
-        history=hist,
-        inspectors=[],
-        tool_executor=RecordingExecutor(),
-        max_turns=4,
-    ):
-        pass
-    assert prov.stream_models == ["env-wins", "gemini-2.5-flash"]
 
 
 @pytest.mark.asyncio
@@ -2108,11 +2000,8 @@ async def test_run_no_context_summarize_events_when_under_cap(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_run_does_not_compact_on_message_count_under_token_cap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_run_does_not_compact_on_message_count_under_token_cap(tmp_path: Path) -> None:
     """Long chatty threads under the token bar must not compact on row count alone."""
-    monkeypatch.delenv("CONTEXT_SUMMARIZATION_MODEL", raising=False)
     preload = [
         Message(
             role="user" if i % 2 == 0 else "assistant",
@@ -2242,9 +2131,7 @@ def test_messages_for_provider_folds_update_into_trailing_user_message() -> None
         Message(role="assistant", content=[ToolRequest(id="c1", name="run_command", args={})]),
         tool_response_row,
     ]
-    out = _messages_for_provider(
-        system, history, mid_conversation_update="## System context update\n..."
-    )
+    out = _messages_for_provider(system, history, context_tail="## System context update\n...")
     roles = [m.role for m in out]
     assert all(a != b for a, b in zip(roles, roles[1:])), roles
     assert len(out) == len(history) + 1  # system + history rows, no extra message
@@ -2260,9 +2147,7 @@ def test_messages_for_provider_appends_update_after_trailing_assistant_message()
         Message(role="user", content=[Text(text="hi")]),
         Message(role="assistant", content=[Text(text="ok, thinking...")]),
     ]
-    out = _messages_for_provider(
-        system, history, mid_conversation_update="## System context update\n..."
-    )
+    out = _messages_for_provider(system, history, context_tail="## System context update\n...")
     roles = [m.role for m in out]
     assert roles == ["system", "user", "assistant", "user"]
     assert all(a != b for a, b in zip(roles, roles[1:]))
@@ -2340,6 +2225,10 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
                 ToolCall(call_id="c1", name="run_command", args={"command": "noop"}),
                 Done(),
             ],
+            [
+                ToolCall(call_id="c2", name="run_command", args={"command": "noop"}),
+                Done(),
+            ],
             [TextDelta(text="done"), Done()],
         ]
     )
@@ -2369,16 +2258,18 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
         if isinstance(e, TurnComplete):
             break
 
-    assert len(prov.captured_messages) == 2
+    assert len(prov.captured_messages) == 3
     sys1 = _flatten_text_from_message(prov.captured_messages[0][0])
+    first_all = "\n".join(_flatten_text_from_message(m) for m in prov.captured_messages[0])
     turn2 = prov.captured_messages[1]
     turn2_texts = [_flatten_text_from_message(m) for m in turn2]
     all2 = "\n".join(turn2_texts)
-    assert "initial line" in sys1
-    assert "new memory from tool" not in sys1
-    # Volatile memory refresh arrives as a mid-conversation system-context update
-    # (leading epoch baseline stays cache-stable).
+    assert "initial line" not in sys1
+    assert "initial line" in first_all
+    assert "new memory from tool" not in first_all
+    # A memory refresh stays in the tail, so the system text does not change.
     assert "new memory from tool" in all2
+    assert "new memory from tool" not in _flatten_text_from_message(turn2[0])
     # Regression guard: the mid-conversation update must never create two
     # consecutive same-role messages (Anthropic/Gemini both reject this shape).
     roles = [m.role for m in turn2]
@@ -2391,6 +2282,311 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
     assert last.role == "user"
     assert any(isinstance(b, ToolResponse) for b in last.content)
     assert any(isinstance(b, Text) and "new memory from tool" in b.text for b in last.content)
+    turn3 = prov.captured_messages[2]
+    all3 = "\n".join(_flatten_text_from_message(message) for message in turn3)
+    assert "new memory from tool" in all3
+    assert "new memory from tool" not in _flatten_text_from_message(turn3[0])
+    assert sys1 == _flatten_text_from_message(turn2[0]) == _flatten_text_from_message(turn3[0])
+    roles3 = [message.role for message in turn3]
+    assert all(left != right for left, right in zip(roles3, roles3[1:])), (
+        f"consecutive same-role messages in provider payload: {roles3}"
+    )
+
+
+_TAIL_HEADING = "## System context update"
+_OLD_TODO = "OLD-TODO-AT-START"
+_NEW_TODO = "NEW-TODO-FROM-CALL-1"
+
+
+def _tail_texts(messages: Sequence[Message]) -> list[str]:
+    texts: list[str] = []
+    for message in messages:
+        for block in message.content:
+            if isinstance(block, Text) and _TAIL_HEADING in block.text:
+                texts.append(block.text)
+    return texts
+
+
+def _without_tail(messages: Sequence[Message]) -> list[dict[str, object]]:
+    """Provider messages with the live tail block removed, as stored history sees them."""
+    out: list[dict[str, object]] = []
+    for message in messages:
+        blocks = [
+            block
+            for block in message.content
+            if not (isinstance(block, Text) and _TAIL_HEADING in block.text)
+        ]
+        if not blocks:
+            continue
+        out.append(Message(role=message.role, content=blocks).to_dict())
+    return out
+
+
+class _AddTodoOnFirst(RecordingExecutor):
+    def __init__(self, store: Any) -> None:
+        super().__init__(ToolExecutionResult.ok_text("ok"))
+        self._store = store
+        self._calls = 0
+
+    async def execute(self, *, call: ToolCall, ctx: TurnContext) -> ToolExecutionResult:
+        self._calls += 1
+        if self._calls == 1:
+            added = await self._store.add(_NEW_TODO)
+            assert not isinstance(added, str)
+        return await super().execute(call=call, ctx=ctx)
+
+
+def _tool_script(n: int) -> list[list[object]]:
+    steps: list[list[object]] = [
+        [ToolCall(call_id=f"c{i}", name="run_command", args={"command": f"step-{i}"}), Done()]
+        for i in range(1, n)
+    ]
+    steps.append([TextDelta(text="final answer"), Done()])
+    return steps
+
+
+@pytest.mark.asyncio
+async def test_context_tail_stays_on_every_later_call(tmp_path: Path) -> None:
+    """A todo change and the current-request anchor stay visible after the call that
+    first carried them, and no earlier message is rewritten (C1, P2).
+    """
+    from monkeybot.todo_list.store import TodoListStore
+
+    store = TodoListStore("tail", workspace_root=tmp_path, mirror_to_disk=False)
+    seeded = await store.add(_OLD_TODO)
+    assert not isinstance(seeded, str)
+    provider = FakeProvider(_tool_script(4))
+    ctx = dataclasses.replace(_ctx(workspace_root=tmp_path), todo_store=store, request_id="r1")
+    async for _event in run(
+        "please do the anchored task",
+        ctx,
+        provider=provider,
+        history=FakeHistory(),
+        inspectors=[AllowInspector()],
+        tool_executor=_AddTodoOnFirst(store),
+        max_turns=6,
+    ):
+        pass
+
+    calls = provider.stream_messages
+    assert len(calls) == 4
+    systems = [_flatten_text_from_message(call[0]) for call in calls]
+    assert systems[0] == systems[1] == systems[2] == systems[3]
+    assert _OLD_TODO not in systems[0]
+    assert _NEW_TODO not in systems[0]
+    stripped = [_without_tail(call) for call in calls]
+    for earlier, later in zip(stripped, stripped[1:], strict=False):
+        assert later[: len(earlier)] == earlier
+    first_tails = _tail_texts(calls[0])
+    assert len(first_tails) == 1
+    assert _OLD_TODO in first_tails[0]
+    assert _NEW_TODO not in first_tails[0]
+    assert "## Current request" not in first_tails[0]
+    for call in calls[1:]:
+        tails = _tail_texts(call)
+        assert len(tails) == 1
+        assert _NEW_TODO in tails[0]
+        assert _TAIL_HEADING in tails[0]
+        assert "## Current request" in tails[0]
+        assert "please do the anchored task" in tails[0]
+
+
+@pytest.mark.asyncio
+async def test_next_user_message_keeps_the_system_text(tmp_path: Path) -> None:
+    """The next user message sends the same system text. A todo list that
+    changed during the first request is in the tail, and the previous request's
+    messages (minus the tail, which was never stored) are unchanged.
+    """
+    from monkeybot.todo_list.store import TodoListStore
+
+    store = TodoListStore("tail2", workspace_root=tmp_path, mirror_to_disk=False)
+    seeded = await store.add(_OLD_TODO)
+    assert not isinstance(seeded, str)
+    hist = FakeHistory()
+    first = FakeProvider(_tool_script(2))
+    ctx = dataclasses.replace(_ctx(workspace_root=tmp_path), todo_store=store, request_id="r1")
+    exe = _AddTodoOnFirst(store)
+    async for _event in run(
+        "please do the anchored task",
+        ctx,
+        provider=first,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=exe,
+        max_turns=4,
+    ):
+        pass
+    assert len(first.stream_messages) == 2
+    prior = _without_tail(first.stream_messages[-1])
+
+    second = FakeProvider([[TextDelta(text="second answer"), Done()]])
+    ctx2 = dataclasses.replace(ctx, request_id="r2")
+    async for _event in run(
+        "a follow-up question",
+        ctx2,
+        provider=second,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(ToolExecutionResult.ok_text("ok")),
+        max_turns=2,
+    ):
+        pass
+    assert len(second.stream_messages) == 1
+    opened = second.stream_messages[0]
+    first_system = _flatten_text_from_message(first.stream_messages[0][0])
+    assert _flatten_text_from_message(opened[0]) == first_system
+    assert _NEW_TODO not in first_system
+    opened_tails = _tail_texts(opened)
+    assert len(opened_tails) == 1
+    assert _NEW_TODO in opened_tails[0]
+    opened_body = _without_tail(opened)
+    assert opened_body[1 : 1 + (len(prior) - 1)] == prior[1:]
+    assert opened_body[-1]["role"] == "user"
+
+
+class _Clock:
+    """Stand-in for ``datetime.date`` so a test can move the calendar day."""
+
+    iso = "2026-11-10"
+
+    @classmethod
+    def today(cls) -> _Clock:
+        return cls()
+
+    def isoformat(self) -> str:
+        return type(self).iso
+
+
+@pytest.mark.asyncio
+async def test_next_user_message_keeps_system_text_when_live_state_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A todo, a git note, a memory write, and the date can all change between
+    two user messages. The system text stays byte-identical. Bedrock's block
+    before the cache point is the same on both, and the first request's
+    messages up to the tail are a prefix of the second.
+    """
+    from monkeybot.core.coding.git_context_hook import GitContextHook
+    from monkeybot.core.hooks import HookManager
+    from monkeybot.providers._bedrock_converse import converse_request_kwargs
+    from monkeybot.todo_list.store import TodoListStore
+    from testkit.memory import make_memory_subsystem
+
+    monkeypatch.setattr("monkeybot.core.prompts.prompt.date", _Clock)
+    git_note = {"text": "git: branch main, clean"}
+
+    async def fake_note(root: Path, **_: object) -> str:
+        del root
+        return git_note["text"]
+
+    monkeypatch.setattr("monkeybot.core.coding.git_context_hook.git_status_note", fake_note)
+    mem = make_memory_subsystem(tmp_path / "memory")
+    mem._palace.upsert_drawer(
+        "d1",
+        "memory-before",
+        {"wing": "main", "room": "conversation", "filed_at": "2026-01-01T00:00:00Z"},
+    )
+    store = TodoListStore("live", workspace_root=tmp_path, mirror_to_disk=False)
+    seeded = await store.add(_OLD_TODO)
+    assert not isinstance(seeded, str)
+    hooks = HookManager()
+    GitContextHook().register(hooks)
+    hist = FakeHistory()
+    first = FakeProvider(_tool_script(2))
+    ctx = dataclasses.replace(
+        _ctx(workspace_root=tmp_path),
+        todo_store=store,
+        memory=mem,
+        request_id="r1",
+    )
+    async for _event in run(
+        "please do the anchored task",
+        ctx,
+        provider=first,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=_AddTodoOnFirst(store),
+        hook_manager=hooks,
+        max_turns=4,
+    ):
+        pass
+    assert len(first.stream_messages) == 2
+
+    git_note["text"] = "git: branch main, 1 modified (notes.txt)"
+    _Clock.iso = "2026-11-11"
+    mem._palace.upsert_drawer(
+        "d2",
+        "memory-after",
+        {"wing": "main", "room": "conversation", "filed_at": "2026-01-02T00:00:00Z"},
+    )
+    second = FakeProvider([[TextDelta(text="second answer"), Done()]])
+    async for _event in run(
+        "a follow-up question",
+        dataclasses.replace(ctx, request_id="r2"),
+        provider=second,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(ToolExecutionResult.ok_text("ok")),
+        hook_manager=hooks,
+        max_turns=2,
+    ):
+        pass
+    assert len(second.stream_messages) == 1
+
+    systems = [_flatten_text_from_message(call[0]) for call in first.stream_messages]
+    systems.append(_flatten_text_from_message(second.stream_messages[0][0]))
+    assert systems[0] == systems[1] == systems[2]
+    for live in (_NEW_TODO, "memory-after", "2026-11-11", "notes.txt"):
+        assert live not in systems[0]
+
+    first_tail = _tail_texts(first.stream_messages[0])
+    second_tail = _tail_texts(second.stream_messages[0])
+    assert len(first_tail) == 1
+    assert len(second_tail) == 1
+    assert _OLD_TODO in first_tail[0]
+    assert "memory-before" in first_tail[0]
+    assert "2026-11-10" in first_tail[0]
+    assert "git: branch main, clean" in first_tail[0]
+    assert _NEW_TODO not in first_tail[0]
+    assert "memory-after" in second_tail[0]
+    assert "2026-11-11" in second_tail[0]
+    assert "notes.txt" in second_tail[0]
+    assert _NEW_TODO in second_tail[0]
+
+    prior = _without_tail(first.stream_messages[-1])
+    opened = _without_tail(second.stream_messages[0])
+    assert opened[: len(prior)] == prior
+
+    def bedrock_system(messages: list[Message]) -> list[dict[str, object]]:
+        kwargs = converse_request_kwargs(
+            model="us.amazon.nova-pro-v1:0",
+            messages=messages,
+            tools=[],
+            max_tokens=16,
+            temperature=0,
+        )
+        system = kwargs["system"]
+        assert isinstance(system, list)
+        return system
+
+    first_system = bedrock_system(first.stream_messages[0])
+    second_system = bedrock_system(second.stream_messages[0])
+
+    def joined(system: list[dict[str, object]]) -> str:
+        return "".join(str(block["text"]) for block in system if "text" in block)
+
+    def before_cache_point(system: list[dict[str, object]]) -> dict[str, object]:
+        stable: dict[str, object] = {}
+        for block in system:
+            if "cachePoint" in block:
+                return stable
+            if "text" in block:
+                stable = block
+        return stable
+
+    assert joined(first_system) == systems[0]
+    assert joined(second_system) == systems[0]
+    assert before_cache_point(first_system) == before_cache_point(second_system)
 
 
 @pytest.mark.asyncio
@@ -3496,7 +3692,7 @@ class _CodingCfg:
 
 def _ledger_ctx(tmp_path: Path, ledger: Any) -> TurnContext:
     return dataclasses.replace(
-        _ctx(workspace_root=tmp_path, context_window_tokens=800),
+        _ctx(workspace_root=tmp_path, context_window_tokens=1_600),
         read_ledger=ledger,
         config=_CodingCfg(),  # type: ignore[arg-type]
     )
@@ -3734,5 +3930,5 @@ async def test_provider_failure_with_empty_message_still_reports_something() -> 
         )
     ]
     errors = [e.error for e in events if type(e).__name__ == "Error"]
-    assert errors == ["Provider request failed (TimeoutError)"]
+    assert errors == ["Lost the connection to the model provider. (ref r1)"]
     assert type(events[-1]).__name__ == "TurnComplete"

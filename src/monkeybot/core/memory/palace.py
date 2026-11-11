@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import tempfile
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field
 from importlib.util import find_spec
@@ -27,6 +28,10 @@ PALACE_ID_FILE = ".palace_id"
 PALACE_WRITE_LOCK_FILE = ".palace_write.lock"
 L2_MAX_CHARS = 2000
 L2_MAX_DRAWERS = 12
+WAKE_UP_SNIPPET_CHARS = 200
+_WAKE_UP_ELLIPSIS = "..."
+_THREAD_WAKE_BULLET = re.compile(r"^- \[[^\]]*\] (.*)$")
+_PALACE_WAKE_BULLET = re.compile(r"^  - (.*)$")
 
 
 @dataclass(frozen=True)
@@ -443,11 +448,65 @@ def format_thread_wake_up(
         lines.append("No memories yet.")
         return "\n".join(lines)
     for drawer in selected[:15]:
-        snippet = " ".join(drawer.content.split())
-        if len(snippet) > 200:
-            snippet = snippet[:197] + "..."
-        lines.append(f"- [{drawer.room}] {snippet}")
+        lines.append(f"- [{drawer.room}] {_wake_up_snippet(drawer.content)}")
     return "\n".join(lines)
+
+
+def _collapsed(content: str) -> str:
+    return " ".join(content.split())
+
+
+def _wake_up_snippet(content: str) -> str:
+    """The text a wake-up bullet shows for one drawer."""
+    snippet = _collapsed(content)
+    if len(snippet) <= WAKE_UP_SNIPPET_CHARS:
+        return snippet
+    keep = WAKE_UP_SNIPPET_CHARS - len(_WAKE_UP_ELLIPSIS)
+    return snippet[:keep] + _WAKE_UP_ELLIPSIS
+
+
+def _wake_snippets(wake_lines: Sequence[str]) -> list[str]:
+    """Snippets from both wake-up bullet shapes. Other lines are ignored."""
+    snippets: list[str] = []
+    for line in wake_lines:
+        thread = _THREAD_WAKE_BULLET.match(line)
+        if thread is not None:
+            snippets.append(thread.group(1))
+            continue
+        palace = _PALACE_WAKE_BULLET.match(line)
+        if palace is not None:
+            snippets.append(palace.group(1))
+    return snippets
+
+
+def _wake_shows(content: str, snippets: Sequence[str]) -> bool:
+    collapsed = _collapsed(content)
+    keep = WAKE_UP_SNIPPET_CHARS - len(_WAKE_UP_ELLIPSIS)
+    for snippet in snippets:
+        if snippet == collapsed:
+            return True
+        cut = (
+            len(snippet) == WAKE_UP_SNIPPET_CHARS
+            and snippet.endswith(_WAKE_UP_ELLIPSIS)
+            and collapsed.startswith(snippet[:keep])
+        )
+        if cut:
+            return True
+    return False
+
+
+def drawers_not_in_wake_up(
+    drawers: list[DrawerRecord], wake_lines: Sequence[str]
+) -> list[DrawerRecord]:
+    """Drop recall drawers whose text the wake-up block already shows.
+
+    A miss leaves the drawer in place. A drawer is dropped in error only when
+    its opening characters match a different drawer the wake-up shows.
+    """
+    snippets = _wake_snippets(wake_lines)
+    if not snippets:
+        return list(drawers)
+    return [drawer for drawer in drawers if not _wake_shows(drawer.content, snippets)]
 
 
 def format_recall_lines(drawers: list[DrawerRecord], *, max_chars: int = L2_MAX_CHARS) -> list[str]:

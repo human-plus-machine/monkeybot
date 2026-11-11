@@ -13,8 +13,13 @@ pytest.importorskip("google.cloud.firestore")
 
 from google.cloud.firestore import AsyncClient  # noqa: E402
 
+import monkeybot.core.persistence.firestore as firestore_mod
 from monkeybot.core.llm.provider import Message
-from monkeybot.core.persistence.firestore import FirestoreHistoryStore, firestore_summary_doc_id
+from monkeybot.core.persistence.firestore import (
+    FirestoreHistoryStore,
+    _legacy_summary_document_id,
+    firestore_summary_doc_id,
+)
 from monkeybot.core.types.content_blocks import Text
 
 
@@ -51,6 +56,15 @@ def test_summary_doc_id_differs_by_scope_and_thread_id() -> None:
     b = FirestoreHistoryStore(None, "prefix", "agent-b")  # type: ignore[arg-type]
     assert a._summary_doc_id("t1") != b._summary_doc_id("t1")
     assert a._summary_doc_id("t1") != a._summary_doc_id("t2")
+
+
+def test_legacy_summary_document_id_rejects_illegal_ids() -> None:
+    assert _legacy_summary_document_id("thread-1") == "thread-1"
+    assert _legacy_summary_document_id("a/b") is None
+    assert _legacy_summary_document_id("") is None
+    assert _legacy_summary_document_id(".") is None
+    assert _legacy_summary_document_id("..") is None
+    assert _legacy_summary_document_id("x" * 1501) is None
 
 
 def test_summary_doc_id_matches_public_function() -> None:
@@ -239,6 +253,99 @@ async def test_list_threads_exhausts_collection_of_only_subagent_docs() -> None:
     assert threads == []
 
 
+@pytest.mark.asyncio
+async def test_list_threads_dedupes_legacy_raw_summary() -> None:
+    """A raw-id summary and the hashed summary for one thread are one entry.
+
+    The newer document is first, which is what the descending query returns,
+    and a page full of duplicates still reaches the next thread.
+    """
+    docs = [
+        _FakeDoc(
+            {
+                "thread_id": "t1",
+                "last_message_at": 5,
+                "message_count": 3,
+                "last_content": '[{"type":"text","text":"newer"}]',
+            }
+        ),
+        _FakeDoc(
+            {
+                "thread_id": "t1",
+                "last_message_at": 4,
+                "message_count": 2,
+                "last_content": '[{"type":"text","text":"older"}]',
+            }
+        ),
+        _FakeDoc(
+            {
+                "thread_id": "t2",
+                "last_message_at": 1,
+                "message_count": 1,
+                "last_content": "",
+            }
+        ),
+    ]
+    client = _FakeFirestoreClient(docs)
+    store = FirestoreHistoryStore(client, "prefix", "agent-a")  # type: ignore[arg-type]
+    threads = await store.list_threads(limit=2)
+    assert [item.thread_id for item in threads] == ["t1", "t2"]
+    assert threads[0].message_count == 3
+    assert threads[0].preview == "newer"
+
+
+class _OverlapQuery:
+    """Blocks each read until both the newest-row stream and the count have started."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self._release = asyncio.Event()
+
+    def where(self, *_args, **_kwargs) -> _OverlapQuery:
+        return self
+
+    def order_by(self, *_args, **_kwargs) -> _OverlapQuery:
+        return self
+
+    def limit(self, _n: int) -> _OverlapQuery:
+        return self
+
+    def count(self) -> _OverlapQuery:
+        return self
+
+    async def _arrive(self, name: str) -> None:
+        self.events.append(name)
+        if len(self.events) >= 2:
+            self._release.set()
+        await self._release.wait()
+
+    async def stream(self):
+        await self._arrive("stream")
+        yield _FakeDoc({"content": "[]"})
+
+    async def get(self):
+        await self._arrive("count")
+        return [[type("Agg", (), {"value": 1})()]]
+
+
+class _OverlapClient:
+    def __init__(self, query: _OverlapQuery) -> None:
+        self._query = query
+
+    def collection(self, _name: str) -> _OverlapQuery:
+        return self._query
+
+
+@pytest.mark.asyncio
+async def test_last_row_starts_both_reads_before_either_finishes() -> None:
+    query = _OverlapQuery()
+    store = FirestoreHistoryStore(_OverlapClient(query), "prefix", "agent-a")  # type: ignore[arg-type]
+    count, content = await asyncio.wait_for(store.last_row("t"), timeout=1)
+    assert sorted(query.events) == ["count", "stream"]
+    assert count == 1
+    assert content == "[]"
+
+
 @pytest_asyncio.fixture
 async def firestore_history(require_emulator: None):
     prefix = f"test_{uuid.uuid4().hex[:8]}"
@@ -248,6 +355,7 @@ async def firestore_history(require_emulator: None):
     for collection in (
         store._collection,
         store._threads_collection,
+        store._archive_collection,
     ):
         async for doc in client.collection(collection).stream():
             await doc.reference.delete()
@@ -292,7 +400,11 @@ async def test_firestore_list_threads_isolated_by_agent_scope(require_emulator: 
         assert await store_a.load("t2") == []
         assert await store_b.load("t1") == []
     finally:
-        for collection in (store_a._collection, store_a._threads_collection):
+        for collection in (
+            store_a._collection,
+            store_a._threads_collection,
+            store_a._archive_collection,
+        ):
             async for doc in client.collection(collection).stream():
                 await doc.reference.delete()
         client.close()
@@ -359,3 +471,221 @@ async def test_firestore_concurrent_message_id_is_idempotent(firestore_history) 
     threads = await store.list_threads(limit=10)
     row = next(item for item in threads if item.thread_id == "thread-idempotent")
     assert row.message_count == 1
+
+
+def _count_rpcs(client: AsyncClient) -> dict[str, int]:
+    """Count Firestore RPCs on ``client``. Later calls replace nothing already wrapped."""
+    counts: dict[str, int] = {}
+    api = client._firestore_api
+    for name in (
+        "run_query",
+        "commit",
+        "begin_transaction",
+        "batch_get_documents",
+        "run_aggregation_query",
+    ):
+        original = getattr(api, name)
+
+        async def wrapped(*args, _name=name, _original=original, **kwargs):
+            counts[_name] = counts.get(_name, 0) + 1
+            return await _original(*args, **kwargs)
+
+        setattr(api, name, wrapped)
+    return counts
+
+
+def _texts(messages: list[Message]) -> list[str]:
+    return [
+        block.text for message in messages for block in message.content if isinstance(block, Text)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_plain_append_commits_once(firestore_history) -> None:
+    store: FirestoreHistoryStore = firestore_history
+    counts = _count_rpcs(store._client)
+    await store.append("thread-plain", Message(role="user", content=[Text(text="hello")]))
+    assert counts["commit"] == 1
+    assert "run_query" not in counts
+    loaded = await store.load("thread-plain")
+    assert _texts(loaded) == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_message_id_append_writes_hashed_summary_only(firestore_history) -> None:
+    store: FirestoreHistoryStore = firestore_history
+    thread_id = "thread-hashed"
+    await store.append(
+        thread_id,
+        Message(role="user", content=[Text(text="once")]),
+        turn_id="turn-1",
+        message_id="message-hashed",
+    )
+    client = store._client
+    raw = await client.collection(store._threads_collection).document(thread_id).get()
+    hashed = (
+        await client.collection(store._threads_collection)
+        .document(store._summary_doc_id(thread_id))
+        .get()
+    )
+    assert raw.exists is False
+    data = hashed.to_dict() or {}
+    assert data["thread_id"] == thread_id
+    assert data["message_count"] == 1
+    assert data["agent_scope"] == store._agent_scope
+
+
+@pytest.mark.asyncio
+async def test_hidden_appends_write_no_summary(firestore_history) -> None:
+    store: FirestoreHistoryStore = firestore_history
+    hidden = "subagent:parent:child"
+    message = Message(role="user", content=[Text(text="hidden")])
+    await store.append(hidden, message, turn_id="turn-1", message_id="message-hidden")
+    await store.append_with_outbox(
+        hidden,
+        message,
+        turn_id="turn-2",
+        message_id="message-hidden-outbox",
+        outbox={
+            "agent_id": "agent",
+            "thread_id": hidden,
+            "message_id": "message-hidden-outbox",
+            "role": "user",
+            "content": "hidden",
+        },
+    )
+    found: list[str] = []
+    async for doc in store._client.collection(store._threads_collection).stream():
+        data = doc.to_dict() or {}
+        if data.get("thread_id") == hidden:
+            found.append(doc.id)
+    assert found == []
+    assert len(await store.load(hidden)) == 2
+
+
+@pytest.mark.asyncio
+async def test_outbox_append_reads_both_documents_once(firestore_history) -> None:
+    store: FirestoreHistoryStore = firestore_history
+    counts = _count_rpcs(store._client)
+    await store.append_with_outbox(
+        "thread-outbox",
+        Message(role="user", content=[Text(text="with outbox")]),
+        turn_id="turn-1",
+        message_id="message-outbox",
+        outbox={
+            "agent_id": "agent",
+            "thread_id": "thread-outbox",
+            "message_id": "message-outbox",
+            "role": "user",
+            "content": "with outbox",
+        },
+    )
+    assert counts["batch_get_documents"] == 1
+    assert counts["run_query"] == 1
+    assert counts["commit"] == 1
+    assert _texts(await store.load("thread-outbox")) == ["with outbox"]
+
+
+@pytest.mark.asyncio
+async def test_reset_archiving_reads_once_and_commits_once(firestore_history) -> None:
+    store: FirestoreHistoryStore = firestore_history
+    thread_id = "thread-compact"
+    for i in range(4):
+        await store.append(thread_id, Message(role="user", content=[Text(text=f"m{i}")]))
+    kept = await store.load(thread_id)
+    counts = _count_rpcs(store._client)
+    archived = await store.reset_archiving(
+        thread_id, kept[:1], reason="compaction", summary_row_id="summary-1"
+    )
+    assert archived == 3
+    assert counts["run_query"] == 1
+    assert counts["commit"] == 1
+    assert _texts(await store.load(thread_id)) == ["m0"]
+    archive = await store.load_archive(thread_id)
+    assert _texts([row.message for row in archive]) == ["m1", "m2", "m3"]
+
+
+@pytest.mark.asyncio
+async def test_over_limit_rewrite_still_archives_before_deleting(
+    firestore_history, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(firestore_mod, "_FIRESTORE_BATCH_LIMIT", 2)
+    store: FirestoreHistoryStore = firestore_history
+    thread_id = "thread-chunked"
+    for i in range(4):
+        await store.append(thread_id, Message(role="user", content=[Text(text=f"m{i}")]))
+    kept = await store.load(thread_id)
+    counts = _count_rpcs(store._client)
+    archived = await store.reset_archiving(
+        thread_id, kept[:1], reason="compaction", summary_row_id=None
+    )
+    assert archived == 3
+    assert counts["run_query"] == 1
+    assert counts["commit"] > 1
+    assert _texts(await store.load(thread_id)) == ["m0"]
+    assert len(await store.load_archive(thread_id)) == 3
+
+
+@pytest.mark.asyncio
+async def test_rewrite_keeps_a_row_absent_from_the_snapshot(firestore_history) -> None:
+    store: FirestoreHistoryStore = firestore_history
+    thread_id = "thread-race"
+    for i in range(3):
+        await store.append(
+            thread_id,
+            Message(role="user", content=[Text(text=f"m{i}")]),
+            turn_id="turn-1",
+            message_id=f"race-{i}",
+        )
+    kept = await store.load(thread_id)
+    real = store._stored_docs
+
+    async def stale(thread: str):
+        docs = await real(thread)
+        await FirestoreHistoryStore.append(
+            store,
+            thread,
+            Message(role="user", content=[Text(text="late")]),
+            turn_id="turn-1",
+            message_id="race-late",
+        )
+        return docs
+
+    store._stored_docs = stale  # type: ignore[method-assign]
+    await store.reset(thread_id, kept[:1])
+    assert _texts(await store.load(thread_id)) == ["m0", "late"]
+
+
+@pytest.mark.asyncio
+async def test_purge_removes_same_scope_raw_summary_only(firestore_history) -> None:
+    store: FirestoreHistoryStore = firestore_history
+    client = store._client
+    threads = client.collection(store._threads_collection)
+    await threads.document("mine").set(
+        {
+            "thread_id": "mine",
+            "agent_scope": store._agent_scope,
+            "last_message_at": 1,
+            "message_count": 9,
+            "last_content": "stale",
+        }
+    )
+    await threads.document("shared").set(
+        {
+            "thread_id": "shared",
+            "agent_scope": "other-agent",
+            "last_message_at": 1,
+            "message_count": 4,
+            "last_content": "keep",
+        }
+    )
+    await store.append("mine", Message(role="user", content=[Text(text="live")]))
+    await store.append("shared", Message(role="user", content=[Text(text="live")]))
+    await store.reset("mine", [])
+    await store.reset("shared", [])
+    assert (await threads.document("mine").get()).exists is False
+    assert (await threads.document(store._summary_doc_id("mine")).get()).exists is False
+    shared = await threads.document("shared").get()
+    assert shared.exists is True
+    assert (shared.to_dict() or {})["agent_scope"] == "other-agent"
+    assert (await threads.document(store._summary_doc_id("shared")).get()).exists is False

@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from collections.abc import Collection
 from typing import Any, cast
 
@@ -19,7 +20,16 @@ import aiosqlite
 
 from monkeybot.core.llm.provider import Message, Role
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.loop_yield import LoopYield
+from monkeybot.core.persistence.archive import archived_row, kept_row_ids, unmatched_indexes
+from monkeybot.core.persistence.backends import ArchivedRow
 from monkeybot.core.persistence.row_ids import loaded_row_id, row_id_for_insert, split_row_ids
+from monkeybot.core.persistence.row_meta import (
+    RowMeta,
+    carry_created_at,
+    match_stored,
+    stored_text,
+)
 from monkeybot.core.persistence.sqlite import ConnLock, with_conn_lock
 from monkeybot.core.persistence.thread_summary import (
     BRANCH_THREAD_ID_PREFIX,
@@ -34,6 +44,9 @@ logger = logging.getLogger("monkeybot.core.persistence.history")
 _VALID_ROLES: tuple[str, ...] = ("user", "assistant", "system")
 # Stays under SQLITE_MAX_VARIABLE_NUMBER (999 on older builds) with the scope params.
 _DELETE_CHUNK = 500
+# Each archived row binds its id twice (CASE and IN) plus the position. 200 keeps
+# the statement under the 999-variable limit together with the fixed parameters.
+_ARCHIVE_CHUNK = 200
 
 
 def _validate_message(message: Message) -> None:
@@ -87,6 +100,7 @@ class SQLiteHistoryStore:
         row_id: str,
         turn_id: str | None,
         message_id: str | None,
+        strict: bool = False,
     ) -> None:
         names = ["thread_id", "role", "content", "created_at", "agent_scope"]
         values: list[object] = [thread_id, role, payload, created_at, self._agent_scope]
@@ -95,7 +109,10 @@ class SQLiteHistoryStore:
             values.append(row_id)
         memory = await self._has_memory_columns()
         if memory:
-            if message_id:
+            # A rewrite re-inserts ids it just deleted. Skipping the dedupe
+            # check lets a unique collision roll the transaction back instead
+            # of dropping the row.
+            if message_id and not strict:
                 cur = await self._conn.execute(
                     """
                     SELECT 1 FROM conversation_history
@@ -116,7 +133,7 @@ class SQLiteHistoryStore:
                 tuple(values),
             )
         except aiosqlite.IntegrityError:
-            if not memory:
+            if strict or not memory:
                 raise
 
     async def append(
@@ -144,6 +161,8 @@ class SQLiteHistoryStore:
         *,
         turn_id: str | None = None,
         message_id: str | None = None,
+        created_at: int | None = None,
+        strict: bool = False,
     ) -> None:
         """Insert one history row without committing (caller owns the transaction)."""
         _validate_message(message)
@@ -152,7 +171,8 @@ class SQLiteHistoryStore:
             separators=(",", ":"),
             ensure_ascii=False,
         )
-        created_at = int(time.time() * 1000)
+        if created_at is None:
+            created_at = int(time.time() * 1000)
         await self._insert_history_row(
             thread_id,
             message.role,
@@ -161,7 +181,37 @@ class SQLiteHistoryStore:
             row_id=row_id_for_insert(message),
             turn_id=turn_id,
             message_id=message_id,
+            strict=strict,
         )
+
+    async def _stored_rows(self, thread_id: str) -> list[tuple[str, RowMeta]]:
+        """Rows of ``thread_id`` in load order, with the id ``load`` would report."""
+        columns = await self._columns()
+        row_id_sql = "row_id" if "row_id" in columns else "NULL"
+        turn_sql = "turn_id" if "turn_id" in columns else "NULL"
+        message_sql = "message_id" if "message_id" in columns else "NULL"
+        cursor = await self._conn.execute(
+            f"""
+            SELECT id, {row_id_sql}, created_at, {turn_sql}, {message_sql}
+            FROM conversation_history
+            WHERE thread_id = ? AND agent_scope = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (thread_id, self._agent_scope),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [
+            (
+                loaded_row_id(row[1], row[0]),
+                RowMeta(
+                    created_at=int(row[2]),
+                    turn_id=stored_text(row[3]),
+                    message_id=stored_text(row[4]),
+                ),
+            )
+            for row in rows
+        ]
 
     async def append_with_outbox(
         self,
@@ -246,6 +296,9 @@ class SQLiteHistoryStore:
             rows = await cursor.fetchall()
             await cursor.close()
             rows_chrono = list(reversed(list(rows)))
+        # Decoding holds the GIL. Yield between rows so a long thread does not
+        # stall every other session for the whole load.
+        pace = LoopYield()
         out: list[Message] = []
         for row in rows_chrono:
             db_id = int(row[0])
@@ -273,6 +326,7 @@ class SQLiteHistoryStore:
                     row_id=loaded_row_id(row[4], db_id),
                 )
             )
+            await pace.tick()
         return out
 
     @with_conn_lock
@@ -347,17 +401,38 @@ class SQLiteHistoryStore:
         """Replace the thread transcript with ``messages`` (validated like ``append``).
 
         Delete + re-insert run in a single SQLite transaction so a crash mid-reset
-        cannot leave the thread empty or only partially rewritten.
+        cannot leave the thread empty or only partially rewritten. A row whose
+        ``row_id`` is already stored keeps that row's ``created_at``, ``turn_id``,
+        and ``message_id``.
         """
+        now_ms = int(time.time() * 1000)
         async with self._lock:
             await self._conn.execute("BEGIN IMMEDIATE")
             try:
+                stored = await self._stored_rows(thread_id)
+                matched = match_stored(messages, stored)
+                stamps = carry_created_at(
+                    [
+                        stored[index][1].created_at if index is not None else None
+                        for index in matched
+                    ],
+                    now_ms=now_ms,
+                    step=0,
+                )
                 await self._conn.execute(
                     "DELETE FROM conversation_history WHERE thread_id = ? AND agent_scope = ?",
                     (thread_id, self._agent_scope),
                 )
-                for msg in messages:
-                    await self._insert_message(thread_id, msg)
+                for message, index, created_at in zip(messages, matched, stamps, strict=True):
+                    meta = stored[index][1] if index is not None else None
+                    await self._insert_message(
+                        thread_id,
+                        message,
+                        turn_id=meta.turn_id if meta is not None else None,
+                        message_id=meta.message_id if meta is not None else None,
+                        created_at=created_at,
+                        strict=True,
+                    )
                 await self._conn.commit()
             except Exception as exc:
                 await self._conn.rollback()
@@ -374,6 +449,185 @@ class SQLiteHistoryStore:
 
                     raise AmbiguousCommitError(str(exc)) from exc
                 raise
+
+    async def reset_archiving(
+        self,
+        thread_id: str,
+        messages: list[Message],
+        *,
+        reason: str,
+        summary_row_id: str | None,
+    ) -> int:
+        """Replace the thread and keep every dropped row in the archive.
+
+        The copy and the rewrite commit together. A failure leaves both tables
+        as they were.
+        """
+        archive_id = uuid.uuid4().hex
+        now_ms = int(time.time() * 1000)
+        async with self._lock:
+            await self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                stored = await self._stored_rows(thread_id)
+                archived = await self._copy_unmatched_to_archive(
+                    thread_id,
+                    messages,
+                    archive_id=archive_id,
+                    summary_row_id=summary_row_id,
+                    reason=reason,
+                    archived_at=now_ms,
+                )
+                matched = match_stored(messages, stored)
+                stamps = carry_created_at(
+                    [
+                        stored[index][1].created_at if index is not None else None
+                        for index in matched
+                    ],
+                    now_ms=now_ms,
+                    step=0,
+                )
+                await self._conn.execute(
+                    "DELETE FROM conversation_history WHERE thread_id = ? AND agent_scope = ?",
+                    (thread_id, self._agent_scope),
+                )
+                for message, index, created_at in zip(messages, matched, stamps, strict=True):
+                    meta = stored[index][1] if index is not None else None
+                    await self._insert_message(
+                        thread_id,
+                        message,
+                        turn_id=meta.turn_id if meta is not None else None,
+                        message_id=meta.message_id if meta is not None else None,
+                        created_at=created_at,
+                        strict=True,
+                    )
+                await self._conn.commit()
+            except Exception as exc:
+                await self._conn.rollback()
+                logger.warning(
+                    "history reset rolled back %s",
+                    kv(thread_id=thread_id),
+                    exc_info=True,
+                )
+                if isinstance(
+                    exc,
+                    (TimeoutError, OSError, ConnectionError, aiosqlite.OperationalError),
+                ):
+                    from monkeybot.core.persistence.errors import AmbiguousCommitError
+
+                    raise AmbiguousCommitError(str(exc)) from exc
+                raise
+        return archived
+
+    async def _copy_unmatched_to_archive(
+        self,
+        thread_id: str,
+        messages: list[Message],
+        *,
+        archive_id: str,
+        summary_row_id: str | None,
+        reason: str,
+        archived_at: int,
+    ) -> int:
+        columns = await self._columns()
+        row_id_sql = "row_id" if "row_id" in columns else "NULL"
+        cursor = await self._conn.execute(
+            f"""
+            SELECT id, {row_id_sql}
+            FROM conversation_history
+            WHERE thread_id = ? AND agent_scope = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (thread_id, self._agent_scope),
+        )
+        rows = list(await cursor.fetchall())
+        await cursor.close()
+        stored_ids = [loaded_row_id(row[1], row[0]) for row in rows]
+        dropped = unmatched_indexes(stored_ids, kept_row_ids(messages))
+        if not dropped:
+            return 0
+        pairs = [(int(rows[index][0]), index) for index in dropped]
+        row_expr = (
+            "CASE WHEN row_id IS NULL OR row_id = '' THEN 'legacy:' || id ELSE row_id END"
+            if "row_id" in columns
+            else "'legacy:' || id"
+        )
+        turn_expr = "turn_id" if "turn_id" in columns else "NULL"
+        message_expr = "message_id" if "message_id" in columns else "NULL"
+        for start in range(0, len(pairs), _ARCHIVE_CHUNK):
+            chunk = pairs[start : start + _ARCHIVE_CHUNK]
+            when = " ".join("WHEN ? THEN ?" for _ in chunk)
+            id_slots = ", ".join("?" for _ in chunk)
+            params: list[object] = [archive_id, summary_row_id, reason]
+            params.extend(value for pair in chunk for value in pair)
+            params.append(archived_at)
+            params.extend((thread_id, self._agent_scope))
+            params.extend(row_id for row_id, _position in chunk)
+            await self._conn.execute(
+                f"""
+                INSERT INTO conversation_history_archive (
+                    agent_scope, thread_id, row_id, role, content, created_at,
+                    turn_id, message_id, archive_id, summary_row_id, reason,
+                    position, archived_at
+                )
+                SELECT agent_scope, thread_id, {row_expr}, role, content, created_at,
+                       {turn_expr}, {message_expr}, ?, ?, ?, CASE id {when} END, ?
+                FROM conversation_history
+                WHERE thread_id = ? AND agent_scope = ? AND id IN ({id_slots})
+                """,
+                tuple(params),
+            )
+        return len(pairs)
+
+    @with_conn_lock
+    async def load_archive(self, thread_id: str) -> list[ArchivedRow]:
+        """Archived rows for this scope and thread, oldest rewrite first."""
+        cursor = await self._conn.execute(
+            """
+            SELECT role, content, created_at, turn_id, message_id, row_id,
+                   archive_id, summary_row_id, reason, position, archived_at
+            FROM conversation_history_archive
+            WHERE thread_id = ? AND agent_scope = ?
+            ORDER BY archived_at ASC, archive_id ASC, position ASC, id ASC
+            """,
+            (thread_id, self._agent_scope),
+        )
+        rows = list(await cursor.fetchall())
+        await cursor.close()
+        out: list[ArchivedRow] = []
+        for row in rows:
+            try:
+                out.append(
+                    archived_row(
+                        role=str(row[0]),
+                        content_blob=str(row[1]),
+                        row_id=str(row[5]),
+                        created_at=int(row[2]),
+                        turn_id=None if row[3] is None else str(row[3]),
+                        message_id=None if row[4] is None else str(row[4]),
+                        archive_id=str(row[6]),
+                        summary_row_id=None if row[7] is None else str(row[7]),
+                        reason=str(row[8]),
+                        position=int(row[9]),
+                        archived_at=int(row[10]),
+                    )
+                )
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                raise ValueError(f"archive row unparseable: {exc}") from exc
+        return out
+
+    @with_conn_lock
+    async def delete_archive(self, thread_id: str) -> int:
+        """Delete this scope's archived rows for ``thread_id``."""
+        cursor = await self._conn.execute(
+            """
+            DELETE FROM conversation_history_archive
+            WHERE thread_id = ? AND agent_scope = ?
+            """,
+            (thread_id, self._agent_scope),
+        )
+        deleted = cursor.rowcount
+        await self._conn.commit()
+        return int(deleted)
 
     @with_conn_lock
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:

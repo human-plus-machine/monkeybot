@@ -93,9 +93,11 @@ class Error:
 class HarnessIntervention:
     """Transcript-only record of a harness guard. Not published on the SSE wire.
 
-    ``intervention`` is one of ``doom_loop``, ``truncated_batch``,
+    ``intervention`` is one of ``doom_loop``, ``truncated_batch``, ``truncated_text``,
     ``empty_completion``, ``post_tool_empty``, ``background_jobs_nudge``,
-    ``compaction_fallback``, ``max_turns``, ``verifier_replan``, ``final_answer_gate``.
+    ``compaction_fallback``, ``max_turns``, ``verifier_replan``, ``final_answer_gate``,
+    ``provider_retry``, ``provider_resume``, ``stream_stall``,
+    ``context_overflow_recovery``.
     """
 
     kind: Literal["HarnessIntervention"] = "HarnessIntervention"
@@ -134,6 +136,20 @@ class ContextUsage:
 
 
 @dataclass(frozen=True)
+class PromptSection:
+    """One prompt section's size. ``cap_chars`` is omitted on the wire when there is no cap.
+
+    ``chars`` counts the bytes that section contributes to the system prompt,
+    including its heading. ``est_tokens`` is characters // 4, not a provider count.
+    """
+
+    name: str
+    chars: int
+    est_tokens: int
+    cap_chars: int | None = None
+
+
+@dataclass(frozen=True)
 class SystemPromptSnapshot:
     """Full system message text sent to the provider on this inner-loop iteration (playground / debug)."""
 
@@ -142,6 +158,8 @@ class SystemPromptSnapshot:
     inner_turn: int = 0
     """1-based inner loop index for this user message (increments on tool follow-ups)."""
     text: str = ""
+    """Per-section size. Empty on older payloads; omitted from the wire when empty."""
+    sections: tuple[PromptSection, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -671,6 +689,47 @@ def _usage_from_obj(raw: object | None) -> UsageTotals:
     )
 
 
+def _json_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
+def _prompt_section_json(section: PromptSection) -> dict[str, object]:
+    item: dict[str, object] = {
+        "name": section.name,
+        "chars": section.chars,
+        "est_tokens": section.est_tokens,
+    }
+    if section.cap_chars is not None:
+        item["cap_chars"] = section.cap_chars
+    return item
+
+
+def _prompt_sections(raw: object) -> tuple[PromptSection, ...]:
+    if not isinstance(raw, list):
+        return ()
+    sections: list[PromptSection] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        chars = _json_int(item.get("chars", 0))
+        est = _json_int(item.get("est_tokens", 0))
+        if not isinstance(name, str) or chars is None or est is None:
+            continue
+        cap = item.get("cap_chars")
+        sections.append(
+            PromptSection(
+                name=name,
+                chars=chars,
+                est_tokens=est,
+                cap_chars=None if cap is None else _json_int(cap),
+            )
+        )
+    return tuple(sections)
+
+
 def _str_payload(payload: dict[str, Any], key: str, *, default: str = "") -> str:
     raw = payload.get(key, default)
     return raw if isinstance(raw, str) else default
@@ -948,6 +1007,8 @@ def event_to_json(event: AgentEvent) -> str:
         payload = {**base, "turns_summarized": event.turns_summarized}
     elif isinstance(event, SystemPromptSnapshot):
         payload = {**base, "inner_turn": event.inner_turn, "text": event.text}
+        if event.sections:
+            payload["sections"] = [_prompt_section_json(section) for section in event.sections]
     elif isinstance(event, SubagentStarted):
         payload = {
             **base,
@@ -1144,7 +1205,12 @@ def _event_from_dict(payload: dict[str, Any]) -> AgentEvent:
         inner_turn = int(it_raw) if isinstance(it_raw, (int, float)) else 0
         text_raw = payload.get("text", "")
         text = text_raw if isinstance(text_raw, str) else ""
-        return SystemPromptSnapshot(request_id=rid, inner_turn=inner_turn, text=text)
+        return SystemPromptSnapshot(
+            request_id=rid,
+            inner_turn=inner_turn,
+            text=text,
+            sections=_prompt_sections(payload.get("sections")),
+        )
     if t in ("ImageBlock", "FileBlock"):
         path = _str_payload(payload, "path").strip()
         mime_type = _str_payload(payload, "mime_type")

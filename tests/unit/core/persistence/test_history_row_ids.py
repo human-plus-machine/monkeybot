@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -41,6 +42,21 @@ async def store():
 
 async def _ids(store: SQLiteHistoryStore, thread_id: str = "t") -> list[str | None]:
     return [m.row_id for m in await store.load(thread_id)]
+
+
+async def _stored(store: SQLiteHistoryStore, thread_id: str = "t") -> list[tuple[Any, ...]]:
+    cursor = await store._conn.execute(
+        """
+        SELECT created_at, turn_id, message_id, row_id, content
+        FROM conversation_history
+        WHERE thread_id = ?
+        ORDER BY created_at ASC, id ASC
+        """,
+        (thread_id,),
+    )
+    rows = [tuple(row) for row in await cursor.fetchall()]
+    await cursor.close()
+    return rows
 
 
 @pytest.mark.asyncio
@@ -397,12 +413,26 @@ class _FsCollection(_FsQuery):
     async def add(self, data: dict[str, Any]) -> None:
         self._added.append(data)
 
-    def document(self, _doc_id: str) -> Any:
+    def document(self, _doc_id: str | None = None) -> Any:
         class _Ref:
             async def set(self, *_a: Any, **_k: Any) -> None:
                 return None
 
         return _Ref()
+
+
+class _FsBatch:
+    def __init__(self, added: list[dict[str, Any]]) -> None:
+        self._added = added
+        self._rows: list[dict[str, Any]] = []
+
+    def set(self, _ref: Any, data: dict[str, Any], merge: bool = False) -> None:
+        del merge
+        if "row_id" in data:
+            self._rows.append(data)
+
+    async def commit(self) -> None:
+        self._added.extend(self._rows)
 
 
 class _FsClient:
@@ -412,6 +442,9 @@ class _FsClient:
 
     def collection(self, _name: str) -> _FsCollection:
         return _FsCollection(self.docs, self.added)
+
+    def batch(self) -> _FsBatch:
+        return _FsBatch(self.added)
 
 
 def _fs_store(client: _FsClient) -> Any:
@@ -442,3 +475,375 @@ async def test_firestore_load_returns_stored_or_legacy_row_id() -> None:
     )
     rows = await _fs_store(client).load("t")
     assert [m.row_id for m in rows] == [f"{LEGACY_ROW_ID_PREFIX}doc-a", "rb"]
+
+
+def _payload(text: str) -> str:
+    return json.dumps([{"type": "text", "text": text}], separators=(",", ":"), ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_reset_keeps_created_at_turn_id_and_message_id(store: SQLiteHistoryStore) -> None:
+    specs = (("head", "h", "turn-a", "m-head", 1000), ("middle", "m", "turn-a", "m-mid", 2000))
+    for text, row_id, turn_id, message_id, _stamp in specs:
+        await store.append(
+            "t",
+            Message(role="user", content=[Text(text=text)], row_id=row_id),
+            turn_id=turn_id,
+            message_id=message_id,
+        )
+    await store.append(
+        "t",
+        Message(role="assistant", content=[Text(text="tail")], row_id="tail"),
+        turn_id="turn-b",
+        message_id="m-tail",
+    )
+    for _text, _row_id, _turn_id, message_id, stamp in (
+        *specs,
+        ("tail", "tail", "turn-b", "m-tail", 3000),
+    ):
+        await store._conn.execute(
+            "UPDATE conversation_history SET created_at = ? WHERE message_id = ?",
+            (stamp, message_id),
+        )
+    await store._conn.commit()
+
+    loaded = await store.load("t")
+    await store.reset(
+        "t",
+        [loaded[0], Message(role="assistant", content=[Text(text="summary")]), loaded[2]],
+    )
+    rows = await _stored(store)
+    assert [row[0] for row in rows] == [1000, 1000, 3000]
+    assert [row[1] for row in rows] == ["turn-a", None, "turn-b"]
+    assert [row[2] for row in rows] == ["m-head", None, "m-tail"]
+    assert rows[0][3] == "h" and rows[2][3] == "tail"
+    assert rows[1][3] not in {None, "h", "tail"}
+    await store.append(
+        "t",
+        Message(role="user", content=[Text(text="again")]),
+        turn_id="turn-retry",
+        message_id="m-head",
+    )
+    assert len(await store.load("t")) == 3
+    listed = await store.list_threads()
+    assert listed[0].thread_id == "t"
+    assert listed[0].last_message_at == 3000
+
+
+@pytest.mark.asyncio
+async def test_reset_matches_legacy_rows_and_duplicate_row_ids_in_order(
+    store: SQLiteHistoryStore,
+) -> None:
+    await store.append(
+        "t",
+        Message(role="user", content=[Text(text="first")], row_id="dup"),
+        turn_id="t",
+        message_id="m1",
+    )
+    await store.append(
+        "t",
+        Message(role="user", content=[Text(text="second")], row_id="dup"),
+        turn_id="t",
+        message_id="m2",
+    )
+    await store.append(
+        "t",
+        Message(role="assistant", content=[Text(text="old")]),
+        turn_id="t0",
+        message_id="m-old",
+    )
+    await store._conn.execute(
+        "UPDATE conversation_history SET created_at = 1000 WHERE message_id = 'm1'"
+    )
+    await store._conn.execute(
+        "UPDATE conversation_history SET created_at = 2000 WHERE message_id = 'm2'"
+    )
+    await store._conn.execute(
+        "UPDATE conversation_history SET created_at = 3000, row_id = NULL WHERE message_id = 'm-old'"
+    )
+    await store._conn.commit()
+    loaded = await store.load("t")
+    assert loaded[2].row_id is not None and loaded[2].row_id.startswith(LEGACY_ROW_ID_PREFIX)
+    # Both survivors share a row_id, so they pair in stored order rather than by content.
+    await store.reset("t", [loaded[1], loaded[0], loaded[2]])
+    rows = await _stored(store)
+    assert [json.loads(str(row[4]))[0]["text"] for row in rows] == ["second", "first", "old"]
+    assert [row[2] for row in rows] == ["m1", "m2", "m-old"]
+    assert [row[0] for row in rows] == [1000, 2000, 3000]
+    assert rows[2][3] == loaded[2].row_id
+
+
+@pytest.mark.asyncio
+async def test_reset_without_memory_columns_keeps_created_at() -> None:
+    conn = await open_connection("sqlite:///:memory:")
+    try:
+        await conn.execute(
+            """CREATE TABLE conversation_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                agent_scope TEXT NOT NULL DEFAULT ''
+            )"""
+        )
+        for text, stamp in (("a", 1000), ("b", 2000)):
+            await conn.execute(
+                "INSERT INTO conversation_history(thread_id, role, content, created_at) "
+                "VALUES ('t', 'user', ?, ?)",
+                (_payload(text), stamp),
+            )
+        await conn.commit()
+        bare = SQLiteHistoryStore(conn)
+        loaded = await bare.load("t")
+        await bare.reset(
+            "t",
+            [loaded[0], Message(role="assistant", content=[Text(text="new")]), loaded[1]],
+        )
+        cursor = await conn.execute(
+            "SELECT created_at, content FROM conversation_history "
+            "WHERE thread_id = 't' ORDER BY created_at, id"
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        assert [row[0] for row in rows] == [1000, 1000, 2000]
+        assert "new" in str(rows[1][1])
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_postgres_reset_rewrites_with_stored_metadata() -> None:
+    conn = _PgConn(
+        [
+            {
+                "id": 4,
+                "row_id": "drop",
+                "created_at": 3000,
+                "turn_id": "t-old",
+                "message_id": "m-drop",
+            },
+            {
+                "id": 2,
+                "row_id": "keep",
+                "created_at": 1000,
+                "turn_id": "t-old",
+                "message_id": "m-keep",
+            },
+        ]
+    )
+    await _pg_store(conn).reset(
+        "t",
+        [
+            Message(role="user", content=[Text(text="kept")], row_id="keep"),
+            Message(role="assistant", content=[Text(text="summary")]),
+        ],
+    )
+    inserts = [args for query, args in conn.executed if "INSERT" in query]
+    assert len(inserts) == 2
+    assert inserts[0][3:] == (1000, "agent-a", "t-old", "m-keep", "keep")
+    assert inserts[1][3] == 1000
+    assert inserts[1][5] is None and inserts[1][6] is None
+    assert inserts[1][-1] not in ("", None, "keep")
+
+
+class _ResetRef:
+    def __init__(self, doc_id: str) -> None:
+        self.id = doc_id
+
+    async def set(self, data: dict[str, Any], merge: bool = False) -> None:
+        del data, merge
+
+    async def delete(self) -> None:
+        return None
+
+    async def get(self) -> Any:
+        class _Missing:
+            exists = False
+            update_time = None
+
+            def to_dict(self) -> None:
+                return None
+
+        return _Missing()
+
+
+class _ResetDoc:
+    def __init__(self, client: _ResetClient, doc_id: str, data: dict[str, Any]) -> None:
+        self.id = doc_id
+        self._data = data
+        self.reference = _ResetRef(doc_id)
+        self._client = client
+
+    def to_dict(self) -> dict[str, Any]:
+        return self._data
+
+
+class _ResetQuery:
+    def __init__(self, docs: list[_ResetDoc]) -> None:
+        self._docs = docs
+
+    def where(self, *_args: Any, **_kwargs: Any) -> _ResetQuery:
+        return self
+
+    def order_by(self, *_args: Any, **_kwargs: Any) -> _ResetQuery:
+        return self
+
+    async def stream(self) -> AsyncIterator[_ResetDoc]:
+        for doc in self._docs:
+            yield doc
+
+
+class _ResetCollection:
+    def __init__(self, client: _ResetClient, docs: list[_ResetDoc]) -> None:
+        self._client = client
+        self._docs = docs
+        self._auto = 0
+
+    def where(self, *_args: Any, **_kwargs: Any) -> _ResetQuery:
+        return _ResetQuery(self._docs)
+
+    def document(self, doc_id: str | None = None) -> _ResetRef:
+        if doc_id is None:
+            self._auto += 1
+            doc_id = f"auto-{self._auto}"
+        ref = _ResetRef(doc_id)
+        ref.set = self._record_set(doc_id)  # type: ignore[method-assign]
+        ref.delete = self._record_delete(doc_id)  # type: ignore[method-assign]
+        return ref
+
+    def _record_set(self, doc_id: str) -> Any:
+        async def _set(data: dict[str, Any], merge: bool = False) -> None:
+            self._client.direct.append(("set", doc_id, data, merge))
+
+        return _set
+
+    def _record_delete(self, doc_id: str) -> Any:
+        async def _delete() -> None:
+            self._client.direct.append(("delete", doc_id, None, False))
+
+        return _delete
+
+
+class _ResetBatch:
+    def __init__(self, client: _ResetClient) -> None:
+        self._client = client
+        self._ops: list[tuple[str, str, dict[str, Any] | None]] = []
+
+    def set(self, ref: _ResetRef, data: dict[str, Any], merge: bool = False) -> None:
+        del merge
+        self._ops.append(("set", ref.id, data))
+
+    def update(self, ref: _ResetRef, data: dict[str, Any]) -> None:
+        self._ops.append(("update", ref.id, data))
+
+    def delete(self, ref: _ResetRef, option: Any = None) -> None:
+        del option
+        self._ops.append(("delete", ref.id, None))
+
+    async def commit(self) -> None:
+        self._client.commits.append(self._ops)
+
+
+class _ResetClient:
+    def __init__(self, docs: list[tuple[str, dict[str, Any]]]) -> None:
+        self.commits: list[list[tuple[str, str, dict[str, Any] | None]]] = []
+        self.direct: list[tuple[str, str, dict[str, Any] | None, bool]] = []
+        self._docs = [_ResetDoc(self, doc_id, data) for doc_id, data in docs]
+        self._history = _ResetCollection(self, self._docs)
+        self._threads = _ResetCollection(self, [])
+
+    def collection(self, name: str) -> _ResetCollection:
+        if name.endswith("threads"):
+            return self._threads
+        return self._history
+
+    def batch(self) -> _ResetBatch:
+        return _ResetBatch(self)
+
+
+def _reset_store(client: _ResetClient) -> Any:
+    pytest.importorskip("google.cloud.firestore")
+    from monkeybot.core.persistence.firestore import FirestoreHistoryStore
+
+    return FirestoreHistoryStore(client, "prefix", "agent-a")  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_firestore_reset_writes_nothing_for_an_unchanged_row() -> None:
+    message = Message(role="user", content=[Text(text="kept")], row_id="keep")
+    client = _ResetClient(
+        [
+            (
+                "doc-1",
+                {
+                    "role": "user",
+                    "content": _payload("kept"),
+                    "created_at": 1000,
+                    "turn_id": "turn-old",
+                    "message_id": "m-old",
+                    "row_id": "keep",
+                },
+            )
+        ]
+    )
+    await _reset_store(client).reset("t", [message])
+    assert client.direct == []
+    assert "doc-1" not in [op[1] for commit in client.commits for op in commit]
+    summary = [op for commit in client.commits for op in commit if op[0] == "set"]
+    assert len(summary) == 1
+    assert summary[0][2] is not None
+    assert summary[0][2]["last_message_at"] == 1000
+    assert summary[0][2]["message_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_firestore_reset_commits_sets_before_deletes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("monkeybot.core.persistence.firestore._FIRESTORE_BATCH_LIMIT", 2)
+    client = _ResetClient(
+        [
+            (
+                "keep-doc",
+                {
+                    "role": "user",
+                    "content": _payload("stale"),
+                    "created_at": 1000,
+                    "turn_id": "turn-old",
+                    "message_id": "m-keep",
+                    "row_id": "keep",
+                },
+            ),
+            (
+                "drop-doc",
+                {
+                    "role": "assistant",
+                    "content": _payload("gone"),
+                    "created_at": 3000,
+                    "turn_id": "turn-old",
+                    "message_id": "m-drop",
+                    "row_id": "drop",
+                },
+            ),
+        ]
+    )
+    await _reset_store(client).reset(
+        "t",
+        [
+            Message(role="user", content=[Text(text="kept")], row_id="keep"),
+            Message(role="assistant", content=[Text(text="summary")]),
+            Message(role="user", content=[Text(text="extra")]),
+        ],
+    )
+    assert [len(commit) for commit in client.commits] == [2, 1, 1, 1]
+    writes = [op for commit in client.commits[:-2] for op in commit]
+    assert {op[0] for op in writes} <= {"set", "update"}
+    assert client.commits[-2][0][0] == "delete"
+    assert client.commits[-2][0][1] == "drop-doc"
+    assert client.commits[-1][0][0] == "set"
+    update = next(op for op in writes if op[0] == "update")
+    assert update[2] is not None
+    assert "turn_id" not in update[2] and "message_id" not in update[2]
+    assert "kept" in str(update[2]["content"])
+    sets = [op[2] for op in writes if op[0] == "set" and op[2] is not None]
+    assert [item["created_at"] for item in sets] == [1001, 1002]
+    assert all(item["message_id"] is None and item["turn_id"] is None for item in sets)

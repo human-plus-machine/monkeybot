@@ -594,21 +594,41 @@ class _ProductionStdioHooks:
         )
 
 
+def canonical_schema(value: object) -> object:
+    """Sort object keys at every depth. Array order stays as the server sent it.
+
+    JSON object order has no meaning, but the bytes are the cache key. Two
+    listings of the same tool must serialize the same way.
+    """
+    if isinstance(value, dict):
+        return {key: canonical_schema(value[key]) for key in sorted(value)}
+    if isinstance(value, list):
+        return [canonical_schema(item) for item in value]
+    return value
+
+
 def _tool_input_schema(tool: object) -> dict[str, object]:
-    """Extract JSON-schema dict from an MCP ``Tool`` object across SDK revisions."""
+    """Extract JSON-schema dict from an MCP ``Tool`` object across SDK revisions.
+
+    Object keys are sorted once, here, so a server that reorders them between
+    connections does not change the bytes sent to the provider.
+    """
     raw = getattr(tool, "inputSchema", None)
     if raw is None:
         raw = getattr(tool, "input_schema", None)
     if raw is None:
         return {}
+    schema: object
     if isinstance(raw, dict):
-        return raw
-    model_dump = getattr(raw, "model_dump", None)
-    if callable(model_dump):
-        dumped = raw.model_dump(mode="python", by_alias=True)
-        if isinstance(dumped, dict):
-            return dumped
-        return {}
+        schema = raw
+    else:
+        model_dump = getattr(raw, "model_dump", None)
+        if not callable(model_dump):
+            return {}
+        schema = model_dump(mode="python", by_alias=True)
+    canonical = canonical_schema(schema)
+    if isinstance(canonical, dict):
+        return canonical
     return {}
 
 

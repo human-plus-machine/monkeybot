@@ -10,6 +10,7 @@ import re
 from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Any, Literal
 
+from monkeybot.core.attachments.text import filename_from_metadata
 from monkeybot.core.llm.provider import (
     Done,
     Message,
@@ -21,7 +22,7 @@ from monkeybot.core.llm.provider import (
     UsageEvent,
 )
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.attachments.text import filename_from_metadata
+from monkeybot.core.prompts.headings import is_system_context_update
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
     File,
@@ -38,6 +39,7 @@ from monkeybot.providers._utils import (
     iter_stream_with_param_retry,
     safe_parse_tool_args,
     split_leading_system,
+    split_system_prompt_for_cache,
 )
 from monkeybot.providers.model_capabilities import BEDROCK_GEO_PREFIXES, supports_param
 
@@ -262,8 +264,34 @@ def _copy_content_blocks(blocks: list[Any]) -> list[Any]:
     return [dict(b) if isinstance(b, dict) else b for b in blocks]
 
 
-def _append_cache_point_to_system(system: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return _copy_content_blocks(system) + [dict(_CACHE_POINT_BLOCK)]
+def _converse_system_blocks(
+    system: str,
+    *,
+    cache_retention: Literal["none", "short", "long"],
+) -> list[dict[str, Any]]:
+    """Stable prefix, then the volatile tail, as separate Converse text blocks.
+
+    One block when caching is off, when there is no volatile heading, or when
+    the stable prefix is blank. An empty text block is rejected by Converse.
+    """
+    if cache_retention == "none":
+        return [{"text": system}]
+    stable, volatile = split_system_prompt_for_cache(system)
+    if not stable.strip() or not volatile.strip():
+        return [{"text": system}]
+    return [{"text": stable}, {"text": volatile}]
+
+
+def _cache_point_after_first_system_block(system: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Put the cache point after the first block, the stable prefix.
+
+    A second block, when present, is the volatile tail (skills, verifier) and
+    stays after the point, so a change there does not drop the stable checkpoint.
+    """
+    copied = _copy_content_blocks(system)
+    if not copied:
+        return copied
+    return [copied[0], dict(_CACHE_POINT_BLOCK), *copied[1:]]
 
 
 def _append_cache_point_to_tools(tool_config: dict[str, Any]) -> dict[str, Any]:
@@ -276,6 +304,27 @@ def _append_cache_point_to_tools(tool_config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _converse_block_is_context_tail(block: object) -> bool:
+    if not isinstance(block, dict):
+        return False
+    text = block.get("text")
+    return isinstance(text, str) and is_system_context_update(text)
+
+
+def _cache_point_before_tail(content: list[Any]) -> list[Any] | None:
+    """Insert a cache point before a trailing context tail.
+
+    ``None`` when every block is a tail, so the point stays on an earlier user
+    message whose bytes the next call will still send.
+    """
+    split = len(content)
+    while split > 0 and _converse_block_is_context_tail(content[split - 1]):
+        split -= 1
+    if split == 0 and content:
+        return None
+    return [*content[:split], dict(_CACHE_POINT_BLOCK), *content[split:]]
+
+
 def _append_cache_points_to_last_user_messages(
     messages: list[dict[str, Any]],
     *,
@@ -285,15 +334,25 @@ def _append_cache_points_to_last_user_messages(
         return [
             dict(m, content=_copy_content_blocks(list(m.get("content") or []))) for m in messages
         ]
-    user_indices = [i for i, m in enumerate(messages) if m.get("role") == "user"]
-    targets = set(user_indices[-2:])
+    # Walk user messages from the end. A tail-only message is not a cache point:
+    # the next call drops that text, so a point after it would never be read.
+    pending: list[int] = []
+    for index in range(len(messages) - 1, -1, -1):
+        if messages[index].get("role") != "user":
+            continue
+        content = list(messages[index].get("content") or [])
+        if content and all(_converse_block_is_context_tail(block) for block in content):
+            continue
+        pending.append(index)
+        if len(pending) >= max_points:
+            break
+    targets = set(pending)
     out: list[dict[str, Any]] = []
-    budget = max_points
-    for i, msg in enumerate(messages):
+    for index, msg in enumerate(messages):
         content = _copy_content_blocks(list(msg.get("content") or []))
-        if i in targets and budget > 0:
-            content.append(dict(_CACHE_POINT_BLOCK))
-            budget -= 1
+        if index in targets:
+            placed = _cache_point_before_tail(content)
+            content = content if placed is None else placed
         out.append({"role": msg["role"], "content": content})
     return out
 
@@ -305,7 +364,7 @@ def _apply_cache_points(kwargs: dict[str, Any]) -> dict[str, Any]:
 
     system = out.get("system")
     if isinstance(system, list) and system and budget > 0:
-        out["system"] = _append_cache_point_to_system(system)
+        out["system"] = _cache_point_after_first_system_block(system)
         budget -= 1
 
     tool_config = out.get("toolConfig")
@@ -382,8 +441,9 @@ def converse_request_kwargs(
     """Build ``converse_stream`` kwargs. Always sets ``inferenceConfig.maxTokens``.
 
     When ``cache_retention`` is not ``none``, inserts Converse ``cachePoint`` blocks
-    on system, tools, and the last two user turns (Bedrock max 4). ``short`` and
-    ``long`` both use the default 5-minute Converse cache tier.
+    on tools, after the stable system prefix, and on the last two user turns
+    (Bedrock max 4). The volatile tail (skills, verifier) stays after that system
+    point. ``short`` and ``long`` both use the default 5-minute Converse cache tier.
 
     ``thinking_budget`` is not forwarded on this path — Converse reasoning is not
     requested via ``additionalModelRequestFields`` yet; the mapper only round-trips
@@ -399,7 +459,7 @@ def converse_request_kwargs(
         "inferenceConfig": inference,
     }
     if system:
-        kwargs["system"] = [{"text": system}]
+        kwargs["system"] = _converse_system_blocks(system, cache_retention=cache_retention)
     tool_config = converse_tools(tools)
     if tool_config is not None:
         kwargs["toolConfig"] = tool_config
@@ -715,7 +775,9 @@ def _estimate_block(block: ContentBlock) -> dict[str, Any]:
     if isinstance(block, RedactedThinking):
         return {"redactedThinking": {"chars": len(block.data)}}
     if isinstance(block, Image):
-        return {"image": block.mime_type, "chars": len(block.data)}
+        # No payload. ``estimate_anthropic_input_tokens`` bills each image at
+        # ``IMAGE_TOKEN_ESTIMATE`` instead of its base64 length.
+        return {"type": "image"}
     if isinstance(block, File):
         return {"file": block.mime_type, "chars": len(block.data)}
     if isinstance(block, ToolRequest):

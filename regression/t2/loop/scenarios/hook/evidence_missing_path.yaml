@@ -33,10 +33,11 @@ assertions:
   provider_calls: 3
   provider_request:
     - n: 2
-      system_contains: "## Evidence path correction"
-    - n: 2
-      system_contains: missing.py
-    - n: 3
+      messages_contain: "## Evidence path correction"
       system_not_contains: "## Evidence path correction"
+    - n: 2
+      messages_contain: missing.py
+    - n: 3
+      messages_not_contain: "## Evidence path correction"
   turn_completed: true
   no_errors: true

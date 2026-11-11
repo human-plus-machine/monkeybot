@@ -87,6 +87,7 @@ from monkeybot.core.persistence.transcript import (
     TranscriptWriter,
     runtime_manifest_fields,
 )
+from monkeybot.core.runtime.error_text import client_error_text
 from monkeybot.core.runtime.events import (
     AgentEvent,
     HarnessIntervention,
@@ -1094,9 +1095,90 @@ def _ensure_subagent_supervisor(
         lease_ms=settings.lease_ms,
         run_inline=_run_inline_subagent_with_progress,
         on_wake=_on_wake,
+        wake_budget=_session_wake_budget(bus),
     )
     bus.subagent_supervisor = supervisor
     return supervisor
+
+
+def _session_wake_budget(bus: Any) -> Any:
+    """One wake cap per session, shared by subagents and background commands."""
+    from monkeybot.core.runtime.wake_budget import WakeBudget
+
+    budget = getattr(bus, "wake_budget", None)
+    if budget is None:
+        budget = WakeBudget()
+        bus.wake_budget = budget
+    return budget
+
+
+def _background_jobs_survive_turn(bus: Any, cfg: Any) -> bool:
+    """Whether local background commands outlive the turn. Fixed for the session.
+
+    Sandbox commands stay turn-scoped. The choice is stored on the bus so a
+    later config read cannot change the tool text in the middle of a chat.
+    """
+    decided = getattr(bus, "background_jobs_survive_turn", None)
+    if isinstance(decided, bool):
+        return decided
+    from monkeybot.core.tools.sandbox_executor import SandboxConfig
+
+    decided = not SandboxConfig.from_env(cfg).enabled
+    bus.background_jobs_survive_turn = decided
+    return decided
+
+
+def _ensure_session_jobs(
+    bus: Any,
+    session_id: str,
+    storage: StorageBackend | None,
+    loop_port: LoopPort,
+    *,
+    max_jobs: int,
+) -> Any:
+    """One local-command table per session bus. Later turns reuse it."""
+    existing = getattr(bus, "session_jobs", None)
+    if existing is not None:
+        return existing
+    from monkeybot.core.tools.session_jobs import SessionJobs
+    from monkeybot.gateway.sse.routes import _drain_follow_up
+
+    async def _on_wake(batch: list[tuple[str, str]]) -> bool:
+        if bus.current_request_id is not None:
+            return False
+        summary = ", ".join(f"{job_id} ({status})" for job_id, status in batch)
+        text = (
+            f"[harness] Background command {summary} finished. Call await_command before reporting."
+        )
+        try:
+            bus.admission.enqueue_follow_up(
+                f"wake-job-{uuid.uuid4().hex[:10]}",
+                [Text(text=text)],
+                provenance="harness",
+                harness_job_ids=tuple(job_id for job_id, _status in batch),
+            )
+        except Exception:
+            logger.warning(
+                "background command wake enqueue failed %s",
+                kv(session_id=session_id),
+                exc_info=True,
+            )
+            return False
+        await _drain_follow_up(
+            bus=bus,
+            loop_ref=loop_port,
+            storage=storage,
+            session_id=session_id,
+        )
+        return True
+
+    jobs = SessionJobs(
+        max_jobs=max_jobs,
+        on_wake=_on_wake,
+        wake_budget=_session_wake_budget(bus),
+    )
+    bus.session_jobs = jobs
+    return jobs
 
 
 class GatewayLoopPort:
@@ -1222,10 +1304,23 @@ class GatewayLoopPort:
             storage_backend = getattr(serving.state, "storage", None)
             loops_available = storage_backend is not None
             loops_advertised = loops_available and loops_registry.advertised
-            summarization_model = env_value(cfg, "CONTEXT_SUMMARIZATION_MODEL", "").strip() or None
             supervisor = _ensure_subagent_supervisor(bus, session_id, storage_backend, self)
+            jobs_survive = _background_jobs_survive_turn(bus, cfg)
+            session_jobs = None
+            if jobs_survive:
+                from monkeybot.core.tools.sandbox_executor import SandboxConfig
+
+                session_jobs = _ensure_session_jobs(
+                    bus,
+                    session_id,
+                    storage_backend,
+                    self,
+                    max_jobs=SandboxConfig.from_env(cfg).max_background_jobs,
+                )
             if provenance == "human":
                 supervisor.note_human_turn()
+                if session_jobs is not None:
+                    session_jobs.note_human_turn()
 
             thread_id: str | None = None
             try:
@@ -1242,7 +1337,6 @@ class GatewayLoopPort:
                     skills_path=skills_resolved,
                     mcp_client=mcp,
                     model=model_name,
-                    summarization_model=summarization_model,
                     cancelled=cancel_event,
                     context_window_tokens=context_window_tokens(cfg),
                     workspace_root=workspace_root,
@@ -1262,6 +1356,10 @@ class GatewayLoopPort:
                     mcp_visibility=bus.mcp_visibility,
                     background_tasks_available=True,
                     background_runs_view=supervisor.snapshot_text,
+                    background_jobs_survive_turn=jobs_survive,
+                    background_jobs_view=(
+                        None if session_jobs is None else session_jobs.snapshot_text
+                    ),
                 )
                 seed_turn_grants(ctx, bus)
             except Exception as exc:
@@ -1281,7 +1379,12 @@ class GatewayLoopPort:
                         model=model_name,
                     )
                 await bus.publish_data(
-                    event_to_json(AgentError(request_id=request_id, error=str(exc)))
+                    event_to_json(
+                        AgentError(
+                            request_id=request_id,
+                            error=client_error_text(exc, request_id=request_id),
+                        )
+                    )
                 )
                 await bus.publish_data(
                     event_to_json(TurnComplete(request_id=request_id, usage=UsageTotals()))
@@ -1311,6 +1414,7 @@ class GatewayLoopPort:
                 read_ledger=read_ledger,
                 subagent_supervisor=supervisor,
                 completion_verifier=gateway_runtime.completion_verifier,
+                session_jobs=session_jobs,
             )
             if transcript_writer is not None:
                 await transcript_writer.write_user_message(
@@ -1373,6 +1477,21 @@ class GatewayLoopPort:
                 await watcher
             bus.cancel_requested_for = None
             bus.turn_cancel_event = None
+
+
+def bind_goal_tick_port(fastapi_app: FastAPI) -> tuple[GatewayLoopPort, SessionRegistry]:
+    """Run goal ticks on the app whose lifespan opened storage.
+
+    Desktop dev serves ``gateway.realtime.app`` and calls ``_startup`` on that
+    app. An unbound port falls back to the SSE module app, whose ``state``
+    never receives ``storage``.
+    """
+    registry = getattr(fastapi_app.state, "registry", None)
+    if not isinstance(registry, SessionRegistry):
+        registry = _registry
+    port = GatewayLoopPort(registry)
+    port.bind_app(fastapi_app)
+    return port, registry
 
 
 def _cors_allow_origins() -> list[str]:
@@ -1538,13 +1657,13 @@ async def _startup(fastapi_app: FastAPI) -> None:
     from monkeybot.scheduler.engine import scheduler_enabled_from_env, start_scheduler_background
 
     if scheduler_enabled_from_env():
-        loop_port = GatewayLoopPort(_registry)
+        loop_port, registry = bind_goal_tick_port(fastapi_app)
         turn_locks = backend.session_turns()
         fastapi_app.state.scheduler = start_scheduler_background(
             store=backend.scheduled_loops(),
-            invoker=GatewayTickInvoker(loop_port, _registry, turn_locks),
+            invoker=GatewayTickInvoker(loop_port, registry, turn_locks),
             session_busy=StorageSessionBusyChecker(turn_locks),
-            ensure_session=GatewaySessionEnsurer(_registry),
+            ensure_session=GatewaySessionEnsurer(registry),
         )
         logger.info("scheduled-loop engine enabled (in-process; development-friendly)")
 

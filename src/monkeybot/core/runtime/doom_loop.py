@@ -1,4 +1,9 @@
-"""Doom-loop detection: consecutive identical tool calls within one user message."""
+"""Doom-loop detection: repeated tool calls within one user message.
+
+Three detectors share one recovery path. A streak of identical calls (same
+name and args), a streak of the same tool failing on the same file, and a
+short cycle of identical calls (the same two or three calls repeating).
+"""
 
 from __future__ import annotations
 
@@ -7,6 +12,7 @@ import json
 import logging
 import os
 import re
+from collections import deque
 from collections.abc import Sequence
 from typing import Any
 
@@ -17,10 +23,11 @@ logger = logging.getLogger("monkeybot.core.runtime.loop.doom_loop")
 
 
 def _effective_doom_loop_threshold() -> int:
-    """Consecutive identical tool calls before doom-loop recovery.
+    """Repeated identical calls, or repeats of a short cycle, before recovery.
 
     Default 3. Set ``DOOM_LOOP_THRESHOLD=0`` to disable. Applies whether the
     calls succeed or fail — identical name+args with no progress is the signal.
+    The same count is how many times a cycle of two or three calls must repeat.
     """
     raw = os.getenv("DOOM_LOOP_THRESHOLD")
     if raw is None or raw.strip() == "":
@@ -45,6 +52,38 @@ def _doom_loop_texts(tool_name: str, threshold: int) -> tuple[str, str]:
     note = (
         f"[Harness] {error}. Do not repeat the same call. Explain the situation "
         "to the user and take a different approach (different tool or args)."
+    )
+    return error, note
+
+
+# Longest cycle the third detector looks for. Period 1 is the identical-call streak.
+_MAX_CYCLE_PERIOD = 3
+
+
+def _repeating_cycle(recent: Sequence[str], repeats: int) -> int | None:
+    """Shortest period in 2..``_MAX_CYCLE_PERIOD`` whose block fills the tail.
+
+    The tail is the last ``period * repeats`` fingerprints. A block of one
+    distinct call is left to the identical-call detector.
+    """
+    for period in range(2, _MAX_CYCLE_PERIOD + 1):
+        span = period * repeats
+        if len(recent) < span:
+            break
+        tail = list(recent)[-span:]
+        block = tail[:period]
+        if len(set(block)) > 1 and all(tail[i] == block[i % period] for i in range(span)):
+            return period
+    return None
+
+
+def _cycle_doom_loop_texts(names: Sequence[str], period: int, repeats: int) -> tuple[str, str]:
+    """Return ``(error_event_text, recovery_system_note)`` for a repeating cycle."""
+    listed = ", ".join(repr(name) for name in names)
+    error = f"Doom loop detected: the same {period} tool calls ({listed}) repeated {repeats} times"
+    note = (
+        f"[Harness] {error}. Alternating between the same calls is not making progress. "
+        "Explain the situation to the user and take a different approach (different tool or args)."
     )
     return error, note
 
@@ -155,8 +194,14 @@ class _DoomLoopTracker:
     ``threshold`` times in a row even though the other arguments differ (an edit retried with a
     slightly different ``old_string`` or hunk, or the same file spelled ``./a`` and ``a``).
     Only failures count there. A success, or any other non-exempt call, restarts the streak.
-    Exempt tools are invisible to both detectors, so polling between failures does not
-    hide the loop or trip it.
+
+    A third detector catches a short cycle: the same two or three calls, each with
+    identical args, repeating ``threshold`` times (A-B-A-B, or A-B-C-A-B-C). Outcome
+    does not matter. A call that breaks the pattern restarts it. A run of one distinct
+    call stays with the identical-call detector.
+
+    Exempt tools are invisible to all three detectors, so polling between failures
+    does not hide the loop or trip it.
 
     Tools in ``exempt_names`` (from ``ToolDef.doom_loop_exempt``) are ignored so
     legitimate polling (e.g. ``loop_status``) does not force a recovery turn.
@@ -177,7 +222,12 @@ class _DoomLoopTracker:
     triggered_tool: str | None = None
     path_streak_key: tuple[str, str] | None = None
     path_streak_count: int = 0
+    recent: deque[tuple[str, str]] = dataclasses.field(default_factory=deque)
     _pending_error: str | None = None
+
+    def __post_init__(self) -> None:
+        maxlen = _MAX_CYCLE_PERIOD * self.threshold if self.threshold > 0 else 0
+        self.recent = deque(self.recent, maxlen=maxlen)
 
     def record(self, name: str, args: dict[str, Any], *, failed: bool = False) -> None:
         if self.threshold <= 0 or self.triggered or name in self.exempt_names:
@@ -194,14 +244,24 @@ class _DoomLoopTracker:
         else:
             self.path_streak_key = path_key
             self.path_streak_count = 1 if path_key is not None else 0
+        self.recent.append((fp, name))
+        cycle_names: tuple[str, ...] | None = None
         if self.streak_count >= self.threshold:
             error, note = _doom_loop_texts(name, self.threshold)
         elif path_key is not None and self.path_streak_count >= self.threshold:
             error, note = _path_doom_loop_texts(name, path_key[1], self.path_streak_count)
         else:
-            return
+            period = _repeating_cycle([item[0] for item in self.recent], self.threshold)
+            if period is None:
+                return
+            block = list(self.recent)[-(period * self.threshold) :][:period]
+            cycle_names = tuple(tool_name for _fp, tool_name in block)
+            error, note = _cycle_doom_loop_texts(cycle_names, period, self.threshold)
         self.triggered = True
-        self.triggered_tool = name
+        if cycle_names is None:
+            self.triggered_tool = name
+        else:
+            self.triggered_tool = ", ".join(dict.fromkeys(cycle_names))
         self._pending_error = error
         self.force_no_tools = True
         self.recovery_note = note
@@ -225,4 +285,5 @@ class _DoomLoopTracker:
             self.path_streak_key = None
             self.path_streak_count = 0
             self.triggered_tool = None
+            self.recent.clear()
         return force, note

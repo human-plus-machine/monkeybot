@@ -41,4 +41,5 @@ assertions:
   provider_request:
   - n: 2
     tools_empty: true
-    system_contains: '[Harness] Doom loop detected'
+    messages_contain: '[Harness] Doom loop detected'
+    system_not_contains: '[Harness] Doom loop detected'

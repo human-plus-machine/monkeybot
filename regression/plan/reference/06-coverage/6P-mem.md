@@ -12,7 +12,7 @@ Existing: T1 `tests/core/memory/*`, `test_migrate_embedding.py`, `test_memory_la
 | T1-MEM-01 | `share_threads_flag` | Default on: thread B recall includes thread A. `MONKEYBOT_MEMORY_SHARE_THREADS` off: thread B recall excludes thread A. |
 | T1-MEM-02 | `drain_timeout_keeps_pending` | Hung embedder: rows stay `pending` after `drain_writer`. |
 | T1-MEM-03 | `object_store_uri_fallback` | `gcs://` / `s3://` memory URI falls back to local; `palace_path_from_uri` raises for object stores. |
-| T2-MEM-01 | `outbox_ingest_then_inject` | Turn 1 persists; `drain_writer`; turn 2 `PRE_TURN` injects the turn-1 text (content check). |
+| T2-MEM-01 | `outbox_ingest_then_inject` | Turn 1 persists; `drain_writer`; turn 2's system prompt contains the turn-1 text. |
 | T2-MEM-02 | `outbox_thread_isolation` | Thread B never sees thread A's lines with share-threads off. |
 | T2-MEM-03 | `ambiguous_commit_no_duplicate` | Simulated `AmbiguousCommitError`: retry once, one history row, one outbox row. |
 | T2-MEM-04 | `outbox_failure_does_not_fail_turn` | Outbox write fails after history commit: turn completes; history-only. |
@@ -21,6 +21,7 @@ Existing: T1 `tests/core/memory/*`, `test_migrate_embedding.py`, `test_memory_la
 | T2-MEM-07 | `subagent_no_ingest` | Child turn creates no outbox rows. |
 | T2-MEM-08 | `memory_write_inject` (migrate) | As today, with content checks. |
 | T2-MEM-09 | `ephemeral_palace_shared_outbox_rejected` | Postgres/Firestore shared outbox + ephemeral palace: `MemoryConfigurationError` at boot. |
+| T2-MEM-10 | `recall_not_in_wake_up` | Turn 2's messages carry the turn-1 fact once and have no recall heading. |
 | T3-MEM-01 | `replay_wake_up` | Recorded `load_index()` lines for a palace snapshot match byte for byte. |
 | T4-MEM-01..02 | `memory/recall_*` (migrate) | Plus a sidecar check that the drawer was filed under session 1's thread. |
 | T4-MEM-03 | `search_past_session` | Session 2 calls `mempalace search` and answers with the session-1 fact. |

@@ -317,8 +317,8 @@ def test_paths_approvals_config_env(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert os.environ.get("MONKEYBOT_APPROVALS_CONFIG") == "./monkeybot_config/approvals.json"
 
 
-def test_model_summarization_model_yaml_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_model_summarization_model_is_retired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.chdir(tmp_path)
     cfg_dir = tmp_path / "monkeybot_config"
@@ -328,11 +328,13 @@ def test_model_summarization_model_yaml_only(
         encoding="utf-8",
     )
     monkeypatch.delenv("CONTEXT_SUMMARIZATION_MODEL", raising=False)
+    caplog.set_level("WARNING")
     runtime_env.apply_monkeybot_runtime_env()
     assert os.environ.get("CONTEXT_SUMMARIZATION_MODEL") is None
+    assert "model.summarization_model is retired and ignored" in caplog.text
     from monkeybot.core.config.snapshot import get_config_store
 
-    assert get_config_store().current().model.summarization_model == "flash-lite"
+    assert not hasattr(get_config_store().current().model, "summarization_model")
 
 
 def test_paths_agent_id_sets_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

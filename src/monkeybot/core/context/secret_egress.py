@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -58,6 +59,10 @@ _SCAN_MAX_BATCH_BYTES = 2 * 1024 * 1024
 # canary generated) mid-session must eventually be caught even though its
 # exact text was scanned clean earlier in that same session.
 _CLEAN_CACHE_TTL_S = 30.0
+# After a timeout or a connection error, skip the bridge for this long. Same
+# window as the clean-text cache: that is already how stale a scan may be.
+# An HTTP response does not open this window — the bridge answered.
+_BRIDGE_DOWN_COOLDOWN_S = 30.0
 
 # Passing ProxyHandler({}) makes urllib skip its default env-based proxy
 # handler, so loopback requests never honor HTTP_PROXY (mirrors login.py).
@@ -134,12 +139,23 @@ class SecretScanner:
     running (no bridge file, or the request fails), scanning is a no-op —
     logged once at info — rather than blocking the agent: the egress gate is
     a backstop, not a hard dependency the app must always satisfy.
+
+    A timeout or a connection error opens a breaker for that bridge URL and
+    token for ``_BRIDGE_DOWN_COOLDOWN_S``. Later scans in the window are not
+    sent and are not remembered as clean. The next scan after the window
+    tries again. A new URL or token is a different bridge, so a restarted
+    Spaces app is scanned at once.
     """
 
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._clean_digests: dict[str, float] = {}
         self._warned_no_app = False
         self._clock = clock
+        # Scans run on worker threads. The breaker is the only state those
+        # threads both read and write around the decision to skip the bridge.
+        self._lock = threading.Lock()
+        self._down_key: tuple[str, str] | None = None
+        self._down_until = 0.0
 
     def scan(self, texts: Sequence[str]) -> list[Hit]:
         if not texts:
@@ -188,13 +204,26 @@ class SecretScanner:
         # original index, so results from every batch merge into one space.
         hit_indices: set[int] = {i for i, _ in oversized}
         scanned_indices: set[int] = set()
-        for batch in _chunk_by_bytes(scannable, _SCAN_MAX_BATCH_BYTES):
-            batch_hits, batch_hit_indices, batch_scanned_indices = self._scan_batch(
-                batch, http, token
-            )
-            hits.extend(batch_hits)
-            hit_indices.update(batch_hit_indices)
-            scanned_indices.update(batch_scanned_indices)
+        # An oversized text is still withheld: that decision does not ask the
+        # bridge. The breaker only skips the round trips.
+        bridge_key = (http, token)
+        if not self._breaker_is_open(bridge_key):
+            saw_success = False
+            for batch in _chunk_by_bytes(scannable, _SCAN_MAX_BATCH_BYTES):
+                batch_hits, batch_hit_indices, batch_scanned_indices, bridge_down = (
+                    self._scan_batch(batch, http, token)
+                )
+                hits.extend(batch_hits)
+                hit_indices.update(batch_hit_indices)
+                scanned_indices.update(batch_scanned_indices)
+                if bridge_down:
+                    self._trip_breaker(bridge_key)
+                    break
+                if batch_scanned_indices:
+                    saw_success = True
+            else:
+                if saw_success:
+                    self._note_bridge_back(bridge_key)
 
         # Cache only texts a batch actually confirmed clean. A batch whose
         # request failed (or returned an unparseable body) contributes no
@@ -209,12 +238,43 @@ class SecretScanner:
                 self._clean_digests[digest] = now
         return hits
 
+    def _breaker_is_open(self, key: tuple[str, str]) -> bool:
+        with self._lock:
+            return self._down_key == key and self._clock() < self._down_until
+
+    def _trip_breaker(self, key: tuple[str, str]) -> None:
+        """Open the breaker. Logs once per opening, not once per skipped scan."""
+        with self._lock:
+            now = self._clock()
+            already_open = self._down_key == key and now < self._down_until
+            self._down_key = key
+            self._down_until = now + _BRIDGE_DOWN_COOLDOWN_S
+        if not already_open:
+            logger.warning(
+                "secret scan bridge unreachable; skipping scans for %.0f s",
+                _BRIDGE_DOWN_COOLDOWN_S,
+            )
+
+    def _note_bridge_back(self, key: tuple[str, str]) -> None:
+        """Clear a breaker this scan just found answering. Logs the recovery once."""
+        with self._lock:
+            recovered = self._down_key == key
+            if recovered:
+                self._down_key = None
+                self._down_until = 0.0
+        if recovered:
+            logger.info("secret scan bridge reachable again")
+
     def _scan_batch(
         self, batch: list[tuple[int, str]], http: str, token: str
-    ) -> tuple[list[Hit], set[int], set[int]]:
-        """Returns (hits, hit_indices, scanned_indices) — all indices are into
-        the original `texts` argument passed to `scan`, via `batch`'s own
-        `(original_index, text)` tuples."""
+    ) -> tuple[list[Hit], set[int], set[int], bool]:
+        """Returns (hits, hit_indices, scanned_indices, bridge_down).
+
+        Indices are into the original `texts` argument passed to `scan`, via
+        `batch`'s own `(original_index, text)` tuples. `bridge_down` is true
+        only when the request timed out or the connection failed. An HTTP
+        status is an answer, so it leaves the breaker alone.
+        """
         payload = _scan_request_body([t for _, t in batch])
         req = urllib.request.Request(
             f"{http}/json/scan",
@@ -243,20 +303,29 @@ class SecretScanner:
                     [Hit(index=original_index, kind="secret") for original_index, _ in batch],
                     {original_index for original_index, _ in batch},
                     set(),
+                    False,
                 )
             logger.warning("secret scan request failed", exc_info=True)
-            return [], set(), set()
+            return [], set(), set(), False
+        except (TimeoutError, urllib.error.URLError, OSError):
+            # HTTPError is a URLError, and URLError is an OSError, so it has
+            # to be handled above. A hung bridge raises TimeoutError from
+            # getresponse(); a refused connection is a URLError. Either way
+            # the bridge did not answer.
+            logger.warning("secret scan request failed", exc_info=True)
+            return [], set(), set(), True
         except Exception:
             logger.warning("secret scan request failed", exc_info=True)
             # Nothing in this batch was actually scanned — the caller must
-            # not cache any of it as clean, nor report it as a hit. The
+            # not cache any of it as clean, nor report it as a hit. A parse
+            # failure is not a dead bridge: the process answered. The
             # sealed-window/CDP-level controls remain the primary defense
             # regardless of this backstop's availability.
-            return [], set(), set()
+            return [], set(), set(), False
         raw_hits = body.get("hits") if isinstance(body, dict) else None
         if not isinstance(raw_hits, list):
             logger.warning("secret scan response malformed: missing/invalid 'hits'")
-            return [], set(), set()
+            return [], set(), set(), False
         hits: list[Hit] = []
         hit_indices: set[int] = set()
         for raw in raw_hits:
@@ -272,7 +341,7 @@ class SecretScanner:
             hits.append(Hit(index=original_index, kind=kind))
             hit_indices.add(original_index)
         scanned_indices = {original_index for original_index, _ in batch}
-        return hits, hit_indices, scanned_indices
+        return hits, hit_indices, scanned_indices, False
 
 
 def _scan_request_body(texts: Sequence[str]) -> bytes:

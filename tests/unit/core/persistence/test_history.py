@@ -20,7 +20,13 @@ from monkeybot.core.persistence.sqlite import (
     open_connection,
     sqlite_path_from_db_url,
 )
-from monkeybot.core.types.content_blocks import SystemNotification, Text, ToolRequest, ToolResponse
+from monkeybot.core.types.content_blocks import (
+    AttachmentRef,
+    SystemNotification,
+    Text,
+    ToolRequest,
+    ToolResponse,
+)
 
 # Legacy ChatMessage + tool_* columns removed in story-2-persistence; see design 1B §7.8.
 
@@ -189,6 +195,35 @@ async def test_history_tool_response_roundtrip(history_db) -> None:
     original = Message(
         role="user",
         content=[ToolResponse(id="x", tool_name="echo", result=[Text(text="ok")])],
+    )
+    await history.append(thread_id, original)
+    loaded = await history.load(thread_id)
+    assert loaded == [original]
+
+
+@pytest.mark.asyncio
+async def test_history_nested_attachment_ref_roundtrip(history_db) -> None:
+    _conn, history = history_db
+    thread_id = "t-nested-ref-rt"
+    original = Message(
+        role="user",
+        content=[
+            ToolResponse(
+                id="c1",
+                tool_name="load_file",
+                result=[
+                    AttachmentRef(
+                        attachment_id="att_round",
+                        mime_type="image/png",
+                        metadata={
+                            "filename": "x.png",
+                            "path": "x.png",
+                            "base64_chars": 12,
+                        },
+                    )
+                ],
+            )
+        ],
     )
     await history.append(thread_id, original)
     loaded = await history.load(thread_id)

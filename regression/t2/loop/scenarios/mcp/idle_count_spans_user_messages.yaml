@@ -1,6 +1,6 @@
 id: regression/t2/loop/scenarios/mcp/idle_count_spans_user_messages
 case: T2-MCP-16
-description: Idle inner turns add up across user messages. The first message's closing text is one of its six idle turns.
+description: Idle inner turns add up across user messages. Compaction in the second message hides the server.
 mode: scripted
 driver: loop
 executor: real
@@ -11,8 +11,17 @@ messages:
 config:
   model:
     max_turns: 30
+    context_window: 12000
   env:
     MCP_CONFIG: regression/fixtures/configs/mcp.progressive.json
+steps:
+- action: touch_file
+  path: big.txt
+  size: 20000
+  fill: Q
+  when:
+    event: tool_result
+    nth: 1
 script:
 - - type: tool_call
     call_id: c0
@@ -86,18 +95,45 @@ script:
       path: .
       nonce: 8
   - type: done
+- - type: tool_call
+    call_id: read-big
+    name: read_file
+    args:
+      path: big.txt
+  - type: done
+- - type: text
+    text: idle-summary-body
+  - type: done
+- - type: tool_call
+    call_id: between
+    name: list_dir
+    args:
+      path: .
+      nonce: between
+  - type: done
+- - type: text
+    text: "Still listing."
+  - type: done
+- - type: tool_call
+    call_id: after
+    name: list_dir
+    args:
+      path: .
+      nonce: after
+  - type: done
 - - type: text
     text: "Hidden now."
   - type: done
 assertions:
-  provider_calls: 12
+  provider_calls: 17
   provider_request:
   - n: 7
     tools_include:
     - fixture__echo
-  - n: 12
+  - n: 16
     tools_exclude:
     - fixture__echo
-    messages_contain: "was hidden after 10 turns without use"
+  - n: 17
+    messages_contain: "because it went unused"
   turn_completed: true
   no_errors: true

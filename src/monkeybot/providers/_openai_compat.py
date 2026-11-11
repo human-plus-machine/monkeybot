@@ -57,6 +57,7 @@ from monkeybot.providers.rejected_sampling import (
 )
 from monkeybot.providers.request_budget import (
     RequestByteBudgetError,
+    request_bytes_sliced,
     trim_message_media_for_byte_budget,
 )
 from monkeybot.providers.sampling import REASONING_EFFORT_NONE
@@ -525,6 +526,21 @@ def openai_tools_token_count(encoding: Any, tools: list[dict[str, Any]]) -> int:
     return len(encoding.encode(json.dumps(tools, ensure_ascii=False, default=str)))
 
 
+def _count_tokens_sync(
+    encoding: Any,
+    oai_messages: list[dict[str, Any]],
+    tool_defs: list[dict[str, Any]],
+) -> int:
+    """Encode one request. Called from a worker thread.
+
+    tiktoken releases the GIL while it encodes, so the loop stays free for
+    other sessions. On the loop the same count holds it for the whole prompt.
+    """
+    return openai_messages_token_count(encoding, oai_messages) + openai_tools_token_count(
+        encoding, tool_defs
+    )
+
+
 async def count_openai_compat_input_tokens(
     encoding: Any,
     messages: Sequence[Message],
@@ -536,9 +552,7 @@ async def count_openai_compat_input_tokens(
     if system:
         oai_messages = [{"role": "system", "content": system}, *oai_messages]
     tool_defs = openai_tools(tools) if tools else []
-    return openai_messages_token_count(encoding, oai_messages) + openai_tools_token_count(
-        encoding, tool_defs
-    )
+    return await asyncio.to_thread(_count_tokens_sync, encoding, oai_messages, tool_defs)
 
 
 _STREAM_USAGE_OPTIONS: dict[str, bool] = {"include_usage": True}
@@ -571,6 +585,8 @@ class ProviderRateLimitError(Exception):
     ``__cause__`` (see ``raise ... from exc``) for logs, not shown to the user.
     """
 
+    user_facing = True
+
     def __init__(self, provider: str, model: str, original: BaseException) -> None:
         super().__init__(
             f"{provider} is temporarily rate-limiting requests for model {model!r}. "
@@ -590,6 +606,8 @@ class ProviderServerError(Exception):
     ``str(self)`` is a user-facing message; the raw upstream error is chained via
     ``__cause__`` (see ``raise ... from exc``) for logs, not shown to the user.
     """
+
+    user_facing = True
 
     def __init__(self, provider: str, model: str, original: BaseException) -> None:
         super().__init__(
@@ -1108,6 +1126,7 @@ async def count_input_tokens_tiktoken(
     none of these providers' token counts vary with reasoning configuration.
     """
     del thinking_budget
+    size = await request_bytes_sliced(messages, tools, count_file_data=False)
     msgs = trim_message_media_for_byte_budget(
         messages,
         tools,
@@ -1115,8 +1134,12 @@ async def count_input_tokens_tiktoken(
         provider=provider,
         raise_if_oversized=False,
         trim_files=False,
+        known_bytes=size,
     )
-    enc = tiktoken_encoding_for_model(model)
+    # An unknown model id shares the encoding loaded at import. A known id
+    # loads its file on first use, and a cold cache downloads it with a
+    # blocking request. Either way the lookup stays off the loop.
+    enc = await asyncio.to_thread(tiktoken_encoding_for_model, model)
     return await count_openai_compat_input_tokens(enc, msgs, tools, hints=hints)
 
 
@@ -1323,7 +1346,12 @@ def is_ollama_request_body_read_error(exc: BaseException) -> bool:
     return True
 
 
-_OPENAI_STRIPPABLE = ("temperature", "reasoning_effort")
+_OPENAI_STRIPPABLE = (
+    "temperature",
+    "reasoning_effort",
+    "prompt_cache_key",
+    "prompt_cache_retention",
+)
 
 
 def drop_rejected_sampling(
@@ -1333,10 +1361,11 @@ def drop_rejected_sampling(
     provider: str = "",
     model: str = "",
 ) -> list[str]:
-    """Remove sampling kwargs a 400 blames. Returns the names that were removed.
+    """Remove kwargs a 400 blames. Returns the names that were removed.
 
-    When ``provider`` and ``model`` are set, the names are remembered so later
-    turns omit them instead of paying for another rejected request.
+    Covers sampling fields and the OpenAI prompt-cache fields. When ``provider``
+    and ``model`` are set, the names are remembered so later turns omit them
+    instead of paying for another rejected request.
     """
     if not is_status_400(exc):
         return []
@@ -1547,12 +1576,14 @@ async def stream_chat_completions_with_tool_fallback(
 
     msgs = list(messages)
     if max_request_bytes is not None and max_request_bytes > 0:
+        size = await request_bytes_sliced(msgs, tools, count_file_data=False)
         msgs = trim_message_media_for_byte_budget(
             msgs,
             tools,
             max_bytes=max_request_bytes,
             provider=provider,
             trim_files=False,
+            known_bytes=size,
         )
     system, oai_messages = await messages_to_openai(msgs, hints=hints)
     if system:

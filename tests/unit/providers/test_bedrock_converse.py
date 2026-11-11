@@ -16,7 +16,10 @@ from monkeybot.core.llm.provider import (
     ToolInputDelta,
     UsageEvent,
 )
+from monkeybot.core.runtime.loop_messages import _send_tail
 from monkeybot.core.types.content_blocks import (
+    IMAGE_TOKEN_ESTIMATE,
+    ContentBlock,
     File,
     Image,
     RedactedThinking,
@@ -36,6 +39,7 @@ from monkeybot.providers._bedrock_converse import (
     messages_to_converse,
     uses_anthropic_bedrock,
 )
+from monkeybot.providers._utils import reset_anthropic_token_estimate_correction
 from monkeybot.providers.bedrock import BedrockProvider
 from monkeybot.providers.model_capabilities import supports_param
 from testkit.conversations import make_anthropic_stream_mock
@@ -148,11 +152,118 @@ def test_converse_cache_points_default_retention() -> None:
         temperature=0.2,
     )
     assert kwargs["system"][-1] == {"cachePoint": {"type": "default"}}
+    assert [block for block in kwargs["system"] if "text" in block] == [
+        {"text": "You are helpful."}
+    ]
     assert kwargs["toolConfig"]["tools"][-1] == {"cachePoint": {"type": "default"}}
     user_msgs = [m for m in kwargs["messages"] if m["role"] == "user"]
     assert user_msgs[-2]["content"][-1] == {"cachePoint": {"type": "default"}}
     assert user_msgs[-1]["content"][-1] == {"cachePoint": {"type": "default"}}
     assert _count_cache_points(kwargs) == 4
+
+
+_TAIL = (
+    "## System context update\n"
+    "The following replaces the prior current-request section for this conversation.\n\n"
+    "## Current request\nfix it"
+)
+
+
+def test_converse_cache_point_sits_before_context_tail() -> None:
+    messages = [
+        Message.text("system", "You are helpful."),
+        Message.text("user", "first"),
+        Message(role="assistant", content=[ToolRequest(id="c1", name="echo", args={})]),
+        Message(
+            role="user",
+            content=[
+                ToolResponse(id="c1", tool_name="echo", result=[Text(text="ok")], is_error=False),
+                Text(text=_TAIL),
+            ],
+        ),
+    ]
+    kwargs = converse_request_kwargs(
+        model=_NOVA,
+        messages=messages,
+        tools=[_ECHO],
+        max_tokens=256,
+        temperature=0.2,
+    )
+    content = kwargs["messages"][-1]["content"]
+    assert "toolResult" in content[0]
+    assert content[1] == {"cachePoint": {"type": "default"}}
+    assert content[2]["text"] == _TAIL
+
+
+def test_converse_cache_point_sits_before_a_note_only_tail() -> None:
+    tail = _send_tail("", "Read the file before editing.")
+    messages = [
+        Message.text("system", "You are helpful."),
+        Message.text("user", "first"),
+        Message(role="assistant", content=[ToolRequest(id="c1", name="echo", args={})]),
+        Message(
+            role="user",
+            content=[
+                ToolResponse(id="c1", tool_name="echo", result=[Text(text="ok")], is_error=False),
+                Text(text=tail),
+            ],
+        ),
+    ]
+    kwargs = converse_request_kwargs(
+        model=_NOVA,
+        messages=messages,
+        tools=[_ECHO],
+        max_tokens=256,
+        temperature=0.2,
+    )
+    content = kwargs["messages"][-1]["content"]
+    assert "toolResult" in content[0]
+    assert content[1] == {"cachePoint": {"type": "default"}}
+    assert "Read the file before editing." in content[2]["text"]
+    assert content[2]["text"].startswith("## System context update")
+
+
+def test_converse_cache_point_sits_before_a_tail_that_also_carries_a_note() -> None:
+    tail = _send_tail(_TAIL, "Read the file before editing.")
+    assert tail.index("## Current request") < tail.index("## Runtime notes")
+    messages = [
+        Message.text("system", "You are helpful."),
+        Message.text("user", "first"),
+        Message.text("assistant", "ok"),
+        Message(role="user", content=[Text(text="second"), Text(text=tail)]),
+    ]
+    kwargs = converse_request_kwargs(
+        model=_NOVA,
+        messages=messages,
+        tools=[_ECHO],
+        max_tokens=256,
+        temperature=0.2,
+    )
+    content = kwargs["messages"][-1]["content"]
+    assert content[0]["text"] == "second"
+    assert content[1] == {"cachePoint": {"type": "default"}}
+    assert "## Current request" in content[2]["text"]
+    assert "Read the file before editing." in content[2]["text"]
+
+
+def test_converse_cache_point_skips_a_tail_only_user_message() -> None:
+    messages = [
+        Message.text("system", "You are helpful."),
+        Message.text("user", "first"),
+        Message.text("assistant", "ok"),
+        Message.text("user", _TAIL),
+    ]
+    kwargs = converse_request_kwargs(
+        model=_NOVA,
+        messages=messages,
+        tools=[_ECHO],
+        max_tokens=256,
+        temperature=0.2,
+    )
+    user_msgs = [m for m in kwargs["messages"] if m["role"] == "user"]
+    assert user_msgs[0]["content"][-1] == {"cachePoint": {"type": "default"}}
+    assert all("cachePoint" not in block for block in user_msgs[-1]["content"])
+    assert user_msgs[-1]["content"][-1]["text"] == _TAIL
 
 
 def test_converse_cache_points_cap_with_long_history() -> None:
@@ -167,10 +278,11 @@ def test_converse_cache_points_cap_with_long_history() -> None:
 
 
 def test_converse_cache_retention_none() -> None:
+    text = "You are helpful.\n\n## Skills\nread_file"
     kwargs = converse_request_kwargs(
         model=_NOVA,
         messages=[
-            Message.text("system", "sys"),
+            Message.text("system", text),
             Message.text("user", "hi"),
         ],
         tools=[_ECHO],
@@ -179,6 +291,64 @@ def test_converse_cache_retention_none() -> None:
         cache_retention="none",
     )
     assert _count_cache_points(kwargs) == 0
+    assert kwargs["system"] == [{"text": text}]
+
+
+def test_converse_system_cache_point_follows_the_stable_prefix() -> None:
+    stable = "You are helpful."
+    skills = "\n\n## Skills\nread_file"
+    changed = "\n\n## Skills\ngrep"
+    kwargs = converse_request_kwargs(
+        model=_NOVA,
+        messages=[Message.text("system", stable + skills), Message.text("user", "hi")],
+        tools=[_ECHO],
+        max_tokens=64,
+        temperature=0.2,
+    )
+    later = converse_request_kwargs(
+        model=_NOVA,
+        messages=[Message.text("system", stable + changed), Message.text("user", "hi")],
+        tools=[_ECHO],
+        max_tokens=64,
+        temperature=0.2,
+    )
+    assert kwargs["system"] == [
+        {"text": stable},
+        {"cachePoint": {"type": "default"}},
+        {"text": skills},
+    ]
+    assert later["system"][0] == kwargs["system"][0]
+    assert later["system"][2] == {"text": changed}
+    assert _count_cache_points(kwargs) <= 4
+
+
+def test_converse_system_that_starts_volatile_stays_one_block() -> None:
+    text = "\n\n## Skills\nread_file"
+    kwargs = converse_request_kwargs(
+        model=_NOVA,
+        messages=[Message.text("system", text), Message.text("user", "hi")],
+        tools=[],
+        max_tokens=64,
+        temperature=0.2,
+    )
+    assert [block for block in kwargs["system"] if "text" in block] == [{"text": text}]
+    assert kwargs["system"][-1] == {"cachePoint": {"type": "default"}}
+
+
+def test_converse_skills_split_stays_within_the_cache_point_cap() -> None:
+    messages = _long_user_history(20)
+    messages[0] = Message.text("system", "You are helpful.\n\n## Skills\nread_file")
+    kwargs = converse_request_kwargs(
+        model=_GROK,
+        messages=messages,
+        tools=[_ECHO],
+        max_tokens=256,
+        temperature=0.2,
+    )
+    assert _count_cache_points(kwargs) == 4
+    assert kwargs["system"][0] == {"text": "You are helpful."}
+    assert kwargs["system"][1] == {"cachePoint": {"type": "default"}}
+    assert kwargs["system"][2]["text"].startswith("\n\n## Skills\n")
 
 
 def test_converse_request_kwargs_does_not_mutate_messages() -> None:
@@ -621,6 +791,46 @@ async def test_iter_converse_stream_retries_without_cache_points(
 
 
 @pytest.mark.asyncio
+async def test_cache_point_retry_keeps_both_system_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "monkeybot.providers._bedrock_converse._CACHEPOINT_UNSUPPORTED",
+        set(),
+    )
+    calls: list[dict[str, object]] = []
+
+    def converse_stream(**kwargs: object) -> dict[str, object]:
+        calls.append(dict(kwargs))
+        if _count_cache_points(kwargs) > 0:
+            raise CacheValidationError("cachePoint is not supported for this model")
+        return {"stream": iter(_text_stream())}
+
+    client = MagicMock()
+    client.converse_stream.side_effect = converse_stream
+    stable = "You are helpful."
+    skills = "\n\n## Skills\nread_file"
+    stream_kwargs = converse_request_kwargs(
+        model=_GROK,
+        messages=[Message.text("system", stable + skills), Message.text("user", "hi")],
+        tools=[_ECHO],
+        max_tokens=32,
+        temperature=0.2,
+    )
+    events = [
+        event
+        async for event in iter_converse_stream(
+            client,
+            stream_kwargs,
+            provider="bedrock",
+            error_message="err %s",
+        )
+    ]
+    assert calls[1]["system"] == [{"text": stable}, {"text": skills}]
+    assert any(isinstance(event, TextDelta) and event.text == "ok" for event in events)
+
+
+@pytest.mark.asyncio
 async def test_iter_converse_stream_reraises_cache_error_mid_stream() -> None:
     class _Stream:
         def __init__(self) -> None:
@@ -722,6 +932,31 @@ def test_estimate_with_image_does_not_raise() -> None:
         [],
     )
     assert n >= 1
+
+
+def _converse_tokens(content: list[ContentBlock]) -> int:
+    reset_anthropic_token_estimate_correction()
+    return estimate_converse_input_tokens([Message(role="user", content=content)], [])
+
+
+def test_converse_image_estimate_is_fixed_at_top_level_and_in_a_tool_result() -> None:
+    text: list[ContentBlock] = [Text(text="see")]
+    small = _converse_tokens([*text, Image(mime_type="image/png", data="A" * 100)])
+    large = _converse_tokens([*text, Image(mime_type="image/png", data="A" * 500_000)])
+    assert small == large
+    added = small - _converse_tokens(text)
+    assert IMAGE_TOKEN_ESTIMATE <= added < IMAGE_TOKEN_ESTIMATE + 50
+
+    def result(data: str | None) -> list[ContentBlock]:
+        nested: list[ContentBlock] = [Text(text="ok")]
+        if data is not None:
+            nested.append(Image(mime_type="image/png", data=data))
+        return [ToolResponse(id="c1", tool_name="load_file", result=nested)]
+
+    nested_small = _converse_tokens(result("A" * 100))
+    assert nested_small == _converse_tokens(result("A" * 500_000))
+    nested_added = nested_small - _converse_tokens(result(None))
+    assert IMAGE_TOKEN_ESTIMATE <= nested_added < IMAGE_TOKEN_ESTIMATE + 50
 
 
 def test_estimate_attachment_uses_char_count_not_payload() -> None:

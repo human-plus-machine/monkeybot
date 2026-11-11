@@ -6,6 +6,54 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### CLI
+
+### Changed
+
+- The scaffold example and the config reference no longer document `summarization_model`. History summarization and chat titles use `model.name`. A leftover `summarization_model` key is ignored.
+
+## [core v3.15.0] - 2026-11-11
+
+### Fixed
+
+- A repeating cycle of the same tool calls trips doom-loop recovery. The same two or three calls, repeated `DOOM_LOOP_THRESHOLD` times (default 3), emit the same no-tools recovery as three identical calls. A call with different arguments breaks the cycle.
+- `history.reset` keeps `created_at`, `turn_id`, and `message_id` on the rows it rewrites. A compacted thread stays where it was in the chat list, and retrying a message does not insert a duplicate. On Firestore the new rows are written before the old ones are deleted.
+- A cut-off answer continues, and the raw provider error stays out of the user-visible text.
+- Goal ticks run on the gateway that opened storage.
+- A local background command keeps running after the turn that started it ends.
+- Bedrock and OpenAI prompt caches stay valid when a volatile section changes.
+- Secret scans are skipped while the bridge is down.
+- A failed preflight token count falls back instead of failing the turn.
+- History reads and writes make fewer Firestore round trips.
+- The system text stays the same across user messages in a thread.
+- A repeated file read and a subagent result are sent once.
+- One-shot runtime notes are sent in the tail.
+- Rows that compaction drops are archived.
+- Compaction starts at the 85% bar so a background summary can finish.
+- Wake-up drawers are left out of PRE_TURN recall.
+- An image counts at a fixed token estimate.
+- A tool request is kept when a cut splits its assistant turn, and when the tail holds an orphan result.
+- A context change in the middle of a request stays visible.
+- Tool results are shaped from the current prompt count.
+- One history load is reused for the rest of a request.
+- Prompt tokens are counted from the last provider report.
+- A transient model call is retried instead of ending the turn.
+- Prompt sections that had no cap are capped. Dead tools are dropped from subagents. Prompt size is reported per section.
+
+### Changed
+
+- An unused MCP server stays in the tool list until the next history rewrite. Reaching ten idle turns no longer rewrites the prompt cache on its own. The idle note arrives on the next tool result, and `enable_mcp` still brings the server back. MCP tool schemas are stored with object keys sorted, so a server that reorders keys between connections does not change the bytes sent to the provider.
+- History summarization and chat titles use `model.name`. `model.summarization_model` is ignored, and `CONTEXT_SUMMARIZATION_MODEL` is no longer read. A leftover YAML key warns and is ignored.
+
+### Added
+
+- Tool-loaded media is stored as an attachment reference. The provider still receives the same preview, and the base64 does not stay in history for the rest of the turn.
+- A row larger than the tail budget is summarized. Only the newest row is kept when it does not fit, and a tool response stays with its request.
+- The first time a provider rejects a request for size, whatever can be summarized is summarized and the request is sent again. A second rejection, or a history with nothing left to summarize, tells the user the request is too large. The provider error stays in the log.
+- A size rejection of a summary chunk packs the same rows again at half the budget. After three halvings the failure is discarded and history stays as it was.
+- A summary request stays within 85% of the context window. A middle that fits is one call. A larger middle is summarized in pieces, and each later call starts from the summary so far.
+- File tools run off the event loop, so a slow grep or a batch of reads does not block every session in the process. Ripgrep is killed when the call is cancelled.
+
 ## [cli v0.13.1] - 2026-11-09
 
 ### Fixed

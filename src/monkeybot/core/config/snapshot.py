@@ -130,8 +130,9 @@ class ModelConfig:
     max_tokens: str | None = None
     thinking_budget: str | None = None
     context_window: str | None = None
-    summarization_model: str | None = None
     max_turns: str | None = None
+    provider_max_retries: str | None = None
+    stream_idle_timeout_s: str | None = None
     max_request_bytes: str | None = None
     cache_retention: str | None = None
     vertex_project_id: str | None = None
@@ -928,8 +929,9 @@ def _model_from_env(env: Mapping[str, str]) -> ModelConfig:
         max_tokens=env.get("MODEL_MAX_TOKENS"),
         thinking_budget=env.get("MODEL_THINKING_BUDGET"),
         context_window=env.get("MODEL_CONTEXT_WINDOW"),
-        summarization_model=env.get("CONTEXT_SUMMARIZATION_MODEL"),
         max_turns=env.get("MAX_TURNS"),
+        provider_max_retries=env.get("PROVIDER_MAX_RETRIES"),
+        stream_idle_timeout_s=env.get("STREAM_IDLE_TIMEOUT_S"),
         max_request_bytes=env.get("MODEL_MAX_REQUEST_BYTES"),
         cache_retention=env.get("MODEL_CACHE_RETENTION"),
         vertex_project_id=env.get("VERTEX_AI_PROJECT_ID"),

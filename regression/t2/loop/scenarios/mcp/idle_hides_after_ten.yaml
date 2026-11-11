@@ -1,6 +1,6 @@
 id: regression/t2/loop/scenarios/mcp/idle_hides_after_ten
 case: T2-MCP-12
-description: Ten inner turns that offer fixture__echo but do not call it hide the server. The next request drops the tool and the tool result carries the note.
+description: Ten idle turns leave the server listed. Compaction then drops it, and the next tool result carries the note.
 mode: scripted
 driver: loop
 executor: real
@@ -9,8 +9,17 @@ messages:
 config:
   model:
     max_turns: 30
+    context_window: 12000
   env:
     MCP_CONFIG: regression/fixtures/configs/mcp.progressive.json
+steps:
+- action: touch_file
+  path: big.txt
+  size: 20000
+  fill: Q
+  when:
+    event: tool_result
+    nth: 1
 script:
 - - type: tool_call
     call_id: c0
@@ -88,11 +97,37 @@ script:
       path: .
       nonce: 9
   - type: done
+- - type: tool_call
+    call_id: read-big
+    name: read_file
+    args:
+      path: big.txt
+  - type: done
 - - type: text
-    text: "Done listing."
+    text: idle-summary-body
+  - type: done
+- - type: tool_call
+    call_id: after-hide
+    name: list_dir
+    args:
+      path: .
+      nonce: after
+  - type: done
+- - type: text
+    text: "Hidden."
+  - type: done
+- - type: tool_call
+    call_id: note-carrier
+    name: list_dir
+    args:
+      path: .
+      nonce: note
+  - type: done
+- - type: text
+    text: "Note landed."
   - type: done
 assertions:
-  provider_calls: 12
+  provider_calls: 17
   provider_request:
   - n: 1
     tools_exclude:
@@ -100,12 +135,13 @@ assertions:
   - n: 2
     tools_include:
     - fixture__echo
-  - n: 11
+  - n: 12
     tools_include:
     - fixture__echo
-  - n: 12
+  - n: 16
     tools_exclude:
     - fixture__echo
-    messages_contain: "was hidden after 10 turns without use"
+  - n: 17
+    messages_contain: "because it went unused"
   turn_completed: true
   no_errors: true

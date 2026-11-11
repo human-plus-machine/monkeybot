@@ -20,8 +20,9 @@ from monkeybot.core.llm.provider import (
     UsageEvent,
 )
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.prompts.headings import VOLATILE_SECTION_MARKERS
+from monkeybot.core.prompts.headings import VOLATILE_SECTION_MARKERS, is_system_context_update
 from monkeybot.core.types.content_blocks import (
+    IMAGE_TOKEN_ESTIMATE,
     ContentBlock,
     File,
     Image,
@@ -513,8 +514,8 @@ def _anthropic_assistant_block(block: ContentBlock) -> dict[str, Any]:
 
 
 # Volatile section headings emitted by ``compose_system_prompt``
-# (``core.prompts.prompt``), ``_append_extra_system_text`` (``core.runtime.loop``),
-# and ``_format_system_context_update`` (``core.context.epoch``). Shared from the
+# (``core.prompts.prompt``), the live tail (``core.context.epoch``), and the
+# send-time notes (``_send_tail``). Shared from the
 # import-free ``core.prompts.headings`` leaf: importing the composing modules
 # here would cycle (``core.context`` -> ``core.config.settings`` -> provider
 # classes in this package), which is why these literals were once duplicated by
@@ -616,14 +617,36 @@ def mark_last_tool_cached(
     return [*tools[:-1], marked_last]
 
 
-def _mark_message_last_block_cached(
+def _block_is_context_tail(block: object) -> bool:
+    """True for a text block that is the live context tail (string form included)."""
+    if isinstance(block, str):
+        return is_system_context_update(block)
+    if not isinstance(block, dict):
+        return False
+    text = block.get("text")
+    if not isinstance(text, str):
+        return False
+    kind = block.get("type")
+    if kind not in (None, "text"):
+        return False
+    return is_system_context_update(text)
+
+
+def _mark_message_before_tail(
     message: dict[str, Any],
     *,
     control: dict[str, Any],
-) -> dict[str, Any]:
-    """Return a shallow-copied message with ``cache_control`` on its last content block."""
+) -> dict[str, Any] | None:
+    """Copy ``message`` with ``cache_control`` on the last block that is not a tail.
+
+    Returns ``None`` when the message holds only a tail, so the caller can skip it
+    and mark an earlier message instead. A string content body (Anthropic's
+    single-text shortcut) is treated as one block.
+    """
     content = message.get("content")
     if isinstance(content, str):
+        if _block_is_context_tail(content):
+            return None
         return {
             **message,
             "content": [{"type": "text", "text": content, "cache_control": control}],
@@ -631,9 +654,16 @@ def _mark_message_last_block_cached(
     if not isinstance(content, list) or not content:
         return dict(message)
     blocks = [dict(b) if isinstance(b, dict) else b for b in content]
-    last = blocks[-1]
-    if isinstance(last, dict):
-        blocks[-1] = {**last, "cache_control": control}
+    target: int | None = None
+    for index in range(len(blocks) - 1, -1, -1):
+        if not _block_is_context_tail(blocks[index]):
+            target = index
+            break
+    if target is None:
+        return None
+    chosen = blocks[target]
+    if isinstance(chosen, dict):
+        blocks[target] = {**chosen, "cache_control": control}
     return {**message, "content": blocks}
 
 
@@ -645,10 +675,12 @@ def mark_conversation_cache_breakpoints(
 ) -> list[dict[str, Any]]:
     """Return messages with rolling ``cache_control`` breakpoints on the conversation prefix.
 
-    Marks the last content block of the most recent message and retains a breakpoint
-    on the previous message (when present) so the turn that *writes* a new cache
-    entry can still *read* the prior prefix. Anthropic allows at most 4 breakpoints
-    per request; callers should budget system/tools markers accordingly.
+    Marks the last content block that is not a context tail, walking backward, and
+    keeps a breakpoint on the previous eligible message so the turn that *writes*
+    a new cache entry can still *read* the prior prefix. A message that holds only
+    the tail is skipped: the marker must not sit on text the next call will not
+    resend. Anthropic allows at most 4 breakpoints per request; callers should
+    budget system/tools markers accordingly.
 
     Does not mutate caller-owned dicts. When ``cache_retention`` is ``none`` or
     ``max_breakpoints`` < 1, returns a shallow copy of ``messages`` unchanged.
@@ -660,10 +692,15 @@ def mark_conversation_cache_breakpoints(
         return list(messages)
 
     out = [dict(m) for m in messages]
-    # Mark from the end: newest first, then previous turn's end.
-    n = min(max_breakpoints, len(out))
-    for idx in range(len(out) - n, len(out)):
-        out[idx] = _mark_message_last_block_cached(out[idx], control=control)
+    marked = 0
+    for idx in range(len(out) - 1, -1, -1):
+        if marked >= max_breakpoints:
+            break
+        updated = _mark_message_before_tail(out[idx], control=control)
+        if updated is None:
+            continue
+        out[idx] = updated
+        marked += 1
     return out
 
 
@@ -764,27 +801,62 @@ def reset_anthropic_token_estimate_correction() -> None:
     _estimate_correction = 1.0
 
 
+def _without_image_payloads(value: object) -> tuple[object, int]:
+    """Drop image bytes and return how many images were found.
+
+    A provider bills an image by its pixels. The base64 must not enter the
+    character estimate, including when the image sits inside a tool result.
+    """
+    if isinstance(value, dict):
+        if value.get("type") == "image":
+            return {"type": "image"}, 1
+        count = 0
+        stripped: dict[object, object] = {}
+        for key, item in value.items():
+            child, found = _without_image_payloads(item)
+            count += found
+            stripped[key] = child
+        return stripped, count
+    if isinstance(value, list):
+        count = 0
+        items: list[object] = []
+        for item in value:
+            child, found = _without_image_payloads(item)
+            count += found
+            items.append(child)
+        return items, count
+    return value, 0
+
+
 def estimate_anthropic_input_tokens(
     *,
     system: str,
     messages: Sequence[dict[str, Any]],
     tools: Sequence[dict[str, Any]] | None,
 ) -> int:
-    """Rough prompt token estimate when provider ``count_tokens`` is unavailable (e.g. Bedrock)."""
+    """Rough prompt token estimate when provider ``count_tokens`` is unavailable (e.g. Bedrock).
+
+    Each image adds ``IMAGE_TOKEN_ESTIMATE`` after the character estimate. The
+    learned correction applies to the text part only.
+    """
+    image_count = 0
     parts: list[str] = [system]
     for msg in messages:
         content = msg.get("content")
         if isinstance(content, str):
             parts.append(content)
         elif isinstance(content, list):
-            parts.append(json.dumps(content, ensure_ascii=False))
+            stripped, found = _without_image_payloads(content)
+            image_count += found
+            parts.append(json.dumps(stripped if found else content, ensure_ascii=False))
         else:
             parts.append(str(content))
     if tools:
         parts.append(json.dumps(list(tools), ensure_ascii=False))
     char_count = sum(len(p) for p in parts)
     base = max(1, int(char_count / _ESTIMATE_CHARS_PER_TOKEN))
-    return max(1, int(base * _estimate_correction))
+    text_tokens = max(1, int(base * _estimate_correction))
+    return text_tokens + image_count * IMAGE_TOKEN_ESTIMATE
 
 
 __all__ = [

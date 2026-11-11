@@ -19,7 +19,7 @@ Gaps: `compaction_fallback` untested; epochs never asserted through `run`; nothi
 | T2-CTX-04 | `compact_keep_tail_ratio` | Tail keeps `max(2, 20%)` rows and never cuts a tool pair. |
 | T2-CTX-05 | `compact_fallback` | Summarizer `raise` + > 5000 preloaded rows: `compaction_fallback`; pins kept; `ContextEpochStarted`. |
 | T2-CTX-06 | `compact_trailer_from_goal_ledger` | Summary row carries the workspace trailer. |
-| T2-CTX-07 | `summarizer_model_override` | `model.summarization_model` is the model of the summary call; summary call has no `vertex_google_search`. |
+| T2-CTX-07 | `summarizer_model_override` | The summary call uses `model.name` and has no `vertex_google_search`. |
 | T2-CTX-08 | `background_summary_applied` | At the moderate bar a background summary is applied on the next turn when the prefix matches. |
 | T2-CTX-09 | `background_summary_stale_fallback` | After a rewind, the stale background summary is discarded and inline compaction runs. |
 | T2-CTX-10 | `epoch_volatile_update` | Memory index changes between inner turns: `SystemContextUpdated` with `changed_sources: [memory]`; stable prefix bytes identical. |
@@ -32,6 +32,12 @@ Gaps: `compaction_fallback` untested; epochs never asserted through `run`; nothi
 | T2-CTX-17 | `base64_sanitized` | Tool result with a base64 blob is redacted before the provider (`MONKEYBOT_TOOL_RESULT_SANITIZE` default). |
 | T2-CTX-18 | `context_usage_current_not_peak` | `ContextUsage.estimated_tokens` drops after compaction. |
 | T2-CTX-19 | `memory_wake_up_large` (migrate) | Large wake-up index injected; turn completes. |
+| T2-CTX-20 | `context_tail_persists` | The current-request anchor is absent on call 1 and is in the provider messages, not the system prompt, on calls 2, 3, and 4. |
+| T2-CTX-21 | `one_shot_note_keeps_system` | An evidence correction is in the messages on call 2 only, and the system text matches call 1 on calls 2 and 3. |
+| T2-CTX-22 | `todo_list_capped` | Fifteen 500-character items are clipped in the next request, with every id kept. Starting the first item shows that item in full. |
+| T2-CTX-23 | `stable_system_across_messages` | A todo and a git note that change between user messages are in the next message's tail, and the system text matches the first call. |
+| T2-CTX-24 | `overflow_recovery` | A provider size rejection compacts once and the retry answers. `context_overflow_recovery`; one summary row. |
+| T2-CTX-25 | `overflow_summary_fails` | A size rejection whose summary also fails is the fixed overflow error, with no summary row. |
 | T3-CTX-01 | `replay_live_compaction` | Recorded long-session cassette compacts at the same call index. |
 | T4-CTX-01 | `summarization_trigger` (migrate, retuned) | `config: model.context_window` small enough that the scenario must compact; `min_summarizations: 1`. Fails if it would have passed without compacting. |
 | T4-CTX-02 | `post_compaction_continuity` | Multi-step task spanning a forced compaction still completes (workspace grader). |

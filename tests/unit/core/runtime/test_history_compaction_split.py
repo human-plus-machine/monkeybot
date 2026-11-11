@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from monkeybot.core.attachments.text import render_attachment_descriptor_text
 from monkeybot.core.llm.provider import Message
+from monkeybot.core.messages.transform_context import transform_context
 from monkeybot.core.runtime.history_compaction import (
     SUMMARY_KEEP_HEAD_COUNT,
     SUMMARY_KEEP_TAIL_MIN,
@@ -17,6 +18,7 @@ from monkeybot.core.runtime.history_compaction import (
 )
 from monkeybot.core.tools.spill_inventory import spill_budgets_from_window
 from monkeybot.core.types.content_blocks import (
+    IMAGE_TOKEN_ESTIMATE,
     File,
     Image,
     SystemNotification,
@@ -46,7 +48,8 @@ def test_split_requires_room_for_middle() -> None:
     assert len(head) + len(tail) == SUMMARY_KEEP_HEAD_COUNT + SUMMARY_KEEP_TAIL_MIN
 
 
-def test_split_keeps_a_tool_pair_when_the_response_blows_the_budget() -> None:
+def test_split_summarizes_a_huge_response_behind_a_newer_row_with_its_request() -> None:
+    """A response that does not fit is summarized, and its request goes with it."""
     older = _msgs(6, chars=400)
     request = Message(
         role="assistant",
@@ -65,8 +68,205 @@ def test_split_keeps_a_tool_pair_when_the_response_blows_the_budget() -> None:
     newest = Message(role="user", content=[Text(text="go")])
     messages = [*older, request, response, newest]
     head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert tail == [newest]
+    assert request in middle
+    assert response in middle
+    assert head + middle + tail == messages
+
+
+def test_split_keeps_the_request_when_the_tail_also_holds_an_orphan_result() -> None:
+    """An unpaired result later in the tail must not drop the request at the cut."""
+    older = _msgs(6, chars=400)
+    request = Message(
+        role="assistant",
+        content=[ToolRequest(id="real", name="write_file", args={"content": "c" * 6000})],
+    )
+    response = Message(
+        role="user",
+        content=[ToolResponse(id="real", tool_name="write_file", result=[Text(text="ok")])],
+    )
+    noted = Message(role="assistant", content=[Text(text="noted")])
+    orphan = Message(
+        role="user",
+        content=[ToolResponse(id="orphan", tool_name="write_file", result=[Text(text="leftover")])],
+    )
+    newest = Message(role="assistant", content=[Text(text="go")])
+    messages = [*older, request, response, noted, orphan, newest]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
     assert request in tail
     assert response in tail
+    assert orphan in tail
+    assert middle
+    assert head + middle + tail == messages
+    summary = Message(role="assistant", content=[Text(text="[Context Summary]: mid")])
+    view = transform_context([*head, summary, *tail])
+    real = [
+        block
+        for message in view
+        for block in message.content
+        if isinstance(block, ToolRequest) and block.id == "real"
+    ]
+    assert len(real) == 1
+    assert real[0].args == {"content": "c" * 6000}
+
+
+def test_split_keeps_the_request_when_the_cut_splits_its_assistant_turn() -> None:
+    """Two adjacent assistant rows are one turn, so a cut between them keeps the request."""
+    older = _msgs(6, chars=400)
+    request = Message(
+        role="assistant",
+        content=[ToolRequest(id="real", name="write_file", args={"content": "c" * 6000})],
+    )
+    bridge = Message(role="assistant", content=[Text(text="n" * 3000)])
+    response = Message(
+        role="user",
+        content=[ToolResponse(id="real", tool_name="write_file", result=[Text(text="ok")])],
+    )
+    newest = Message(role="assistant", content=[Text(text="go")])
+    messages = [*older, request, bridge, response, newest]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert request in tail
+    assert bridge in tail
+    assert response in tail
+    assert newest in tail
+    assert middle
+    assert head + middle + tail == messages
+
+
+def test_split_keeps_a_split_turn_request_when_the_tail_also_holds_an_orphan() -> None:
+    """An orphan later in the tail must not drop a request whose turn is split by the cut."""
+    older = _msgs(6, chars=400)
+    request = Message(
+        role="assistant",
+        content=[ToolRequest(id="real", name="write_file", args={"content": "c" * 6000})],
+    )
+    bridge = Message(role="assistant", content=[Text(text="n" * 3000)])
+    response = Message(
+        role="user",
+        content=[ToolResponse(id="real", tool_name="write_file", result=[Text(text="ok")])],
+    )
+    noted = Message(role="assistant", content=[Text(text="noted")])
+    orphan = Message(
+        role="user",
+        content=[ToolResponse(id="orphan", tool_name="write_file", result=[Text(text="leftover")])],
+    )
+    newest = Message(role="assistant", content=[Text(text="go")])
+    messages = [*older, request, bridge, response, noted, orphan, newest]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert request in tail
+    assert bridge in tail
+    assert response in tail
+    assert orphan in tail
+    assert middle
+    assert head + middle + tail == messages
+
+
+def test_split_does_not_extend_the_tail_when_the_pair_is_already_inside_it() -> None:
+    """A pair behind the tail's leading assistant row does not pull older rows back."""
+    head_row = Message(role="user", content=[Text(text="goal")])
+    bulky = _msgs(7, chars=4000)
+    preface = Message(role="assistant", content=[Text(text="preface")])
+    request = Message(
+        role="assistant",
+        content=[ToolRequest(id="inside", name="read_file", args={"path": "a.txt"})],
+    )
+    response = Message(
+        role="user",
+        content=[ToolResponse(id="inside", tool_name="read_file", result=[Text(text="body")])],
+    )
+    newest = Message(role="assistant", content=[Text(text="go")])
+    messages = [head_row, *bulky, preface, request, response, newest]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert tail == [preface, request, response, newest]
+    assert bulky[-1] in middle
+    assert head + middle + tail == messages
+
+
+def test_split_does_not_pull_an_already_answered_request_into_the_tail() -> None:
+    """A repeated result id matches the turn at the cut, not the original request."""
+    head_row = Message(role="user", content=[Text(text="goal")])
+    old_request = Message(
+        role="assistant",
+        content=[ToolRequest(id="dup", name="read_file", args={"path": "a.txt"})],
+    )
+    old_response = Message(
+        role="user",
+        content=[ToolResponse(id="dup", tool_name="read_file", result=[Text(text="body")])],
+    )
+    bulky = _msgs(6, chars=4000)
+    stale = Message(
+        role="user",
+        content=[ToolResponse(id="dup", tool_name="read_file", result=[Text(text="again")])],
+    )
+    newest = Message(role="assistant", content=[Text(text="go")])
+    messages = [head_row, old_request, old_response, *bulky, stale, newest]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert tail == [stale, newest]
+    assert old_request in middle
+    assert old_response in middle
+    assert head + middle + tail == messages
+
+
+def test_split_keeps_the_request_across_a_ui_row_at_the_cut() -> None:
+    """A UI-only row between a request and its result does not hide the pair."""
+    older = _msgs(6, chars=400)
+    request = Message(
+        role="assistant",
+        content=[ToolRequest(id="cut", name="read_file", args={"pad": "p" * 6000})],
+    )
+    ui = Message(
+        role="user",
+        content=[SystemNotification(notification_type="inline", msg="n")],  # type: ignore[arg-type]
+    )
+    response = Message(
+        role="user",
+        content=[ToolResponse(id="cut", tool_name="read_file", result=[Text(text="R" * 20)])],
+    )
+    messages = [*older, request, ui, response]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert request in tail
+    assert ui in tail
+    assert response in tail
+    assert middle
+    assert head + middle + tail == messages
+
+
+def test_split_leaves_the_tail_unchanged_when_it_opens_on_an_orphan_result() -> None:
+    """An orphan result at the cut has no request in the turn before it."""
+    head_row = Message(role="user", content=[Text(text="goal")])
+    bulky = _msgs(6, chars=4000)
+    orphan = Message(
+        role="user",
+        content=[ToolResponse(id="orphan", tool_name="echo", result=[Text(text="leftover")])],
+    )
+    newest = Message(role="assistant", content=[Text(text="go")])
+    messages = [head_row, *bulky, orphan, newest]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=4000)
+    assert tail == [orphan, newest]
+    assert bulky[-1] in middle
+    assert head + middle + tail == messages
+
+
+def test_split_keeps_a_huge_newest_response_with_its_request() -> None:
+    older = _msgs(6, chars=40)
+    request = Message(
+        role="assistant",
+        content=[ToolRequest(id="cut", name="read_file", args={"path": "a.txt"})],
+    )
+    response = Message(
+        role="user",
+        content=[
+            ToolResponse(
+                id="cut",
+                tool_name="read_file",
+                result=[Text(text="R" * 20_000)],
+            )
+        ],
+    )
+    messages = [*older, request, response]
+    head, middle, tail = split_messages_for_compaction(messages, window_tokens=10_000)
+    assert response in tail
+    assert request in tail
     assert head + middle + tail == messages
     assert middle
 
@@ -93,12 +293,12 @@ def test_split_pins_attachment_descriptor_text() -> None:
     assert descriptor in rebuilt
 
 
-def test_split_keeps_minimum_tail_on_tiny_window() -> None:
+def test_split_keeps_only_the_newest_row_when_every_row_exceeds_the_budget() -> None:
     messages = _msgs(20, chars=400)
     head, middle, tail = split_messages_for_compaction(messages, window_tokens=100)
-    assert len(head) == SUMMARY_KEEP_HEAD_COUNT
-    assert len(tail) >= SUMMARY_KEEP_TAIL_MIN
-    assert middle
+    assert head == []
+    assert tail == [messages[-1]]
+    assert messages[0] in middle
     assert head + middle + tail == messages
 
 
@@ -157,10 +357,12 @@ def test_estimate_ignores_summary_truncation_cap_for_large_tool_results() -> Non
 
 
 def test_estimate_counts_image_thinking_and_file_payloads() -> None:
-    """Multimodal / reasoning blocks must not collapse to type-name char counts.
+    """Thinking and file payloads stay at full length. An image is a fixed estimate.
 
-    A type-name fallback (~5–8 chars) would undercount base64 images, long
-    thinking traces, and file payloads against ``SUMMARY_KEEP_TAIL_RATIO``.
+    A type-name fallback (~5–8 chars) would undercount a long thinking trace or
+    a file against ``SUMMARY_KEEP_TAIL_RATIO``. Counting image base64 the same
+    way sizes one preview as tens of thousands of tokens, so an image is
+    ``IMAGE_TOKEN_ESTIMATE`` whatever its byte length.
     """
     image_data = "A" * 40_000
     thinking_text = "r" * 20_000
@@ -176,9 +378,39 @@ def test_estimate_counts_image_thinking_and_file_payloads() -> None:
         ],
     )
     tokens = _estimate_message_tokens(message)
-    # Type-name fallback would be ~5–8 tokens total; real payload is >> that.
-    min_chars = len(image_data) + len(thinking_text) + len(file_data)
-    assert tokens >= min_chars // 4
+    text_floor = (len(thinking_text) + len(file_data)) // 4
+    assert tokens >= text_floor + IMAGE_TOKEN_ESTIMATE
+    # The image's 40,000 base64 characters are not part of the count.
+    assert tokens < text_floor + IMAGE_TOKEN_ESTIMATE + len(image_data) // 4
+
+
+def _load_file_image(data: str) -> Message:
+    return Message(
+        role="user",
+        content=[
+            ToolResponse(
+                id="load-1",
+                tool_name="load_file",
+                result=[Image(mime_type="image/png", data=data)],
+            )
+        ],
+    )
+
+
+def test_image_estimate_ignores_base64_length() -> None:
+    small = _estimate_message_tokens(_load_file_image("A" * 1_000))
+    large = _estimate_message_tokens(_load_file_image("A" * 500_000))
+    assert small == IMAGE_TOKEN_ESTIMATE
+    assert large == IMAGE_TOKEN_ESTIMATE
+
+
+def test_large_image_stays_in_the_tail() -> None:
+    """A preview-sized image fits the tail. Counting its base64 would push it out."""
+    image = _load_file_image("A" * 500_000)
+    newest = Message(role="assistant", content=[Text(text="seen")])
+    messages = [*_msgs(6, chars=40), image, newest]
+    _, _, tail = split_messages_for_compaction(messages, window_tokens=200_000)
+    assert image in tail
 
 
 def test_estimate_ignores_completed_reply_thinking_and_ui_blocks() -> None:

@@ -15,7 +15,6 @@ def _ctx(
     workspace_root: Path | None = None,
     context_window_tokens: int = 200_000,
     model: str = "gemini-2.5-flash",
-    summarization_model: str | None = None,
 ) -> TurnContext:
     return TurnContext(
         thread_id="t1",
@@ -27,7 +26,6 @@ def _ctx(
         user_id=None,
         parent_run_id=None,
         model=model,
-        summarization_model=summarization_model,
         workspace_root=workspace_root,
         context_window_tokens=context_window_tokens,
     )
@@ -38,7 +36,6 @@ def _ctx_with_task(
     workspace_root: Path | None = None,
     context_window_tokens: int = 200_000,
     model: str = "gemini-2.5-flash",
-    summarization_model: str | None = None,
 ) -> TurnContext:
     return TurnContext(
         thread_id="t1",
@@ -53,7 +50,6 @@ def _ctx_with_task(
         user_id=None,
         parent_run_id=None,
         model=model,
-        summarization_model=summarization_model,
         workspace_root=workspace_root,
         context_window_tokens=context_window_tokens,
     )
