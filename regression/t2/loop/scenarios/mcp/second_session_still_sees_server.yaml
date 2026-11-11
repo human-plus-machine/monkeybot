@@ -1,14 +1,23 @@
 id: regression/t2/loop/scenarios/mcp/second_session_still_sees_server
 case: T2-MCP-25
-description: After one chat hides a connected server, the next chat still receives its tools and can call them.
+description: After compaction hides a server in one chat, the next chat still receives its tools and can call them.
 mode: scripted
 driver: loop
 executor: real
 config:
   model:
     max_turns: 30
+    context_window: 12000
   env:
     MCP_CONFIG: regression/fixtures/configs/mcp.autoconnect.json
+steps:
+- action: touch_file
+  path: big.txt
+  size: 20000
+  fill: Q
+  when:
+    event: tool_result
+    nth: 1
 sessions:
 - - Hide the fixture server by listing directories.
 - - Echo through the fixture server.
@@ -83,6 +92,32 @@ script:
       path: .
       nonce: 9
   - type: done
+- - type: tool_call
+    call_id: read-big
+    name: read_file
+    args:
+      path: big.txt
+  - type: done
+- - type: text
+    text: idle-summary-body
+  - type: done
+- - type: tool_call
+    call_id: between
+    name: list_dir
+    args:
+      path: .
+      nonce: between
+  - type: done
+- - type: text
+    text: "Still listing."
+  - type: done
+- - type: tool_call
+    call_id: after
+    name: list_dir
+    args:
+      path: .
+      nonce: after
+  - type: done
 - - type: text
     text: Hidden in this chat.
   - type: done
@@ -96,16 +131,15 @@ script:
     text: Session B echoed.
   - type: done
 assertions:
-  provider_calls: 13
+  provider_calls: 18
   provider_request:
   - n: 10
     tools_include:
     - fixture__echo
-  - n: 11
+  - n: 15
     tools_exclude:
     - fixture__echo
-    messages_contain: "was hidden after 10 turns without use"
-  - n: 12
+  - n: 17
     tools_include:
     - fixture__echo
   events_sequence:

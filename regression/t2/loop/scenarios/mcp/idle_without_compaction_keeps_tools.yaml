@@ -1,0 +1,122 @@
+id: regression/t2/loop/scenarios/mcp/idle_without_compaction_keeps_tools
+case: T2-MCP-27
+description: More than ten idle turns without compaction leave fixture__echo on every request.
+mode: scripted
+driver: loop
+executor: real
+messages:
+- List directories without touching the fixture MCP server.
+config:
+  model:
+    max_turns: 30
+  env:
+    MCP_CONFIG: regression/fixtures/configs/mcp.progressive.json
+script:
+- - type: tool_call
+    call_id: c0
+    name: enable_mcp
+    args:
+      name: fixture
+  - type: done
+- - type: tool_call
+    call_id: c1
+    name: list_dir
+    args:
+      path: .
+      nonce: 0
+  - type: done
+- - type: tool_call
+    call_id: c2
+    name: list_dir
+    args:
+      path: .
+      nonce: 1
+  - type: done
+- - type: tool_call
+    call_id: c3
+    name: list_dir
+    args:
+      path: .
+      nonce: 2
+  - type: done
+- - type: tool_call
+    call_id: c4
+    name: list_dir
+    args:
+      path: .
+      nonce: 3
+  - type: done
+- - type: tool_call
+    call_id: c5
+    name: list_dir
+    args:
+      path: .
+      nonce: 4
+  - type: done
+- - type: tool_call
+    call_id: c6
+    name: list_dir
+    args:
+      path: .
+      nonce: 5
+  - type: done
+- - type: tool_call
+    call_id: c7
+    name: list_dir
+    args:
+      path: .
+      nonce: 6
+  - type: done
+- - type: tool_call
+    call_id: c8
+    name: list_dir
+    args:
+      path: .
+      nonce: 7
+  - type: done
+- - type: tool_call
+    call_id: c9
+    name: list_dir
+    args:
+      path: .
+      nonce: 8
+  - type: done
+- - type: tool_call
+    call_id: c10
+    name: list_dir
+    args:
+      path: .
+      nonce: 9
+  - type: done
+- - type: tool_call
+    call_id: c11
+    name: list_dir
+    args:
+      path: .
+      nonce: 10
+  - type: done
+- - type: tool_call
+    call_id: c12
+    name: list_dir
+    args:
+      path: .
+      nonce: 11
+  - type: done
+- - type: text
+    text: "Still listed."
+  - type: done
+assertions:
+  provider_calls: 14
+  provider_request:
+  - n: 2
+    tools_include:
+    - fixture__echo
+  - n: 12
+    tools_include:
+    - fixture__echo
+  - n: 14
+    tools_include:
+    - fixture__echo
+    messages_not_contain: "because it went unused"
+  turn_completed: true
+  no_errors: true

@@ -15,7 +15,10 @@ from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.freeze import freeze_attachments_in_history
 from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.context import (
+    MCP_PROGRESSIVE_META_TOOLS,
     TurnContext,
+    _any_mcp_connected,
+    hide_due_mcp_servers,
     refresh_memory_index,
 )
 from monkeybot.core.context.epoch import ContextEpochTracker, EpochAdmit
@@ -521,9 +524,14 @@ def _admit_steer_to_ledger(
 
 
 def _tools_schema_digest(tools: Sequence[ToolDef]) -> tuple[str, int]:
-    """Hash and character length of the compact tool schema, from one serialization."""
+    """Hash and character length of the tool schema the provider is sent.
+
+    Key order is part of the hash. A cache key is the wire prefix, and a
+    schema whose keys moved is a different prefix even when the character
+    length is not. One serialization supplies both numbers.
+    """
     payload = [t.to_model_schema() for t in tools]
-    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    blob = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     digest = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
     return digest, len(blob)
 
@@ -541,8 +549,8 @@ def _note_mcp_idle_turn(state: _TurnState, tool_executor: ToolExecutorPort) -> N
     """Count this model call against servers whose tools were offered.
 
     A recovery call that sent no tools (``tools_suppressed``) does not count.
-    Calls the model made reset a visible server. Hiding itself waits for the
-    tool-batch boundary.
+    Calls the model made reset a visible server. Hiding itself waits until a
+    history rewrite, which already replaces the cached message prefix.
     """
     visibility = state.ctx.mcp_visibility
     if visibility is None:
@@ -553,6 +561,53 @@ def _note_mcp_idle_turn(state: _TurnState, tool_executor: ToolExecutorPort) -> N
         advertised = advertised_servers(state.turn_tools, known)
     calls = [(call.name, call.args) for call in state.pending.values()]
     visibility.note_inner_turn(advertised, servers_used_by_calls(calls, known))
+
+
+def _hide_due_mcp_on_history_rewrite(
+    state: _TurnState,
+    tool_executor: ToolExecutorPort | None,
+) -> None:
+    """Hide idle MCP servers on the request that sends the rewritten history.
+
+    ``turn_tools`` was copied before this rewrite. When it is still the context
+    list, the in-place rebuild is enough. A hook's separate list is filtered
+    the same way, so a hidden server does not survive into this call.
+    """
+    if tool_executor is None:
+        return
+    visibility = state.ctx.mcp_visibility
+    if visibility is None or not visibility.servers_due():
+        return
+    mcp_client = getattr(tool_executor, "mcp", None)
+    if mcp_client is None:
+        logger.error(
+            "MCP idle hide but tool executor has no mcp client %s",
+            kv(request_id=state.ctx.request_id, thread_id=state.ctx.thread_id),
+        )
+        return
+    shared = state.turn_tools is state.ctx.tools
+    newly = hide_due_mcp_servers(state.ctx, mcp_client)
+    if not newly:
+        return
+    if not state.tools_suppressed and not shared:
+        known = list(mcp_client.known_server_names())
+        filtered = visibility.filter_tools(list(state.turn_tools), known)
+        if not _any_mcp_connected(mcp_client, visibility):
+            filtered = [tool for tool in filtered if tool.name not in MCP_PROGRESSIVE_META_TOOLS]
+        state.turn_tools = filtered
+    if not state.tools_suppressed:
+        _mark_tools_dirty(state, "mcp_idle", state.turn_tools)
+    state.doom_tracker.exempt_names = _doom_loop_exempt_names(state.ctx.tools)
+    logger.info(
+        "mcp idle hide %s",
+        kv(
+            request_id=state.ctx.request_id,
+            thread_id=state.ctx.thread_id,
+            session=state.ctx.session_id,
+            servers=",".join(newly),
+            tool_count=len(state.ctx.tools),
+        ),
+    )
 
 
 def _mark_tools_dirty(state: _TurnState, reason: str, tools: Sequence[ToolDef]) -> None:
@@ -760,11 +815,18 @@ async def _refresh_prompt_after_history_change(
     attachment_store: AttachmentStore | None,
     attachment_catalog: SessionAttachmentCatalog | None,
     begin_epoch: bool,
+    tool_executor: ToolExecutorPort | None = None,
 ) -> AsyncIterator[AgentEvent]:
-    """Reload chat history and rebuild system/provider messages after compaction."""
+    """Reload chat history and rebuild system/provider messages after compaction.
+
+    When the rewrite opens a new epoch, an MCP server that has been idle long
+    enough is dropped from this same request. The message prefix is already
+    being replaced, so the tool-list change does not cost a second cache break.
+    """
     state.prompt_ledger.invalidate()
     if begin_epoch:
         state.epoch_tracker.begin_new_epoch()
+        _hide_due_mcp_on_history_rewrite(state, tool_executor)
     state.chat_messages = await _load_agent_chat_history(history, state.ctx.thread_id)
     state.ctx = await refresh_memory_index(state.ctx)
     state.admit = _admit_system_context(
@@ -878,6 +940,7 @@ async def _run_history_summarization(
     estimated_tokens: int,
     recount_after: bool,
     hook_manager: HookManager | None = None,
+    tool_executor: ToolExecutorPort | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Shared summarize body: events, LLM compact, reload, optional post-token recount."""
     from monkeybot.observability.spans import set_summarize_turns, span_summarize
@@ -944,6 +1007,7 @@ async def _run_history_summarization(
         attachment_store=attachment_store,
         attachment_catalog=attachment_catalog,
         begin_epoch=turns_summarized > 0,
+        tool_executor=tool_executor,
     ):
         yield evt
     if recount_after or turns_summarized > 0:
@@ -974,6 +1038,7 @@ async def _maybe_summarize_on_token_pressure(
     preflight: int,
     cap: int,
     hook_manager: HookManager | None = None,
+    tool_executor: ToolExecutorPort | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Compact when prompt tokens hit the context-window ratio threshold."""
     if not await _token_pressure_should_summarize(
@@ -995,6 +1060,7 @@ async def _maybe_summarize_on_token_pressure(
         estimated_tokens=preflight,
         recount_after=True,
         hook_manager=hook_manager,
+        tool_executor=tool_executor,
     ):
         yield evt
 
@@ -1005,6 +1071,7 @@ async def _apply_history_load_max_safety(
     history: HistoryStore,
     attachment_store: AttachmentStore | None,
     attachment_catalog: SessionAttachmentCatalog | None,
+    tool_executor: ToolExecutorPort | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Last resort after compact failure: persist a truncated tail (no silent slide)."""
     if len(state.chat_messages) <= HISTORY_LOAD_MAX:
@@ -1044,6 +1111,7 @@ async def _apply_history_load_max_safety(
         attachment_store=attachment_store,
         attachment_catalog=attachment_catalog,
         begin_epoch=True,
+        tool_executor=tool_executor,
     ):
         yield evt
 
@@ -1158,6 +1226,7 @@ async def _maybe_compact_and_shape(
     attachment_store: AttachmentStore | None,
     attachment_catalog: SessionAttachmentCatalog | None,
     vertex_google_search: bool,
+    tool_executor: ToolExecutorPort | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Token compaction, pressure shaping, before-provider hook."""
     _require_prompt(state)
@@ -1190,6 +1259,7 @@ async def _maybe_compact_and_shape(
         preflight=preflight,
         cap=cap,
         hook_manager=hook_manager,
+        tool_executor=tool_executor,
     ):
         yield evt
     async for evt in _apply_history_load_max_safety(
@@ -1197,6 +1267,7 @@ async def _maybe_compact_and_shape(
         history=history,
         attachment_store=attachment_store,
         attachment_catalog=attachment_catalog,
+        tool_executor=tool_executor,
     ):
         yield evt
     async for evt in _apply_pressure_and_before_provider(
@@ -2623,6 +2694,7 @@ async def _run_inner_core(
                 attachment_store=attachment_store,
                 attachment_catalog=attachment_catalog,
                 vertex_google_search=vertex_google_search,
+                tool_executor=tool_executor,
             ):
                 yield evt
 
@@ -2651,6 +2723,7 @@ async def _run_inner_core(
                     estimated_tokens=state.last_preflight_tokens,
                     recount_after=True,
                     hook_manager=hook_manager,
+                    tool_executor=tool_executor,
                 ):
                     if isinstance(evt, ContextSummarized):
                         summarized = evt.turns_summarized

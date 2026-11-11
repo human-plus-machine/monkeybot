@@ -1,6 +1,6 @@
 id: regression/t2/loop/scenarios/mcp/only_idle_server_hidden
 case: T2-MCP-17
-description: With two connected servers, only the one that goes unused is hidden.
+description: With two connected servers, compaction hides only the one that goes unused.
 mode: scripted
 driver: loop
 executor: real
@@ -9,8 +9,17 @@ messages:
 config:
   model:
     max_turns: 30
+    context_window: 12000
   env:
     MCP_CONFIG: regression/fixtures/configs/mcp.two_prefix.json
+steps:
+- action: touch_file
+  path: big.txt
+  size: 20000
+  fill: Q
+  when:
+    event: tool_result
+    nth: 1
 script:
 - - type: tool_call
     call_id: e0
@@ -72,21 +81,46 @@ script:
     args:
       text: n9
   - type: done
+- - type: tool_call
+    call_id: read-big
+    name: read_file
+    args:
+      path: big.txt
+  - type: done
+- - type: text
+    text: idle-summary-body
+  - type: done
+- - type: tool_call
+    call_id: between
+    name: fix__echo
+    args:
+      text: between
+  - type: done
+- - type: text
+    text: "Still calling."
+  - type: done
+- - type: tool_call
+    call_id: after
+    name: fix__echo
+    args:
+      text: after
+  - type: done
 - - type: text
     text: "Only the idle one dropped."
   - type: done
 assertions:
-  provider_calls: 11
+  provider_calls: 16
   provider_request:
   - n: 10
     tools_include:
     - fix__echo
     - fix__extra__echo
-  - n: 11
+  - n: 15
     tools_include:
     - fix__echo
     tools_exclude:
     - fix__extra__echo
+  - n: 16
     messages_contain: "MCP server `fix__extra` was hidden"
   turn_completed: true
   no_errors: true

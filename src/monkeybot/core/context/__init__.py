@@ -527,6 +527,25 @@ def refresh_tools_after_mcp_change(
     return ctx
 
 
+def hide_due_mcp_servers(ctx: TurnContext, mcp_client: Any) -> list[str]:
+    """Hide MCP servers that reached the idle limit and queue the note.
+
+    Returns the names hidden by this call. A server used since it became due
+    is not in that list: its idle count is already zero. The tool list is
+    unchanged when nothing is due. The caller invokes this only while history
+    is being rewritten, so the cache prefix is already being replaced.
+    """
+    visibility = ctx.mcp_visibility
+    if visibility is None or mcp_client is None:
+        return []
+    newly = visibility.take_newly_idle()
+    if not newly:
+        return []
+    refresh_tools_after_mcp_change(ctx, mcp_client)
+    visibility.queue_note(newly)
+    return newly
+
+
 def refresh_tools_after_loops_change(
     ctx: TurnContext,
     *,

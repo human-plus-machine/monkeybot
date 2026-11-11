@@ -1,6 +1,6 @@
 id: regression/t2/loop/scenarios/mcp/hidden_tool_call_rejected
 case: T2-MCP-15
-description: A remembered call to a hidden server is rejected, and listing resources skips that server.
+description: After compaction hides a server, a remembered call is rejected and listing resources skips it.
 mode: scripted
 driver: loop
 executor: real
@@ -9,8 +9,17 @@ messages:
 config:
   model:
     max_turns: 30
+    context_window: 12000
   env:
     MCP_CONFIG: regression/fixtures/configs/mcp.progressive.json
+steps:
+- action: touch_file
+  path: big.txt
+  size: 20000
+  fill: Q
+  when:
+    event: tool_result
+    nth: 1
 script:
 - - type: tool_call
     call_id: c0
@@ -89,6 +98,25 @@ script:
       nonce: 9
   - type: done
 - - type: tool_call
+    call_id: read-big
+    name: read_file
+    args:
+      path: big.txt
+  - type: done
+- - type: text
+    text: idle-summary-body
+  - type: done
+- - type: tool_call
+    call_id: between
+    name: list_dir
+    args:
+      path: .
+      nonce: between
+  - type: done
+- - type: text
+    text: "Still listing."
+  - type: done
+- - type: tool_call
     call_id: hidden-echo
     name: fixture__echo
     args:
@@ -102,13 +130,13 @@ script:
     text: "Rejected."
   - type: done
 assertions:
-  provider_calls: 13
+  provider_calls: 17
   provider_request:
-  - n: 12
+  - n: 16
     tools_exclude:
     - fixture__echo
     - list_mcp_resources
-  - n: 13
+  - n: 17
     messages_contain: "enable_mcp"
     messages_not_contain: "fixture://readme"
   events_sequence:
