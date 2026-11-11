@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import math
+
 from monkeybot.core.llm.provider import Message
+from monkeybot.core.runtime.context_budget import PROMPT_ESTIMATE_CHARS_PER_TOKEN
 from monkeybot.core.runtime.loop_usage import reported_prompt_tokens
 from monkeybot.core.runtime.prompt_ledger import PromptTokenLedger, request_chars
 from monkeybot.core.types.content_blocks import IMAGE_TOKEN_ESTIMATE, Image, Text, ToolResponse
@@ -196,6 +199,97 @@ def test_request_chars_counts_an_image_once_whatever_its_bytes() -> None:
     large = request_chars([image_message(500_000)], [])
     assert small == large
     assert small == IMAGE_TOKEN_ESTIMATE * 4
+
+
+def _chars_estimate(messages: list[Message], tools: list[ToolDef]) -> int:
+    chars = request_chars(messages, tools)
+    if chars <= 0:
+        return 0
+    return math.ceil(chars / PROMPT_ESTIMATE_CHARS_PER_TOKEN)
+
+
+def test_fallback_without_an_anchor_uses_three_characters_per_token() -> None:
+    ledger = PromptTokenLedger()
+    messages = [_msg("abcdef")]
+    tools = [_tool()]
+    assert ledger.fallback_tokens(messages, tools) == _chars_estimate(messages, tools)
+
+
+def test_fallback_with_an_anchor_uses_the_point_estimate() -> None:
+    ledger = PromptTokenLedger()
+    tools = [_tool()]
+    base = [_msg("hello")]
+    _accept(ledger, base, tools, 8_000)
+    grown = [*base, _msg("x" * 30)]
+    delta = (request_chars(grown, tools) - ledger.anchor_chars) / PROMPT_ESTIMATE_CHARS_PER_TOKEN
+    assert ledger.fallback_tokens(grown, tools) == max(0, int(round(8_000 + delta)))
+
+
+def test_fallback_with_an_anchor_skips_the_quarter_and_band_checks() -> None:
+    ledger = PromptTokenLedger()
+    tools = [_tool()]
+    base = [_msg("hello")]
+    _accept(ledger, base, tools, 1_000)
+    huge = [*base, _msg("y" * 10_000)]
+    decision = ledger.consider(huge, tools, window_tokens=1_000_000)
+    assert decision.needs_count
+    delta = (request_chars(huge, tools) - ledger.anchor_chars) / PROMPT_ESTIMATE_CHARS_PER_TOKEN
+    assert ledger.fallback_tokens(huge, tools) == max(0, int(round(1_000 + delta)))
+
+    banded = PromptTokenLedger()
+    base_band = [_msg("a" * 300)]
+    _accept(banded, base_band, tools, 68_000)
+    grown = [*base_band, _msg("b" * 5_500)]
+    band_decision = banded.consider(grown, tools, window_tokens=100_000)
+    assert band_decision.needs_count
+    band_delta = (
+        request_chars(grown, tools) - banded.anchor_chars
+    ) / PROMPT_ESTIMATE_CHARS_PER_TOKEN
+    assert banded.fallback_tokens(grown, tools) == max(0, int(round(68_000 + band_delta)))
+
+
+def test_fallback_ignores_a_changed_tool_list() -> None:
+    ledger = PromptTokenLedger()
+    messages = [_msg("hi")]
+    _accept(ledger, messages, [_tool("run_command")], 4_000)
+    other = [_tool("grep")]
+    assert ledger.trusted
+    assert ledger.fallback_tokens(messages, other) == _chars_estimate(messages, other)
+
+
+def test_note_fallback_accepts_a_report_within_half_to_twice() -> None:
+    ledger = PromptTokenLedger()
+    messages = [_msg("hi")]
+    tools = [_tool()]
+    ledger.consider(messages, tools, window_tokens=100_000)
+    ledger.note_fallback(1_000)
+    assert not ledger.last_preflight_was_real
+    ledger.observe(prompt_tokens=1_500, output_tokens=4, messages=messages, tools=tools)
+    assert ledger.trusted
+    assert ledger.anchor_tokens == 1_500
+    decision = ledger.consider(messages, tools, window_tokens=100_000)
+    assert not decision.needs_count
+
+
+def test_note_fallback_rejects_a_report_outside_half_to_twice() -> None:
+    ledger = PromptTokenLedger()
+    messages = [_msg("hi")]
+    tools = [_tool()]
+    ledger.consider(messages, tools, window_tokens=100_000)
+    ledger.note_fallback(1_000)
+    ledger.observe(prompt_tokens=3_000, output_tokens=1, messages=messages, tools=tools)
+    assert not ledger.trusted
+    assert not ledger.last_preflight_was_real
+
+
+def test_note_fallback_is_not_a_real_count() -> None:
+    ledger = PromptTokenLedger()
+    messages = [_msg("hi")]
+    tools = [_tool()]
+    ledger.note_fallback(1_000)
+    assert not ledger.last_preflight_was_real
+    ledger.observe(prompt_tokens=1_000, output_tokens=1, messages=messages, tools=tools)
+    assert ledger.trusted
 
 
 def test_reported_prompt_tokens_do_not_add_gemini_cache_twice() -> None:
