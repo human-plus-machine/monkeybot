@@ -26,7 +26,7 @@ from .history_compaction import (
     _finalize_summary_row,
     _generate_summary_text,
     _intent_facts_from_ctx,
-    _summarization_viable,
+    _middle_summary_lines,
     rebuild_compacted_history,
     split_messages_for_compaction,
 )
@@ -235,9 +235,14 @@ async def maybe_start(
     existing = _pending.get(ctx.thread_id)
     if existing is not None and _is_fresh(existing, raw, model=model, window=window):
         return
-    if not _summarization_viable(raw, window_tokens=window):
+    # Rows appended before the bar join the tail. Keep less now so the tail is
+    # the inline budget when the summary is applied.
+    start_tail = max(1, _tail_budget(window) - (cap - preflight))
+    head, middle, tail = split_messages_for_compaction(
+        raw, window_tokens=window, keep_tail_tokens=start_tail
+    )
+    if not _middle_summary_lines(middle, window_tokens=window):
         return
-    head, middle, tail = split_messages_for_compaction(raw, window_tokens=window)
     cut = _first_tail_index(raw, tail)
     if not tail or cut <= 0 or cut >= len(raw):
         return

@@ -73,7 +73,8 @@ def _assert_call_matches_last_usage(
     usages = [event.estimated_tokens for event in events if isinstance(event, ContextUsage)]
     assert usages, "provider call before any context usage"
     tier = compute_context_pressure_tier(usages[-1], window)
-    if tier in ("moderate", "aggressive"):
+    # Moderate starts a background summary and leaves sent rows verbatim.
+    if tier == "aggressive":
         assert _shaped(text), f"tier {tier} at {usages[-1]} tokens left the old result verbatim"
         assert text.count(KEEP) < 40
     else:
@@ -245,7 +246,8 @@ async def test_preflight_compaction_sends_the_same_turn_unshaped(tmp_path) -> No
     assert usages[-1] == LOW
 
 
-async def test_pressure_without_compaction_still_shapes(tmp_path) -> None:
+async def test_moderate_band_does_not_shape(tmp_path) -> None:
+    """76% is under the compaction bar, so the old result stays verbatim."""
     events: list[object] = []
     provider = _Provider(["done"], events)
     await _drive(tmp_path, provider, events, _history(bulk=True))
@@ -312,3 +314,169 @@ async def test_failed_recount_after_compaction_does_not_use_the_peak(tmp_path) -
     assert _TRUNCATED in fresh_results[0]
     assert fresh in fresh_results[1]
     assert _TRUNCATED not in fresh_results[1]
+
+
+_WIDE = 100_000
+_BAND = 76_000
+_BAR = 85_000
+_AFTER = 25_000
+
+
+def _row_texts(messages: Sequence[Message]) -> list[str]:
+    return [_texts([message]) for message in messages if message.role != "system"]
+
+
+class _WideProvider:
+    """Scripted main turns. Counts stay at 76% through two tool turns, then hit 85%.
+
+    ``count`` fixes every count, for a history that cannot be summarized.
+    The two tool turns each take a preflight and a post-tool recount, all at
+    76%. The next count is that recount's successor, the preflight that crosses
+    the bar. Later counts are the size after compaction.
+    """
+
+    def __init__(
+        self,
+        main: list[str],
+        events: list[object],
+        *,
+        count: int | None = None,
+    ) -> None:
+        self._main = list(main)
+        self._events = events
+        self._fixed = count
+        self._after_two = 0
+        self.main_calls = 0
+        self.counts: list[int] = []
+        self.rows: list[list[str]] = []
+        self.name = "fake"
+
+    def _is_summary(self, messages: Sequence[Message]) -> bool:
+        return any(
+            isinstance(block, Text) and block.text.startswith(_SUMMARY_OPENING)
+            for message in messages
+            for block in message.content
+        )
+
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[object],
+        *,
+        model: str,
+        thinking_budget: int | None = None,
+        **kwargs: object,
+    ) -> AsyncIterator[TextDelta | ToolCall | Done]:
+        del tools, model, thinking_budget, kwargs
+        if self._is_summary(messages):
+            yield TextDelta(text="summary")
+            yield Done()
+            return
+        self.main_calls += 1
+        self.rows.append(_row_texts(messages))
+        step = self._main.pop(0)
+        if step == "tool":
+            yield ToolCall(
+                call_id=f"c{self.main_calls}",
+                name="run_command",
+                args={"command": "noop"},
+            )
+            yield Done()
+            return
+        yield TextDelta(text=step)
+        yield Done()
+
+    async def count_input_tokens(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[object],
+        *,
+        model: str,
+        thinking_budget: int | None = None,
+        **kwargs: object,
+    ) -> int:
+        del tools, model, thinking_budget, kwargs
+        if self._fixed is not None:
+            value = self._fixed
+        elif self._is_summary(messages) or self.main_calls < 2:
+            value = _BAND
+        elif self._after_two == 0:
+            self._after_two += 1
+            value = _BAND
+        elif self._after_two == 1:
+            self._after_two += 1
+            value = _BAR
+        else:
+            value = _AFTER
+        self.counts.append(value)
+        return value
+
+
+async def _drive_wide(
+    tmp_path,
+    provider: _WideProvider,
+    events: list[object],
+    rows: list[Message],
+    *,
+    max_turns: int = 4,
+) -> None:
+    async for event in run(
+        "continue",
+        _ctx(workspace_root=tmp_path, context_window_tokens=_WIDE),
+        provider=provider,  # type: ignore[arg-type]
+        history=FakeHistory(rows),
+        inspectors=[],
+        tool_executor=RecordingExecutor(("ok", None)),
+        max_turns=max_turns,
+    ):
+        events.append(event)
+
+
+async def test_tool_batch_in_the_band_compacts_at_85(tmp_path) -> None:
+    """A 76% tool batch does not compact, and the next call at 85% compacts once."""
+    events: list[object] = []
+    provider = _WideProvider(["tool", "tool", "done"], events)
+    await _drive_wide(tmp_path, provider, events, _history(bulk=True))
+    assert isinstance(events[-1], TurnComplete), provider.counts
+    assert not any(isinstance(event, Error) for event in events), provider.counts
+    assert provider.main_calls == 3, provider.counts
+    assert provider.rows[1][: len(provider.rows[0])] == provider.rows[0]
+    kept = [row for row in provider.rows[0] if KEEP in row]
+    assert kept and kept[0].count(KEEP) == 40
+    assert kept[0] in provider.rows[1]
+    summarizing = [event for event in events if isinstance(event, ContextSummarizing)]
+    assert len(summarizing) == 1, provider.counts
+    prior = [
+        event.estimated_tokens
+        for event in events[: events.index(summarizing[0])]
+        if isinstance(event, ContextUsage)
+    ]
+    assert prior[-1] == _BAR, prior
+
+
+async def test_unsplittable_history_at_the_bar_is_shaped(tmp_path) -> None:
+    """85% with nothing to summarize is the aggressive tier, so the old result is shaped."""
+    events: list[object] = []
+    provider = _WideProvider(["done"], events, count=_BAR)
+    short = [
+        Message(
+            role="user",
+            content=[
+                ToolResponse(
+                    id="old",
+                    tool_name="run_command",
+                    result=[Text(text=_old_result())],
+                )
+            ],
+        ),
+        Message(role="assistant", content=[Text(text="ack")]),
+    ]
+    await _drive_wide(tmp_path, provider, events, short, max_turns=2)
+    assert isinstance(events[-1], TurnComplete)
+    assert not any(isinstance(event, Error) for event in events)
+    assert provider.main_calls == 1
+    assert not any(isinstance(event, ContextSummarizing) for event in events)
+    kept = [row for row in provider.rows[0] if KEEP in row]
+    assert len(kept) == 1
+    assert _shaped(kept[0])
+    assert kept[0].count(KEEP) < 40

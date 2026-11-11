@@ -1051,7 +1051,9 @@ async def _apply_pressure_and_before_provider(
         state.last_preflight_tokens,
         state.ctx.context_window_tokens,
     )
-    if pressure_tier in ("moderate", "aggressive"):
+    # Moderate only starts a background summary. Reshaping older rows here would
+    # rewrite the cached prefix on the calls before compaction applies it.
+    if pressure_tier == "aggressive":
         state.resolved_messages = convert_to_provider(
             state.chat_messages,
             attachment_store=attachment_store,

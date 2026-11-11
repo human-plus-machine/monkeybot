@@ -530,3 +530,92 @@ async def test_turn_schedules_background_summary(monkeypatch: pytest.MonkeyPatch
     ]
     assert seen and seen[0] > 0
     assert any(type(event).__name__ == "TurnComplete" for event in events)
+
+
+_WIDE = 100_000
+
+
+def _exact_tokens(n: int, mark: str) -> str:
+    """``n`` estimated tokens. The keep-budget counts 4 characters as one token."""
+    return mark * (n * 4)
+
+
+def _banded_history() -> list[Message]:
+    """A head, a middle, and 1,000-token rows a reduced tail can cut through."""
+    rows = [Message(role="user", content=[Text(text=_exact_tokens(100, "h"))])]
+    for index in range(10):
+        role = "assistant" if index % 2 else "user"
+        rows.append(Message(role=role, content=[Text(text=_exact_tokens(3_000, "M"))]))
+    for index in range(20):
+        role = "user" if index % 2 else "assistant"
+        rows.append(Message(role=role, content=[Text(text=_exact_tokens(1_000, "t"))]))
+    return rows
+
+
+async def test_job_started_at_70_survives_growth_to_the_bar() -> None:
+    """Rows added on the way to 85% stay inside the tail this job already accepted."""
+    history = MemoryHistory(_banded_history())
+    provider = Scripted(["bg-summary", "inline-summary"])
+    ctx = _ctx("wide-grow", _WIDE)
+    await maybe_start(ctx, history, provider, 70_000)  # type: ignore[arg-type]
+    await wait_idle(ctx.thread_id)
+    await history.append(
+        ctx.thread_id,
+        Message(role="user", content=[Text(text=_exact_tokens(15_000, "g"))]),
+    )
+    turns = await _compact(history, provider, ctx)
+    assert turns > 0
+    assert provider.calls == 1
+    summary = _summary_text(history.rows)
+    assert "bg-summary" in summary
+    assert "inline-summary" not in summary
+
+
+async def test_in_band_growth_does_not_restart_the_job() -> None:
+    history = MemoryHistory(_banded_history())
+    provider = Scripted(["bg-summary", "restarted"])
+    ctx = _ctx("wide-restart", _WIDE)
+    await maybe_start(ctx, history, provider, 70_000)  # type: ignore[arg-type]
+    await wait_idle(ctx.thread_id)
+    first = bg._pending[ctx.thread_id].task
+    await history.append(
+        ctx.thread_id,
+        Message(role="user", content=[Text(text=_exact_tokens(15_000, "g"))]),
+    )
+    for preflight in (75_000, 80_000, 84_000):
+        await maybe_start(ctx, history, provider, preflight)  # type: ignore[arg-type]
+    assert provider.calls == 1
+    assert bg._pending[ctx.thread_id].task is first
+
+
+async def test_later_start_keeps_a_larger_tail() -> None:
+    rows = _banded_history()
+    provider = Scripted(["early", "late"])
+    early = _ctx("wide-early", _WIDE)
+    late = _ctx("wide-late", _WIDE)
+    await maybe_start(early, MemoryHistory(rows), provider, 70_000)  # type: ignore[arg-type]
+    await maybe_start(late, MemoryHistory(list(rows)), provider, 80_000)  # type: ignore[arg-type]
+    early_tail = len(rows) - bg._pending[early.thread_id].cut
+    late_tail = len(rows) - bg._pending[late.thread_id].cut
+    assert late_tail > early_tail
+
+
+async def test_growth_past_the_tail_budget_falls_back_inline() -> None:
+    history = MemoryHistory(_banded_history())
+    provider = Scripted(["bg-summary", "inline-summary"])
+    ctx = _ctx("wide-jump", _WIDE)
+    await maybe_start(ctx, history, provider, 70_000)  # type: ignore[arg-type]
+    await wait_idle(ctx.thread_id)
+    pending = bg._pending[ctx.thread_id]
+    limit = max(pending.suffix_tokens, bg._tail_budget(_WIDE))
+    extra = limit - pending.suffix_tokens + 1_000
+    await history.append(
+        ctx.thread_id,
+        Message(role="user", content=[Text(text=_exact_tokens(extra, "j"))]),
+    )
+    turns = await _compact(history, provider, ctx)
+    assert turns > 0
+    assert provider.calls == 2
+    summary = _summary_text(history.rows)
+    assert "inline-summary" in summary
+    assert "bg-summary" not in summary

@@ -32,10 +32,9 @@ _DIFF_GIT_RE = re.compile(r"^diff --git a/.+ b/(.+)$", re.MULTILINE)
 PRESSURE_LIGHT_RATIO = 0.50
 PRESSURE_MODERATE_RATIO = 0.70
 PRESSURE_AGGRESSIVE_RATIO = 0.85
-# Inline history summarization fires at the same bar as aggressive tool-result
-# shaping — row count is otherwise unbounded until this token bar is hit.
-# A background summary starts at the moderate bar so the turn that crosses this
-# one can apply it instead of waiting on the summarizer.
+# The only token-ratio compaction trigger. A background summary starts at the
+# moderate bar so the turn that crosses this one can apply it instead of
+# waiting on the summarizer. The post-tool budgeter does not compact on a tier.
 SUMMARY_TRIGGER_RATIO = PRESSURE_AGGRESSIVE_RATIO
 RESULT_BUDGET_FRACTION = 0.8
 
@@ -228,8 +227,6 @@ class ContextBudgeter:
         pool = max(1, int(remaining * self.safety_fraction))
         per_item = max(1, pool // len(blocks))
         needs_compaction = remaining < self.floor_tokens * 2
-        if self.pressure_tier in ("moderate", "aggressive"):
-            needs_compaction = True
 
         out: list[ContentBlock] = []
         for block in blocks:
