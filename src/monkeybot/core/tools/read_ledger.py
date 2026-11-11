@@ -8,6 +8,10 @@ writes refresh the stamp: it knows what it just wrote and need not re-read it.
 The executor is built per request, so the gateway keeps one ledger per session on
 the session bus (like ``todo_store``) and passes it in. File tools update it from
 worker threads, so every read and write of this state takes ``_lock``.
+
+A second map records a read whose full text was stored, keyed by thread and line
+range. That is only a hint: the stored row is checked before a later read is
+replaced with a stub. ``clear`` drops it with the stamps.
 """
 
 from __future__ import annotations
@@ -40,6 +44,18 @@ class CommandRecord:
     exit_code: int
 
 
+ShownReadKey = tuple[str, str, int, int]
+
+
+@dataclass(frozen=True)
+class ShownRead:
+    """One stored ``read_file`` result a later identical read may point at."""
+
+    call_id: str
+    text_hash: str
+    stubbed: bool
+
+
 class FileReadLedger:
     """Which files were read (and in what state), plus what this session wrote."""
 
@@ -48,6 +64,7 @@ class FileReadLedger:
         self._seen: dict[str, Stamp] = {}
         self._written: set[str] = set()
         self._commands: deque[CommandRecord] = deque(maxlen=_RECENT_COMMANDS)
+        self._shown: dict[ShownReadKey, ShownRead] = {}
 
     @property
     def written(self) -> frozenset[str]:
@@ -87,6 +104,48 @@ class FileReadLedger:
         """Forget every read — called when history compaction drops file contents."""
         with self._lock:
             self._seen.clear()
+            self._shown.clear()
+
+    def shown_read(
+        self, thread_id: str, path: str, start_line: int, end_line: int
+    ) -> ShownRead | None:
+        """The stored read for this thread, path, and line range, if one was recorded."""
+        with self._lock:
+            return self._shown.get((thread_id, path, start_line, end_line))
+
+    def record_shown_read(
+        self,
+        thread_id: str,
+        path: str,
+        start_line: int,
+        end_line: int,
+        *,
+        call_id: str,
+        text_hash: str,
+        stubbed: bool,
+    ) -> None:
+        """Remember a read whose text was stored whole. Replaces any earlier entry."""
+        shown = ShownRead(call_id=call_id, text_hash=text_hash, stubbed=stubbed)
+        with self._lock:
+            self._shown[(thread_id, path, start_line, end_line)] = shown
+
+    def mark_shown_stubbed(self, thread_id: str, path: str, start_line: int, end_line: int) -> None:
+        """The last answer for this key was a stub. The call id and hash stay."""
+        key = (thread_id, path, start_line, end_line)
+        with self._lock:
+            current = self._shown.get(key)
+            if current is None or current.stubbed:
+                return
+            self._shown[key] = ShownRead(
+                call_id=current.call_id,
+                text_hash=current.text_hash,
+                stubbed=True,
+            )
+
+    def forget_shown_read(self, thread_id: str, path: str, start_line: int, end_line: int) -> None:
+        """Drop a hint whose stored row no longer holds the recorded text."""
+        with self._lock:
+            self._shown.pop((thread_id, path, start_line, end_line), None)
 
     @property
     def recent_commands(self) -> tuple[CommandRecord, ...]:

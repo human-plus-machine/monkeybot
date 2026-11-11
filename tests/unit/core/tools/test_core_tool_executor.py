@@ -2625,8 +2625,8 @@ async def test_task_tool_aggregates_subagent_stream(
     assert err is None and out is not None
     payload = json.loads(out)
     assert payload["ok"] is True
-    assert payload["assistant_text"] == "partial answer"
     assert payload["final_message"] == "partial answer"
+    assert "assistant_text" not in payload
     assert payload["tool_call_count"] == 1
     assert payload["tool_results"] == [{"tool": "search", "snippet": "hit one"}]
     assert payload["usage"]["input_tokens"] == 3
@@ -4695,7 +4695,8 @@ async def test_task_tool_noop_publish_when_publisher_none(
     assert err is None and out is not None
     payload = json.loads(out)
     assert payload["ok"] is True
-    assert payload["assistant_text"] == "ok"
+    assert payload["final_message"] == "ok"
+    assert "assistant_text" not in payload
     assert isinstance(payload.get("child_thread_id"), str)
     assert payload["child_thread_id"].startswith("subagent:t:")
     assert "run_id" in payload
