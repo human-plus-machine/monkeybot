@@ -39,6 +39,7 @@ from monkeybot.providers._utils import (
     iter_stream_with_param_retry,
     safe_parse_tool_args,
     split_leading_system,
+    split_system_prompt_for_cache,
 )
 from monkeybot.providers.model_capabilities import BEDROCK_GEO_PREFIXES, supports_param
 
@@ -263,8 +264,34 @@ def _copy_content_blocks(blocks: list[Any]) -> list[Any]:
     return [dict(b) if isinstance(b, dict) else b for b in blocks]
 
 
-def _append_cache_point_to_system(system: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return _copy_content_blocks(system) + [dict(_CACHE_POINT_BLOCK)]
+def _converse_system_blocks(
+    system: str,
+    *,
+    cache_retention: Literal["none", "short", "long"],
+) -> list[dict[str, Any]]:
+    """Stable prefix, then the volatile tail, as separate Converse text blocks.
+
+    One block when caching is off, when there is no volatile heading, or when
+    the stable prefix is blank. An empty text block is rejected by Converse.
+    """
+    if cache_retention == "none":
+        return [{"text": system}]
+    stable, volatile = split_system_prompt_for_cache(system)
+    if not stable.strip() or not volatile.strip():
+        return [{"text": system}]
+    return [{"text": stable}, {"text": volatile}]
+
+
+def _cache_point_after_first_system_block(system: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Put the cache point after the first block, the stable prefix.
+
+    A second block, when present, is the volatile tail (skills, verifier) and
+    stays after the point, so a change there does not drop the stable checkpoint.
+    """
+    copied = _copy_content_blocks(system)
+    if not copied:
+        return copied
+    return [copied[0], dict(_CACHE_POINT_BLOCK), *copied[1:]]
 
 
 def _append_cache_point_to_tools(tool_config: dict[str, Any]) -> dict[str, Any]:
@@ -337,7 +364,7 @@ def _apply_cache_points(kwargs: dict[str, Any]) -> dict[str, Any]:
 
     system = out.get("system")
     if isinstance(system, list) and system and budget > 0:
-        out["system"] = _append_cache_point_to_system(system)
+        out["system"] = _cache_point_after_first_system_block(system)
         budget -= 1
 
     tool_config = out.get("toolConfig")
@@ -414,8 +441,9 @@ def converse_request_kwargs(
     """Build ``converse_stream`` kwargs. Always sets ``inferenceConfig.maxTokens``.
 
     When ``cache_retention`` is not ``none``, inserts Converse ``cachePoint`` blocks
-    on system, tools, and the last two user turns (Bedrock max 4). ``short`` and
-    ``long`` both use the default 5-minute Converse cache tier.
+    on tools, after the stable system prefix, and on the last two user turns
+    (Bedrock max 4). The volatile tail (skills, verifier) stays after that system
+    point. ``short`` and ``long`` both use the default 5-minute Converse cache tier.
 
     ``thinking_budget`` is not forwarded on this path — Converse reasoning is not
     requested via ``additionalModelRequestFields`` yet; the mapper only round-trips
@@ -431,7 +459,7 @@ def converse_request_kwargs(
         "inferenceConfig": inference,
     }
     if system:
-        kwargs["system"] = [{"text": system}]
+        kwargs["system"] = _converse_system_blocks(system, cache_retention=cache_retention)
     tool_config = converse_tools(tools)
     if tool_config is not None:
         kwargs["toolConfig"] = tool_config

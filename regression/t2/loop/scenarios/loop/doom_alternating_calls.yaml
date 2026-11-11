@@ -1,0 +1,56 @@
+id: regression/t2/loop/scenarios/loop/doom_alternating_calls
+case: T2-LOOP-49
+description: Six read_file calls alternating two paths trip the doom loop and the next request has no tools.
+mode: scripted
+driver: loop
+messages:
+- read two files over and over
+script:
+- - type: tool_call
+    call_id: r1
+    name: read_file
+    args:
+      path: notes.txt
+  - type: tool_call
+    call_id: r2
+    name: read_file
+    args:
+      path: other.txt
+  - type: tool_call
+    call_id: r3
+    name: read_file
+    args:
+      path: notes.txt
+  - type: tool_call
+    call_id: r4
+    name: read_file
+    args:
+      path: other.txt
+  - type: tool_call
+    call_id: r5
+    name: read_file
+    args:
+      path: notes.txt
+  - type: tool_call
+    call_id: r6
+    name: read_file
+    args:
+      path: other.txt
+  - type: done
+- - type: text
+    text: stopped
+  - type: done
+assertions:
+  turn_completed: true
+  provider_calls: 2
+  tool_calls:
+    read_file: 6
+  interventions:
+  - intervention: doom_loop
+    detail: "Doom loop detected: the same 2 tool calls ('read_file', 'read_file') repeated 3 times"
+  error_contains: "Doom loop detected: the same 2 tool calls ('read_file', 'read_file') repeated 3 times"
+  provider_request:
+  - n: 2
+    tools_empty: true
+    messages_contain: '[Harness] Doom loop detected'
+    system_not_contains: '[Harness] Doom loop detected'

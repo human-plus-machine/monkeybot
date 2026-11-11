@@ -1342,7 +1342,12 @@ def is_ollama_request_body_read_error(exc: BaseException) -> bool:
     return True
 
 
-_OPENAI_STRIPPABLE = ("temperature", "reasoning_effort")
+_OPENAI_STRIPPABLE = (
+    "temperature",
+    "reasoning_effort",
+    "prompt_cache_key",
+    "prompt_cache_retention",
+)
 
 
 def drop_rejected_sampling(
@@ -1352,10 +1357,11 @@ def drop_rejected_sampling(
     provider: str = "",
     model: str = "",
 ) -> list[str]:
-    """Remove sampling kwargs a 400 blames. Returns the names that were removed.
+    """Remove kwargs a 400 blames. Returns the names that were removed.
 
-    When ``provider`` and ``model`` are set, the names are remembered so later
-    turns omit them instead of paying for another rejected request.
+    Covers sampling fields and the OpenAI prompt-cache fields. When ``provider``
+    and ``model`` are set, the names are remembered so later turns omit them
+    instead of paying for another rejected request.
     """
     if not is_status_400(exc):
         return []

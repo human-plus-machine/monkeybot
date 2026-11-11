@@ -8,6 +8,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A repeating cycle of the same tool calls trips doom-loop recovery. The same two or three calls, repeated `DOOM_LOOP_THRESHOLD` times (default 3), emit the same no-tools recovery as three identical calls. A call with different arguments breaks the cycle.
 - `history.reset` keeps `created_at`, `turn_id`, and `message_id` on the rows it rewrites. A compacted thread stays where it was in the chat list, and retrying a message does not insert a duplicate. On Firestore the new rows are written before the old ones are deleted.
 
 ### Changed

@@ -81,6 +81,49 @@ def test_a_run_file_from_before_the_runner_counted_is_not_checked() -> None:
     assert live_invariant_failures([t.turn_completes for t in record.scenarios[0].turns]) == []
 
 
+def test_a_harness_error_does_not_end_the_turn_before_turn_complete() -> None:
+    async def run() -> tuple[TurnResult, str | None]:
+        async with _client(
+            _sse(
+                {
+                    "type": "Error",
+                    "error": "Doom loop detected: tool 'read_file' called identically 3 times",
+                },
+                {"type": "ContextSummarized", "turns_summarized": 4},
+                {"type": "AssistantDelta", "delta": "recovered"},
+                _turn_complete(),
+            )
+        ) as client:
+            return await _collect_turn_output(
+                client, "http://agent.test", "sess", "req", "hi", duplicate_grace_sec=0.05
+            )
+
+    result, error = asyncio.run(run())
+    assert error is None
+    assert result.turn_completes == 1
+    assert result.summarizations_count == 1
+    assert result.output == "recovered"
+
+
+def test_an_error_with_no_turn_complete_is_the_failure() -> None:
+    async def run() -> tuple[TurnResult, str | None]:
+        async with _client(
+            _sse(
+                {
+                    "type": "Error",
+                    "error": "Doom loop detected: tool 'read_file' called identically 3 times",
+                }
+            )
+        ) as client:
+            return await _collect_turn_output(
+                client, "http://agent.test", "sess", "req", "hi", duplicate_grace_sec=0.05
+            )
+
+    result, error = asyncio.run(run())
+    assert error == "Doom loop detected: tool 'read_file' called identically 3 times"
+    assert result.turn_completes == 0
+
+
 def test_the_runner_counts_one_turn_complete() -> None:
     result = asyncio.run(
         _collect(_sse({"type": "AssistantDelta", "delta": "hi"}, _turn_complete()))

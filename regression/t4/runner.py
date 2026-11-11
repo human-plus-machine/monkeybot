@@ -192,6 +192,9 @@ class _TurnState:
         self.events: list[dict[str, Any]] = []
         self.frames: list[dict[str, Any]] = []
         self.last_seen_id: str | None = None
+        # Error frames the turn kept going after. A doom-loop recovery still
+        # ends with TurnComplete, so the text is not a reason to stop reading.
+        self.harness_errors: list[str] = []
 
     def result(self) -> TurnResult:
         return TurnResult(
@@ -217,6 +220,17 @@ class _Consume:
         self.drop = False
         self.resume_id: str | None = None
         self.error: str | None = None
+
+
+def _unfinished_turn_error(state: _TurnState) -> str:
+    """Why a stream ended with no ``TurnComplete``.
+
+    A harness ``Error`` that the turn never recovered from wins over the
+    generic end-of-stream message.
+    """
+    if state.harness_errors:
+        return state.harness_errors[0]
+    return "SSE ended before TurnComplete"
 
 
 def _absorb_event(state: _TurnState, event: dict[str, Any]) -> str | None:
@@ -269,7 +283,7 @@ def _absorb_event(state: _TurnState, event: dict[str, Any]) -> str | None:
     elif kind == "VerifierVerdict":
         state.verdicts.append(_verdict_from_event(event))
     elif kind == "Error":
-        return str(event.get("error") or "unknown error")
+        state.harness_errors.append(str(event.get("error") or "unknown error"))
     elif kind == "TurnComplete":
         tid = event.get("trace_id")
         state.trace_id = str(tid) if tid else None
@@ -523,7 +537,7 @@ async def _collect_turn_output(
             return state.result(), (
                 f"invoke-tick HTTP {response.status_code}: {response.text[:500]}"
             )
-    return state.result(), "SSE ended before TurnComplete"
+    return state.result(), _unfinished_turn_error(state)
 
 
 async def _run_session(

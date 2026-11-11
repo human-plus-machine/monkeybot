@@ -158,8 +158,25 @@ def clear_sdk_clients() -> None:
         asyncio.run(_aclose_all(clients))
 
 
-def session_affinity_headers(hints: ProviderCallHints | None) -> dict[str, str] | None:
-    """Per-request ``x-session-affinity`` header, or None when caching is off."""
+def _cache_session_id(hints: ProviderCallHints | None) -> str | None:
+    """Session id to pin a prompt cache to, or None when caching is off."""
     if hints is None or not hints.session_id or hints.cache_retention == "none":
         return None
-    return {"x-session-affinity": hints.session_id}
+    return hints.session_id
+
+
+def session_affinity_headers(hints: ProviderCallHints | None) -> dict[str, str] | None:
+    """Per-request ``x-session-affinity`` header, or None when caching is off."""
+    session_id = _cache_session_id(hints)
+    if session_id is None:
+        return None
+    return {"x-session-affinity": session_id}
+
+
+def prompt_cache_key(hints: ProviderCallHints | None) -> str | None:
+    """OpenAI ``prompt_cache_key`` for this session, or None when caching is off.
+
+    The same rule as :func:`session_affinity_headers`: a session id is sent
+    unless retention is ``none``.
+    """
+    return _cache_session_id(hints)

@@ -2448,9 +2448,9 @@ async def test_next_user_message_keeps_system_text_when_live_state_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A todo, a git note, a memory write, and the date can all change between
-    two user messages. The system text stays byte-identical, including the
-    single system block Bedrock sends, and the first request's messages up to
-    the tail are a prefix of the second.
+    two user messages. The system text stays byte-identical. Bedrock's block
+    before the cache point is the same on both, and the first request's
+    messages up to the tail are a prefix of the second.
     """
     from monkeybot.core.coding.git_context_hook import GitContextHook
     from monkeybot.core.hooks import HookManager
@@ -2556,8 +2556,23 @@ async def test_next_user_message_keeps_system_text_when_live_state_changes(
         return system
 
     first_system = bedrock_system(first.stream_messages[0])
-    assert first_system == bedrock_system(second.stream_messages[0])
-    assert [block for block in first_system if "text" in block] == [{"text": systems[0]}]
+    second_system = bedrock_system(second.stream_messages[0])
+
+    def joined(system: list[dict[str, object]]) -> str:
+        return "".join(str(block["text"]) for block in system if "text" in block)
+
+    def before_cache_point(system: list[dict[str, object]]) -> dict[str, object]:
+        stable: dict[str, object] = {}
+        for block in system:
+            if "cachePoint" in block:
+                return stable
+            if "text" in block:
+                stable = block
+        return stable
+
+    assert joined(first_system) == systems[0]
+    assert joined(second_system) == systems[0]
+    assert before_cache_point(first_system) == before_cache_point(second_system)
 
 
 @pytest.mark.asyncio
