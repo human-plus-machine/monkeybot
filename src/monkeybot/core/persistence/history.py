@@ -20,6 +20,7 @@ import aiosqlite
 
 from monkeybot.core.llm.provider import Message, Role
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.loop_yield import LoopYield
 from monkeybot.core.persistence.archive import archived_row, kept_row_ids, unmatched_indexes
 from monkeybot.core.persistence.backends import ArchivedRow
 from monkeybot.core.persistence.row_ids import loaded_row_id, row_id_for_insert, split_row_ids
@@ -295,6 +296,9 @@ class SQLiteHistoryStore:
             rows = await cursor.fetchall()
             await cursor.close()
             rows_chrono = list(reversed(list(rows)))
+        # Decoding holds the GIL. Yield between rows so a long thread does not
+        # stall every other session for the whole load.
+        pace = LoopYield()
         out: list[Message] = []
         for row in rows_chrono:
             db_id = int(row[0])
@@ -322,6 +326,7 @@ class SQLiteHistoryStore:
                     row_id=loaded_row_id(row[4], db_id),
                 )
             )
+            await pace.tick()
         return out
 
     @with_conn_lock

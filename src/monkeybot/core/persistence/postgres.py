@@ -24,6 +24,7 @@ from monkeybot.core.llm.usage import (
     UsageSeriesPoint,
     UsageSummary,
 )
+from monkeybot.core.loop_yield import LoopYield
 from monkeybot.core.memory.ids import outbox_id, utc_now_iso
 from monkeybot.core.memory.outbox import (
     STATUS_COMMITTED,
@@ -496,6 +497,9 @@ class PostgresHistoryStore:
                     limit,
                 )
                 rows_chrono = list(reversed(rows))
+        # Decoding holds the GIL. Yield between rows so a long thread does not
+        # stall every other session for the whole load.
+        pace = LoopYield()
         out: list[Message] = []
         for row in rows_chrono:
             db_id = int(row["id"])
@@ -523,6 +527,7 @@ class PostgresHistoryStore:
                     row_id=loaded_row_id(row["row_id"], db_id),
                 )
             )
+            await pace.tick()
         return out
 
     async def clear(self, thread_id: str) -> None:

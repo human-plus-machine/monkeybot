@@ -27,6 +27,7 @@ from monkeybot.core.llm.usage import (
     UsageSeriesPoint,
     UsageSummary,
 )
+from monkeybot.core.loop_yield import LoopYield
 from monkeybot.core.memory.ids import outbox_id, utc_now_iso
 from monkeybot.core.memory.outbox import (
     STATUS_COMMITTED,
@@ -450,6 +451,9 @@ class FirestoreHistoryStore:
             )
             rows = [doc async for doc in query.stream()]
             rows_chrono = list(rows)
+        # Decoding holds the GIL. Yield between rows so a long thread does not
+        # stall every other session for the whole load.
+        pace = LoopYield()
         out: list[Message] = []
         for doc in rows_chrono:
             data = doc.to_dict() or {}
@@ -469,6 +473,7 @@ class FirestoreHistoryStore:
                     exc,
                     exc_info=True,
                 )
+                await pace.tick()
                 continue
             if role not in _VALID_ROLES:
                 logger.error(
@@ -477,6 +482,7 @@ class FirestoreHistoryStore:
                     thread_id,
                     role,
                 )
+                await pace.tick()
                 continue
             out.append(
                 Message(
@@ -485,6 +491,7 @@ class FirestoreHistoryStore:
                     row_id=loaded_row_id(data.get("row_id"), doc_id),
                 )
             )
+            await pace.tick()
         return out
 
     async def last_row(self, thread_id: str) -> tuple[int, str] | None:
