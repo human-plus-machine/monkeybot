@@ -1479,6 +1479,21 @@ class GatewayLoopPort:
             bus.turn_cancel_event = None
 
 
+def bind_goal_tick_port(fastapi_app: FastAPI) -> tuple[GatewayLoopPort, SessionRegistry]:
+    """Run goal ticks on the app whose lifespan opened storage.
+
+    Desktop dev serves ``gateway.realtime.app`` and calls ``_startup`` on that
+    app. An unbound port falls back to the SSE module app, whose ``state``
+    never receives ``storage``.
+    """
+    registry = getattr(fastapi_app.state, "registry", None)
+    if not isinstance(registry, SessionRegistry):
+        registry = _registry
+    port = GatewayLoopPort(registry)
+    port.bind_app(fastapi_app)
+    return port, registry
+
+
 def _cors_allow_origins() -> list[str]:
     """Browser origins allowed for cross-origin API calls (SSE, JSON).
 
@@ -1642,13 +1657,13 @@ async def _startup(fastapi_app: FastAPI) -> None:
     from monkeybot.scheduler.engine import scheduler_enabled_from_env, start_scheduler_background
 
     if scheduler_enabled_from_env():
-        loop_port = GatewayLoopPort(_registry)
+        loop_port, registry = bind_goal_tick_port(fastapi_app)
         turn_locks = backend.session_turns()
         fastapi_app.state.scheduler = start_scheduler_background(
             store=backend.scheduled_loops(),
-            invoker=GatewayTickInvoker(loop_port, _registry, turn_locks),
+            invoker=GatewayTickInvoker(loop_port, registry, turn_locks),
             session_busy=StorageSessionBusyChecker(turn_locks),
-            ensure_session=GatewaySessionEnsurer(_registry),
+            ensure_session=GatewaySessionEnsurer(registry),
         )
         logger.info("scheduled-loop engine enabled (in-process; development-friendly)")
 

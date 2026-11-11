@@ -157,6 +157,7 @@ A bug-fix change adds a case that fails before the fix and passes after, at the 
 | regression_of | Case or reason |
 | --- | --- |
 | duplicate-tool-result | T2-LOOP-41. A UI-only row between a tool call and its result used to make the provider see two results for one call. |
+| goal-tick-serving-app | T1-GW-07. A goal tick on the desktop realtime app read the SSE module app, whose `state` has no `storage`. |
 
 ## 8. Case catalog
 
@@ -732,6 +733,7 @@ Existing unit coverage: `tests/unit/core/runtime`, `tests/unit/gateway`.
 | T1-GW-04 | Verdict wire snake case | SSE `VerifierVerdict` is snake_case (not `to_wire()` camelCase). | T1 | P0 | `gateway/sse/*` (`routes.py`, `session_bus.py`, `sse.py`, `app.py`, `history_routes.py`, `reply_body.py`, `reload.py`), `core/runtime/events.py` (`event_to_json`). | tests/contracts/test_sse_schema.py |
 | T1-GW-05 | Route table snapshot | `app.routes` method+path set equals a committed list (Appendix D); a new/removed route is a reviewed diff. | T1 | P0 | `gateway/sse/*` (`routes.py`, `session_bus.py`, `sse.py`, `app.py`, `history_routes.py`, `reply_body.py`, `reload.py`), `core/runtime/events.py` (`event_to_json`). | tests/contracts/test_route_table.py |
 | T1-GW-06 | Error envelope | Every `APIError` code in routes has the `{error:{code,message,request_id}}` shape. | T1 | P0 | `gateway/sse/*` (`routes.py`, `session_bus.py`, `sse.py`, `app.py`, `history_routes.py`, `reply_body.py`, `reload.py`), `core/runtime/events.py` (`event_to_json`). | tests/contracts/test_route_table.py |
+| T1-GW-07 | Goal tick uses serving storage | A goal tick on the realtime app reads that app's storage and session registry. An unbound port still reads the SSE module app. | T1 | P1 | `gateway/sse/app.py` (`bind_goal_tick_port`), `gateway/realtime/app.py`. | tests/unit/gateway/sse/test_goal_tick_app_binding.py |
 | T2-GW-01 | Scripted turn golden sse | Gateway driver, scripted provider: frames equal `t3/sse/basic_turn.sse`. | T2 | P0 | `gateway/sse/*` (`routes.py`, `session_bus.py`, `sse.py`, `app.py`, `history_routes.py`, `reply_body.py`, `reload.py`), `core/runtime/events.py` (`event_to_json`). | regression/t2/gateway/scenarios/gw/scripted_turn_golden_sse.yaml |
 | T2-GW-02 | Tool turn golden sse | Tool call + result: equals `t3/sse/tool_turn.sse`. | T2 | P0 | `gateway/sse/*` (`routes.py`, `session_bus.py`, `sse.py`, `app.py`, `history_routes.py`, `reply_body.py`, `reload.py`), `core/runtime/events.py` (`event_to_json`). | regression/t2/gateway/scenarios/gw/tool_turn_golden_sse.yaml |
 | T2-GW-03 | Setup failure releases lock | Broken MCP/provider: `Error` then empty `TurnComplete`; user prompt persisted; next `/reply` not 409. | T2 | P0 | `gateway/sse/*` (`routes.py`, `session_bus.py`, `sse.py`, `app.py`, `history_routes.py`, `reply_body.py`, `reload.py`), `core/runtime/events.py` (`event_to_json`). | regression/t2/gateway/test_cases.py |
