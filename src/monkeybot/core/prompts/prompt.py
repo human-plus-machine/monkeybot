@@ -310,14 +310,31 @@ def _harness_text(ctx: TurnContext) -> str:
     )
 
 
-def _coding_context_blocks(ctx: TurnContext) -> str:
-    """Coding-mode project instructions + repo overview (stable, so they cache with the prefix)."""
-    out = ""
-    if ctx.project_instructions:
-        out += f"{PROJECT_INSTRUCTIONS_HEADING}{ctx.project_instructions}"
-    if ctx.repo_overview:
-        out += f"{REPO_OVERVIEW_HEADING}{ctx.repo_overview}"
-    return out
+def _project_instructions_block(ctx: TurnContext) -> str:
+    if not ctx.project_instructions:
+        return ""
+    return f"{PROJECT_INSTRUCTIONS_HEADING}{ctx.project_instructions}"
+
+
+def _repo_overview_block(ctx: TurnContext) -> str:
+    if not ctx.repo_overview:
+        return ""
+    return f"{REPO_OVERVIEW_HEADING}{ctx.repo_overview}"
+
+
+def compose_stable_baseline_parts(
+    ctx: TurnContext,
+    *,
+    attachment_catalog: Sequence[AttachmentRecord] | None = None,
+) -> dict[str, str]:
+    """Cacheable prefix split by section. The values join to :func:`compose_stable_baseline`."""
+    return {
+        "agent_md": ctx.agent_md,
+        "harness": f"\n\n{_harness_text(ctx)}",
+        "project_instructions": _project_instructions_block(ctx),
+        "repo_overview": _repo_overview_block(ctx),
+        "attachments": _session_attachments_block(attachment_catalog),
+    }
 
 
 def compose_stable_baseline(
@@ -326,10 +343,9 @@ def compose_stable_baseline(
     attachment_catalog: Sequence[AttachmentRecord] | None = None,
 ) -> str:
     """Cacheable prefix: AGENT.md + harness + project context + session attachments."""
-    harness = _harness_text(ctx)
-    coding_context = _coding_context_blocks(ctx)
-    attachments = _session_attachments_block(attachment_catalog)
-    return f"{ctx.agent_md}\n\n{harness}{coding_context}{attachments}"
+    return "".join(
+        compose_stable_baseline_parts(ctx, attachment_catalog=attachment_catalog).values()
+    )
 
 
 def compose_volatile_tail(

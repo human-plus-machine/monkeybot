@@ -20,6 +20,8 @@ from monkeybot.core.prompts.headings import (
 )
 from monkeybot.core.prompts.prompt import (
     _MAX_CURRENT_REQUEST_CHARS,
+    compose_stable_baseline,
+    compose_stable_baseline_parts,
     compose_system_prompt,
     compose_volatile_tail_parts,
 )
@@ -470,6 +472,30 @@ def test_background_tasks_section_is_capped() -> None:
     assert compose_volatile_tail_parts(short)["background_tasks"] == (
         f"{BACKGROUND_TASKS_HEADING}one line\n"
     )
+
+
+def test_stable_parts_join_equals_the_baseline() -> None:
+    ctx = replace(
+        _minimal_ctx(),
+        project_instructions="Be careful.",
+        repo_overview="Layout (workspace root):\n  src/",
+    )
+    record = AttachmentRecord(
+        attachment_id="att1",
+        filename="report.pdf",
+        mime_type="application/pdf",
+        description="Q1 report",
+        storage_path=".monkeybot/attachments/t1/att1",
+    )
+    parts = compose_stable_baseline_parts(ctx, attachment_catalog=[record])
+    assert "".join(parts.values()) == compose_stable_baseline(ctx, attachment_catalog=[record])
+    assert list(parts) == [
+        "agent_md",
+        "harness",
+        "project_instructions",
+        "repo_overview",
+        "attachments",
+    ]
 
 
 def test_coding_protocol_is_always_in_stable_prefix() -> None:

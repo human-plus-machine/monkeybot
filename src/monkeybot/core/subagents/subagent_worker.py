@@ -230,6 +230,7 @@ def _event_for_ndjson_pipe(evt: AgentEvent) -> AgentEvent:
             request_id=evt.request_id,
             inner_turn=evt.inner_turn,
             text=f"[omitted {len(evt.text)} chars]",
+            sections=evt.sections,
         )
     return evt
 
