@@ -13,7 +13,7 @@ script:
     message: boom
 assertions:
   turn_completed: true
-  error_contains: boom
+  error_contains: The request failed (RuntimeError).
   response_contains: partial
   history:
     roles:
@@ -21,5 +21,6 @@ assertions:
     - assistant
   events_sequence:
   - type: Error
-    error: boom
+    error:
+      regex: The request failed \(RuntimeError\)
   - type: TurnComplete

@@ -355,7 +355,11 @@ async def test_retries_exhausted_end_the_turn_once() -> None:
     events = await _collect(provider, hist)
 
     assert provider.stream_calls == 6
-    assert _errors(events) == ["429 rate limit"]
+    assert _errors(events) == [
+        "The model provider is rate-limiting requests. Wait a moment and try again. "
+        "(HTTP 429, ref r1)"
+    ]
+    assert "429 rate limit" not in _errors(events)[0]
     assert isinstance(events[-1], TurnComplete)
     assert _unmatched_tool_ids(hist) == []
 
@@ -365,12 +369,14 @@ async def test_fatal_errors_are_not_retried() -> None:
     runtime = ScriptedProvider([[RaiseStep(error=RuntimeError, message="boom")]])
     events = await _collect(runtime, FakeHistory())
     assert runtime.stream_calls == 1
-    assert _errors(events) == ["boom"]
+    assert _errors(events) == ["The request failed (RuntimeError). (ref r1)"]
+    assert "boom" not in _errors(events)[0]
 
     rejected = ScriptedProvider([[RaiseStep(error=_BadRequestError, message="invalid request")]])
     events = await _collect(rejected, FakeHistory())
     assert rejected.stream_calls == 1
-    assert _errors(events) == ["invalid request"]
+    assert _errors(events) == ["The model provider rejected the request. (HTTP 400, ref r1)"]
+    assert "invalid request" not in _errors(events)[0]
 
 
 @pytest.mark.asyncio
@@ -393,7 +399,11 @@ async def test_zero_retries_sends_the_call_once() -> None:
         ):
             events.append(evt)
     assert provider.stream_calls == 1
-    assert _errors(events) == ["429 rate limit"]
+    assert _errors(events) == [
+        "The model provider is rate-limiting requests. Wait a moment and try again. "
+        "(HTTP 429, ref r1)"
+    ]
+    assert "429 rate limit" not in _errors(events)[0]
 
 
 @pytest.mark.asyncio
@@ -448,8 +458,8 @@ async def test_a_stalled_stream_is_retried_once() -> None:
 
     assert provider.stream_calls == 2
     assert elapsed < 2
-    assert len(_errors(events)) == 1
-    assert "stalled" in _errors(events)[0]
+    assert _errors(events) == ["The model provider stopped responding. (ref r1)"]
+    assert "stalled" not in _errors(events)[0]
     assert isinstance(events[-1], TurnComplete)
     assert any(
         isinstance(evt, HarnessIntervention) and evt.intervention == "stream_stall"

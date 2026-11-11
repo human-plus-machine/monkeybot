@@ -1496,7 +1496,8 @@ async def test_run_provider_raises_wrapped_as_error() -> None:
     assert isinstance(events[0], Thinking)
     assert any(isinstance(e, SystemPromptSnapshot) for e in events)
     err = next(e for e in events if isinstance(e, Error))
-    assert "boom" in err.error
+    assert err.error == "The request failed (RuntimeError). (ref r1)"
+    assert "boom" not in err.error
     assert isinstance(events[-1], TurnComplete)
 
 
@@ -3929,5 +3930,5 @@ async def test_provider_failure_with_empty_message_still_reports_something() -> 
         )
     ]
     errors = [e.error for e in events if type(e).__name__ == "Error"]
-    assert errors == ["Provider request failed (TimeoutError)"]
+    assert errors == ["Lost the connection to the model provider. (ref r1)"]
     assert type(events[-1]).__name__ == "TurnComplete"

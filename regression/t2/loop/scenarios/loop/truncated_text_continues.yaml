@@ -1,0 +1,30 @@
+id: regression/t2/loop/scenarios/loop/truncated_text_continues
+case: T2-LOOP-50
+description: A text answer cut off at the output limit is continued, then finished.
+mode: scripted
+driver: loop
+messages:
+- write a long answer
+script:
+- - type: text
+    text: first half
+  - type: done
+    truncated: true
+- - type: text
+    text: second half
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  response_contains_all:
+  - first half
+  - second half
+  interventions:
+  - intervention: truncated_text
+    detail: continue
+  history:
+    roles:
+    - user
+    - assistant
+    - assistant

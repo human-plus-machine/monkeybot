@@ -44,6 +44,7 @@ from monkeybot.core.types.content_blocks import ContentBlock
 from monkeybot.core.verifier.binding import bind_verifier_session, reset_verifier_session
 
 from .context_budget import SUMMARY_TRIGGER_RATIO
+from .error_text import client_error_text
 from .events import AgentEvent, Error, TurnComplete
 from .input_admission import InputAdmission
 from .loop_hooks import _drain_hook_settlement
@@ -151,7 +152,7 @@ async def run(
             "harness turn failed %s",
             kv(request_id=ctx.request_id, thread_id=ctx.thread_id),
         )
-        terminal_error = str(exc)
+        terminal_error = client_error_text(exc, request_id=ctx.request_id)
     finally:
         try:
             await _drain_hook_settlement(hook_manager)

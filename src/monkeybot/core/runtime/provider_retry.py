@@ -215,7 +215,7 @@ def classify(exc: BaseException) -> Failure:
     connection. An exception this function does not recognise is fatal, so a
     bug fails once instead of being sent again.
     """
-    chain = _related(exc)
+    chain = related_exceptions(exc)
     retry_after = _retry_after_s(chain)
     if any(isinstance(item, StreamStalledError) for item in chain):
         return Failure(kind="stall", retry_after_s=retry_after)
@@ -258,7 +258,7 @@ def _parse_idle(raw: str) -> float | None:
         return _DEFAULT_IDLE_TIMEOUT_S
 
 
-def _related(exc: BaseException) -> tuple[BaseException, ...]:
+def related_exceptions(exc: BaseException) -> tuple[BaseException, ...]:
     """``exc`` and the exceptions it wraps, outermost first."""
     seen: set[int] = set()
     ordered: list[BaseException] = []
@@ -284,7 +284,7 @@ def _related(exc: BaseException) -> tuple[BaseException, ...]:
     return tuple(ordered)
 
 
-def _status_code(exc: BaseException) -> int | None:
+def status_code(exc: BaseException) -> int | None:
     for attr in ("status_code", "code"):
         value = getattr(exc, attr, None)
         if isinstance(value, int) and not isinstance(value, bool):
@@ -303,16 +303,16 @@ def _is_rate_limit(exc: BaseException) -> bool:
             is_rate_limit_error,
         )
     except ImportError:  # pragma: no cover - openai compat is part of the package
-        return _status_code(exc) == _RATE_LIMIT_STATUS
+        return status_code(exc) == _RATE_LIMIT_STATUS
     if isinstance(exc, ProviderRateLimitError):
         return True
     if is_rate_limit_error(exc):
         return True
-    return _status_code(exc) == _RATE_LIMIT_STATUS
+    return status_code(exc) == _RATE_LIMIT_STATUS
 
 
 def _is_server(exc: BaseException) -> bool:
-    status = _status_code(exc)
+    status = status_code(exc)
     if status is not None and status >= 500:
         return True
     try:
@@ -330,7 +330,7 @@ def _is_server(exc: BaseException) -> bool:
 def _is_connection(exc: BaseException) -> bool:
     if isinstance(exc, StreamStalledError):
         return False
-    status = _status_code(exc)
+    status = status_code(exc)
     if status in _CONNECTION_STATUS:
         return True
     if isinstance(exc, (ConnectionError, TimeoutError)):
