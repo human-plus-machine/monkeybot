@@ -57,6 +57,7 @@ from monkeybot.providers.rejected_sampling import (
 )
 from monkeybot.providers.request_budget import (
     RequestByteBudgetError,
+    request_bytes_sliced,
     trim_message_media_for_byte_budget,
 )
 from monkeybot.providers.sampling import REASONING_EFFORT_NONE
@@ -525,6 +526,21 @@ def openai_tools_token_count(encoding: Any, tools: list[dict[str, Any]]) -> int:
     return len(encoding.encode(json.dumps(tools, ensure_ascii=False, default=str)))
 
 
+def _count_tokens_sync(
+    encoding: Any,
+    oai_messages: list[dict[str, Any]],
+    tool_defs: list[dict[str, Any]],
+) -> int:
+    """Encode one request. Called from a worker thread.
+
+    tiktoken releases the GIL while it encodes, so the loop stays free for
+    other sessions. On the loop the same count holds it for the whole prompt.
+    """
+    return openai_messages_token_count(encoding, oai_messages) + openai_tools_token_count(
+        encoding, tool_defs
+    )
+
+
 async def count_openai_compat_input_tokens(
     encoding: Any,
     messages: Sequence[Message],
@@ -536,9 +552,7 @@ async def count_openai_compat_input_tokens(
     if system:
         oai_messages = [{"role": "system", "content": system}, *oai_messages]
     tool_defs = openai_tools(tools) if tools else []
-    return openai_messages_token_count(encoding, oai_messages) + openai_tools_token_count(
-        encoding, tool_defs
-    )
+    return await asyncio.to_thread(_count_tokens_sync, encoding, oai_messages, tool_defs)
 
 
 _STREAM_USAGE_OPTIONS: dict[str, bool] = {"include_usage": True}
@@ -1108,6 +1122,7 @@ async def count_input_tokens_tiktoken(
     none of these providers' token counts vary with reasoning configuration.
     """
     del thinking_budget
+    size = await request_bytes_sliced(messages, tools, count_file_data=False)
     msgs = trim_message_media_for_byte_budget(
         messages,
         tools,
@@ -1115,8 +1130,12 @@ async def count_input_tokens_tiktoken(
         provider=provider,
         raise_if_oversized=False,
         trim_files=False,
+        known_bytes=size,
     )
-    enc = tiktoken_encoding_for_model(model)
+    # An unknown model id shares the encoding loaded at import. A known id
+    # loads its file on first use, and a cold cache downloads it with a
+    # blocking request. Either way the lookup stays off the loop.
+    enc = await asyncio.to_thread(tiktoken_encoding_for_model, model)
     return await count_openai_compat_input_tokens(enc, msgs, tools, hints=hints)
 
 
@@ -1553,12 +1572,14 @@ async def stream_chat_completions_with_tool_fallback(
 
     msgs = list(messages)
     if max_request_bytes is not None and max_request_bytes > 0:
+        size = await request_bytes_sliced(msgs, tools, count_file_data=False)
         msgs = trim_message_media_for_byte_budget(
             msgs,
             tools,
             max_bytes=max_request_bytes,
             provider=provider,
             trim_files=False,
+            known_bytes=size,
         )
     system, oai_messages = await messages_to_openai(msgs, hints=hints)
     if system:

@@ -9,6 +9,7 @@ from collections.abc import Sequence
 
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.loop_yield import LoopYield
 from monkeybot.core.types.content_blocks import ContentBlock, File, Image, Text, ToolResponse
 from monkeybot.core.types.interfaces import LLMError
 from monkeybot.core.types.types_tools import ToolDef
@@ -117,22 +118,17 @@ def _json_list_bytes(item_sizes: Sequence[int]) -> int:
     return 2 + sum(item_sizes) + max(0, len(item_sizes) - 1)
 
 
-def _request_bytes(
-    messages: Sequence[Message],
-    tools: Sequence[ToolDef],
-    *,
-    count_file_data: bool = True,
-) -> int:
-    message_sizes = []
-    for message in messages:
-        envelope = _json_bytes({"role": message.role, "content": []})
-        # Metadata is deliberately included even though some provider converters
-        # omit it: this estimate is a conservative pre-conversion guard.
-        content_size = _json_list_bytes(
-            [_block_bytes(block, count_file_data=count_file_data) for block in message.content]
-        )
-        message_sizes.append(envelope - 2 + content_size)
-    tool_sizes = [_json_bytes(tool.to_model_schema()) for tool in tools]
+def _message_bytes(message: Message, *, count_file_data: bool) -> int:
+    envelope = _json_bytes({"role": message.role, "content": []})
+    # Metadata is deliberately included even though some provider converters
+    # omit it: this estimate is a conservative pre-conversion guard.
+    content_size = _json_list_bytes(
+        [_block_bytes(block, count_file_data=count_file_data) for block in message.content]
+    )
+    return envelope - 2 + content_size
+
+
+def _request_total(message_sizes: Sequence[int], tool_sizes: Sequence[int]) -> int:
     empty_payload = _json_bytes({"messages": [], "tools": []})
     return (
         _REQUEST_OVERHEAD_BYTES
@@ -143,6 +139,41 @@ def _request_bytes(
     )
 
 
+def _request_bytes(
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+    *,
+    count_file_data: bool = True,
+) -> int:
+    message_sizes = [
+        _message_bytes(message, count_file_data=count_file_data) for message in messages
+    ]
+    tool_sizes = [_json_bytes(tool.to_model_schema()) for tool in tools]
+    return _request_total(message_sizes, tool_sizes)
+
+
+async def request_bytes_sliced(
+    messages: Sequence[Message],
+    tools: Sequence[ToolDef],
+    *,
+    count_file_data: bool = True,
+) -> int:
+    """Same number as :func:`_request_bytes`, handing the loop back between messages.
+
+    Measuring serializes every block. At a full window that holds the loop for
+    the whole pass. The caller passes the result to
+    :func:`trim_message_media_for_byte_budget` as ``known_bytes`` so the trim
+    does not measure again.
+    """
+    pace = LoopYield()
+    message_sizes: list[int] = []
+    for message in messages:
+        message_sizes.append(_message_bytes(message, count_file_data=count_file_data))
+        await pace.tick()
+    tool_sizes = [_json_bytes(tool.to_model_schema()) for tool in tools]
+    return _request_total(message_sizes, tool_sizes)
+
+
 def trim_message_media_for_byte_budget(
     messages: Sequence[Message],
     tools: Sequence[ToolDef],
@@ -151,6 +182,7 @@ def trim_message_media_for_byte_budget(
     provider: str,
     raise_if_oversized: bool = True,
     trim_files: bool = True,
+    known_bytes: int | None = None,
 ) -> list[Message]:
     """Stub oldest media until a conservative provider-neutral request estimate fits.
 
@@ -164,10 +196,17 @@ def trim_message_media_for_byte_budget(
 
     OpenAI-compatible callers pass ``trim_files=False`` because their converter
     replaces files with bounded extracted text before constructing the request.
+
+    *known_bytes*, when set, is that estimate already measured (see
+    :func:`request_bytes_sliced`) with the same ``count_file_data`` as
+    *trim_files*. The trim then skips its own measuring pass.
     """
     if max_bytes is None:
         max_bytes = configured_request_byte_budget(provider=provider)
-    current = _request_bytes(messages, tools, count_file_data=trim_files)
+    if known_bytes is None:
+        current = _request_bytes(messages, tools, count_file_data=trim_files)
+    else:
+        current = known_bytes
     if current <= max_bytes:
         return list(messages)
 
@@ -234,5 +273,6 @@ def trim_message_media_for_byte_budget(
 __all__ = [
     "RequestByteBudgetError",
     "configured_request_byte_budget",
+    "request_bytes_sliced",
     "trim_message_media_for_byte_budget",
 ]

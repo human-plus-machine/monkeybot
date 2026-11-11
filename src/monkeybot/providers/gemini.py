@@ -20,6 +20,7 @@ from monkeybot.core.llm.provider import (
     UsageEvent,
 )
 from monkeybot.core.logging_utils import kv
+from monkeybot.core.loop_yield import LoopYield
 from monkeybot.core.types.content_blocks import (
     File,
     Image,
@@ -37,7 +38,10 @@ from monkeybot.providers.rejected_sampling import (
     remember_rejected_sampling,
     was_rejected,
 )
-from monkeybot.providers.request_budget import trim_message_media_for_byte_budget
+from monkeybot.providers.request_budget import (
+    request_bytes_sliced,
+    trim_message_media_for_byte_budget,
+)
 from monkeybot.providers.sampling import (
     REASONING_EFFORT_NONE,
     normalize_reasoning_effort,
@@ -402,6 +406,98 @@ def _signature_wire_bytes(sig: str) -> bytes:
         return sig.encode("utf-8")
 
 
+def _gemini_active_start(rest: Sequence[Message]) -> int | None:
+    """Index of the active tool loop, after rejecting an empty tool name.
+
+    ``None`` when ``rest`` is empty. A history with no user-text boundary is
+    treated as one active loop so signatures are still attached.
+    """
+    for message in rest:
+        if message.role != "user":
+            continue
+        for block in message.content:
+            if isinstance(block, ToolResponse) and not str(block.tool_name or "").strip():
+                raise LLMError(
+                    "Cannot replay tool result to Vertex: empty tool_name "
+                    f"(tool_call_id={block.id!r})."
+                )
+
+    active_start = _active_loop_start_index(rest)
+    # No clear user-text boundary (e.g. repaired tool-only history): treat the
+    # whole transcript as the active loop so we still attach signatures / synthetic.
+    if active_start is None and rest:
+        _log.debug(
+            "Gemini history has no user-loop boundary; treating full history as active loop %s",
+            kv(n_messages=len(rest)),
+        )
+        return 0
+    return active_start
+
+
+def _content_for_message(message: Message, *, in_active_loop: bool, types: Any) -> Any:
+    """One ``Content`` for ``message``.
+
+    ``in_active_loop`` decides whether thought signatures and thinking blocks
+    are attached. The synthetic signature, when needed, goes on this message's
+    first tool call only.
+    """
+    gemini_role = "user" if message.role == "user" else "model"
+    needs_synthetic_for_first_model_tool_call = in_active_loop and message.role != "user"
+    parts: list[Any] = []
+    for block in message.content:
+        if isinstance(block, Text):
+            parts.append(types.Part(text=block.text))
+        elif isinstance(block, (Image, File)):
+            parts.extend(_media_parts_from_blocks([block]))
+        elif isinstance(block, Thinking):
+            if not in_active_loop:
+                continue
+            kwargs: dict[str, Any] = {"text": block.thinking, "thought": True}
+            if block.signature:
+                kwargs["thought_signature"] = _signature_wire_bytes(block.signature)
+            parts.append(types.Part(**kwargs))
+        elif isinstance(block, RedactedThinking):
+            # Vertex has no redacted-thinking wire type. Drop so a
+            # credential-egress redaction does not fail the next Gemini turn
+            # (mirrors Bedrock Converse omitting RedactedThinking).
+            continue
+        elif isinstance(block, ToolRequest):
+            fc_kwargs: dict[str, Any] = {
+                "name": block.name,
+                "args": dict(block.args),
+                "id": block.id,
+            }
+            part_kwargs: dict[str, Any] = {
+                "function_call": types.FunctionCall(**fc_kwargs),
+            }
+            if in_active_loop:
+                sig = _signature_from_metadata(block.metadata)
+                if sig is None and needs_synthetic_for_first_model_tool_call:
+                    sig = SYNTHETIC_THOUGHT_SIGNATURE
+                if sig is not None:
+                    part_kwargs["thought_signature"] = _signature_wire_bytes(sig)
+            needs_synthetic_for_first_model_tool_call = False
+            parts.append(types.Part(**part_kwargs))
+        elif isinstance(block, ToolResponse):
+            parts.append(
+                types.Part(
+                    function_response=types.FunctionResponse(
+                        id=block.id or None,
+                        name=block.tool_name,
+                        response={"result": _flatten_tool_response_result(block)},
+                    )
+                )
+            )
+            parts.extend(_media_parts_from_blocks(block.result))
+        else:
+            raise LLMError(
+                f"Cannot replay message to Vertex Gemini: unsupported block {type(block).__name__}"
+            )
+    if not parts:
+        parts.append(types.Part(text=""))
+    return types.Content(role=gemini_role, parts=parts)
+
+
 def _messages_to_contents(rest: Sequence[Message]) -> list[Any]:
     """Build ``google.genai.types.Content`` list from harness messages (no system rows).
 
@@ -419,85 +515,29 @@ def _messages_to_contents(rest: Sequence[Message]) -> list[Any]:
     """
     from google.genai import types
 
-    for m in rest:
-        if m.role != "user":
-            continue
-        for block in m.content:
-            if isinstance(block, ToolResponse) and not str(block.tool_name or "").strip():
-                raise LLMError(
-                    "Cannot replay tool result to Vertex: empty tool_name "
-                    f"(tool_call_id={block.id!r})."
-                )
-
-    active_start = _active_loop_start_index(rest)
-    # No clear user-text boundary (e.g. repaired tool-only history): treat the
-    # whole transcript as the active loop so we still attach signatures / synthetic.
-    if active_start is None and rest:
-        _log.debug(
-            "Gemini history has no user-loop boundary; treating full history as active loop %s",
-            kv(n_messages=len(rest)),
-        )
-        active_start = 0
-
+    active_start = _gemini_active_start(rest)
     contents: list[Any] = []
-    for idx, m in enumerate(rest):
-        gemini_role = "user" if m.role == "user" else "model"
+    for idx, message in enumerate(rest):
         in_active_loop = active_start is not None and idx >= active_start
-        needs_synthetic_for_first_model_tool_call = in_active_loop and m.role != "user"
-        parts: list[Any] = []
-        for block in m.content:
-            if isinstance(block, Text):
-                parts.append(types.Part(text=block.text))
-            elif isinstance(block, (Image, File)):
-                parts.extend(_media_parts_from_blocks([block]))
-            elif isinstance(block, Thinking):
-                if not in_active_loop:
-                    continue
-                kwargs: dict[str, Any] = {"text": block.thinking, "thought": True}
-                if block.signature:
-                    kwargs["thought_signature"] = _signature_wire_bytes(block.signature)
-                parts.append(types.Part(**kwargs))
-            elif isinstance(block, RedactedThinking):
-                # Vertex has no redacted-thinking wire type. Drop so a
-                # credential-egress redaction does not fail the next Gemini turn
-                # (mirrors Bedrock Converse omitting RedactedThinking).
-                continue
-            elif isinstance(block, ToolRequest):
-                fc_kwargs: dict[str, Any] = {
-                    "name": block.name,
-                    "args": dict(block.args),
-                    "id": block.id,
-                }
-                part_kwargs: dict[str, Any] = {
-                    "function_call": types.FunctionCall(**fc_kwargs),
-                }
-                if in_active_loop:
-                    sig = _signature_from_metadata(block.metadata)
-                    if sig is None and needs_synthetic_for_first_model_tool_call:
-                        sig = SYNTHETIC_THOUGHT_SIGNATURE
-                    if sig is not None:
-                        part_kwargs["thought_signature"] = _signature_wire_bytes(sig)
-                needs_synthetic_for_first_model_tool_call = False
-                parts.append(types.Part(**part_kwargs))
-            elif isinstance(block, ToolResponse):
-                parts.append(
-                    types.Part(
-                        function_response=types.FunctionResponse(
-                            id=block.id or None,
-                            name=block.tool_name,
-                            response={"result": _flatten_tool_response_result(block)},
-                        )
-                    )
-                )
-                parts.extend(_media_parts_from_blocks(block.result))
-            else:
-                raise LLMError(
-                    "Cannot replay message to Vertex Gemini: unsupported block "
-                    f"{type(block).__name__}"
-                )
-        if not parts:
-            parts.append(types.Part(text=""))
-        contents.append(types.Content(role=gemini_role, parts=parts))
+        contents.append(_content_for_message(message, in_active_loop=in_active_loop, types=types))
+    return contents
+
+
+async def _messages_to_contents_sliced(rest: Sequence[Message]) -> list[Any]:
+    """Same contents as :func:`_messages_to_contents`, handing the loop back between messages.
+
+    Building one ``Content`` per message is pure Python and holds the GIL. At a
+    full window that stalls every other session for the whole conversion.
+    """
+    from google.genai import types
+
+    active_start = _gemini_active_start(rest)
+    pace = LoopYield()
+    contents: list[Any] = []
+    for idx, message in enumerate(rest):
+        in_active_loop = active_start is not None and idx >= active_start
+        contents.append(_content_for_message(message, in_active_loop=in_active_loop, types=types))
+        await pace.tick()
     return contents
 
 
@@ -742,14 +782,16 @@ class GeminiProvider:
                 "google-genai is required for GeminiProvider. Install with: uv sync (monkeybot dependencies)."
             ) from exc
 
+        size = await request_bytes_sliced(messages, tools)
         messages = trim_message_media_for_byte_budget(
             messages,
             tools,
             provider=self.name,
             raise_if_oversized=False,
+            known_bytes=size,
         )
         system_instruction, rest = _split_system_and_rest(messages)
-        contents = _messages_to_contents(rest)
+        contents = await _messages_to_contents_sliced(rest)
         # Developer API CountTokensConfig rejects system_instruction/tools/gen_cfg; fold system into contents.
         count_cfg_kwargs: dict[str, Any] = {}
         gen_cfg_kwargs: dict[str, Any] | None = None
@@ -869,9 +911,12 @@ class GeminiProvider:
             tools=tools,
         )
 
-        messages = trim_message_media_for_byte_budget(messages, tools, provider=self.name)
+        size = await request_bytes_sliced(messages, tools)
+        messages = trim_message_media_for_byte_budget(
+            messages, tools, provider=self.name, known_bytes=size
+        )
         system_instruction, rest = _split_system_and_rest(messages)
-        contents = _messages_to_contents(rest)
+        contents = await _messages_to_contents_sliced(rest)
 
         decls = _tool_defs_to_declarations(tools)
         stream_tools: list[Any] = []

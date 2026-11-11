@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
@@ -34,6 +35,7 @@ from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.rejected_sampling import omit_known_rejected
 from monkeybot.providers.request_budget import (
     configured_request_byte_budget,
+    request_bytes_sliced,
     trim_message_media_for_byte_budget,
 )
 from monkeybot.providers.sampling import REASONING_EFFORT_NONE, resolve_model_sampling
@@ -93,14 +95,19 @@ class OpenAIProvider:
         hints: ProviderCallHints | None = None,
     ) -> int:
         del thinking_budget
+        size = await request_bytes_sliced(messages, tools, count_file_data=False)
         msgs = trim_message_media_for_byte_budget(
             messages,
             tools,
             provider=self.name,
             raise_if_oversized=False,
             trim_files=False,
+            known_bytes=size,
         )
-        enc = tiktoken_encoding_for_model(model)
+        # An unknown model id shares the encoding loaded at import. A known id
+        # loads its file on first use, and a cold cache downloads it with a
+        # blocking request. Either way the lookup stays off the loop.
+        enc = await asyncio.to_thread(tiktoken_encoding_for_model, model)
         return await count_openai_compat_input_tokens(enc, msgs, tools, hints=hints)
 
     async def warm_connection(self) -> None:
@@ -118,12 +125,14 @@ class OpenAIProvider:
     ) -> AsyncIterator[ProviderEvent]:
         del thinking_budget
         max_request_bytes = configured_request_byte_budget(provider=self.name)
+        size = await request_bytes_sliced(messages, tools, count_file_data=False)
         msgs = trim_message_media_for_byte_budget(
             messages,
             tools,
             max_bytes=max_request_bytes,
             provider=self.name,
             trim_files=False,
+            known_bytes=size,
         )
 
         system, oai_messages = await messages_to_openai(msgs, hints=hints)
