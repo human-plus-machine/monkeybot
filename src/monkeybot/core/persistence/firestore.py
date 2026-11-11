@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -35,7 +36,8 @@ from monkeybot.core.memory.outbox import (
     backoff_iso,
     is_permanent_error,
 )
-from monkeybot.core.persistence.backends import FirestoreConfig
+from monkeybot.core.persistence.archive import archived_row, kept_row_ids, unmatched_indexes
+from monkeybot.core.persistence.backends import ArchivedRow, FirestoreConfig
 from monkeybot.core.persistence.branches import (
     BRANCH_COLUMNS,
     ROOT_BRANCH_ID,
@@ -95,6 +97,15 @@ def _stamp(raw: object) -> int | None:
     if raw is None:
         return None
     return _int_value(raw)
+
+
+def _archive_document_id(source_id: str) -> str:
+    """Stable id for the archive copy of one live document.
+
+    A retry of the same rewrite overwrites the copy instead of inserting a
+    second one. The id is a hash because a live document id can be long.
+    """
+    return hashlib.sha256(f"archive\0{source_id}".encode()).hexdigest()
 
 
 def _int_value(raw: object, default: int = 0) -> int:
@@ -212,6 +223,7 @@ class FirestoreHistoryStore:
         self._client = client
         self._prefix = prefix
         self._collection = _collection_name(prefix, "conversation_history")
+        self._archive_collection = _collection_name(prefix, "conversation_history_archive")
         self._threads_collection = _collection_name(prefix, "threads")
         self._agent_scope = agent_scope
         self._last_created_at = 0
@@ -596,6 +608,160 @@ class FirestoreHistoryStore:
                 else:
                     batch.delete(ref)
             await batch.commit()
+
+    async def reset_archiving(
+        self,
+        thread_id: str,
+        messages: list[Message],
+        *,
+        reason: str,
+        summary_row_id: str | None,
+    ) -> int:
+        """Copy dropped rows into the archive, then replace the thread.
+
+        The archive documents are committed before any live row is deleted, and
+        each document id is derived from the live document id. A crash can leave
+        a row in both places; a retry overwrites the copy instead of duplicating
+        it. The live rewrite itself is the existing ``reset``.
+        """
+        archived = await self._copy_unmatched_to_archive(
+            thread_id,
+            messages,
+            archive_id=uuid.uuid4().hex,
+            summary_row_id=summary_row_id,
+            reason=reason,
+            archived_at=int(time.time() * 1000),
+        )
+        await self.reset(thread_id, messages)
+        return archived
+
+    async def _copy_unmatched_to_archive(
+        self,
+        thread_id: str,
+        messages: list[Message],
+        *,
+        archive_id: str,
+        summary_row_id: str | None,
+        reason: str,
+        archived_at: int,
+    ) -> int:
+        query = (
+            self._client.collection(self._collection)
+            .where(filter=FieldFilter("thread_id", "==", thread_id))
+            .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
+            .order_by("created_at", direction=firestore.Query.ASCENDING)
+        )
+        docs = [doc async for doc in query.stream()]
+        stored_ids = [loaded_row_id((doc.to_dict() or {}).get("row_id"), doc.id) for doc in docs]
+        dropped = unmatched_indexes(stored_ids, kept_row_ids(messages))
+        if not dropped:
+            return 0
+        batch = self._client.batch()
+        pending = 0
+        for position in dropped:
+            doc = docs[position]
+            data = doc.to_dict() or {}
+            payload = {
+                "thread_id": thread_id,
+                "agent_scope": self._agent_scope,
+                "role": str(data.get("role") or ""),
+                "content": str(data.get("content") or ""),
+                "created_at": _int_value(data.get("created_at")),
+                "row_id": stored_ids[position],
+                "archive_id": archive_id,
+                "reason": reason,
+                "position": position,
+                "archived_at": archived_at,
+            }
+            turn_id = data.get("turn_id")
+            message_id = data.get("message_id")
+            if isinstance(turn_id, str):
+                payload["turn_id"] = turn_id
+            if isinstance(message_id, str):
+                payload["message_id"] = message_id
+            if summary_row_id is not None:
+                payload["summary_row_id"] = summary_row_id
+            batch.set(
+                self._client.collection(self._archive_collection).document(
+                    _archive_document_id(doc.id)
+                ),
+                payload,
+            )
+            pending += 1
+            if pending >= _FIRESTORE_BATCH_LIMIT:
+                await batch.commit()
+                batch = self._client.batch()
+                pending = 0
+        if pending:
+            await batch.commit()
+        return len(dropped)
+
+    async def load_archive(self, thread_id: str) -> list[ArchivedRow]:
+        """Archived rows for this scope and thread, oldest rewrite first.
+
+        Equality filters only, so this collection needs no composite index.
+        Order is applied here.
+        """
+        query = (
+            self._client.collection(self._archive_collection)
+            .where(filter=FieldFilter("thread_id", "==", thread_id))
+            .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
+        )
+        found: list[ArchivedRow] = []
+        async for doc in query.stream():
+            data = doc.to_dict() or {}
+            try:
+                found.append(
+                    archived_row(
+                        role=str(data.get("role") or ""),
+                        content_blob=str(data.get("content") or ""),
+                        row_id=str(data.get("row_id") or ""),
+                        created_at=_int_value(data.get("created_at")),
+                        turn_id=data.get("turn_id")
+                        if isinstance(data.get("turn_id"), str)
+                        else None,
+                        message_id=(
+                            data.get("message_id")
+                            if isinstance(data.get("message_id"), str)
+                            else None
+                        ),
+                        archive_id=str(data.get("archive_id") or ""),
+                        summary_row_id=(
+                            data.get("summary_row_id")
+                            if isinstance(data.get("summary_row_id"), str)
+                            else None
+                        ),
+                        reason=str(data.get("reason") or ""),
+                        position=_int_value(data.get("position")),
+                        archived_at=_int_value(data.get("archived_at")),
+                    )
+                )
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
+                raise ValueError(f"archive row {doc.id} unparseable: {exc}") from exc
+        found.sort(key=lambda row: (row.archived_at, row.archive_id, row.position))
+        return found
+
+    async def delete_archive(self, thread_id: str) -> int:
+        """Delete this scope's archived rows for ``thread_id``."""
+        query = (
+            self._client.collection(self._archive_collection)
+            .where(filter=FieldFilter("thread_id", "==", thread_id))
+            .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
+        )
+        batch = self._client.batch()
+        pending = 0
+        deleted = 0
+        async for doc in query.stream():
+            batch.delete(doc.reference)
+            pending += 1
+            deleted += 1
+            if pending >= _FIRESTORE_BATCH_LIMIT:
+                await batch.commit()
+                batch = self._client.batch()
+                pending = 0
+        if pending:
+            await batch.commit()
+        return deleted
 
     async def delete_rows(self, thread_id: str, row_ids: Collection[str]) -> int:
         """Delete the rows whose loaded ``row_id`` is in ``row_ids``, then refresh the summary.

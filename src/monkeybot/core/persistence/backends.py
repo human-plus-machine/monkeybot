@@ -28,6 +28,28 @@ if TYPE_CHECKING:
     from monkeybot.core.persistence.thread_summary import ChatThreadSummary
 
 
+@dataclass(frozen=True, slots=True)
+class ArchivedRow:
+    """A history row removed by compaction or the load-max truncation.
+
+    ``created_at``, ``turn_id``, and ``message_id`` are the values the live row
+    had when it was removed. ``archive_id`` is shared by every row of one
+    rewrite. ``summary_row_id`` is the summary that replaced the row, or
+    ``None`` when the rewrite was the load-max truncation. ``position`` is the
+    row's index in the thread before the rewrite.
+    """
+
+    message: Message
+    created_at: int
+    turn_id: str | None
+    message_id: str | None
+    archive_id: str
+    summary_row_id: str | None
+    reason: str
+    position: int
+    archived_at: int
+
+
 @runtime_checkable
 class HistoryStore(Protocol):
     """Protocol for conversation history persistence."""
@@ -44,6 +66,30 @@ class HistoryStore(Protocol):
     ) -> None: ...
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None: ...
+
+    async def reset_archiving(
+        self,
+        thread_id: str,
+        messages: list[Message],
+        *,
+        reason: str,
+        summary_row_id: str | None,
+    ) -> int:
+        """Replace the thread, copying rows that do not survive into the archive.
+
+        Returns how many rows were archived. A stored row is dropped when its
+        loaded ``row_id`` has no remaining match among ``messages``, counted
+        per id, so one kept copy of a duplicated id still archives the other.
+        """
+        ...
+
+    async def load_archive(self, thread_id: str) -> list[ArchivedRow]:
+        """Archived rows for this thread, oldest rewrite first, then position."""
+        ...
+
+    async def delete_archive(self, thread_id: str) -> int:
+        """Delete this thread's archived rows. Returns how many were deleted."""
+        ...
 
     async def delete_rows(self, thread_id: str, row_ids: Collection[str]) -> int:
         """Delete the rows whose loaded ``row_id`` is in ``row_ids``; return the count."""

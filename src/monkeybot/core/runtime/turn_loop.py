@@ -105,6 +105,7 @@ from .history_compaction import (
     _workspace_trailer_from_ctx,
     bind_summary_transcript,
     protect_recent_count,
+    replace_history_archiving,
     reset_summary_transcript,
     truncate_history_preserving_pins,
 )
@@ -1017,7 +1018,12 @@ async def _apply_history_load_max_safety(
             dropped=dropped,
         ),
     )
-    await history.reset(state.ctx.thread_id, truncated)
+    await replace_history_archiving(
+        history,
+        state.ctx.thread_id,
+        truncated,
+        reason="load_max",
+    )
     yield HarnessIntervention(
         request_id=state.ctx.request_id,
         intervention="compaction_fallback",

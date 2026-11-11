@@ -10,6 +10,7 @@ import asyncio
 import sqlite3
 import time
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -812,3 +813,73 @@ async def test_reset_keeps_row_metadata(open_backend: Any) -> None:
     assert all(row["message_id"] is None for row in await _history_meta(backend, copy))
     await history.append(thread, Message.text("user", "head"), message_id=message_ids[0])
     assert len(await history.load(thread)) == 4
+
+
+@pytest.mark.case("T1-STORE-18")
+async def test_compaction_archive_keeps_dropped_rows(open_backend: Any) -> None:
+    scope_a = await open_backend(agent_scope="scope-a")
+    scope_b = await open_backend(agent_scope="scope-b")
+    history = scope_a.history()
+    thread = _id("thread")
+    for index in range(6):
+        await history.append(
+            thread,
+            Message.text("user" if index % 2 == 0 else "assistant", f"m{index}"),
+            turn_id=f"turn-{index}",
+            message_id=f"msg-{thread}-{index}",
+        )
+    loaded = await history.load(thread)
+    await asyncio.sleep(0.05)
+    cutoff = int(time.time() * 1000)
+    summary = replace(
+        Message.text("assistant", f"{CONTEXT_SUMMARY_PREFIX} first"),
+        row_id="sum-1",
+    )
+    kept = [loaded[0], loaded[1], summary, loaded[4], loaded[5]]
+    assert (
+        await history.reset_archiving(thread, kept, reason="compaction", summary_row_id="sum-1")
+        == 2
+    )
+    archived = await history.load_archive(thread)
+    assert [row.message.row_id for row in archived] == [loaded[2].row_id, loaded[3].row_id]
+    assert [row.position for row in archived] == [2, 3]
+    assert [row.turn_id for row in archived] == ["turn-2", "turn-3"]
+    assert [row.message_id for row in archived] == [f"msg-{thread}-2", f"msg-{thread}-3"]
+    assert all(row.created_at < cutoff <= row.archived_at for row in archived)
+    assert all(row.summary_row_id == "sum-1" and row.reason == "compaction" for row in archived)
+    assert len({row.archive_id for row in archived}) == 1
+    live = await history.load(thread)
+    assert [message.row_id for message in live] == [
+        loaded[0].row_id,
+        loaded[1].row_id,
+        "sum-1",
+        loaded[4].row_id,
+        loaded[5].row_id,
+    ]
+
+    await asyncio.sleep(0.05)
+    summary_2 = replace(
+        Message.text("assistant", f"{CONTEXT_SUMMARY_PREFIX} second"),
+        row_id="sum-2",
+    )
+    kept_2 = [live[0], live[1], summary_2, live[3], live[4]]
+    assert (
+        await history.reset_archiving(thread, kept_2, reason="compaction", summary_row_id="sum-2")
+        == 1
+    )
+    chained = await history.load_archive(thread)
+    assert [row.message.row_id for row in chained] == [
+        loaded[2].row_id,
+        loaded[3].row_id,
+        "sum-1",
+    ]
+    assert chained[-1].summary_row_id == "sum-2"
+    assert chained[-1].position == 2
+    assert {row.summary_row_id for row in chained[:2]} == {"sum-1"}
+
+    other = scope_b.history()
+    assert await other.load_archive(thread) == []
+    assert await other.delete_archive(thread) == 0
+    assert len(await history.load_archive(thread)) == 3
+    assert await history.delete_archive(thread) == 3
+    assert await history.load_archive(thread) == []

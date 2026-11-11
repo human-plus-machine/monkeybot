@@ -1,4 +1,8 @@
-"""Apply the monkeybot SQLite schema the same way startup does."""
+"""Apply the monkeybot SQLite schema the same way startup does.
+
+The statements live in ``sqlite.SCHEMA_DDLS``, including
+``conversation_history_archive``.
+"""
 
 from __future__ import annotations
 
