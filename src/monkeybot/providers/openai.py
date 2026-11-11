@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
@@ -99,7 +100,10 @@ class OpenAIProvider:
             raise_if_oversized=False,
             trim_files=False,
         )
-        enc = tiktoken_encoding_for_model(model)
+        # An unknown model id shares the encoding loaded at import. A known id
+        # loads its file on first use, and a cold cache downloads it with a
+        # blocking request. Either way the lookup stays off the loop.
+        enc = await asyncio.to_thread(tiktoken_encoding_for_model, model)
         return await count_openai_compat_input_tokens(enc, msgs, tools, hints=hints)
 
     async def warm_connection(self) -> None:

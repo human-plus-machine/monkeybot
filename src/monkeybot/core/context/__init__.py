@@ -1216,6 +1216,15 @@ def _load_agent_md(agent_md_path: Path) -> str:
     return content
 
 
+def _load_agent_and_skills(agent_md_path: Path, skills_path: Path) -> tuple[str, list[SkillRef]]:
+    """Read AGENT.md and the skill folders. Called from a worker thread.
+
+    Both are disk reads, and a slow or network filesystem has no upper bound.
+    One hop covers both, and an empty AGENT.md still raises before anything else.
+    """
+    return _load_agent_md(agent_md_path), _discover_skills(skills_path)
+
+
 def _coding_project_context(workspace_root: Path, names: Sequence[str]) -> tuple[str, str]:
     return load_project_instructions(workspace_root, names), repo_overview(workspace_root)
 
@@ -1309,9 +1318,8 @@ async def build_context(
     Raises:
         ValueError: When AGENT.md is missing or empty after normalization.
     """
-    agent_md = _load_agent_md(agent_md_path)
+    agent_md, skills = await asyncio.to_thread(_load_agent_and_skills, agent_md_path, skills_path)
     memory_index = await memory.load_index(thread_id=thread_id) if memory is not None else []
-    skills = _discover_skills(skills_path)
     if skill_names is not None:
         allowed = {name for name in skill_names if name}
         skills = [skill for skill in skills if skill.name in allowed]
