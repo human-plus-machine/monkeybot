@@ -47,6 +47,12 @@ from monkeybot.core.persistence.durable_runs import (
 )
 from monkeybot.core.persistence.errors import AmbiguousCommitError
 from monkeybot.core.persistence.row_ids import loaded_row_id, row_id_for_insert, split_row_ids
+from monkeybot.core.persistence.row_meta import (
+    RowMeta,
+    carry_created_at,
+    match_stored,
+    stored_text,
+)
 from monkeybot.core.persistence.scheduled_loops import (
     _SCHEDULED_LOOP_COLUMNS,
     GOAL_MAX_CONSECUTIVE_ERRORS,
@@ -370,11 +376,15 @@ class PostgresHistoryStore:
         *,
         turn_id: str | None = None,
         message_id: str | None = None,
+        created_at: int | None = None,
+        strict: bool = False,
     ) -> None:
         role = message.role
         if role not in _VALID_ROLES:
             raise ValueError(f"invalid role: {role!r}")
-        if message_id:
+        # A rewrite re-inserts ids it just deleted. Skipping the dedupe check
+        # lets a unique collision abort the transaction instead of dropping the row.
+        if message_id and not strict:
             existing = await conn.fetchval(
                 "SELECT 1 FROM conversation_history WHERE message_id = $1 LIMIT 1",
                 message_id,
@@ -386,7 +396,8 @@ class PostgresHistoryStore:
             separators=(",", ":"),
             ensure_ascii=False,
         )
-        created_at = int(time.time() * 1000)
+        if created_at is None:
+            created_at = int(time.time() * 1000)
         await conn.execute(
             """
             INSERT INTO conversation_history(
@@ -502,15 +513,51 @@ class PostgresHistoryStore:
             )
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
-        """Replace thread history atomically (single transaction)."""
+        """Replace thread history atomically (single transaction).
+
+        A row whose ``row_id`` is already stored keeps that row's ``created_at``,
+        ``turn_id``, and ``message_id``.
+        """
+        now_ms = int(time.time() * 1000)
         async with self._pool.acquire() as conn, conn.transaction():
-            await conn.execute(
-                "DELETE FROM conversation_history WHERE thread_id = $1 AND agent_scope = $2",
+            deleted = await conn.fetch(
+                """
+                DELETE FROM conversation_history
+                WHERE thread_id = $1 AND agent_scope = $2
+                RETURNING id, row_id, created_at, turn_id, message_id
+                """,
                 thread_id,
                 self._agent_scope,
             )
-            for msg in messages:
-                await self._insert_message(conn, thread_id, msg)
+            deleted = sorted(deleted, key=lambda row: (int(row["created_at"]), int(row["id"])))
+            stored: list[tuple[str, RowMeta]] = [
+                (
+                    loaded_row_id(row["row_id"], row["id"]),
+                    RowMeta(
+                        created_at=int(row["created_at"]),
+                        turn_id=stored_text(row["turn_id"]),
+                        message_id=stored_text(row["message_id"]),
+                    ),
+                )
+                for row in deleted
+            ]
+            matched = match_stored(messages, stored)
+            stamps = carry_created_at(
+                [stored[index][1].created_at if index is not None else None for index in matched],
+                now_ms=now_ms,
+                step=0,
+            )
+            for message, index, created_at in zip(messages, matched, stamps, strict=True):
+                meta = stored[index][1] if index is not None else None
+                await self._insert_message(
+                    conn,
+                    thread_id,
+                    message,
+                    turn_id=meta.turn_id if meta is not None else None,
+                    message_id=meta.message_id if meta is not None else None,
+                    created_at=created_at,
+                    strict=True,
+                )
 
     async def delete_rows(self, thread_id: str, row_ids: Collection[str]) -> int:
         """Delete the rows whose loaded ``row_id`` is in ``row_ids`` in one statement."""

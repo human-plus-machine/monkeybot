@@ -50,6 +50,12 @@ from monkeybot.core.persistence.durable_runs import (
 from monkeybot.core.persistence.errors import AmbiguousCommitError
 from monkeybot.core.persistence.firestore_scheduled_loops import FirestoreScheduledLoopStore
 from monkeybot.core.persistence.row_ids import loaded_row_id, row_id_for_insert
+from monkeybot.core.persistence.row_meta import (
+    RowMeta,
+    carry_created_at,
+    match_stored,
+    stored_text,
+)
 from monkeybot.core.persistence.scheduled_loops import resolve_now_ms
 from monkeybot.core.persistence.thread_summary import (
     ChatThreadSummary,
@@ -82,6 +88,13 @@ def _memory_outbox_collection(client: AsyncClient, prefix: str) -> Any:
 def _history_document_id(message_id: str) -> str:
     """Stable Firestore document ID for idempotent message delivery."""
     return "message_" + hashlib.sha256(message_id.encode()).hexdigest()
+
+
+def _stamp(raw: object) -> int | None:
+    """A stored ``created_at``, or None when the field is missing."""
+    if raw is None:
+        return None
+    return _int_value(raw)
 
 
 def _int_value(raw: object, default: int = 0) -> int:
@@ -479,25 +492,110 @@ class FirestoreHistoryStore:
         return int(counted[0][0].value), content
 
     async def reset(self, thread_id: str, messages: list[Message]) -> None:
+        """Replace the thread, keeping metadata on rows whose ``row_id`` is stored.
+
+        Matched documents stay in place, so their id, ``turn_id``, and
+        ``message_id`` survive. New rows are written, and unmatched documents
+        deleted, in batches of ``_FIRESTORE_BATCH_LIMIT``. Every set and update
+        commits before any delete, so a crash leaves extra old rows rather than
+        a missing survivor. Up to one batch, the write is atomic.
+        """
         query = (
             self._client.collection(self._collection)
             .where(filter=FieldFilter("thread_id", "==", thread_id))
             .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
+            .order_by("created_at", direction=firestore.Query.ASCENDING)
         )
-        batch = self._client.batch()
-        count = 0
-        async for doc in query.stream():
-            batch.delete(doc.reference)
-            count += 1
-            if count >= 400:
-                await batch.commit()
-                batch = self._client.batch()
-                count = 0
-        if count:
+        stored_docs = [doc async for doc in query.stream()]
+        stored: list[tuple[str, RowMeta]] = []
+        for doc in stored_docs:
+            data = doc.to_dict() or {}
+            stored.append(
+                (
+                    loaded_row_id(data.get("row_id"), doc.id),
+                    RowMeta(
+                        created_at=_stamp(data.get("created_at")),
+                        turn_id=stored_text(data.get("turn_id")),
+                        message_id=stored_text(data.get("message_id")),
+                    ),
+                )
+            )
+        matched = match_stored(messages, stored)
+        now_ms = int(time.time() * 1000)
+        stamps = carry_created_at(
+            [stored[index][1].created_at if index is not None else None for index in matched],
+            now_ms=now_ms,
+            step=1,
+        )
+        if stamps:
+            self._last_created_at = max(self._last_created_at, stamps[-1])
+
+        history = self._client.collection(self._collection)
+        mutations: list[tuple[str, Any, dict[str, Any] | None]] = []
+        summary_rows: list[dict[str, Any]] = []
+        for message, index, created_at in zip(messages, matched, stamps, strict=True):
+            payload = json.dumps(
+                [block.to_dict() for block in message.content],
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            summary_rows.append({"created_at": created_at, "content": payload})
+            if index is None:
+                mutations.append(
+                    (
+                        "set",
+                        history.document(),
+                        _history_row(
+                            thread_id,
+                            message.role,
+                            payload,
+                            created_at,
+                            self._agent_scope,
+                            None,
+                            None,
+                            row_id_for_insert(message),
+                        ),
+                    )
+                )
+                continue
+            data = stored_docs[index].to_dict() or {}
+            updates: dict[str, Any] = {}
+            if str(data.get("role") or "") != message.role:
+                updates["role"] = message.role
+            if str(data.get("content") or "") != payload:
+                updates["content"] = payload
+            if _stamp(data.get("created_at")) != created_at:
+                updates["created_at"] = created_at
+            if not stored_text(data.get("row_id")):
+                updates["row_id"] = row_id_for_insert(message)
+            if updates:
+                mutations.append(("update", stored_docs[index].reference, updates))
+
+        used = {index for index in matched if index is not None}
+        deletions: list[tuple[str, Any, dict[str, Any] | None]] = [
+            ("delete", doc.reference, None)
+            for index, doc in enumerate(stored_docs)
+            if index not in used
+        ]
+        await self._commit_writes(mutations)
+        await self._commit_writes(deletions)
+        if not messages or is_hidden_thread_id(thread_id):
+            await self._delete_thread_summary(thread_id)
+        else:
+            await self._refresh_thread_summary(thread_id, summary_rows)
+
+    async def _commit_writes(self, ops: list[tuple[str, Any, dict[str, Any] | None]]) -> None:
+        """Commit ``ops`` in order, one batch per ``_FIRESTORE_BATCH_LIMIT`` writes."""
+        for start in range(0, len(ops), _FIRESTORE_BATCH_LIMIT):
+            batch = self._client.batch()
+            for op, ref, payload in ops[start : start + _FIRESTORE_BATCH_LIMIT]:
+                if op == "set":
+                    batch.set(ref, payload or {})
+                elif op == "update":
+                    batch.update(ref, payload or {})
+                else:
+                    batch.delete(ref)
             await batch.commit()
-        await self._delete_thread_summary(thread_id)
-        for msg in messages:
-            await self.append(thread_id, msg)
 
     async def delete_rows(self, thread_id: str, row_ids: Collection[str]) -> int:
         """Delete the rows whose loaded ``row_id`` is in ``row_ids``, then refresh the summary.

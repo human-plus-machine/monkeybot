@@ -603,3 +603,212 @@ async def test_request_history_snapshot_matches_load(open_backend: Any) -> None:
     assert _row_sig(reset) == _row_sig(await history.load(thread))
     assert [block.text for message in reset for block in message.content] == ["kept", "tail"]
     assert counted.loads == 1
+
+
+async def _history_meta(backend: Any, thread_id: str) -> list[dict[str, Any]]:
+    """``created_at``, ``turn_id``, and ``message_id`` in load order."""
+    scope = backend._agent_scope
+    conn = getattr(backend, "_conn", None)
+    if conn is not None:
+        cursor = await conn.execute(
+            """
+            SELECT created_at, turn_id, message_id
+            FROM conversation_history
+            WHERE thread_id = ? AND agent_scope = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (thread_id, scope),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [
+            {"created_at": int(row[0]), "turn_id": row[1], "message_id": row[2]} for row in rows
+        ]
+    pool = getattr(backend, "_pool", None)
+    if pool is not None:
+        fetched = await pool.fetch(
+            """
+            SELECT created_at, turn_id, message_id
+            FROM conversation_history
+            WHERE thread_id = $1 AND agent_scope = $2
+            ORDER BY created_at ASC, id ASC
+            """,
+            thread_id,
+            scope,
+        )
+        return [
+            {
+                "created_at": int(row["created_at"]),
+                "turn_id": row["turn_id"],
+                "message_id": row["message_id"],
+            }
+            for row in fetched
+        ]
+    history = backend.history()
+    from google.cloud.firestore_v1.base_query import FieldFilter
+
+    query = (
+        history._client.collection(history._collection)
+        .where(filter=FieldFilter("thread_id", "==", thread_id))
+        .where(filter=FieldFilter("agent_scope", "==", history._agent_scope))
+        .order_by("created_at")
+    )
+    out: list[dict[str, Any]] = []
+    async for doc in query.stream():
+        data = doc.to_dict() or {}
+        out.append(
+            {
+                "created_at": int(data.get("created_at") or 0),
+                "turn_id": data.get("turn_id"),
+                "message_id": data.get("message_id"),
+            }
+        )
+    return out
+
+
+async def _stamp_history(
+    backend: Any,
+    thread_id: str,
+    specs: list[tuple[int, str, str]],
+) -> None:
+    """Set ``created_at``, ``turn_id``, and ``message_id`` on the thread's rows, in order."""
+    scope = backend._agent_scope
+    conn = getattr(backend, "_conn", None)
+    if conn is not None:
+        cursor = await conn.execute(
+            """
+            SELECT id FROM conversation_history
+            WHERE thread_id = ? AND agent_scope = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (thread_id, scope),
+        )
+        ids = [row[0] for row in await cursor.fetchall()]
+        await cursor.close()
+        assert len(ids) == len(specs)
+        for db_id, (created_at, turn_id, message_id) in zip(ids, specs, strict=True):
+            await conn.execute(
+                """
+                UPDATE conversation_history
+                SET created_at = ?, turn_id = ?, message_id = ?
+                WHERE id = ?
+                """,
+                (created_at, turn_id, message_id, db_id),
+            )
+        await conn.commit()
+        return
+    pool = getattr(backend, "_pool", None)
+    if pool is not None:
+        fetched = await pool.fetch(
+            """
+            SELECT id FROM conversation_history
+            WHERE thread_id = $1 AND agent_scope = $2
+            ORDER BY created_at ASC, id ASC
+            """,
+            thread_id,
+            scope,
+        )
+        assert len(fetched) == len(specs)
+        for row, (created_at, turn_id, message_id) in zip(fetched, specs, strict=True):
+            await pool.execute(
+                """
+                UPDATE conversation_history
+                SET created_at = $1, turn_id = $2, message_id = $3
+                WHERE id = $4
+                """,
+                created_at,
+                turn_id,
+                message_id,
+                row["id"],
+            )
+        return
+    history = backend.history()
+    from google.cloud.firestore_v1.base_query import FieldFilter
+
+    query = (
+        history._client.collection(history._collection)
+        .where(filter=FieldFilter("thread_id", "==", thread_id))
+        .where(filter=FieldFilter("agent_scope", "==", history._agent_scope))
+        .order_by("created_at")
+    )
+    docs = [doc async for doc in query.stream()]
+    assert len(docs) == len(specs)
+    for doc, (created_at, turn_id, message_id) in zip(docs, specs, strict=True):
+        await doc.reference.update(
+            {"created_at": created_at, "turn_id": turn_id, "message_id": message_id}
+        )
+    await (
+        history._client.collection(history._threads_collection)
+        .document(history._summary_doc_id(thread_id))
+        .set({"last_message_at": specs[-1][0]}, merge=True)
+    )
+
+
+@pytest.mark.case("T1-STORE-17")
+async def test_reset_keeps_row_metadata(open_backend: Any) -> None:
+    backend = await open_backend(agent_scope="scope-a")
+    history = backend.history()
+    thread = _id("thread")
+    roles = ("user", "assistant", "user", "assistant")
+    texts = ("head", "middle", "tail-a", "tail-b")
+    for role, text in zip(roles, texts, strict=True):
+        await history.append(thread, Message.text(role, text))
+    message_ids = [_id("msg") for _ in texts]
+    specs = [
+        (1_000, "turn-a", message_ids[0]),
+        (2_000, "turn-a", message_ids[1]),
+        (3_000, "turn-b", message_ids[2]),
+        (4_000, "turn-b", message_ids[3]),
+    ]
+    await _stamp_history(backend, thread, specs)
+    listed = await history.list_threads()
+    before = next(item for item in listed if item.thread_id == thread)
+    assert before.last_message_at == 4_000
+
+    loaded = await history.load(thread)
+    await history.reset(
+        thread,
+        [
+            loaded[0],
+            Message.text("assistant", "summary"),
+            loaded[2],
+            loaded[3],
+        ],
+    )
+    meta = await _history_meta(backend, thread)
+    kept = await history.load(thread)
+    assert [block.text for message in kept for block in message.content] == [
+        "head",
+        "summary",
+        "tail-a",
+        "tail-b",
+    ]
+    assert [row["created_at"] for row in meta] == [1_000, meta[1]["created_at"], 3_000, 4_000]
+    assert 1_000 <= meta[1]["created_at"] <= 3_000
+    assert meta[0]["turn_id"] == "turn-a" and meta[0]["message_id"] == message_ids[0]
+    assert meta[1]["turn_id"] is None and meta[1]["message_id"] is None
+    assert meta[2]["turn_id"] == "turn-b" and meta[2]["message_id"] == message_ids[2]
+    assert meta[3]["turn_id"] == "turn-b" and meta[3]["message_id"] == message_ids[3]
+    assert [message.row_id for message in kept[:1] + kept[2:]] == [
+        loaded[0].row_id,
+        loaded[2].row_id,
+        loaded[3].row_id,
+    ]
+    after = next(item for item in await history.list_threads() if item.thread_id == thread)
+    assert after.last_message_at == before.last_message_at
+
+    await history.append(thread, Message.text("user", "head"), message_id=message_ids[0])
+    assert len(await history.load(thread)) == 4
+
+    copy = _id("copy")
+    await history.reset(copy, await history.load(thread))
+    copied = await history.load(copy)
+    assert [block.text for message in copied for block in message.content] == [
+        "head",
+        "summary",
+        "tail-a",
+        "tail-b",
+    ]
+    assert all(row["message_id"] is None for row in await _history_meta(backend, copy))
+    await history.append(thread, Message.text("user", "head"), message_id=message_ids[0])
+    assert len(await history.load(thread)) == 4

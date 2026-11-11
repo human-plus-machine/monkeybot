@@ -6,6 +6,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `history.reset` keeps `created_at`, `turn_id`, and `message_id` on the rows it rewrites. A compacted thread stays where it was in the chat list, and retrying a message does not insert a duplicate. On Firestore the new rows are written before the old ones are deleted.
+
 ### Changed
 
 - History summarization and chat titles use `model.name`. `model.summarization_model` is ignored, and `CONTEXT_SUMMARIZATION_MODEL` is no longer read.
