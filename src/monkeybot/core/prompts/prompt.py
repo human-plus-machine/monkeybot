@@ -297,9 +297,11 @@ def _todo_list_section(ctx: TurnContext) -> str:
 
 
 def _harness_text(ctx: TurnContext) -> str:
-    include_task = any(t.name == "task" for t in ctx.tools)
+    names = {tool.name for tool in ctx.tools}
+    include_task = "task" in names
     return harness_fixed_context(
         include_task_tool=include_task,
+        include_enable_loops="enable_loops" in names,
         memory_on=ctx.memory is not None,
         workspace_root=str(ctx.workspace_root) if ctx.workspace_root is not None else "(not set)",
         memory_storage_uri=ctx.memory.uri if ctx.memory is not None else "(not set)",

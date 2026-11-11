@@ -445,6 +445,8 @@ async def _async_main() -> None:
             parent_run_id=envelope.parent_run_id,
             model=envelope.model,
             include_task_tool=False,
+            include_ask_user=False,
+            include_enable_loops=False,
             workspace_root=ws,
             context_window_tokens=window_tokens,
             extra_tools=extra_tools,

@@ -26,7 +26,6 @@ This block is injected by the host every turn. Prefer the **active JSON tool lis
 ### MCP
 - Names look like `server__tool` (double underscore). Do not read or search for MCP config files.
 - MCP errors are plain text (not structured JSON). HTTP 4xx/5xx, "not found", "unauthorized", "forbidden", or similar means the tool **did not return usable data** — state what failed; do not fabricate content.
-- Call `enable_loops` before scheduled-loop tools appear.
 - `/goal` uses `create_goal` / `update_goal`. Recurring "every …" work uses `/loop`.
 
 ### Skills

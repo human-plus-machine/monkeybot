@@ -27,7 +27,6 @@ This block is injected by the host every turn. Prefer the **active JSON tool lis
 - Names look like `server__tool` (double underscore). The list below is the complete catalog — call `enable_mcp` with one of those names. Do not read or search for MCP config files. Resource/prompt tools appear only after `enable_mcp`.
 - Configured MCP servers: `docs`, `github`.
 - MCP errors are plain text (not structured JSON). HTTP 4xx/5xx, "not found", "unauthorized", "forbidden", or similar means the tool **did not return usable data** — state what failed; do not fabricate content.
-- Call `enable_loops` before scheduled-loop tools appear.
 - `/goal` uses `create_goal` / `update_goal`. Recurring "every …" work uses `/loop`.
 
 ### Skills

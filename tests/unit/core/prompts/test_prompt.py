@@ -474,6 +474,17 @@ def test_background_tasks_section_is_capped() -> None:
     )
 
 
+def test_harness_mentions_enable_loops_only_when_the_tool_is_advertised() -> None:
+    with_tool = _minimal_ctx(
+        tools=[ToolDef("enable_loops", "Advertise scheduled loops.", {"type": "object"})]
+    )
+    without = _minimal_ctx(tools=[ToolDef("run_command", "Run a command.", {"type": "object"})])
+    assert "Call `enable_loops` before scheduled-loop tools appear." in compose_system_prompt(
+        with_tool
+    )
+    assert "enable_loops" not in compose_system_prompt(without)
+
+
 def test_stable_parts_join_equals_the_baseline() -> None:
     ctx = replace(
         _minimal_ctx(),
