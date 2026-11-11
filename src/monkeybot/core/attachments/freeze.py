@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 
+from monkeybot.core.attachments.config import IMAGE_MIME_TYPES
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.persistence.backends import HistoryStore
 from monkeybot.core.runtime.events import AttachmentDescriptorEvent
@@ -76,6 +77,36 @@ def _freeze_user_row(
     return replace(msg, content=new_content)
 
 
+def _is_tool_media(block: ContentBlock) -> bool:
+    return isinstance(block, (Image, File, AttachmentRef))
+
+
+def _is_image_media(block: ContentBlock) -> bool:
+    if isinstance(block, Image):
+        return True
+    return isinstance(block, AttachmentRef) and block.mime_type in IMAGE_MIME_TYPES
+
+
+def _is_pdf_media(block: ContentBlock) -> bool:
+    return isinstance(block, (File, AttachmentRef)) and block.mime_type == "application/pdf"
+
+
+def _media_locator(block: ContentBlock) -> tuple[str | None, str | None]:
+    """``(attachment_id, path)`` carried by a tool image, file, or reference."""
+    if isinstance(block, AttachmentRef):
+        attachment_id = block.attachment_id.strip() or None
+        meta = block.metadata or {}
+    elif isinstance(block, (Image, File)):
+        meta = block.metadata or {}
+        raw_id = meta.get("attachment_id")
+        attachment_id = raw_id.strip() if isinstance(raw_id, str) and raw_id.strip() else None
+    else:
+        return None, None
+    raw_path = meta.get("path")
+    path = raw_path.strip() if isinstance(raw_path, str) and raw_path.strip() else None
+    return attachment_id, path
+
+
 def _freeze_tool_responses(msg: Message) -> Message:
     new_content: list[ContentBlock] = []
     changed = False
@@ -83,26 +114,22 @@ def _freeze_tool_responses(msg: Message) -> Message:
         if not isinstance(block, ToolResponse):
             new_content.append(block)
             continue
-        if not any(isinstance(b, (Image, File)) for b in block.result):
+        if not any(_is_tool_media(b) for b in block.result):
             new_content.append(block)
             continue
-        kind = "image" if any(isinstance(b, Image) for b in block.result) else "file"
-        if any(isinstance(b, File) and b.mime_type == "application/pdf" for b in block.result):
+        # A pdf wins over an image when one result holds both, matching the
+        # previous order: image first, then a pdf overwrites the kind.
+        kind = "image" if any(_is_image_media(b) for b in block.result) else "file"
+        if any(_is_pdf_media(b) for b in block.result):
             kind = "pdf"
         attachment_id: str | None = None
         path: str | None = None
         for b in block.result:
-            if not isinstance(b, (Image, File)):
-                continue
-            meta = b.metadata or {}
+            found_id, found_path = _media_locator(b)
             if attachment_id is None:
-                att_raw = meta.get("attachment_id")
-                if isinstance(att_raw, str) and att_raw.strip():
-                    attachment_id = att_raw.strip()
+                attachment_id = found_id
             if path is None:
-                path_raw = meta.get("path")
-                if isinstance(path_raw, str) and path_raw.strip():
-                    path = path_raw.strip()
+                path = found_path
             if attachment_id is not None and path is not None:
                 break
         summary = render_tool_media_freeze_text(

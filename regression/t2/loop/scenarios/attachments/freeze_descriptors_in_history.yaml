@@ -1,6 +1,8 @@
 id: regression/t2/loop/scenarios/attachments/freeze_descriptors_in_history
 case: T2-ATT-06
-description: After the turn, history holds an image descriptor instead of media bytes.
+description: >
+  The call after load_file still receives the image. After the turn, history
+  holds a descriptor and the next request does not receive the image again.
 mode: scripted
 driver: loop
 executor: real
@@ -30,8 +32,16 @@ assertions:
     ImageBlock:
       mime_type: image/png
   provider_request:
+  - n: 2
+    messages_contain: image image/png
+    messages_not_contain: attachmentRef
   - n: 3
     messages_contain: image shown earlier
+    messages_not_contain: image image/png
+  history:
+    blocks_include:
+    - type: toolResponse
+      text_contains: shown earlier
   required_tools:
   - load_file
   turn_completed: true

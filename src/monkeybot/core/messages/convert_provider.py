@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Literal
 
-from monkeybot.core.attachments.resolve import resolve_messages_for_provider
+from monkeybot.core.attachments.resolve import MediaMemo, resolve_messages_for_provider
 from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.context.tool_shapers import shape_messages_tool_results
 from monkeybot.core.llm.provider import Message
@@ -22,10 +22,13 @@ def convert_to_provider(
     session_id: str,
     pressure_tier: Literal["none", "moderate", "aggressive"] = "none",
     protect_recent: int = 6,
+    media_memo: MediaMemo | None = None,
 ) -> list[Message]:
     """Agent messages → provider-ready messages (attachments resolved, shaped).
 
     Persisted history is never mutated; shaping and resolution are view-only.
+    ``media_memo`` is request-scoped: later converts of the same request reuse
+    a resolved image or file instead of reading it again.
     """
     working: Sequence[Message] = messages
     if pressure_tier in ("moderate", "aggressive"):
@@ -38,4 +41,5 @@ def convert_to_provider(
         working,
         attachment_store=attachment_store,
         session_id=session_id,
+        media_memo=media_memo,
     )

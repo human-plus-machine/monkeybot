@@ -13,6 +13,7 @@ from typing import Any, Literal, cast
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.attachments.freeze import freeze_attachments_in_history
+from monkeybot.core.attachments.resolve import MediaMemo
 from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.context import (
     MCP_PROGRESSIVE_META_TOOLS,
@@ -689,6 +690,9 @@ class _TurnState:
     tools_dirty_reason: str | None = None
     tools_schema_hash: str = ""
     tools_schema_chars: int = 0
+    # Resolved attachment bytes for this user message. convert_to_provider runs
+    # more than once per inner turn; the second call must not read the file again.
+    media_memo: MediaMemo = dataclasses.field(default_factory=dict)
 
 
 async def _reload_project_instructions(ctx: TurnContext) -> TurnContext:
@@ -807,6 +811,7 @@ async def _prepare_turn_context(
         state.chat_messages,
         attachment_store=attachment_store,
         session_id=state.ctx.session_id,
+        media_memo=state.media_memo,
     )
     system_msg, admit = _require_prompt(state)
     state.provider_messages = _messages_for_provider(
@@ -852,6 +857,7 @@ async def _refresh_prompt_after_history_change(
         state.chat_messages,
         attachment_store=attachment_store,
         session_id=state.ctx.session_id,
+        media_memo=state.media_memo,
     )
     system_msg, admit = _require_prompt(state)
     state.provider_messages = _messages_for_provider(
@@ -1169,6 +1175,7 @@ async def _apply_pressure_and_before_provider(
                 state.chat_messages,
                 window_tokens=state.ctx.context_window_tokens,
             ),
+            media_memo=state.media_memo,
         )
         state.provider_messages = _messages_for_provider(
             system_msg,
@@ -2547,6 +2554,7 @@ async def _append_tool_requests_and_dispatch(
         epoch_tracker=state.epoch_tracker,
         prompt_ledger=state.prompt_ledger,
         prompt_tokens=state.last_preflight_tokens,
+        media_memo=state.media_memo,
     ):
         yield evt
     state.ctx = batch_state.ctx

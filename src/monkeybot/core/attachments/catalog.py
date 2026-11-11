@@ -6,23 +6,34 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from monkeybot.core.llm.provider import Message
-from monkeybot.core.types.content_blocks import AttachmentRef, Text
+from monkeybot.core.types.content_blocks import AttachmentRef, Text, ToolResponse
 
 from .store import attachment_workspace_path
 from .text import parse_attachment_descriptor_text
 
 
+def _collect_attachment_ids(block: object, ids: dict[str, None]) -> None:
+    if isinstance(block, AttachmentRef):
+        ids[block.attachment_id] = None
+    elif isinstance(block, Text):
+        parsed = parse_attachment_descriptor_text(block.text)
+        if parsed is not None:
+            ids[parsed.attachment_id] = None
+    elif isinstance(block, ToolResponse):
+        for item in block.result:
+            _collect_attachment_ids(item, ids)
+
+
 def referenced_attachment_ids(messages: Sequence[Message]) -> list[str]:
-    """Attachment ids a transcript points at: frozen descriptors and unfrozen refs."""
+    """Attachment ids a transcript points at: frozen descriptors and unfrozen refs.
+
+    A ``load_file`` result stores its media as a ref inside the tool response
+    until the turn freezes it, so a fork during the turn still copies the file.
+    """
     ids: dict[str, None] = {}
     for msg in messages:
         for block in msg.content:
-            if isinstance(block, AttachmentRef):
-                ids[block.attachment_id] = None
-            elif isinstance(block, Text):
-                parsed = parse_attachment_descriptor_text(block.text)
-                if parsed is not None:
-                    ids[parsed.attachment_id] = None
+            _collect_attachment_ids(block, ids)
     return list(ids)
 
 

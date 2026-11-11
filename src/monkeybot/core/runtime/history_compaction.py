@@ -11,6 +11,9 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, replace
 from typing import Any, cast
 
+from monkeybot.core.attachments.config import IMAGE_MIME_TYPES
+from monkeybot.core.attachments.refs import tool_media_to_refs
+from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.attachments.text import parse_attachment_descriptor_text
 from monkeybot.core.coding.verification_gate import last_proven_verification
 from monkeybot.core.context import TurnContext
@@ -282,6 +285,16 @@ def _raw_block_char_count(block: ContentBlock) -> int:
     if isinstance(block, RedactedThinking):
         return len(block.data)
     if isinstance(block, AttachmentRef):
+        # An image ref resolves to a preview billed at the fixed estimate.
+        # A file ref records the base64 length it replaced, so the estimate
+        # matches the bytes the provider will be sent. Anything else (a user
+        # upload that is not an image, a ref with no recorded length) stays
+        # the small id-and-mime count.
+        if block.mime_type in IMAGE_MIME_TYPES:
+            return IMAGE_TOKEN_ESTIMATE * _CHARS_PER_TOKEN
+        recorded = (block.metadata or {}).get("base64_chars")
+        if isinstance(recorded, int) and not isinstance(recorded, bool) and recorded >= 0:
+            return recorded + len(block.mime_type)
         return len(block.attachment_id) + len(block.mime_type)
     return len(type(block).__name__)
 
@@ -302,6 +315,8 @@ def _raw_message_char_count(message: Message) -> int:
     Counts ``File`` payloads and ``Thinking`` traces at full length, and an
     ``Image`` at ``IMAGE_TOKEN_ESTIMATE``: its base64 is not text, and counting
     those characters would size one preview as tens of thousands of tokens.
+    An image ``AttachmentRef`` uses that same estimate. A file ref uses the
+    ``base64_chars`` it recorded when the bytes were left out of the row.
     Falling back to ``type(block).__name__`` would report ~5–8 chars for a
     multi-kilobyte file or reasoning block and blow past
     ``SUMMARY_KEEP_TAIL_RATIO``.
@@ -654,6 +669,7 @@ async def _append_budgeted_tool_responses(
     epoch: ContextEpochTracker | None = None,
     hook_manager: HookManager | None = None,
     prompt_ledger: PromptTokenLedger | None = None,
+    attachment_store: AttachmentStore | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Budget tool results against remaining context, append, compact if needed."""
     # A confirmed repeat is a short stub before the budget runs, so the budget
@@ -665,9 +681,17 @@ async def _append_budgeted_tool_responses(
         ledger=ctx.read_ledger,
     )
     trimmed, needs_compaction = budgeter.fit_content_blocks(prepared)
+    # The budget saw the media blocks. The stored row keeps a reference when
+    # the bytes are already in the attachment store, so later loads do not
+    # carry the base64. The live tool event was built from the original blocks.
+    stored = tool_media_to_refs(
+        trimmed,
+        attachment_store=attachment_store,
+        session_id=ctx.session_id,
+    )
     await history.append(
         ctx.thread_id,
-        Message(role="user", content=trimmed),
+        Message(role="user", content=stored),
     )
     remember_stored_reads(trimmed, decisions, ctx.read_ledger)
     usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, budgeter.used_tokens)
@@ -710,7 +734,7 @@ async def _append_budgeted_tool_responses(
                 ctx=ctx,
                 chat_messages=chat_messages,
                 provider=provider,
-                attachment_store=None,
+                attachment_store=attachment_store,
                 attachment_catalog=None,
                 vertex_google_search=vertex_google_search,
                 epoch=epoch,

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import cast
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
+from monkeybot.core.attachments.resolve import MediaMemo
 from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.config.snapshot import env_value_or_current
 from monkeybot.core.context import (
@@ -1062,6 +1063,7 @@ async def _post_batch_budget_and_registry(
     hook_manager: HookManager | None = None,
     prompt_ledger: PromptTokenLedger | None = None,
     prompt_tokens: int = 0,
+    media_memo: MediaMemo | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Doom-loop error, budgeted history append, and MCP/loops registry refresh."""
     ctx = state.ctx
@@ -1131,6 +1133,7 @@ async def _post_batch_budget_and_registry(
                     extra_system_text=pre_turn_extra,
                     vertex_google_search=vertex_google_search,
                     epoch=epoch_tracker,
+                    media_memo=media_memo,
                 )
             except Exception:
                 logger.warning(
@@ -1158,6 +1161,7 @@ async def _post_batch_budget_and_registry(
             epoch=epoch_tracker,
             hook_manager=hook_manager,
             prompt_ledger=prompt_ledger,
+            attachment_store=attachment_store,
         ):
             if isinstance(budget_evt, ContextSummarized):
                 summarized = budget_evt.turns_summarized
@@ -1280,6 +1284,7 @@ async def dispatch_tool_batch(
     epoch_tracker: ContextEpochTracker,
     prompt_ledger: PromptTokenLedger | None = None,
     prompt_tokens: int = 0,
+    media_memo: MediaMemo | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Execute one provider tool-call batch; yield events; update ``state`` in place.
 
@@ -1433,5 +1438,6 @@ async def dispatch_tool_batch(
         hook_manager=hook_manager,
         prompt_ledger=prompt_ledger,
         prompt_tokens=prompt_tokens,
+        media_memo=media_memo,
     ):
         yield evt
