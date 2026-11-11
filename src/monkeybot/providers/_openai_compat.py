@@ -57,6 +57,7 @@ from monkeybot.providers.rejected_sampling import (
 )
 from monkeybot.providers.request_budget import (
     RequestByteBudgetError,
+    request_bytes_sliced,
     trim_message_media_for_byte_budget,
 )
 from monkeybot.providers.sampling import REASONING_EFFORT_NONE
@@ -1121,6 +1122,7 @@ async def count_input_tokens_tiktoken(
     none of these providers' token counts vary with reasoning configuration.
     """
     del thinking_budget
+    size = await request_bytes_sliced(messages, tools, count_file_data=False)
     msgs = trim_message_media_for_byte_budget(
         messages,
         tools,
@@ -1128,6 +1130,7 @@ async def count_input_tokens_tiktoken(
         provider=provider,
         raise_if_oversized=False,
         trim_files=False,
+        known_bytes=size,
     )
     # An unknown model id shares the encoding loaded at import. A known id
     # loads its file on first use, and a cold cache downloads it with a
@@ -1563,12 +1566,14 @@ async def stream_chat_completions_with_tool_fallback(
 
     msgs = list(messages)
     if max_request_bytes is not None and max_request_bytes > 0:
+        size = await request_bytes_sliced(msgs, tools, count_file_data=False)
         msgs = trim_message_media_for_byte_budget(
             msgs,
             tools,
             max_bytes=max_request_bytes,
             provider=provider,
             trim_files=False,
+            known_bytes=size,
         )
     system, oai_messages = await messages_to_openai(msgs, hints=hints)
     if system:
