@@ -25,6 +25,7 @@ from monkeybot.providers._openai_compat import (
     warm_openai_connection,
 )
 from monkeybot.providers._sdk_client import (
+    prompt_cache_key,
     sdk_env,
     session_affinity_headers,
 )
@@ -148,12 +149,17 @@ class OpenAIProvider:
                 if suppress_thinking_for_auxiliary_call(messages, tools)
                 else self._reasoning_effort
             )
+        if retention == "long":
+            kwargs["prompt_cache_retention"] = "24h"
+        cache_key = prompt_cache_key(hints)
+        if cache_key is not None:
+            kwargs["prompt_cache_key"] = cache_key
+        # After the cache fields, so a model that rejected one of them leaves it
+        # off on the next turn instead of paying for another 400.
         omit_known_rejected("openai", model, kwargs)
         if tools:
             kwargs["tools"] = openai_tools(tools)
             kwargs["parallel_" + "tool" + "_calls"] = True
-        if retention == "long":
-            kwargs["prompt_cache_retention"] = "24h"
         kwargs = enforce_openai_request_byte_budget(
             kwargs,
             max_request_bytes,

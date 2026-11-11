@@ -1801,6 +1801,8 @@ async def _consume_provider_stream_body(
                 llm_input=stats.input_tokens,
                 llm_output=stats.output_tokens,
                 llm_cached=stats.cached_tokens,
+                llm_cache_read=stats.cache_read_tokens,
+                llm_cache_creation=stats.cache_creation_tokens,
                 tool_calls=len(state.pending),
                 max_event_gap_s=round(stats.max_event_gap_s, 3),
             ),
