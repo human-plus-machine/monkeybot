@@ -21,3 +21,7 @@
 ## Why
 
 Eager advertising of heavy MCP schemas (especially browser) dominates TTFT on small/local models. Keep default turns on core tools only; pay schema cost when the model opts in.
+
+## Idle hiding
+
+A connected server that goes unused for 10 inner turns is due to be hidden, but its tools stay in the provider payload until the next history rewrite (compaction or the load-max truncation). That rewrite already replaces the cached message prefix, so dropping the schemas there does not add a second cache break. The idle note is attached to the next tool result, and `enable_mcp` with that server's name brings the tools back. A use before the rewrite cancels the hide.

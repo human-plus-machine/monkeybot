@@ -27,19 +27,23 @@ _SERVER_ARG_TOOLS = frozenset(
 
 
 def idle_note(servers: Sequence[str]) -> str:
-    """Short note telling the model how to bring hidden servers back."""
+    """Short note telling the model how to bring hidden servers back.
+
+    The hide can land on a later compaction, so the note does not name the
+    idle-turn count.
+    """
     ordered = [name for name in servers if name]
     if not ordered:
         return ""
     if len(ordered) == 1:
         name = ordered[0]
         return (
-            f"MCP server `{name}` was hidden after {IDLE_INNER_TURNS} turns without use. "
+            f"MCP server `{name}` was hidden because it went unused. "
             f"Call `enable_mcp` with name `{name}` to restore it."
         )
     names = ", ".join(f"`{name}`" for name in ordered)
     return (
-        f"MCP servers {names} were hidden after {IDLE_INNER_TURNS} turns without use. "
+        f"MCP servers {names} were hidden because they went unused. "
         "Call `enable_mcp` with each name to restore them."
     )
 
@@ -90,10 +94,16 @@ def servers_used_by_calls(
 
 @dataclass
 class MCPSessionVisibility:
-    """Idle counts and the set of MCP servers hidden from one chat session."""
+    """Idle counts and the set of MCP servers hidden from one chat session.
+
+    Reaching the idle limit does not hide by itself. The caller hides on a
+    history rewrite, which is already rewriting the cached message prefix.
+    A server used before that rewrite goes back to zero and is not hidden.
+    """
 
     hidden: set[str] = field(default_factory=set)
     _idle: dict[str, int] = field(default_factory=dict)
+    _pending_note: str = ""
 
     def idle_count(self, server: str) -> int:
         """Inner turns this server has been offered without use. Hidden servers read 0."""
@@ -127,17 +137,41 @@ class MCPSessionVisibility:
         self._idle[server] = 0
         self.hidden.discard(server)
 
-    def take_newly_idle(self) -> list[str]:
-        """Hide servers that reached the idle limit. Returns those names, once."""
-        newly = sorted(
+    def servers_due(self) -> list[str]:
+        """Servers at the idle limit that are not hidden yet. Does not hide them."""
+        return sorted(
             name
             for name, count in self._idle.items()
             if count >= IDLE_INNER_TURNS and name not in self.hidden
         )
+
+    def take_newly_idle(self) -> list[str]:
+        """Hide servers that reached the idle limit. Returns those names, once.
+
+        Call this only when history is being rewritten. A due server stays
+        listed, and keeps counting, until then.
+        """
+        newly = self.servers_due()
         for name in newly:
             self.hidden.add(name)
             self._idle[name] = 0
         return newly
+
+    def queue_note(self, servers: Sequence[str]) -> None:
+        """Remember the idle note until a later tool result can carry it."""
+        note = idle_note(servers)
+        if not note:
+            return
+        if self._pending_note:
+            self._pending_note = f"{self._pending_note}\n{note}"
+        else:
+            self._pending_note = note
+
+    def take_note(self) -> str:
+        """Return the queued idle note, once. Empty when nothing is waiting."""
+        note = self._pending_note
+        self._pending_note = ""
+        return note
 
     def filter_tools(self, tools: Sequence[ToolDef], known_servers: Sequence[str]) -> list[ToolDef]:
         """Drop ``server__tool`` entries for servers hidden in this session."""

@@ -16,6 +16,7 @@ from monkeybot.core.attachments.store import AttachmentStore
 from monkeybot.core.config.snapshot import env_value_or_current
 from monkeybot.core.context import (
     TurnContext,
+    hide_due_mcp_servers,
     refresh_tools_after_loops_change,
     refresh_tools_after_mcp_change,
 )
@@ -29,7 +30,6 @@ from monkeybot.core.hooks import HookEvent, HookManager
 from monkeybot.core.llm.provider import Provider, ToolCall
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
-from monkeybot.core.mcp.session_visibility import idle_note
 from monkeybot.core.messages.tool_integrity import (
     cancelled_tool_result_text,
     preempted_tool_result_text,
@@ -50,6 +50,7 @@ from monkeybot.core.types.content_blocks import ContentBlock, File, Image, Text,
 from .doom_loop import _doom_loop_exempt_names, _DoomLoopTracker
 from .events import (
     AgentEvent,
+    ContextSummarized,
     Error,
     FileBlock,
     FileChange,
@@ -974,30 +975,45 @@ async def _execute_allowed_chunk(
             yield evt
 
 
-def _hide_idle_mcp_servers(
+def _attach_queued_idle_note(
     state: ToolBatchState,
     all_tool_responses: list[ContentBlock],
-    *,
-    tool_executor: ToolExecutorPort,
-    doom_tracker: _DoomLoopTracker,
 ) -> None:
-    """Hide servers that reached the idle limit and note that in the last result.
+    """Put a note queued by an earlier hide into the last tool result.
 
-    Runs only for a batch that will be written. A cancelled batch leaves the
-    connection and this session's tool list alone. The note is a text block
-    inside the last tool result, not a separate user message.
+    The note is a text block inside that result, not a separate user message.
+    A batch with no tool result leaves the note queued for a later one.
     """
     visibility = state.ctx.mcp_visibility
     if visibility is None:
         return
-    newly = visibility.take_newly_idle()
-    if not newly:
-        return
-    note = idle_note(newly)
+    target: ToolResponse | None = None
     for block in reversed(all_tool_responses):
         if isinstance(block, ToolResponse):
-            block.result.append(Text(text=note))
+            target = block
             break
+    if target is None:
+        return
+    note = visibility.take_note()
+    if note:
+        target.result.append(Text(text=note))
+
+
+def _hide_mcp_servers_after_rewrite(
+    state: ToolBatchState,
+    *,
+    tool_executor: ToolExecutorPort,
+    doom_tracker: _DoomLoopTracker,
+    prompt_ledger: PromptTokenLedger | None,
+) -> None:
+    """Hide due servers now that this batch's compaction rewrote history.
+
+    A cancelled batch does not call this. The note waits for the next tool
+    result, so this batch's already-appended rows stay unchanged.
+    """
+    visibility = state.ctx.mcp_visibility
+    if visibility is None or not visibility.servers_due():
+        return
     mcp_client = getattr(tool_executor, "mcp", None)
     if mcp_client is None:
         logger.error(
@@ -1005,20 +1021,23 @@ def _hide_idle_mcp_servers(
             kv(request_id=state.ctx.request_id, thread_id=state.ctx.thread_id),
         )
         return
-    ctx = refresh_tools_after_mcp_change(state.ctx, mcp_client)
-    state.ctx = ctx
+    newly = hide_due_mcp_servers(state.ctx, mcp_client)
+    if not newly:
+        return
     state.tools_dirty = True
     if state.tools_dirty_reason is None:
         state.tools_dirty_reason = "mcp_idle"
-    doom_tracker.exempt_names = _doom_loop_exempt_names(ctx.tools)
+    doom_tracker.exempt_names = _doom_loop_exempt_names(state.ctx.tools)
+    if prompt_ledger is not None:
+        prompt_ledger.drop_if_tools_changed(state.ctx.tools)
     logger.info(
         "mcp idle hide %s",
         kv(
-            request_id=ctx.request_id,
-            thread_id=ctx.thread_id,
-            session=ctx.session_id,
+            request_id=state.ctx.request_id,
+            thread_id=state.ctx.thread_id,
+            session=state.ctx.session_id,
             servers=",".join(newly),
-            tool_count=len(ctx.tools),
+            tool_count=len(state.ctx.tools),
         ),
     )
 
@@ -1066,13 +1085,9 @@ async def _post_batch_budget_and_registry(
         yield Error(request_id=ctx.request_id, error=doom_msg)
 
     if all_tool_responses and not state.aborted:
-        _hide_idle_mcp_servers(
-            state,
-            all_tool_responses,
-            tool_executor=tool_executor,
-            doom_tracker=doom_tracker,
-        )
+        _attach_queued_idle_note(state, all_tool_responses)
 
+    summarized = 0
     if all_tool_responses:
         # Compaction + load-max run before every provider call, so steady-state
         # history is ≤ HISTORY_LOAD_MAX. Clamp the recount input defensively for
@@ -1144,7 +1159,16 @@ async def _post_batch_budget_and_registry(
             hook_manager=hook_manager,
             prompt_ledger=prompt_ledger,
         ):
+            if isinstance(budget_evt, ContextSummarized):
+                summarized = budget_evt.turns_summarized
             yield budget_evt
+        if summarized > 0 and not state.aborted:
+            _hide_mcp_servers_after_rewrite(
+                state,
+                tool_executor=tool_executor,
+                doom_tracker=doom_tracker,
+                prompt_ledger=prompt_ledger,
+            )
 
     if mcp_registry_mutated:
         mcp_client = getattr(tool_executor, "mcp", None)

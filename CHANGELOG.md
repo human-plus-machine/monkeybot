@@ -12,6 +12,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- An unused MCP server stays in the tool list until the next history rewrite. Reaching ten idle turns no longer rewrites the prompt cache on its own. The idle note arrives on the next tool result, and `enable_mcp` still brings the server back. MCP tool schemas are stored with object keys sorted, so a server that reorders keys between connections does not change the bytes sent to the provider.
 - History summarization and chat titles use `model.name`. `model.summarization_model` is ignored, and `CONTEXT_SUMMARIZATION_MODEL` is no longer read.
 
 ## [cli v0.13.1] - 2026-11-09

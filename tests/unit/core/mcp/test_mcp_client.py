@@ -23,6 +23,7 @@ from monkeybot.core.mcp.mcp_client import (
     MCPClient,
     MCPConnectionError,
     _mcp_auth_handler_cls,
+    _tool_defs_from_listing,
     interpolate_env_vars,
     mcp_file_env_refs,
     run_cleanup,
@@ -1607,3 +1608,41 @@ async def test_cancelled_connect_reaps_stdio_child(tmp_path: Path) -> None:
             return
         await asyncio.sleep(0.02)
     pytest.fail(f"slow server still running after cancelled connect: {spawned}")
+
+
+def test_listing_schema_key_order_does_not_change_the_bytes() -> None:
+    """Two listings of one tool with different object-key order are the same bytes.
+
+    Array order is the server's. ``required`` is not sorted.
+    """
+    reordered = {
+        "type": "object",
+        "required": ["b", "a"],
+        "properties": {
+            "b": {"type": "string", "description": "second"},
+            "a": {"type": "string", "description": "first"},
+        },
+    }
+    original = {
+        "properties": {
+            "a": {"description": "first", "type": "string"},
+            "b": {"description": "second", "type": "string"},
+        },
+        "required": ["b", "a"],
+        "type": "object",
+    }
+    first = _tool_defs_from_listing(
+        "alpha",
+        SimpleNamespace(tools=[SimpleNamespace(name="m", description="m", inputSchema=reordered)]),
+    )[0]
+    second = _tool_defs_from_listing(
+        "alpha",
+        SimpleNamespace(tools=[SimpleNamespace(name="m", description="m", inputSchema=original)]),
+    )[0]
+    assert json.dumps(first.to_model_schema()) == json.dumps(second.to_model_schema())
+    schema = first.input_schema
+    assert list(schema) == ["properties", "required", "type"]
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+    assert list(properties) == ["a", "b"]
+    assert schema["required"] == ["b", "a"]
