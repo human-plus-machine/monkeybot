@@ -6,7 +6,13 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Core
+### CLI
+
+### Changed
+
+- The scaffold example and the config reference no longer document `summarization_model`. History summarization and chat titles use `model.name`. A leftover `summarization_model` key is ignored.
+
+## [core v3.15.0] - 2026-11-11
 
 ### Fixed
 
@@ -47,12 +53,6 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - A size rejection of a summary chunk packs the same rows again at half the budget. After three halvings the failure is discarded and history stays as it was.
 - A summary request stays within 85% of the context window. A middle that fits is one call. A larger middle is summarized in pieces, and each later call starts from the summary so far.
 - File tools run off the event loop, so a slow grep or a batch of reads does not block every session in the process. Ripgrep is killed when the call is cancelled.
-
-### CLI
-
-### Changed
-
-- The scaffold example and the config reference no longer document `summarization_model`. History summarization and chat titles use `model.name`. A leftover `summarization_model` key is ignored.
 
 ## [cli v0.13.1] - 2026-11-09
 
