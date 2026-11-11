@@ -107,7 +107,23 @@ The factory (`create_workspace_storage`) reads the URI scheme and returns the ri
 
 `SANDBOX_ENABLED=true` uses `python:3.12` by default. MonkeyBot connects to
 OpenSandbox through `SANDBOX_SERVER_URL`; set `SANDBOX_IMAGE` when a custom
-execution environment is needed.
+execution environment is needed. The local Compose override builds
+`docker/sandbox.Dockerfile` as `monkeybot-sandbox:local` and sets
+`SANDBOX_IMAGE` to that tag, so the image exists before the first command.
+Pull any other image (`docker pull "$SANDBOX_IMAGE"`) at deploy time for the
+same reason. A first pull during a user turn is the slow cold start.
+
+The SSE gateway keeps one container per chat. It is created on the first
+`run_command` (or pre-warmed on the next message after that, while the model
+is thinking) and destroyed when the session closes or after
+`SANDBOX_TTL_SECONDS` with no command and no running job. Background jobs in
+that container keep running after the turn. `SANDBOX_PREWARM` defaults to
+true; set it to `false` to skip the ahead-of-time create.
+
+`SANDBOX_USE_SERVER_PROXY` defaults to true, which routes health checks and
+exec through the OpenSandbox HTTP API. Set it to `false` only when this
+process can open the sandbox's published ports directly (the SDK host is on
+the same network as the containers, not behind Docker Desktop's VM).
 
 | Infrastructure | Where OpenSandbox runs | `SANDBOX_SERVER_URL` |
 |---|---|---|

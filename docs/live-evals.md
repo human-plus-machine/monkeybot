@@ -66,6 +66,26 @@ uv run python -m regression.t4 --suite drift
 
 Scripted coverage of the same harness lives in `regression/t2`, collected by `uv run pytest regression/t2`.
 
+## Sandbox scenario
+
+T4-SHELL-02 (`shell/core_run_command_sandbox`) is not in smoke. It needs Docker and an OpenSandbox server, because the command runs in a real container. The scenario boots its own gateway with `SANDBOX_ENABLED=true` and `SANDBOX_SERVER_URL=http://127.0.0.1:8090`. The workspace is not mounted.
+
+```bash
+# Terminal 1 — OpenSandbox. Port 8080 is often already a Monkeybot gateway.
+docker run -d --name monkeybot-opensandbox \
+  -p 8090:8080 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v "$PWD/docker/opensandbox.docker.toml":/etc/opensandbox/config.toml:ro \
+  -e OPENSANDBOX_INSECURE_SERVER=YES \
+  opensandbox/server:latest
+
+# Terminal 2 — scorecard (repo root). The runner starts the eval gateway.
+uv sync --extra evals
+uv run python -m regression.t4 --suite sandbox --no-ledger
+```
+
+The first run also pulls `python:3.12` and the OpenSandbox execd image. That pull is the cold start, not the model.
+
 ## CI
 
 Live eval does not run on push. `.github/workflows/live-eval-smoke.yml` is `workflow_dispatch` only, and it has no provider key, so a GitHub run stops in preflight. The local command is:

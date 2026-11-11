@@ -1104,6 +1104,7 @@ class CoreToolExecutor(ToolExecutorPort):
         read_ledger: FileReadLedger | None = None,
         completion_verifier: CompletionVerifier | None = None,
         session_jobs: SessionJobs | None = None,
+        sandbox_session: Any | None = None,
     ) -> None:
         ws_settings = workspace_settings_from_config()
         self._skills_path = Path(skills_path).resolve()
@@ -1130,9 +1131,9 @@ class CoreToolExecutor(ToolExecutorPort):
         self._config = config
         self._terminal: TerminalExecutor | SandboxExecutor
         self._host_terminal: TerminalExecutor | None = None
-        # Set only when this turn's shell uses the session job table. Sandbox
-        # jobs and an injected terminal keep their own tables.
+        # Set when this turn's shell uses the session job table, host or sandbox.
         self._session_jobs: SessionJobs | None = None
+        self._sandbox_session = sandbox_session
         if terminal is not None:
             cmds = tuple(terminal.allowed_commands)
             paths = tuple(terminal.allowed_path_prefixes)
@@ -1200,7 +1201,11 @@ class CoreToolExecutor(ToolExecutorPort):
                     artifacts_path=self._artifacts_path,
                     allowed_commands=cmds,
                     allowed_path_prefixes=paths,
+                    session=sandbox_session,
+                    jobs=session_jobs,
                 )
+                if session_jobs is not None:
+                    self._session_jobs = session_jobs
             else:
                 self._terminal = TerminalExecutor(
                     allowed_commands=cmds,
@@ -2216,6 +2221,9 @@ class CoreToolExecutor(ToolExecutorPort):
             ),
             path_grants=tuple(sorted(ctx.turn_path_grants)),
             command_grants=tuple(sorted(ctx.turn_command_grants)),
+            sandbox_id=(
+                self._sandbox_session.sandbox_id if self._sandbox_session is not None else None
+            ),
         )
 
         scratch = self._workspace.repo_root / ".monkeybot" / "subagent-runs" / uuid.uuid4().hex

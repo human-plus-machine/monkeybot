@@ -267,7 +267,7 @@ async def test_sandbox_background_launch_complete_stays_running(tmp_path: Path) 
         sandbox.commands.get_command_status.assert_not_awaited()
         sandbox.commands.get_background_command_logs.assert_not_awaited()
         assert executor._renew_task is not None
-        assert job.job_id in executor._timeout_tasks
+        assert executor._jobs._remotes[job.job_id].watcher is not None
 
         status.running = False
         status.exit_code = 0

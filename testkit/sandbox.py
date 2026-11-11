@@ -29,8 +29,45 @@ def _mock_sandbox(execution: MagicMock | None = None) -> MagicMock:
     sandbox = MagicMock()
     sandbox.id = "test-sandbox-id"
     sandbox.commands.run = AsyncMock(return_value=execution or _make_execution())
+    sandbox.commands.get_command_status = AsyncMock(
+        return_value=MagicMock(running=False, exit_code=0, error=None)
+    )
+    sandbox.commands.get_background_command_logs = AsyncMock(
+        return_value=MagicMock(content="", cursor=0)
+    )
+    sandbox.commands.interrupt = AsyncMock()
+    sandbox.renew = AsyncMock()
     sandbox.kill = AsyncMock()
     return sandbox
+
+
+class CreateGate:
+    """Hold ``Sandbox.create`` until ``release`` so tests can watch ordering.
+
+    ``hold`` false (the default) lets create return immediately and only counts calls.
+    """
+
+    def __init__(self, *, hold: bool = False) -> None:
+        import asyncio
+
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.count = 0
+        self.order: list[str] = []
+        if not hold:
+            self.release.set()
+
+    def bind(self, mock_cls: MagicMock, sandbox: MagicMock) -> None:
+        gate = self
+
+        async def create(*_args: object, **_kwargs: object) -> MagicMock:
+            gate.count += 1
+            gate.order.append("create")
+            gate.entered.set()
+            await gate.release.wait()
+            return sandbox
+
+        mock_cls.create = create
 
 
 def _make_create_mock(sandbox: MagicMock | None = None) -> tuple[MagicMock, MagicMock]:

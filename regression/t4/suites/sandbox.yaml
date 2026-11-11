@@ -1,0 +1,7 @@
+# One live scenario that runs run_command inside a real OpenSandbox container.
+# Docker must be running, and the OpenSandbox server must be listening on
+# 127.0.0.1:8090 (the URL in shell/core_run_command_sandbox.yaml). Not part of
+# smoke: smoke keeps SANDBOX_ENABLED=false.
+id: sandbox
+scenarios:
+  - shell/core_run_command_sandbox
