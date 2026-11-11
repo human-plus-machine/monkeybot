@@ -6,6 +6,16 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Core
+
+### Added
+
+- The SSE gateway keeps one OpenSandbox container for the chat. A background command in it keeps running after the turn, and a harness note wakes the model when it finishes. After the chat has run a command, the next message can start the container while the model is thinking. A subagent attaches to that container when it already exists, and does not kill it.
+
+### Changed
+
+- The sandbox Compose file builds the execution image before the first command. `SANDBOX_PREWARM` turns the ahead-of-time start off.
+
 ## [cli v0.13.2] - 2026-11-11
 
 ### Changed
