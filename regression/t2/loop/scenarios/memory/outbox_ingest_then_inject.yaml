@@ -1,6 +1,6 @@
 id: regression/t2/loop/scenarios/memory/outbox_ingest_then_inject
 case: T2-MEM-01
-description: Turn 1 is persisted and drained; turn 2's system prompt contains that text.
+description: Turn 1 is persisted and drained; turn 2's messages contain that text.
 mode: scripted
 driver: loop
 hooks:
@@ -18,7 +18,8 @@ script:
 assertions:
   provider_request:
   - n: 2
-    system_contains: turn-one-persisted-fact
+    messages_contain: turn-one-persisted-fact
+    system_not_contains: turn-one-persisted-fact
   store:
     outbox:
       min: 1

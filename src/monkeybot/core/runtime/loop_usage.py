@@ -19,17 +19,14 @@ from monkeybot.core.llm.provider import (
 )
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.messages import convert_to_provider
-from monkeybot.core.prompts.prompt import (
-    compose_stable_baseline,
-    compose_volatile_tail_parts,
-)
 from monkeybot.core.types.types_tools import ToolDef
 
 from .events import UsageTotals
 from .loop_messages import (
-    _append_extra_system_text,
     _is_routine_resume_turn,
     _messages_for_provider,
+    _send_tail,
+    _stable_text_and_live_parts,
     _system_message_from_text,
 )
 
@@ -148,31 +145,27 @@ async def _prompt_input_tokens_for_history(
 ) -> int:
     """Provider-accurate prompt size for history rows already persisted (e.g. post-assistant).
 
-    When ``epoch`` is supplied, the count reflects the true wire shape for the
-    *current* epoch state — leading (cached) baseline plus the live tail — via
-    a non-mutating :meth:`ContextEpochTracker.peek`. Falls back to a flat
-    stable+volatile concatenation when no tracker is given (e.g. summarizer or
-    curator calls that have no epoch of their own). Either way, the live
-    tracker is never mutated by a budget recount.
+    The count is the wire shape: the stable prefix (baseline plus skills) plus
+    the live tail. When ``epoch`` is supplied that shape comes from a
+    non-mutating :meth:`ContextEpochTracker.peek`; otherwise a fresh tracker is
+    peeked, which is the shape of the first call of a user message. Notes in
+    ``extra_system_text`` are counted in the tail, where the request sends them.
+    The live tracker is never mutated by a budget recount.
     """
-    catalog = attachment_catalog.list_records() if attachment_catalog is not None else None
-    stable = compose_stable_baseline(ctx, attachment_catalog=catalog)
-    volatile_parts = compose_volatile_tail_parts(ctx, chat_messages=chat_messages)
-    volatile = "".join(volatile_parts.values())
-    context_tail = ""
-    if epoch is not None:
-        admit = epoch.peek(
-            stable_baseline=stable,
-            volatile_text=volatile,
-            stable_fingerprint=fingerprint_text(stable),
-            volatile_fingerprint=fingerprint_text(volatile),
-            volatile_parts=volatile_parts,
-        )
-        body = admit.leading_system_text
-        context_tail = admit.context_tail
-    else:
-        body = stable + volatile
-    system = _append_extra_system_text(_system_message_from_text(body), extra_system_text)
+    stable, live_parts, stable_parts = _stable_text_and_live_parts(
+        ctx, chat_messages, attachment_catalog=attachment_catalog
+    )
+    live = "".join(live_parts.values())
+    admit = (epoch or ContextEpochTracker()).peek(
+        stable_baseline=stable,
+        volatile_text=live,
+        stable_fingerprint=fingerprint_text(stable),
+        volatile_fingerprint=fingerprint_text(live),
+        volatile_parts=live_parts,
+        stable_parts=stable_parts,
+    )
+    system = _system_message_from_text(admit.leading_system_text)
+    context_tail = _send_tail(admit.context_tail, extra_system_text)
     resolved_messages = convert_to_provider(
         chat_messages,
         attachment_store=attachment_store,

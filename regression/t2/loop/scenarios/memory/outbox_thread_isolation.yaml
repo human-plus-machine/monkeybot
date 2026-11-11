@@ -25,9 +25,10 @@ script:
 assertions:
   provider_request:
   - n: 2
-    system_contains: alpha-thread-secret-line
-  - n: 3
+    messages_contain: alpha-thread-secret-line
     system_not_contains: alpha-thread-secret-line
+  - n: 3
+    messages_not_contain: alpha-thread-secret-line
   store:
     outbox:
       min: 1

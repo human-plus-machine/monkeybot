@@ -2255,14 +2255,16 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
 
     assert len(prov.captured_messages) == 2
     sys1 = _flatten_text_from_message(prov.captured_messages[0][0])
+    first_all = "\n".join(_flatten_text_from_message(m) for m in prov.captured_messages[0])
     turn2 = prov.captured_messages[1]
     turn2_texts = [_flatten_text_from_message(m) for m in turn2]
     all2 = "\n".join(turn2_texts)
-    assert "initial line" in sys1
-    assert "new memory from tool" not in sys1
-    # Volatile memory refresh arrives as a mid-conversation system-context update
-    # (leading epoch baseline stays cache-stable).
+    assert "initial line" not in sys1
+    assert "initial line" in first_all
+    assert "new memory from tool" not in first_all
+    # A memory refresh stays in the tail, so the system text does not change.
     assert "new memory from tool" in all2
+    assert "new memory from tool" not in _flatten_text_from_message(turn2[0])
     # Regression guard: the mid-conversation update must never create two
     # consecutive same-role messages (Anthropic/Gemini both reject this shape).
     roles = [m.role for m in turn2]
@@ -2354,14 +2356,18 @@ async def test_context_tail_stays_on_every_later_call(tmp_path: Path) -> None:
 
     calls = provider.stream_messages
     assert len(calls) == 4
-    assert _tail_texts(calls[0]) == []
     systems = [_flatten_text_from_message(call[0]) for call in calls]
     assert systems[0] == systems[1] == systems[2] == systems[3]
-    assert _OLD_TODO in systems[0]
+    assert _OLD_TODO not in systems[0]
     assert _NEW_TODO not in systems[0]
     stripped = [_without_tail(call) for call in calls]
     for earlier, later in zip(stripped, stripped[1:], strict=False):
         assert later[: len(earlier)] == earlier
+    first_tails = _tail_texts(calls[0])
+    assert len(first_tails) == 1
+    assert _OLD_TODO in first_tails[0]
+    assert _NEW_TODO not in first_tails[0]
+    assert "## Current request" not in first_tails[0]
     for call in calls[1:]:
         tails = _tail_texts(call)
         assert len(tails) == 1
@@ -2372,9 +2378,10 @@ async def test_context_tail_stays_on_every_later_call(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_next_user_message_opens_without_a_tail(tmp_path: Path) -> None:
-    """The next user message starts a new epoch: no tail, and the previous
-    request's messages (minus the tail, which was never stored) are unchanged.
+async def test_next_user_message_keeps_the_system_text(tmp_path: Path) -> None:
+    """The next user message sends the same system text. A todo list that
+    changed during the first request is in the tail, and the previous request's
+    messages (minus the tail, which was never stored) are unchanged.
     """
     from monkeybot.todo_list.store import TodoListStore
 
@@ -2412,11 +2419,145 @@ async def test_next_user_message_opens_without_a_tail(tmp_path: Path) -> None:
         pass
     assert len(second.stream_messages) == 1
     opened = second.stream_messages[0]
-    assert _tail_texts(opened) == []
+    first_system = _flatten_text_from_message(first.stream_messages[0][0])
+    assert _flatten_text_from_message(opened[0]) == first_system
+    assert _NEW_TODO not in first_system
+    opened_tails = _tail_texts(opened)
+    assert len(opened_tails) == 1
+    assert _NEW_TODO in opened_tails[0]
     opened_body = _without_tail(opened)
     assert opened_body[1 : 1 + (len(prior) - 1)] == prior[1:]
     assert opened_body[-1]["role"] == "user"
-    assert _NEW_TODO in _flatten_text_from_message(opened[0])
+
+
+class _Clock:
+    """Stand-in for ``datetime.date`` so a test can move the calendar day."""
+
+    iso = "2026-11-10"
+
+    @classmethod
+    def today(cls) -> _Clock:
+        return cls()
+
+    def isoformat(self) -> str:
+        return type(self).iso
+
+
+@pytest.mark.asyncio
+async def test_next_user_message_keeps_system_text_when_live_state_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A todo, a git note, a memory write, and the date can all change between
+    two user messages. The system text stays byte-identical, including the
+    single system block Bedrock sends, and the first request's messages up to
+    the tail are a prefix of the second.
+    """
+    from monkeybot.core.coding.git_context_hook import GitContextHook
+    from monkeybot.core.hooks import HookManager
+    from monkeybot.providers._bedrock_converse import converse_request_kwargs
+    from monkeybot.todo_list.store import TodoListStore
+    from testkit.memory import make_memory_subsystem
+
+    monkeypatch.setattr("monkeybot.core.prompts.prompt.date", _Clock)
+    git_note = {"text": "git: branch main, clean"}
+
+    async def fake_note(root: Path, **_: object) -> str:
+        del root
+        return git_note["text"]
+
+    monkeypatch.setattr("monkeybot.core.coding.git_context_hook.git_status_note", fake_note)
+    mem = make_memory_subsystem(tmp_path / "memory")
+    mem._palace.upsert_drawer(
+        "d1",
+        "memory-before",
+        {"wing": "main", "room": "conversation", "filed_at": "2026-01-01T00:00:00Z"},
+    )
+    store = TodoListStore("live", workspace_root=tmp_path, mirror_to_disk=False)
+    seeded = await store.add(_OLD_TODO)
+    assert not isinstance(seeded, str)
+    hooks = HookManager()
+    GitContextHook().register(hooks)
+    hist = FakeHistory()
+    first = FakeProvider(_tool_script(2))
+    ctx = dataclasses.replace(
+        _ctx(workspace_root=tmp_path),
+        todo_store=store,
+        memory=mem,
+        request_id="r1",
+    )
+    async for _event in run(
+        "please do the anchored task",
+        ctx,
+        provider=first,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=_AddTodoOnFirst(store),
+        hook_manager=hooks,
+        max_turns=4,
+    ):
+        pass
+    assert len(first.stream_messages) == 2
+
+    git_note["text"] = "git: branch main, 1 modified (notes.txt)"
+    _Clock.iso = "2026-11-11"
+    mem._palace.upsert_drawer(
+        "d2",
+        "memory-after",
+        {"wing": "main", "room": "conversation", "filed_at": "2026-01-02T00:00:00Z"},
+    )
+    second = FakeProvider([[TextDelta(text="second answer"), Done()]])
+    async for _event in run(
+        "a follow-up question",
+        dataclasses.replace(ctx, request_id="r2"),
+        provider=second,
+        history=hist,
+        inspectors=[AllowInspector()],
+        tool_executor=RecordingExecutor(ToolExecutionResult.ok_text("ok")),
+        hook_manager=hooks,
+        max_turns=2,
+    ):
+        pass
+    assert len(second.stream_messages) == 1
+
+    systems = [_flatten_text_from_message(call[0]) for call in first.stream_messages]
+    systems.append(_flatten_text_from_message(second.stream_messages[0][0]))
+    assert systems[0] == systems[1] == systems[2]
+    for live in (_NEW_TODO, "memory-after", "2026-11-11", "notes.txt"):
+        assert live not in systems[0]
+
+    first_tail = _tail_texts(first.stream_messages[0])
+    second_tail = _tail_texts(second.stream_messages[0])
+    assert len(first_tail) == 1
+    assert len(second_tail) == 1
+    assert _OLD_TODO in first_tail[0]
+    assert "memory-before" in first_tail[0]
+    assert "2026-11-10" in first_tail[0]
+    assert "git: branch main, clean" in first_tail[0]
+    assert _NEW_TODO not in first_tail[0]
+    assert "memory-after" in second_tail[0]
+    assert "2026-11-11" in second_tail[0]
+    assert "notes.txt" in second_tail[0]
+    assert _NEW_TODO in second_tail[0]
+
+    prior = _without_tail(first.stream_messages[-1])
+    opened = _without_tail(second.stream_messages[0])
+    assert opened[: len(prior)] == prior
+
+    def bedrock_system(messages: list[Message]) -> list[dict[str, object]]:
+        kwargs = converse_request_kwargs(
+            model="us.amazon.nova-pro-v1:0",
+            messages=messages,
+            tools=[],
+            max_tokens=16,
+            temperature=0,
+        )
+        system = kwargs["system"]
+        assert isinstance(system, list)
+        return system
+
+    first_system = bedrock_system(first.stream_messages[0])
+    assert first_system == bedrock_system(second.stream_messages[0])
+    assert [block for block in first_system if "text" in block] == [{"text": systems[0]}]
 
 
 @pytest.mark.asyncio

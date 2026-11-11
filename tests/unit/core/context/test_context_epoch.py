@@ -20,8 +20,8 @@ def test_first_reconcile_opens_epoch() -> None:
     )
     assert admit.kind == "new_epoch"
     assert admit.epoch_id == 1
-    assert admit.leading_system_text == "STABLE\n\n## Skills\n- s1"
-    assert admit.context_tail == ""
+    assert admit.leading_system_text == "STABLE"
+    assert admit.context_tail == "## System context update\n\n## Skills\n- s1"
 
 
 def test_unchanged_reuses_leading_baseline() -> None:
@@ -40,7 +40,8 @@ def test_unchanged_reuses_leading_baseline() -> None:
     )
     assert admit.kind == "unchanged"
     assert admit.epoch_id == 1
-    assert admit.context_tail == ""
+    assert admit.leading_system_text == "STABLE"
+    assert admit.context_tail == "## System context update\n\n## Skills\n- s1"
 
 
 def test_volatile_update_keeps_leading_baseline() -> None:
@@ -221,9 +222,9 @@ def test_whole_text_tail_keeps_remaining_sections() -> None:
     assert "## Current date" in admit.context_tail
 
 
-def test_cleared_section_is_named_when_it_becomes_empty() -> None:
-    """A section present in the baseline and empty now is listed as cleared,
-    while an unchanged always-present section (the date) stays out of the tail.
+def test_an_empty_section_is_left_out_and_the_rest_stay() -> None:
+    """A section with no text is omitted. Every section that still has text is
+    in the tail, including one that did not change.
     """
     date = "\n\n## Current date\n2026-07-15"
     skills = "\n\n## Skills\n- s1"
@@ -244,8 +245,10 @@ def test_cleared_section_is_named_when_it_becomes_empty() -> None:
     )
     assert admit.kind == "volatile_updated"
     assert admit.changed_sources == ("skills",)
-    assert "Cleared: skills." in admit.context_tail
-    assert "## Current date" not in admit.context_tail
+    assert admit.leading_system_text == "STABLE"
+    assert "Cleared:" not in admit.context_tail
+    assert "replaces the prior" not in admit.context_tail
+    assert "## Current date" in admit.context_tail
     assert "## Skills" not in admit.context_tail
 
 
@@ -266,15 +269,15 @@ def test_begin_new_epoch_after_compaction() -> None:
     )
     assert admit.kind == "new_epoch"
     assert admit.epoch_id == 2
-    assert admit.leading_system_text == "STABLEV2"
-    assert admit.context_tail == ""
+    assert admit.leading_system_text == "STABLE"
+    assert admit.context_tail == "## System context update\n\nV2"
 
 
 def _parts(todos: str, request: str, memory: str = "\n\n## Memory\nline") -> dict[str, str]:
     return {"memory": memory, "todos": todos, "current_request": request}
 
 
-def test_tail_persists_across_unchanged_reconciles_and_names_only_changes() -> None:
+def test_tail_is_the_full_render_and_names_only_what_changed() -> None:
     todos_v1 = "\n\n## Todo list\n- t1 old"
     todos_v2 = "\n\n## Todo list\n- t2 new"
     request = "\n\n## Current request\nfix the harness"
@@ -287,7 +290,9 @@ def test_tail_persists_across_unchanged_reconciles_and_names_only_changes() -> N
         volatile_parts=_parts(todos_v1, ""),
     )
     assert opened.kind == "new_epoch"
-    assert opened.context_tail == ""
+    assert opened.leading_system_text == "STABLE"
+    assert "- t1 old" in opened.context_tail
+    assert "line" in opened.context_tail
 
     changed = tracker.reconcile(
         stable_baseline="STABLE",
@@ -298,10 +303,10 @@ def test_tail_persists_across_unchanged_reconciles_and_names_only_changes() -> N
     )
     assert changed.kind == "volatile_updated"
     assert changed.changed_sources == ("current_request", "todos")
-    assert "todos and current-request" in changed.context_tail
+    assert "replaces the prior" not in changed.context_tail
     assert "- t2 new" in changed.context_tail
     assert "fix the harness" in changed.context_tail
-    assert "line" not in changed.context_tail
+    assert "line" in changed.context_tail
     assert changed.leading_system_text == opened.leading_system_text
 
     again = tracker.reconcile(
@@ -316,7 +321,7 @@ def test_tail_persists_across_unchanged_reconciles_and_names_only_changes() -> N
     assert again.changed_sources == ()
 
 
-def test_tail_drops_a_section_that_returns_to_baseline() -> None:
+def test_tail_shows_the_current_text_when_a_section_moves_back() -> None:
     todos_v1 = "\n\n## Todo list\n- t1 old"
     todos_v2 = "\n\n## Todo list\n- t2 new"
     request = "\n\n## Current request\nfix the harness"
@@ -342,13 +347,15 @@ def test_tail_drops_a_section_that_returns_to_baseline() -> None:
         volatile_fingerprint="v3",
         volatile_parts=_parts(todos_v1, request),
     )
-    assert "todos" not in back.context_tail
+    assert "- t1 old" in back.context_tail
     assert "- t2 new" not in back.context_tail
     assert "fix the harness" in back.context_tail
+    assert "line" in back.context_tail
+    assert back.leading_system_text == "STABLE"
     assert back.changed_sources == ("todos",)
 
 
-def test_new_epoch_empties_the_tail() -> None:
+def test_new_epoch_keeps_the_live_sections_in_the_tail() -> None:
     todos_v2 = "\n\n## Todo list\n- t2 new"
     tracker = ContextEpochTracker()
     tracker.reconcile(
@@ -374,8 +381,9 @@ def test_new_epoch_empties_the_tail() -> None:
         volatile_parts=_parts(todos_v2, ""),
     )
     assert fresh.kind == "new_epoch"
-    assert fresh.context_tail == ""
-    assert "- t2 new" in fresh.leading_system_text
+    assert fresh.leading_system_text == "STABLE"
+    assert "- t2 new" in fresh.context_tail
+    assert "- t2 new" not in fresh.leading_system_text
 
 
 def test_peek_tail_matches_reconcile() -> None:

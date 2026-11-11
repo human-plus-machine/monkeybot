@@ -3,7 +3,7 @@
 Verifies that:
 
 * Lifecycle hook events fire at the expected points.
-* ``PRE_TURN.inject_text`` lands in the system prompt for the current turn.
+* ``PRE_TURN.inject_text`` lands in the send-time tail for the current turn.
 * ``PRE_TURN.inject_memory_lines`` are added to ``ctx.memory_index``.
 * ``PRE_TOOL.inject_text`` lands in the **next** request's send-time tail (not the tool result).
 * Tool results sent to the provider are unmodified (ground truth).
@@ -142,7 +142,7 @@ async def test_pre_turn_fires_before_provider_stream() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pre_turn_inject_text_lands_in_system_prompt() -> None:
+async def test_pre_turn_inject_text_lands_in_the_tail() -> None:
     mgr = HookManager()
 
     async def inject(p: HookPayload) -> None:
@@ -164,12 +164,15 @@ async def test_pre_turn_inject_text_lands_in_system_prompt() -> None:
         pass
 
     assert prov.system_texts, "provider.stream was never called"
-    assert "## Runtime notes" in prov.system_texts[0]
-    assert "REMEMBER: user is Karthik." in prov.system_texts[0]
+    assert "## Runtime notes" not in prov.system_texts[0]
+    assert "REMEMBER: user is Karthik." not in prov.system_texts[0]
+    sent = _call_text(prov.message_snapshots[0])
+    assert "## Runtime notes" in sent
+    assert "REMEMBER: user is Karthik." in sent
 
 
 @pytest.mark.asyncio
-async def test_git_context_hook_note_lands_in_runtime_notes_not_the_stable_prefix(
+async def test_git_context_hook_note_lands_in_the_tail_not_the_system_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from monkeybot.core.coding.git_context_hook import GitContextHook
@@ -193,10 +196,13 @@ async def test_git_context_hook_note_lands_in_runtime_notes_not_the_stable_prefi
         hook_manager=mgr,
     ):
         pass
-    stable, volatile = split_system_prompt_for_cache(prov.system_texts[0])
-    assert "git: branch feat/x, 2 modified (a.py, b.py)" in prov.system_texts[0]
+    sent = _call_text(prov.message_snapshots[0])
+    stable, _volatile = split_system_prompt_for_cache(prov.system_texts[0])
+    assert "git: branch feat/x, 2 modified (a.py, b.py)" in sent
+    assert "git: branch" not in prov.system_texts[0]
     assert "git: branch" not in stable
-    assert "## Runtime notes" in prov.system_texts[0]
+    assert "## Runtime notes" in sent
+    assert "## Runtime notes" not in prov.system_texts[0]
 
 
 @pytest.mark.asyncio
@@ -372,10 +378,10 @@ async def test_pre_tool_extra_clears_after_one_use() -> None:
 
 @pytest.mark.asyncio
 async def test_history_refresh_keeps_this_turn_runtime_notes() -> None:
-    """Compaction rebuilds the prompt after one-shot notes were already attached.
+    """Compaction rebuilds the prompt after the notes were already attached.
 
-    Those notes are for this provider call and must survive the rebuild, in the
-    tail. The request-long note stays in the system text.
+    The request-long note and the one-shot note are both for this call, and
+    both survive the rebuild in the tail. Neither is written into the system text.
     """
     state = _TurnState(
         ctx=_ctx(),
@@ -398,7 +404,8 @@ async def test_history_refresh_keeps_this_turn_runtime_notes() -> None:
     assert state.system is not None
     system_text = "".join(block.text for block in state.system.content if isinstance(block, Text))
     sent = _call_text(state.provider_messages)
-    assert "from the start of the message" in system_text
+    assert "from the start of the message" not in system_text
+    assert "from the start of the message" in sent
     assert "Todo list unchanged for 8 tool calls" not in system_text
     assert "Todo list unchanged for 8 tool calls" in sent
     assert "## System context update" in sent
