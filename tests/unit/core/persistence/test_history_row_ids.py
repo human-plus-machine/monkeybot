@@ -413,12 +413,26 @@ class _FsCollection(_FsQuery):
     async def add(self, data: dict[str, Any]) -> None:
         self._added.append(data)
 
-    def document(self, _doc_id: str) -> Any:
+    def document(self, _doc_id: str | None = None) -> Any:
         class _Ref:
             async def set(self, *_a: Any, **_k: Any) -> None:
                 return None
 
         return _Ref()
+
+
+class _FsBatch:
+    def __init__(self, added: list[dict[str, Any]]) -> None:
+        self._added = added
+        self._rows: list[dict[str, Any]] = []
+
+    def set(self, _ref: Any, data: dict[str, Any], merge: bool = False) -> None:
+        del merge
+        if "row_id" in data:
+            self._rows.append(data)
+
+    async def commit(self) -> None:
+        self._added.extend(self._rows)
 
 
 class _FsClient:
@@ -428,6 +442,9 @@ class _FsClient:
 
     def collection(self, _name: str) -> _FsCollection:
         return _FsCollection(self.docs, self.added)
+
+    def batch(self) -> _FsBatch:
+        return _FsBatch(self.added)
 
 
 def _fs_store(client: _FsClient) -> Any:
@@ -640,6 +657,16 @@ class _ResetRef:
     async def delete(self) -> None:
         return None
 
+    async def get(self) -> Any:
+        class _Missing:
+            exists = False
+            update_time = None
+
+            def to_dict(self) -> None:
+                return None
+
+        return _Missing()
+
 
 class _ResetDoc:
     def __init__(self, client: _ResetClient, doc_id: str, data: dict[str, Any]) -> None:
@@ -703,13 +730,15 @@ class _ResetBatch:
         self._client = client
         self._ops: list[tuple[str, str, dict[str, Any] | None]] = []
 
-    def set(self, ref: _ResetRef, data: dict[str, Any]) -> None:
+    def set(self, ref: _ResetRef, data: dict[str, Any], merge: bool = False) -> None:
+        del merge
         self._ops.append(("set", ref.id, data))
 
     def update(self, ref: _ResetRef, data: dict[str, Any]) -> None:
         self._ops.append(("update", ref.id, data))
 
-    def delete(self, ref: _ResetRef) -> None:
+    def delete(self, ref: _ResetRef, option: Any = None) -> None:
+        del option
         self._ops.append(("delete", ref.id, None))
 
     async def commit(self) -> None:
@@ -759,11 +788,13 @@ async def test_firestore_reset_writes_nothing_for_an_unchanged_row() -> None:
         ]
     )
     await _reset_store(client).reset("t", [message])
-    assert client.commits == []
-    assert client.direct[0][0] == "set"
-    assert client.direct[0][2] is not None
-    assert client.direct[0][2]["last_message_at"] == 1000
-    assert client.direct[0][2]["message_count"] == 1
+    assert client.direct == []
+    assert "doc-1" not in [op[1] for commit in client.commits for op in commit]
+    summary = [op for commit in client.commits for op in commit if op[0] == "set"]
+    assert len(summary) == 1
+    assert summary[0][2] is not None
+    assert summary[0][2]["last_message_at"] == 1000
+    assert summary[0][2]["message_count"] == 1
 
 
 @pytest.mark.asyncio
@@ -803,11 +834,12 @@ async def test_firestore_reset_commits_sets_before_deletes(monkeypatch: pytest.M
             Message(role="user", content=[Text(text="extra")]),
         ],
     )
-    assert [len(commit) for commit in client.commits] == [2, 1, 1]
-    writes = [op for commit in client.commits[:-1] for op in commit]
+    assert [len(commit) for commit in client.commits] == [2, 1, 1, 1]
+    writes = [op for commit in client.commits[:-2] for op in commit]
     assert {op[0] for op in writes} <= {"set", "update"}
-    assert client.commits[-1][0][0] == "delete"
-    assert client.commits[-1][0][1] == "drop-doc"
+    assert client.commits[-2][0][0] == "delete"
+    assert client.commits[-2][0][1] == "drop-doc"
+    assert client.commits[-1][0][0] == "set"
     update = next(op for op in writes if op[0] == "update")
     assert update[2] is not None
     assert "turn_id" not in update[2] and "message_id" not in update[2]
