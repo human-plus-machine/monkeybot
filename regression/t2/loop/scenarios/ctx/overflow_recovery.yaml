@@ -1,0 +1,56 @@
+id: regression/t2/loop/scenarios/ctx/overflow_recovery
+case: T2-CTX-24
+description: A provider size rejection compacts once, then the retry answers.
+mode: scripted
+driver: loop
+config:
+  model.context_window: 100000
+messages:
+- hello
+history:
+- role: user
+  content:
+  - type: text
+    text: row-0
+- role: assistant
+  content:
+  - type: text
+    text: row-1
+- role: user
+  content:
+  - type: text
+    text: row-2
+- role: assistant
+  content:
+  - type: text
+    text: row-3
+- role: user
+  content:
+  - type: text
+    text: row-4
+- role: assistant
+  content:
+  - type: text
+    text: row-5
+script:
+- - type: raise
+    error: RuntimeError
+    message: 'prompt is too long: 9000 tokens > 8000 maximum'
+- - type: text
+    text: folded-middle
+  - type: done
+- - type: text
+    text: recovered
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  response_contains: recovered
+  provider_calls: 3
+  events_sequence:
+  - ContextSummarizing
+  - ContextSummarized
+  - type: HarnessIntervention
+    intervention: context_overflow_recovery
+  history:
+    summary_row: true

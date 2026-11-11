@@ -2224,6 +2224,10 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
                 ToolCall(call_id="c1", name="run_command", args={"command": "noop"}),
                 Done(),
             ],
+            [
+                ToolCall(call_id="c2", name="run_command", args={"command": "noop"}),
+                Done(),
+            ],
             [TextDelta(text="done"), Done()],
         ]
     )
@@ -2253,7 +2257,7 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
         if isinstance(e, TurnComplete):
             break
 
-    assert len(prov.captured_messages) == 2
+    assert len(prov.captured_messages) == 3
     sys1 = _flatten_text_from_message(prov.captured_messages[0][0])
     first_all = "\n".join(_flatten_text_from_message(m) for m in prov.captured_messages[0])
     turn2 = prov.captured_messages[1]
@@ -2277,6 +2281,15 @@ async def test_loop_picks_up_refreshed_memory_between_turns(tmp_path: Path) -> N
     assert last.role == "user"
     assert any(isinstance(b, ToolResponse) for b in last.content)
     assert any(isinstance(b, Text) and "new memory from tool" in b.text for b in last.content)
+    turn3 = prov.captured_messages[2]
+    all3 = "\n".join(_flatten_text_from_message(message) for message in turn3)
+    assert "new memory from tool" in all3
+    assert "new memory from tool" not in _flatten_text_from_message(turn3[0])
+    assert sys1 == _flatten_text_from_message(turn2[0]) == _flatten_text_from_message(turn3[0])
+    roles3 = [message.role for message in turn3]
+    assert all(left != right for left, right in zip(roles3, roles3[1:])), (
+        f"consecutive same-role messages in provider payload: {roles3}"
+    )
 
 
 _TAIL_HEADING = "## System context update"

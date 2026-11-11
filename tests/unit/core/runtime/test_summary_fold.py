@@ -8,6 +8,7 @@ import pytest
 
 from monkeybot.core.context import TurnContext
 from monkeybot.core.llm.provider import Done, Message, TextDelta
+from monkeybot.core.runtime.events import AssistantDelta, ContextSummarized, Error
 from monkeybot.core.runtime.background_summary import (
     maybe_start,
     reset_pending_summaries,
@@ -261,6 +262,35 @@ async def test_a_failing_summarizer_never_grows_the_request(tmp_path) -> None:
     _, middle, _ = split_messages_for_compaction(history.rows, window_tokens=window)
     lines = _middle_summary_lines(middle, window_tokens=window)
     assert _summary_request_tokens(lines, None) > budget
+
+
+async def test_a_failing_inline_summary_still_answers_and_keeps_history(tmp_path) -> None:
+    window = 4_000
+    rows = _rows(8, 20_000)
+    history = FakeHistory(rows)
+    before = list(history.rows)
+    provider = _FailingSummarizer()
+    events = [
+        event
+        async for event in run(
+            "hello",
+            _ctx(workspace_root=tmp_path, context_window_tokens=window),
+            provider=provider,  # type: ignore[arg-type]
+            history=history,
+            inspectors=[],
+            tool_executor=RecordingExecutor(),
+            max_turns=2,
+        )
+    ]
+    text = "".join(event.delta for event in events if isinstance(event, AssistantDelta))
+    summarized = [event for event in events if isinstance(event, ContextSummarized)]
+    assert text == "ok"
+    assert not any(isinstance(event, Error) for event in events)
+    assert summarized
+    assert all(event.turns_summarized == 0 for event in summarized)
+    assert history.reset_calls == []
+    assert history.rows[: len(before)] == before
+    assert len(history.rows) == len(before) + 2
 
 
 class _TooLongError(Exception):
