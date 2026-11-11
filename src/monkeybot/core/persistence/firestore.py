@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import builtins
+import contextlib
 import hashlib
 import json
 import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Collection, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -90,6 +92,39 @@ def _memory_outbox_collection(client: AsyncClient, prefix: str) -> Any:
 def _history_document_id(message_id: str) -> str:
     """Stable Firestore document ID for idempotent message delivery."""
     return "message_" + hashlib.sha256(message_id.encode()).hexdigest()
+
+
+def _legacy_summary_document_id(thread_id: str) -> str | None:
+    """``thread_id`` when it is a legal Firestore document id, else None.
+
+    Appends that carried a ``message_id`` used to write the summary at
+    ``threads/{thread_id}``. A slash is not legal in a document id, and the
+    store reads the hashed id, so those threads have no raw document to remove.
+    """
+    if not thread_id or thread_id in {".", ".."} or "/" in thread_id:
+        return None
+    if len(thread_id.encode("utf-8")) > 1500:
+        return None
+    return thread_id
+
+
+async def _await_finished(task: asyncio.Task[Any]) -> None:
+    """Cancel a task that is still running, and always retrieve its result."""
+    if not task.done():
+        task.cancel()
+    with contextlib.suppress(asyncio.CancelledError, Exception):
+        await task
+
+
+@dataclass(frozen=True)
+class _Write:
+    """One batched Firestore write."""
+
+    kind: str
+    ref: Any
+    payload: dict[str, Any] | None = None
+    option: Any = None
+    merge: bool = False
 
 
 def _stamp(raw: object) -> int | None:
@@ -255,12 +290,19 @@ class FirestoreHistoryStore:
             merge=True,
         )
 
-    async def _delete_thread_summary(self, thread_id: str) -> None:
-        await (
-            self._client.collection(self._threads_collection)
-            .document(self._summary_doc_id(thread_id))
-            .delete()
+    def _summary_ref(self, thread_id: str) -> Any:
+        return self._client.collection(self._threads_collection).document(
+            self._summary_doc_id(thread_id)
         )
+
+    async def _delete_thread_summary(self, thread_id: str, legacy: _Write | None = None) -> None:
+        """Delete the hashed summary and, when it is this scope's, the raw-id doc."""
+        if legacy is None:
+            legacy = await self._legacy_summary_op(thread_id)
+        ops = [_Write("delete", self._summary_ref(thread_id))]
+        if legacy is not None:
+            ops.append(legacy)
+        await self._commit_writes(ops)
 
     async def append(
         self,
@@ -297,37 +339,41 @@ class FirestoreHistoryStore:
         # visibility via list_threads is suppressed.
         is_hidden = is_hidden_thread_id(thread_id)
         if not message_id:
-            await self._client.collection(self._collection).add(history_data)
+            batch = self._client.batch()
+            batch.set(self._client.collection(self._collection).document(), history_data)
             if not is_hidden:
-                await self._upsert_thread_summary(thread_id, created_at=created_at, content=payload)
+                batch.set(
+                    self._summary_ref(thread_id),
+                    _thread_summary_update(thread_id, created_at, payload, self._agent_scope),
+                    merge=True,
+                )
+            await batch.commit()
             return
 
-        existing_query = (
-            self._client.collection(self._collection)
-            .where(filter=FieldFilter("message_id", "==", message_id))
-            .limit(1)
-        )
-        async for _existing in existing_query.stream():
-            return
+        # The legacy query and the transactional read are independent. Start the
+        # query first so it overlaps the transaction's begin and document get.
+        legacy_task = asyncio.create_task(self._message_id_taken(message_id))
         hist_ref = self._client.collection(self._collection).document(
             _history_document_id(message_id)
         )
-        thread_ref = self._client.collection(self._threads_collection).document(thread_id)
         summary_fields = _thread_summary_update(thread_id, created_at, payload, self._agent_scope)
 
         async def _append_body(txn: firestore.AsyncTransaction) -> None:
             snapshot = await hist_ref.get(transaction=txn)
-            if snapshot.exists:
+            if snapshot.exists or await legacy_task:
                 return
             txn.set(hist_ref, history_data)
             if not is_hidden:
-                txn.set(thread_ref, summary_fields, merge=True)
+                txn.set(self._summary_ref(thread_id), summary_fields, merge=True)
 
         append_txn = cast(
             Callable[[firestore.AsyncTransaction], Awaitable[None]],
             firestore.async_transactional(_append_body),
         )
-        await append_txn(self._client.transaction())
+        try:
+            await append_txn(self._client.transaction())
+        finally:
+            await _await_finished(legacy_task)
 
     async def append_with_outbox(
         self,
@@ -385,29 +431,22 @@ class FirestoreHistoryStore:
             "lease_expires_at": None,
             "palace_id": str(outbox.get("palace_id") or ""),
         }
-        legacy_history_exists = False
-        existing_query = (
-            self._client.collection(self._collection)
-            .where(filter=FieldFilter("message_id", "==", message_id))
-            .limit(1)
-        )
-        async for _existing in existing_query.stream():
-            legacy_history_exists = True
-            break
-
+        legacy_task = asyncio.create_task(self._message_id_taken(message_id))
         hist_ref = self._client.collection(self._collection).document(
             _history_document_id(message_id)
         )
-        thread_ref = self._client.collection(self._threads_collection).document(thread_id)
         summary_fields = _thread_summary_update(thread_id, created_at, payload, self._agent_scope)
         outbox_ref = _memory_outbox_collection(self._client, self._prefix).document(outbox_row_id)
+        is_hidden = is_hidden_thread_id(thread_id)
 
         async def _append_body(txn: firestore.AsyncTransaction) -> None:
-            history_snapshot = await hist_ref.get(transaction=txn)
-            outbox_snapshot = await outbox_ref.get(transaction=txn)
-            if not legacy_history_exists and not history_snapshot.exists:
+            snaps = await self._transaction_snapshots(txn, [hist_ref, outbox_ref])
+            history_snapshot = snaps[hist_ref.path]
+            outbox_snapshot = snaps[outbox_ref.path]
+            if not await legacy_task and not history_snapshot.exists:
                 txn.set(hist_ref, history_data)
-                txn.set(thread_ref, summary_fields, merge=True)
+                if not is_hidden:
+                    txn.set(self._summary_ref(thread_id), summary_fields, merge=True)
             if not outbox_snapshot.exists:
                 txn.set(outbox_ref, outbox_data)
 
@@ -416,18 +455,21 @@ class FirestoreHistoryStore:
             firestore.async_transactional(_append_body),
         )
         try:
-            await append_txn(self._client.transaction())
-        except (
-            TimeoutError,
-            OSError,
-            ConnectionError,
-            google_exceptions.DeadlineExceeded,
-            google_exceptions.ServiceUnavailable,
-            google_exceptions.InternalServerError,
-            google_exceptions.Aborted,
-            google_exceptions.Unknown,
-        ) as extra:
-            raise AmbiguousCommitError(str(extra)) from extra
+            try:
+                await append_txn(self._client.transaction())
+            except (
+                TimeoutError,
+                OSError,
+                ConnectionError,
+                google_exceptions.DeadlineExceeded,
+                google_exceptions.ServiceUnavailable,
+                google_exceptions.InternalServerError,
+                google_exceptions.Aborted,
+                google_exceptions.Unknown,
+            ) as extra:
+                raise AmbiguousCommitError(str(extra)) from extra
+        finally:
+            await _await_finished(legacy_task)
 
     async def load(self, thread_id: str, limit: int | None = None) -> list[Message]:
         if limit is not None:
@@ -488,37 +530,110 @@ class FirestoreHistoryStore:
         return out
 
     async def last_row(self, thread_id: str) -> tuple[int, str] | None:
-        """Message count and the newest row's content JSON, without loading the thread."""
+        """Message count and the newest row's content JSON, without loading the thread.
+
+        The newest-row query and the count run together. A count that disagrees
+        with the row the caller is holding makes that caller reload.
+        """
         base: Any = (
             self._client.collection(self._collection)
             .where(filter=FieldFilter("thread_id", "==", thread_id))
             .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
         )
         latest = base.order_by("created_at", direction=firestore.Query.DESCENDING).limit(1)
-        content: str | None = None
-        async for doc in latest.stream():
-            content = str((doc.to_dict() or {}).get("content") or "")
+
+        async def newest() -> str | None:
+            async for doc in latest.stream():
+                return str((doc.to_dict() or {}).get("content") or "")
+            return None
+
+        async def counted() -> int:
+            result = await base.count().get()
+            return int(result[0][0].value)
+
+        content, count = await asyncio.gather(newest(), counted())
         if content is None:
             return None
-        counted = await base.count().get()
-        return int(counted[0][0].value), content
+        return count, content
 
-    async def reset(self, thread_id: str, messages: list[Message]) -> None:
-        """Replace the thread, keeping metadata on rows whose ``row_id`` is stored.
+    async def _message_id_taken(self, message_id: str) -> bool:
+        """True when some history document already carries ``message_id``."""
+        query = (
+            self._client.collection(self._collection)
+            .where(filter=FieldFilter("message_id", "==", message_id))
+            .limit(1)
+        )
+        async for _doc in query.stream():
+            return True
+        return False
 
-        Matched documents stay in place, so their id, ``turn_id``, and
-        ``message_id`` survive. New rows are written, and unmatched documents
-        deleted, in batches of ``_FIRESTORE_BATCH_LIMIT``. Every set and update
-        commits before any delete, so a crash leaves extra old rows rather than
-        a missing survivor. Up to one batch, the write is atomic.
+    async def _transaction_snapshots(
+        self, txn: firestore.AsyncTransaction, refs: list[Any]
+    ) -> dict[str, Any]:
+        """Read ``refs`` in one ``batch_get_documents`` call, inside ``txn``.
+
+        ``AsyncTransaction.get_all`` awaits the client's async generator and
+        raises ``TypeError`` on google-cloud-firestore 2.27. The client method
+        is the single RPC, and passing ``transaction`` keeps the read in it.
         """
+        found: dict[str, Any] = {}
+        async for snap in self._client.get_all(refs, transaction=txn):
+            found[snap.reference.path] = snap
+        missing = [ref.path for ref in refs if ref.path not in found]
+        if missing:
+            raise RuntimeError(f"firestore batch get omitted {missing}")
+        return found
+
+    async def _stored_docs(self, thread_id: str) -> list[Any]:
         query = (
             self._client.collection(self._collection)
             .where(filter=FieldFilter("thread_id", "==", thread_id))
             .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
             .order_by("created_at", direction=firestore.Query.ASCENDING)
         )
-        stored_docs = [doc async for doc in query.stream()]
+        return [doc async for doc in query.stream()]
+
+    async def _legacy_summary_op(self, thread_id: str) -> _Write | None:
+        """Delete ``threads/{thread_id}`` when it belongs to this scope.
+
+        The raw document is shared across scopes, so a different ``agent_scope``
+        is left in place. The precondition stops the delete from removing a
+        document that changed after this read.
+        """
+        raw_id = _legacy_summary_document_id(thread_id)
+        if raw_id is None or raw_id == self._summary_doc_id(thread_id):
+            return None
+        ref = self._client.collection(self._threads_collection).document(raw_id)
+        snap = await ref.get()
+        if not snap.exists:
+            return None
+        data = snap.to_dict() or {}
+        if data.get("agent_scope") != self._agent_scope:
+            return None
+        option = None
+        if snap.update_time is not None:
+            option = self._client.write_option(last_update_time=snap.update_time)
+        return _Write("delete", ref, option=option)
+
+    async def reset(self, thread_id: str, messages: list[Message]) -> None:
+        """Replace the thread, keeping metadata on rows whose ``row_id`` is stored.
+
+        Matched documents stay in place, so their id, ``turn_id``, and
+        ``message_id`` survive. The read of the thread and the legacy summary
+        doc run together. When the writes fit in ``_FIRESTORE_BATCH_LIMIT`` they
+        commit as one batch. Above that, sets and updates commit before deletes,
+        so a crash leaves extra old rows rather than a missing survivor. A row
+        written after this read is not in the snapshot and is not deleted.
+        """
+        docs, legacy = await asyncio.gather(
+            self._stored_docs(thread_id),
+            self._legacy_summary_op(thread_id),
+        )
+        await self._apply_rewrite(thread_id, messages, docs, [], legacy)
+
+    def _plan_live_writes(
+        self, thread_id: str, messages: list[Message], stored_docs: list[Any]
+    ) -> tuple[list[_Write], list[_Write], list[dict[str, Any]]]:
         stored: list[tuple[str, RowMeta]] = []
         for doc in stored_docs:
             data = doc.to_dict() or {}
@@ -543,7 +658,7 @@ class FirestoreHistoryStore:
             self._last_created_at = max(self._last_created_at, stamps[-1])
 
         history = self._client.collection(self._collection)
-        mutations: list[tuple[str, Any, dict[str, Any] | None]] = []
+        mutations: list[_Write] = []
         summary_rows: list[dict[str, Any]] = []
         for message, index, created_at in zip(messages, matched, stamps, strict=True):
             payload = json.dumps(
@@ -554,7 +669,7 @@ class FirestoreHistoryStore:
             summary_rows.append({"created_at": created_at, "content": payload})
             if index is None:
                 mutations.append(
-                    (
+                    _Write(
                         "set",
                         history.document(),
                         _history_row(
@@ -581,32 +696,70 @@ class FirestoreHistoryStore:
             if not stored_text(data.get("row_id")):
                 updates["row_id"] = row_id_for_insert(message)
             if updates:
-                mutations.append(("update", stored_docs[index].reference, updates))
+                mutations.append(_Write("update", stored_docs[index].reference, updates))
 
         used = {index for index in matched if index is not None}
-        deletions: list[tuple[str, Any, dict[str, Any] | None]] = [
-            ("delete", doc.reference, None)
+        deletions = [
+            _Write("delete", doc.reference)
             for index, doc in enumerate(stored_docs)
             if index not in used
         ]
+        return mutations, deletions, summary_rows
+
+    def _summary_writes(self, thread_id: str, rows: list[dict[str, Any]]) -> list[_Write]:
+        if not rows or is_hidden_thread_id(thread_id):
+            return [_Write("delete", self._summary_ref(thread_id))]
+        last = rows[-1]
+        return [
+            _Write(
+                "set",
+                self._summary_ref(thread_id),
+                {
+                    "thread_id": thread_id,
+                    "last_message_at": int(last.get("created_at") or 0),
+                    "message_count": len(rows),
+                    "last_content": str(last.get("content") or ""),
+                    "agent_scope": self._agent_scope,
+                },
+            )
+        ]
+
+    async def _apply_rewrite(
+        self,
+        thread_id: str,
+        messages: list[Message],
+        docs: list[Any],
+        archive: list[_Write],
+        legacy: _Write | None,
+    ) -> None:
+        """Commit a rewrite. One batch when it fits; otherwise archive, then writes, then deletes."""
+        mutations, deletions, summary_rows = self._plan_live_writes(thread_id, messages, docs)
+        tail = self._summary_writes(thread_id, summary_rows if messages else [])
+        if legacy is not None:
+            tail.append(legacy)
+        staged = archive + mutations + deletions + tail
+        if len(staged) <= _FIRESTORE_BATCH_LIMIT:
+            await self._commit_writes(staged)
+            return
+        await self._commit_writes(archive)
         await self._commit_writes(mutations)
         await self._commit_writes(deletions)
-        if not messages or is_hidden_thread_id(thread_id):
-            await self._delete_thread_summary(thread_id)
-        else:
-            await self._refresh_thread_summary(thread_id, summary_rows)
+        await self._commit_writes(tail)
 
-    async def _commit_writes(self, ops: list[tuple[str, Any, dict[str, Any] | None]]) -> None:
+    async def _commit_writes(self, ops: list[_Write]) -> None:
         """Commit ``ops`` in order, one batch per ``_FIRESTORE_BATCH_LIMIT`` writes."""
         for start in range(0, len(ops), _FIRESTORE_BATCH_LIMIT):
+            chunk = ops[start : start + _FIRESTORE_BATCH_LIMIT]
             batch = self._client.batch()
-            for op, ref, payload in ops[start : start + _FIRESTORE_BATCH_LIMIT]:
-                if op == "set":
-                    batch.set(ref, payload or {})
-                elif op == "update":
-                    batch.update(ref, payload or {})
+            for op in chunk:
+                if op.kind == "set":
+                    batch.set(op.ref, op.payload or {}, merge=op.merge)
+                elif op.kind == "update":
+                    batch.update(op.ref, op.payload or {})
+                elif op.option is None:
+                    batch.delete(op.ref)
                 else:
-                    batch.delete(ref)
+                    batch.delete(op.ref, option=op.option)
             await batch.commit()
 
     async def reset_archiving(
@@ -619,49 +772,47 @@ class FirestoreHistoryStore:
     ) -> int:
         """Copy dropped rows into the archive, then replace the thread.
 
-        The archive documents are committed before any live row is deleted, and
-        each document id is derived from the live document id. A crash can leave
-        a row in both places; a retry overwrites the copy instead of duplicating
-        it. The live rewrite itself is the existing ``reset``.
+        The thread is read once and that snapshot feeds both the archive copy
+        and the live rewrite. When every write fits in ``_FIRESTORE_BATCH_LIMIT``
+        they commit together. Above that, the archive commits first. Each
+        archive document id is derived from the live document id, so a retry
+        overwrites the copy. A row written after the read is not in the snapshot
+        and is not deleted.
         """
-        archived = await self._copy_unmatched_to_archive(
+        docs, legacy = await asyncio.gather(
+            self._stored_docs(thread_id),
+            self._legacy_summary_op(thread_id),
+        )
+        archive = self._archive_writes(
             thread_id,
             messages,
+            docs,
             archive_id=uuid.uuid4().hex,
             summary_row_id=summary_row_id,
             reason=reason,
             archived_at=int(time.time() * 1000),
         )
-        await self.reset(thread_id, messages)
-        return archived
+        await self._apply_rewrite(thread_id, messages, docs, archive, legacy)
+        return len(archive)
 
-    async def _copy_unmatched_to_archive(
+    def _archive_writes(
         self,
         thread_id: str,
         messages: list[Message],
+        docs: list[Any],
         *,
         archive_id: str,
         summary_row_id: str | None,
         reason: str,
         archived_at: int,
-    ) -> int:
-        query = (
-            self._client.collection(self._collection)
-            .where(filter=FieldFilter("thread_id", "==", thread_id))
-            .where(filter=FieldFilter("agent_scope", "==", self._agent_scope))
-            .order_by("created_at", direction=firestore.Query.ASCENDING)
-        )
-        docs = [doc async for doc in query.stream()]
+    ) -> list[_Write]:
         stored_ids = [loaded_row_id((doc.to_dict() or {}).get("row_id"), doc.id) for doc in docs]
         dropped = unmatched_indexes(stored_ids, kept_row_ids(messages))
-        if not dropped:
-            return 0
-        batch = self._client.batch()
-        pending = 0
+        writes: list[_Write] = []
         for position in dropped:
             doc = docs[position]
             data = doc.to_dict() or {}
-            payload = {
+            payload: dict[str, Any] = {
                 "thread_id": thread_id,
                 "agent_scope": self._agent_scope,
                 "role": str(data.get("role") or ""),
@@ -681,20 +832,16 @@ class FirestoreHistoryStore:
                 payload["message_id"] = message_id
             if summary_row_id is not None:
                 payload["summary_row_id"] = summary_row_id
-            batch.set(
-                self._client.collection(self._archive_collection).document(
-                    _archive_document_id(doc.id)
-                ),
-                payload,
+            writes.append(
+                _Write(
+                    "set",
+                    self._client.collection(self._archive_collection).document(
+                        _archive_document_id(doc.id)
+                    ),
+                    payload,
+                )
             )
-            pending += 1
-            if pending >= _FIRESTORE_BATCH_LIMIT:
-                await batch.commit()
-                batch = self._client.batch()
-                pending = 0
-        if pending:
-            await batch.commit()
-        return len(dropped)
+        return writes
 
     async def load_archive(self, thread_id: str) -> list[ArchivedRow]:
         """Archived rows for this scope and thread, oldest rewrite first.
@@ -772,6 +919,7 @@ class FirestoreHistoryStore:
         targets = set(row_ids)
         if not targets:
             return 0
+        legacy_task = asyncio.create_task(self._legacy_summary_op(thread_id))
         query = (
             self._client.collection(self._collection)
             .where(filter=FieldFilter("thread_id", "==", thread_id))
@@ -782,42 +930,42 @@ class FirestoreHistoryStore:
         batch = self._client.batch()
         pending = 0
         deleted = 0
-        async for doc in query.stream():
-            data = doc.to_dict() or {}
-            if loaded_row_id(data.get("row_id"), doc.id) not in targets:
-                kept.append(data)
-                continue
-            batch.delete(doc.reference)
-            pending += 1
-            deleted += 1
-            if pending >= _FIRESTORE_BATCH_LIMIT:
+        try:
+            async for doc in query.stream():
+                data = doc.to_dict() or {}
+                if loaded_row_id(data.get("row_id"), doc.id) not in targets:
+                    kept.append(data)
+                    continue
+                batch.delete(doc.reference)
+                pending += 1
+                deleted += 1
+                if pending >= _FIRESTORE_BATCH_LIMIT:
+                    await batch.commit()
+                    batch = self._client.batch()
+                    pending = 0
+            if pending:
                 await batch.commit()
-                batch = self._client.batch()
-                pending = 0
-        if pending:
-            await batch.commit()
+        except BaseException:
+            await _await_finished(legacy_task)
+            raise
+        legacy = await legacy_task
         if deleted and not is_hidden_thread_id(thread_id):
-            await self._refresh_thread_summary(thread_id, kept)
+            await self._refresh_thread_summary(thread_id, kept, legacy)
         return deleted
 
-    async def _refresh_thread_summary(self, thread_id: str, rows: list[dict[str, Any]]) -> None:
+    async def _refresh_thread_summary(
+        self,
+        thread_id: str,
+        rows: list[dict[str, Any]],
+        legacy: _Write | None = None,
+    ) -> None:
         if not rows:
-            await self._delete_thread_summary(thread_id)
+            await self._delete_thread_summary(thread_id, legacy)
             return
-        last = rows[-1]
-        await (
-            self._client.collection(self._threads_collection)
-            .document(self._summary_doc_id(thread_id))
-            .set(
-                {
-                    "thread_id": thread_id,
-                    "last_message_at": int(last.get("created_at") or 0),
-                    "message_count": len(rows),
-                    "last_content": str(last.get("content") or ""),
-                    "agent_scope": self._agent_scope,
-                }
-            )
-        )
+        ops = self._summary_writes(thread_id, rows)
+        if legacy is not None:
+            ops.append(legacy)
+        await self._commit_writes(ops)
 
     async def list_threads(self, limit: int = 50) -> list[ChatThreadSummary]:
         """Return recent threads, newest first, excluding hidden threads.
@@ -838,6 +986,7 @@ class FirestoreHistoryStore:
         """
         cap = max(1, min(limit, 200))
         out: list[ChatThreadSummary] = []
+        seen: set[str] = set()
         cursor: Any = None
         while len(out) < cap:
             query = (
@@ -853,8 +1002,9 @@ class FirestoreHistoryStore:
             for doc in docs:
                 data = doc.to_dict() or {}
                 thread_id = str(data.get("thread_id") or doc.id)
-                if is_hidden_thread_id(thread_id):
+                if is_hidden_thread_id(thread_id) or thread_id in seen:
                     continue
+                seen.add(thread_id)
                 preview = preview_from_content_blob(str(data.get("last_content", "")))
                 out.append(
                     ChatThreadSummary(
