@@ -2717,7 +2717,7 @@ dev = [{ name = "pytest", specifier = ">=8.0.0" }]
 
 [[package]]
 name = "monkeybot-cli"
-version = "0.13.1"
+version = "0.13.2"
 source = { editable = "cli" }
 dependencies = [
     { name = "httpx" },
