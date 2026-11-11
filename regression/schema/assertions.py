@@ -155,6 +155,7 @@ _REQUEST_KEYS = frozenset(
         "system_same_as",
         "messages_contain",
         "messages_not_contain",
+        "messages_count",
         "no_vertex_google_search",
         "thinking_budget",
         "model",
@@ -1108,6 +1109,20 @@ def _match_provider_request(
         failures.append(f"{label}: messages_not_contain {messages_absent!r} was in the messages")
     elif messages_absent is not None and not isinstance(messages_absent, str):
         failures.append(f"{label}: messages_not_contain must be a string")
+    counts = matcher.get("messages_count")
+    if counts is not None:
+        if not isinstance(counts, dict):
+            failures.append(f"{label}: messages_count must be a mapping of text to a count")
+        else:
+            for needle, expected in counts.items():
+                if not isinstance(needle, str) or type(expected) is not int:
+                    failures.append(f"{label}: messages_count entries must map text to an integer")
+                    break
+                actual = blob.count(needle)
+                if actual != expected:
+                    failures.append(
+                        f"{label}: messages_count {needle!r} appeared {actual} times, not {expected}"
+                    )
     expected_model = matcher.get("model")
     if isinstance(expected_model, str) and request.model != expected_model:
         failures.append(f"{label}: model {request.model!r} != {expected_model!r}")

@@ -41,6 +41,7 @@ from monkeybot.core.runtime.context_budget import (
     estimate_tokens_from_char_count,
     summary_input_budget,
 )
+from monkeybot.core.runtime.read_dedupe import remember_stored_reads, replace_repeated_reads
 from monkeybot.core.types.content_blocks import (
     IMAGE_TOKEN_ESTIMATE,
     AttachmentRef,
@@ -655,11 +656,20 @@ async def _append_budgeted_tool_responses(
     prompt_ledger: PromptTokenLedger | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Budget tool results against remaining context, append, compact if needed."""
-    trimmed, needs_compaction = budgeter.fit_content_blocks(chunk_responses)
+    # A confirmed repeat is a short stub before the budget runs, so the budget
+    # and the stored row both see one copy of the file.
+    prepared, decisions = await replace_repeated_reads(
+        chunk_responses,
+        history=history,
+        thread_id=ctx.thread_id,
+        ledger=ctx.read_ledger,
+    )
+    trimmed, needs_compaction = budgeter.fit_content_blocks(prepared)
     await history.append(
         ctx.thread_id,
         Message(role="user", content=trimmed),
     )
+    remember_stored_reads(trimmed, decisions, ctx.read_ledger)
     usage.estimated_prompt_tokens = max(usage.estimated_prompt_tokens, budgeter.used_tokens)
     current = budgeter.used_tokens
     if needs_compaction:

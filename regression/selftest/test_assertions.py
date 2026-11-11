@@ -272,6 +272,22 @@ def test_provider_request_system_same_as() -> None:
     _bad({"provider_request": [{"n": 3, "system_same_as": 1}]}, run, "provider_request")
 
 
+def test_provider_request_messages_count() -> None:
+    request = ProviderRequest(messages=["hello hello"])
+    run = RunView(provider_requests=[request])
+    _ok({"provider_request": [{"n": 1, "messages_count": {"hello": 2}}]}, run)
+    _bad(
+        {"provider_request": [{"n": 1, "messages_count": {"hello": 1}}]},
+        run,
+        "messages_count",
+    )
+    _bad(
+        {"provider_request": [{"n": 1, "messages_count": "hello"}]},
+        run,
+        "messages_count",
+    )
+
+
 def test_required_and_forbidden_tools() -> None:
     run = _run(*_call("c1", "read_file", {"path": "README.md"}))
     _ok({"required_tools": ["read_file"]}, run)

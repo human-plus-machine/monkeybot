@@ -46,6 +46,7 @@ Gaps: no T2 runs the real executor for escapes, stale reads, incomplete scans, p
 | T2-FILE-31 | `spill_large_tool_output` | Over `spill_threshold`: spill path returned; follow-up `read_file` of the spill path works past the default line cap. |
 | T2-FILE-32 | `spill_session_id_sanitized` | Session id with `..` cannot write outside the spill tree. |
 | T2-FILE-33 | `tool_glob_grep` (migrate) | As today: glob and grep both return the fixture's matches. |
+| T2-FILE-38 | `repeat_read_unchanged` | A second read of an unchanged file is stored as a stub; the next provider request has the file text once and the stub once. |
 | T4-FILE-01 | `core_read` (migrate) | Plus: answer quotes a fixture line (code grader). |
 | T4-FILE-02 | `core_read_error` (migrate; add to smoke) | Model recovers from a bad path; `max_tool_errors: 0` after forgiveness. |
 | T4-FILE-03 | `core_write` (migrate) | Plus: `workspace_file_contains`. |
