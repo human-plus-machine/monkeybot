@@ -1113,19 +1113,18 @@ def _session_wake_budget(bus: Any) -> Any:
 
 
 def _background_jobs_survive_turn(bus: Any, cfg: Any) -> bool:
-    """Whether local background commands outlive the turn. Fixed for the session.
+    """Whether background commands outlive the turn. Fixed for the session.
 
-    Sandbox commands stay turn-scoped. The choice is stored on the bus so a
-    later config read cannot change the tool text in the middle of a chat.
+    Host commands and OpenSandbox commands both keep running after the turn.
+    The sandbox container is session-scoped too. The choice is stored on the
+    bus so a later config read cannot change the tool text mid-chat.
     """
+    del cfg
     decided = getattr(bus, "background_jobs_survive_turn", None)
     if isinstance(decided, bool):
         return decided
-    from monkeybot.core.tools.sandbox_executor import SandboxConfig
-
-    decided = not SandboxConfig.from_env(cfg).enabled
-    bus.background_jobs_survive_turn = decided
-    return decided
+    bus.background_jobs_survive_turn = True
+    return True
 
 
 def _ensure_session_jobs(
@@ -1179,6 +1178,61 @@ def _ensure_session_jobs(
     )
     bus.session_jobs = jobs
     return jobs
+
+
+async def _ensure_sandbox_session(
+    bus: Any,
+    cfg: Any,
+    workspace_root: Path,
+    skills_path: Path,
+    artifacts_path: Path | None,
+) -> Any | None:
+    """One OpenSandbox container per session bus. Later turns reuse it.
+
+    A spec change (image, server, mounts, proxy) kills the old container and
+    starts a new one. Disabled sandbox leaves any previous container in place
+    until the session closes; turns simply stop routing commands to it.
+    """
+    from monkeybot.core.tools.sandbox_executor import SandboxConfig
+    from monkeybot.core.tools.sandbox_session import SandboxSession, SandboxSpec
+
+    config = SandboxConfig.from_env(cfg)
+    if not config.enabled:
+        return None
+    spec = SandboxSpec.from_config(config, workspace_root, skills_path, artifacts_path)
+    existing = getattr(bus, "sandbox_session", None)
+    if existing is not None and not existing.closed and existing.spec == spec:
+        return existing
+    if existing is not None:
+        try:
+            await existing.aclose()
+        except Exception:
+            logger.warning("replacing sandbox session failed", exc_info=True)
+    session = SandboxSession(
+        config,
+        workspace_root,
+        skills_path=skills_path,
+        artifacts_path=artifacts_path,
+    )
+    jobs = getattr(bus, "session_jobs", None)
+    if jobs is not None:
+        session.bind_jobs(lambda: bool(jobs.running()))
+    bus.sandbox_session = session
+    return session
+
+
+def _schedule_sandbox_prewarm(bus: Any, cfg: Any, session: Any | None) -> bool:
+    """Start the container during the model call once this chat has used it."""
+    del bus
+    if session is None or not session.used or session.alive or session.closed:
+        return False
+    from monkeybot.core.tools.sandbox_executor import SandboxConfig
+
+    if not SandboxConfig.from_env(cfg).prewarm:
+        return False
+    task = asyncio.create_task(session.prewarm(), name="sandbox-prewarm")
+    session.note_prewarm_task(task)
+    return True
 
 
 class GatewayLoopPort:
@@ -1317,6 +1371,13 @@ class GatewayLoopPort:
                     self,
                     max_jobs=SandboxConfig.from_env(cfg).max_background_jobs,
                 )
+            sandbox_session = await _ensure_sandbox_session(
+                bus,
+                cfg,
+                workspace_root,
+                skills_resolved,
+                artifacts_resolved,
+            )
             if provenance == "human":
                 supervisor.note_human_turn()
                 if session_jobs is not None:
@@ -1415,7 +1476,11 @@ class GatewayLoopPort:
                 subagent_supervisor=supervisor,
                 completion_verifier=gateway_runtime.completion_verifier,
                 session_jobs=session_jobs,
+                sandbox_session=sandbox_session,
             )
+            if _schedule_sandbox_prewarm(bus, cfg, sandbox_session):
+                # Let prewarm acquire the create lock before the model call.
+                await asyncio.sleep(0)
             if transcript_writer is not None:
                 await transcript_writer.write_user_message(
                     request_id=request_id,

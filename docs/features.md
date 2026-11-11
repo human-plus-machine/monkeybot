@@ -275,7 +275,7 @@ Each section follows: **Purpose** · **Key files** · **How it works** · **Depe
 | `apply_patch` | Multi-file Codex-style Add/Update/Delete/Move; fail-closed before any write. Update/move entries carry `line` + `snippet`. A context-free hunk that matches several places is refused (`ambiguous_context`), and a hunk line that does not start with ` `, `-`, `+` or `@@` is a parse error (`invalid_hunk_line`) |
 | `search_memory` | Keyword search in memory tree |
 | `list_skills` | Skill discovery |
-| `run_command` | Allowlisted **and OS-confined** shell (host or OpenSandbox) — see the workspace jail below |
+| `run_command` | Allowlisted **and OS-confined** shell (host or OpenSandbox) — see the workspace jail below. With OpenSandbox on, the SSE gateway keeps **one container per chat**. Background jobs in it outlive the turn and a harness note wakes the model when they finish. A subagent attaches to that container (`Sandbox.connect`) when the parent has already created it, and never kills it. A subagent started before the container exists gets a private container of its own. |
 | `task` | Subagent subprocess (parent only) |
 | `enable_mcp` / `disable_mcp` | Catalog connect / disconnect (success includes status) |
 | `enable_loops` | Progressive advertise scheduled-loop tools |

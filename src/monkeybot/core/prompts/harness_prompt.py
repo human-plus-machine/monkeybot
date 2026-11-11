@@ -37,7 +37,9 @@ _RUN_COMMAND_EXEC_NOTE_HOST = (
 _RUN_COMMAND_EXEC_NOTE_SANDBOX = (
     "**Execution:** via **OpenSandbox** (Docker-backed session container). "
     "The workspace root is bind-mounted at the **same absolute path**; still confined "
-    "to the workspace and subject to the binary allowlist."
+    "to the workspace and subject to the binary allowlist. "
+    "The container lasts for the session. A background job keeps running after this "
+    "turn, and a harness note wakes you when it finishes."
 )
 
 _HARNESS_BODY = """## monkeybot harness (fixed)

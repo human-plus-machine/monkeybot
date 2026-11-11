@@ -197,6 +197,7 @@ class ToolsConfig:
     sandbox_renew_interval_seconds: str | None = None
     sandbox_await_default_wait_seconds: str | None = None
     sandbox_await_max_wait_seconds: str | None = None
+    sandbox_prewarm: str | None = None
     scheduler_enabled: str | None = None
 
 
@@ -999,6 +1000,7 @@ def _tools_from_env(env: Mapping[str, str]) -> ToolsConfig:
         sandbox_renew_interval_seconds=env.get("SANDBOX_RENEW_INTERVAL_SECONDS"),
         sandbox_await_default_wait_seconds=env.get("SANDBOX_AWAIT_DEFAULT_WAIT_SECONDS"),
         sandbox_await_max_wait_seconds=env.get("SANDBOX_AWAIT_MAX_WAIT_SECONDS"),
+        sandbox_prewarm=env.get("SANDBOX_PREWARM"),
         scheduler_enabled=env.get("MONKEYBOT_SCHEDULER_ENABLED"),
     )
 
