@@ -13,6 +13,7 @@ from monkeybot.core.prompts.harness_prompt import (
     harness_fixed_context,
 )
 from monkeybot.core.prompts.headings import (
+    BACKGROUND_TASKS_HEADING,
     CURRENT_DATE_HEADING,
     CURRENT_REQUEST_HEADING,
     INVOKED_SKILL_HEADING,
@@ -21,13 +22,16 @@ from monkeybot.core.prompts.headings import (
     REPO_OVERVIEW_HEADING,
     SKILLS_HEADING,
     TODO_LIST_HEADING,
-    BACKGROUND_TASKS_HEADING,
 )
+from monkeybot.core.prompts.section_budget import SECTION_CHAR_CAPS, clip_lines
 from monkeybot.core.tools.sandbox_executor import SandboxConfig
 from monkeybot.core.types.content_blocks import Text
+from monkeybot.todo_list.store import TodoItem
 
 # Cap injected user text so long pastes do not dominate the context window.
 _MAX_CURRENT_REQUEST_CHARS = 8000
+_TODO_CLIP_NOTE = "Long items are clipped. Start an item to see its full text."
+_ELLIPSIS = "…"
 # One-line skill summaries; the full procedure stays in SKILL.md.
 _MAX_SKILL_DESCRIPTION_CHARS = 200
 # Total budget for skill descriptions; skills past it are listed by name only.
@@ -160,14 +164,135 @@ def _background_tasks_section(ctx: TurnContext) -> str:
         return ""
     if not isinstance(body, str) or not body.strip():
         return ""
-    return f"{BACKGROUND_TASKS_HEADING}{body.strip()}\n"
+    clipped = clip_lines(
+        body.strip(),
+        SECTION_CHAR_CAPS["background_tasks"],
+        note="… [truncated]",
+    )
+    return f"{BACKGROUND_TASKS_HEADING}{clipped}\n"
+
+
+def _todo_line(item_id: str, status: str, text: str) -> str:
+    return f"- {item_id} [{status}] {text}"
+
+
+def _pending_text(text: str, budget: int) -> str:
+    """Pending item text clipped to ``budget`` characters, with an ellipsis when cut."""
+    if len(text) <= budget:
+        return text
+    if budget <= 1:
+        return _ELLIPSIS
+    return text[: budget - 1] + _ELLIPSIS
+
+
+def _join_under_cap(parts: list[str], cap: int) -> str | None:
+    if not parts:
+        return ""
+    text = "\n".join(parts)
+    if len(text) <= cap:
+        return text
+    return None
+
+
+def _drop_todo_lines(item_lines: list[str], tail_lines: list[str], cap: int) -> str:
+    """Drop item lines from the end until the block fits, and say how many went."""
+    best: str | None = None
+    lo, hi = 0, len(item_lines)
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        hidden = len(item_lines) - mid
+        parts = [*item_lines[:mid], *tail_lines]
+        if hidden:
+            parts.append(f"- (+{hidden} more not shown)")
+        fitted = _join_under_cap(parts, cap)
+        if fitted is not None:
+            best = fitted
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    if best is not None:
+        return best
+    if tail_lines:
+        return _drop_todo_lines(item_lines, [], cap)
+    if not item_lines:
+        return ""
+    hidden = max(len(item_lines) - 1, 0)
+    note = f"- (+{hidden} more not shown)" if hidden else "… [truncated]"
+    return clip_lines(item_lines[0], cap, note=note)
+
+
+def _render_todo_lines(items: Sequence[TodoItem], *, cap: int) -> str:
+    """Store lines, shortened only when they would pass ``cap``.
+
+    Under the cap the text matches ``TodoListStore.format_lines``. Over it, done
+    items collapse to one line of ids, pending text is clipped to an equal share,
+    and the in-progress item stays whole. A hand-edited list that is still too
+    long drops lines from the end.
+    """
+    if not items:
+        return ""
+    full = "\n".join(_todo_line(item.id, item.status, item.text) for item in items)
+    if len(full) <= cap:
+        return full
+
+    done = [item for item in items if item.status == "done"]
+    open_items = [item for item in items if item.status != "done"]
+    done_line = ""
+    if done:
+        ids = ", ".join(item.id for item in done)
+        done_line = f"- done ({len(done)}): {ids}"
+
+    def assemble(text_budget: int | None) -> tuple[str, int]:
+        clipped = 0
+        lines: list[str] = []
+        for item in open_items:
+            text = item.text
+            if item.status != "in_progress" and text_budget is not None and len(text) > text_budget:
+                clipped += 1
+                text = _pending_text(text, text_budget)
+            lines.append(_todo_line(item.id, item.status, text))
+        if done_line:
+            lines.append(done_line)
+        if clipped:
+            lines.append(_TODO_CLIP_NOTE)
+        return "\n".join(lines), clipped
+
+    collapsed, _clipped = assemble(None)
+    if len(collapsed) <= cap:
+        return collapsed
+
+    pending_lengths = [len(item.text) for item in open_items if item.status != "in_progress"]
+    longest = max(pending_lengths, default=0)
+    best: str | None = None
+    lo, hi = 0, longest
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        rendered, _clipped = assemble(mid)
+        if len(rendered) <= cap:
+            best = rendered
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    if best is not None:
+        return best
+
+    item_lines = [
+        _todo_line(
+            item.id,
+            item.status,
+            item.text if item.status == "in_progress" else _pending_text(item.text, 0),
+        )
+        for item in open_items
+    ]
+    tail = [line for line in (done_line, _TODO_CLIP_NOTE) if line]
+    return _drop_todo_lines(item_lines, tail, cap)
 
 
 def _todo_list_section(ctx: TurnContext) -> str:
     store = ctx.todo_store
     if store is None:
         return ""
-    lines = store.format_lines()
+    lines = _render_todo_lines(store.items, cap=SECTION_CHAR_CAPS["todos"])
     return f"{TODO_LIST_HEADING}{lines}" if lines else ""
 
 

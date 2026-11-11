@@ -163,6 +163,17 @@ def test_repo_overview_guesses_toolchain(
     assert expected in repo_overview(tmp_path)
 
 
+def test_repo_overview_caps_long_directory_names(tmp_path: Path) -> None:
+    for index in range(80):
+        name = f"{index:02d}" + ("n" * 198)
+        (tmp_path / name).mkdir()
+    first = repo_overview(tmp_path)
+    assert first == repo_overview(tmp_path)
+    assert len(first) <= 4_000
+    assert "… (+" in first
+    assert f"{79:02d}" + ("n" * 198) not in first
+
+
 def test_repo_overview_empty_workspace_is_empty(tmp_path: Path) -> None:
     assert repo_overview(tmp_path) == ""
     assert repo_overview(tmp_path / "missing") == ""

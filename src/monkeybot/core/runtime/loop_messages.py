@@ -24,6 +24,7 @@ from monkeybot.core.prompts.prompt import (
     compose_stable_baseline,
     compose_volatile_tail_parts,
 )
+from monkeybot.core.prompts.section_budget import SECTION_CHAR_CAPS, clip_head_and_tail
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
     File,
@@ -251,8 +252,18 @@ def _append_extra_system_text(system: Message, extra: str | None) -> Message:
     """
     if not extra:
         return system
+    body = extra.strip()
+    if not body:
+        return system
+    cap = SECTION_CHAR_CAPS["runtime_notes"]
+    if len(body) > cap:
+        logger.warning(
+            "runtime notes truncated %s",
+            kv(chars=len(body), cap=cap),
+        )
+        body = clip_head_and_tail(body, cap)
     base = "".join(b.text for b in system.content if isinstance(b, Text))
-    wrapped = f"{base}{RUNTIME_NOTES_HEADING}\n{extra.strip()}\n"
+    wrapped = f"{base}{RUNTIME_NOTES_HEADING}\n{body}\n"
     return Message(role="system", content=[Text(text=wrapped)])
 
 
