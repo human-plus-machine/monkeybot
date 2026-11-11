@@ -511,6 +511,13 @@
         "inner_turn": {
           "type": "integer"
         },
+        "sections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
         "text": {
           "type": "string"
         }

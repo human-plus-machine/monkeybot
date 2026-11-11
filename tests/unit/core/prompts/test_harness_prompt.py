@@ -15,6 +15,13 @@ def test_harness_directs_list_skills_before_skill_work() -> None:
     assert "skills root" in out
 
 
+def test_harness_omits_enable_loops_when_the_tool_is_not_advertised() -> None:
+    out = harness_fixed_context(include_task_tool=False, include_enable_loops=False)
+    assert "enable_loops" not in out
+    assert "`create_goal`" in out
+    assert "`update_goal`" in out
+
+
 def test_harness_is_protocol_not_tool_catalog() -> None:
     out = harness_fixed_context(include_task_tool=False)
     assert "## monkeybot harness (fixed)" in out

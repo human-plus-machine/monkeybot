@@ -113,7 +113,7 @@ Common types you will handle in a chat UI:
 | `SystemNotificationEvent` | Toasts / inline system messages (`notification_type`, `msg`). |
 | `AttachmentDescriptor` | Frozen attachment metadata after an upload turn (`attachment_id`, `mime_type`, `filename`, `description`). Emitted once per ref when the turn ends; history stores a text descriptor line. |
 | `ContextSummarizing` / `ContextSummarized` | Context window maintenance (optional UI). |
-| `SystemPromptSnapshot` | Debug: full system prompt for an inner iteration (`inner_turn`, `text`). |
+| `SystemPromptSnapshot` | Debug: full system prompt for an inner iteration (`inner_turn`, `text`). When `sections` is present, each entry is one block's `name`, on-wire `chars`, `est_tokens` (characters // 4), and `cap_chars` when that block has a character cap. `tools` is the tool-schema JSON and is not part of `text`. |
 
 The canonical definitions are the `@dataclass` types in `src/monkeybot/core/runtime/events.py`.
 

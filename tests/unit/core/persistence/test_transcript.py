@@ -15,6 +15,7 @@ from monkeybot.core.runtime.events import (
     AssistantTextEnded,
     ContextUsage,
     HarnessIntervention,
+    PromptSection,
     SystemContextUpdated,
     SystemPromptSnapshot,
     ThinkingBlockComplete,
@@ -572,6 +573,25 @@ async def test_system_prompt_snapshot_full_once_then_hash(tmp_path: Path) -> Non
     assert lines[1]["changed"] is False
     assert lines[1]["base_seq"] == lines[0]["seq"]
     assert lines[1]["hash"] == lines[0]["hash"]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_sections_remain_when_the_text_is_unchanged(tmp_path: Path) -> None:
+    writer = TranscriptWriter("sess-snap-sections", workspace_root=tmp_path)
+    section = PromptSection(name="todos", chars=12, est_tokens=3, cap_chars=6000)
+    text = "## Agent\n\nYou are helpful."
+    await writer.write_event(
+        SystemPromptSnapshot(request_id="r1", inner_turn=1, text=text, sections=(section,))
+    )
+    await writer.write_event(
+        SystemPromptSnapshot(request_id="r1", inner_turn=2, text=text, sections=(section,))
+    )
+    lines = _read_lines(writer.path)
+    assert lines[1]["changed"] is False
+    assert "text" not in lines[1]
+    assert lines[1]["sections"] == [
+        {"name": "todos", "chars": 12, "est_tokens": 3, "cap_chars": 6000}
+    ]
 
 
 @pytest.mark.asyncio

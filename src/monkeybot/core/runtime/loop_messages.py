@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from monkeybot.core.attachments.catalog import SessionAttachmentCatalog
 from monkeybot.core.context import TurnContext
@@ -21,9 +21,10 @@ from monkeybot.core.prompts.headings import (
     is_system_context_update,
 )
 from monkeybot.core.prompts.prompt import (
-    compose_stable_baseline,
+    compose_stable_baseline_parts,
     compose_volatile_tail_parts,
 )
+from monkeybot.core.prompts.section_budget import SECTION_CHAR_CAPS, clip_head_and_tail
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
     File,
@@ -33,7 +34,8 @@ from monkeybot.core.types.content_blocks import (
     ToolResponse,
 )
 
-from .events import AgentEvent, ContextEpochStarted, SystemContextUpdated
+from .context_budget import estimate_tokens_from_char_count
+from .events import AgentEvent, ContextEpochStarted, PromptSection, SystemContextUpdated
 
 logger = logging.getLogger("monkeybot.core.runtime.loop.loop_messages")
 
@@ -75,7 +77,8 @@ def _admit_system_context(
 ) -> EpochAdmit:
     """Compose stable/volatile tails and reconcile against the current context epoch."""
     catalog = attachment_catalog.list_records() if attachment_catalog is not None else None
-    stable = compose_stable_baseline(ctx, attachment_catalog=catalog)
+    stable_parts = compose_stable_baseline_parts(ctx, attachment_catalog=catalog)
+    stable = "".join(stable_parts.values())
     volatile_parts = compose_volatile_tail_parts(ctx, chat_messages=chat_messages)
     volatile = "".join(volatile_parts.values())
     return epoch.reconcile(
@@ -84,6 +87,7 @@ def _admit_system_context(
         stable_fingerprint=fingerprint_text(stable),
         volatile_fingerprint=fingerprint_text(volatile),
         volatile_parts=volatile_parts,
+        stable_parts=stable_parts,
     )
 
 
@@ -99,8 +103,16 @@ def _send_tail(context_tail: str, notes: str | None) -> str:
     """
     if not notes or not notes.strip():
         return context_tail
+    raw = notes.strip()
+    body = _clipped_runtime_notes(notes)
+    cap = SECTION_CHAR_CAPS["runtime_notes"]
+    if len(raw) > cap:
+        logger.warning(
+            "runtime notes truncated %s",
+            kv(chars=len(raw), cap=cap),
+        )
     head = context_tail.strip() or heading_marker(SYSTEM_CONTEXT_UPDATE_HEADING).strip()
-    return f"{head}{RUNTIME_NOTES_HEADING}{notes.strip()}\n"
+    return f"{head}{RUNTIME_NOTES_HEADING}{body}\n"
 
 
 def _append_notice_to_send_tail(messages: list[Message], notice: str) -> list[Message]:
@@ -242,6 +254,27 @@ def _provider_messages_prompt_summary(messages: Sequence[Message]) -> str:
     return "\n".join(lines)
 
 
+def _clipped_runtime_notes(extra: str | None) -> str:
+    """Runtime-note body within its character cap, or ``""`` when there is nothing to add."""
+    if not extra:
+        return ""
+    body = extra.strip()
+    if not body:
+        return ""
+    cap = SECTION_CHAR_CAPS["runtime_notes"]
+    if len(body) <= cap:
+        return body
+    return clip_head_and_tail(body, cap)
+
+
+def _runtime_notes_piece(extra: str | None) -> str:
+    """On-wire text appended for runtime notes, including the heading. Empty when unused."""
+    body = _clipped_runtime_notes(extra)
+    if not body:
+        return ""
+    return f"{RUNTIME_NOTES_HEADING}\n{body}\n"
+
+
 def _append_extra_system_text(system: Message, extra: str | None) -> Message:
     """Return a new system Message with ``extra`` under a ``## Runtime notes`` section.
 
@@ -251,9 +284,18 @@ def _append_extra_system_text(system: Message, extra: str | None) -> Message:
     """
     if not extra:
         return system
+    raw = extra.strip()
+    piece = _runtime_notes_piece(extra)
+    if not piece:
+        return system
+    cap = SECTION_CHAR_CAPS["runtime_notes"]
+    if len(raw) > cap:
+        logger.warning(
+            "runtime notes truncated %s",
+            kv(chars=len(raw), cap=cap),
+        )
     base = "".join(b.text for b in system.content if isinstance(b, Text))
-    wrapped = f"{base}{RUNTIME_NOTES_HEADING}\n{extra.strip()}\n"
-    return Message(role="system", content=[Text(text=wrapped)])
+    return Message(role="system", content=[Text(text=f"{base}{piece}")])
 
 
 def _combine_extras(*parts: str | None) -> str | None:
@@ -300,6 +342,58 @@ def _system_prompt_snapshot_text(system: Message, context_tail: str = "") -> str
     if not update:
         return body
     return f"{body}\n\n{update}"
+
+
+def _prompt_section(name: str, chars: int) -> PromptSection:
+    """One section row. ``chars`` is the on-wire contribution, heading included.
+
+    ``cap_chars`` is the body cap, so a capped section can read a few characters
+    over its cap because of the heading that introduces it.
+    """
+    return PromptSection(
+        name=name,
+        chars=chars,
+        est_tokens=estimate_tokens_from_char_count(chars),
+        cap_chars=SECTION_CHAR_CAPS.get(name),
+    )
+
+
+def build_prompt_sections(
+    *,
+    stable_parts: Mapping[str, str],
+    volatile_parts: Mapping[str, str],
+    runtime_notes: str | None,
+    context_tail: str,
+    tools_chars: int,
+    snapshot_text: str,
+) -> tuple[PromptSection, ...]:
+    """Per-section size of the prompt that was just snapshotted.
+
+    System sections sum to ``snapshot_text`` when the system message is the one
+    the epoch composed. A hook that rewrote that message leaves ``unattributed``
+    for the text the parts no longer explain. ``tools`` is the tool-schema JSON,
+    which is not part of the snapshot text.
+    """
+    pieces: list[tuple[str, str]] = [
+        *stable_parts.items(),
+        *volatile_parts.items(),
+        ("runtime_notes", _runtime_notes_piece(runtime_notes)),
+    ]
+    update = context_tail.strip()
+    if update:
+        pieces.append(("context_tail", f"\n\n{update}"))
+    expected = "".join(text for _name, text in pieces)
+    sections = [_prompt_section(name, len(text)) for name, text in pieces if text]
+    if snapshot_text != expected:
+        if snapshot_text.startswith(expected):
+            gap = snapshot_text[len(expected) :]
+        else:
+            sections = []
+            gap = snapshot_text
+        if gap:
+            sections.append(_prompt_section("unattributed", len(gap)))
+    sections.append(_prompt_section("tools", tools_chars))
+    return tuple(sections)
 
 
 def _snapshot_system_message(provider_messages: Sequence[Message], fallback: Message) -> Message:

@@ -548,6 +548,8 @@ def refresh_tools_after_loops_change(
 def _core_tool_defs(
     *,
     include_task_tool: bool = True,
+    include_ask_user: bool = True,
+    include_enable_loops: bool = True,
     subagent_type_names: Sequence[str] | None = None,
     catalog_mcp_servers: Sequence[str] | None = None,
     background_tasks_available: bool = False,
@@ -1109,16 +1111,19 @@ def _core_tool_defs(
                 ),
             ]
         )
-    tools.append(
-        ToolDef(
-            "enable_loops",
-            "Advertise scheduled-loop tools (`start_loop`, `loop_status`, "
-            "`pause_loop`, `resume_loop`, `stop_loop`, `disable_loops`) on the "
-            "next model step this turn. Requires durable storage (DB_URL). "
-            "Prefer the loop skill for procedure before starting a loop.",
-            {"type": "object", "properties": {}, "required": []},
-        ),
-    )
+    if include_enable_loops:
+        tools.append(
+            ToolDef(
+                "enable_loops",
+                "Advertise scheduled-loop tools (`start_loop`, `loop_status`, "
+                "`pause_loop`, `resume_loop`, `stop_loop`, `disable_loops`) on the "
+                "next model step this turn. Requires durable storage (DB_URL). "
+                "Prefer the loop skill for procedure before starting a loop.",
+                {"type": "object", "properties": {}, "required": []},
+            ),
+        )
+    if not include_ask_user:
+        tools = [tool for tool in tools if tool.name != "ask_user"]
     return tools
 
 
@@ -1208,6 +1213,8 @@ async def build_context(
     parent_run_id: str | None = None,
     model: str = "gemini-2.5-flash",
     include_task_tool: bool = True,
+    include_ask_user: bool = True,
+    include_enable_loops: bool = True,
     background_tasks_available: bool = False,
     cancelled: asyncio.Event | None = None,
     context_window_tokens: int = 200_000,
@@ -1247,6 +1254,8 @@ async def build_context(
         parent_run_id: Optional parent run for subagent linkage.
         model: Model id for this turn. History summarization and chat titles use it too.
         include_task_tool: When False, omit the ``task`` tool (used by the subagent worker).
+        include_ask_user: When False, omit ``ask_user``. A subagent has no chat to ask.
+        include_enable_loops: When False, omit ``enable_loops``. A subagent has no loop store.
         cancelled: Optional cooperative-cancel handle for the parent turn (gateway / CLI).
         context_window_tokens: Model context budget for pre-flight and summarization triggers.
         workspace_root: Optional workspace root for tools/spill paths (``paths.workspace_root``).
@@ -1295,6 +1304,8 @@ async def build_context(
     tools = list(
         _core_tool_defs(
             include_task_tool=include_task_tool,
+            include_ask_user=include_ask_user,
+            include_enable_loops=include_enable_loops,
             subagent_type_names=type_names,
             catalog_mcp_servers=catalog_names,
             background_tasks_available=background_tasks_available,

@@ -46,6 +46,10 @@ class EpochAdmit:
     """
     context_tail: str
     changed_sources: tuple[str, ...]
+    """Stable sections admitted into the leading baseline, in prompt order."""
+    stable_parts: dict[str, str] = field(default_factory=dict)
+    """Volatile sections admitted into the leading baseline. Not the live render."""
+    leading_volatile_parts: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -93,6 +97,7 @@ class ContextEpochTracker:
         volatile_fingerprint: str,
         volatile_parts: Mapping[str, str] | None = None,
         volatile_part_fingerprints: Mapping[str, str] | None = None,
+        stable_parts: Mapping[str, str] | None = None,
     ) -> EpochAdmit:
         """Admit current stable/volatile renders at a provider-turn boundary.
 
@@ -112,6 +117,7 @@ class ContextEpochTracker:
             volatile_fingerprint=volatile_fingerprint,
             volatile_parts=volatile_parts,
             volatile_part_fingerprints=volatile_part_fingerprints,
+            stable_parts=stable_parts,
         )
         self._state = next_state
         self._force_new = force_new
@@ -126,6 +132,7 @@ class ContextEpochTracker:
         volatile_fingerprint: str,
         volatile_parts: Mapping[str, str] | None = None,
         volatile_part_fingerprints: Mapping[str, str] | None = None,
+        stable_parts: Mapping[str, str] | None = None,
     ) -> EpochAdmit:
         """Compute the :class:`EpochAdmit` for the given renders without mutating state.
 
@@ -140,6 +147,7 @@ class ContextEpochTracker:
             volatile_fingerprint=volatile_fingerprint,
             volatile_parts=volatile_parts,
             volatile_part_fingerprints=volatile_part_fingerprints,
+            stable_parts=stable_parts,
         )
         return admit
 
@@ -152,9 +160,11 @@ class ContextEpochTracker:
         volatile_fingerprint: str,
         volatile_parts: Mapping[str, str] | None,
         volatile_part_fingerprints: Mapping[str, str] | None,
+        stable_parts: Mapping[str, str] | None = None,
     ) -> tuple[EpochAdmit, _EpochState | None, bool]:
         parts = _part_fingerprints(volatile_parts, volatile_part_fingerprints)
         current_parts = dict(volatile_parts) if volatile_parts is not None else None
+        admitted_stable = dict(stable_parts or {})
         if (
             self._force_new
             or self._state is None
@@ -176,6 +186,8 @@ class ContextEpochTracker:
                 leading_system_text=self._leading(next_state),
                 context_tail="",
                 changed_sources=("epoch",),
+                stable_parts=admitted_stable,
+                leading_volatile_parts=dict(next_state.baseline_parts),
             )
             return admit, next_state, False
 
@@ -188,6 +200,8 @@ class ContextEpochTracker:
                 leading_system_text=self._leading(state),
                 context_tail=tail,
                 changed_sources=(),
+                stable_parts=admitted_stable,
+                leading_volatile_parts=dict(state.baseline_parts),
             )
             return admit, state, self._force_new
 
@@ -207,6 +221,8 @@ class ContextEpochTracker:
             leading_system_text=self._leading(next_state),
             context_tail=tail,
             changed_sources=changed,
+            stable_parts=admitted_stable,
+            leading_volatile_parts=dict(state.baseline_parts),
         )
         return admit, next_state, self._force_new
 

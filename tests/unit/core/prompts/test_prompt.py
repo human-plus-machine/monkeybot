@@ -10,16 +10,26 @@ from monkeybot.core.attachments.catalog import AttachmentRecord
 from monkeybot.core.context import SkillRef
 from monkeybot.core.llm.provider import Message
 from monkeybot.core.prompts.headings import (
+    BACKGROUND_TASKS_HEADING,
     CURRENT_DATE_HEADING,
     CURRENT_REQUEST_HEADING,
     MEMORY_INDEX_HEADING,
     SKILLS_HEADING,
+    TODO_LIST_HEADING,
     heading_marker,
 )
-from monkeybot.core.prompts.prompt import _MAX_CURRENT_REQUEST_CHARS, compose_system_prompt
+from monkeybot.core.prompts.prompt import (
+    _MAX_CURRENT_REQUEST_CHARS,
+    compose_stable_baseline,
+    compose_stable_baseline_parts,
+    compose_system_prompt,
+    compose_volatile_tail_parts,
+)
+from monkeybot.core.prompts.section_budget import SECTION_CHAR_CAPS
 from monkeybot.core.types.content_blocks import Text, ToolRequest, ToolResponse
 from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers._utils import split_system_prompt_for_cache
+from monkeybot.todo_list.store import TodoItem, TodoListStore
 from testkit.context import _minimal_ctx
 
 
@@ -385,6 +395,118 @@ def test_skills_section_lists_description_and_handles_edge_cases() -> None:
     assert skills_block[2].startswith("- wordy — word word")
     assert skills_block[2].endswith("…")
     assert len(skills_block[2]) < 230
+
+
+def _todo_body(ctx: object) -> str:
+    from monkeybot.core.context import TurnContext
+
+    assert isinstance(ctx, TurnContext)
+    section = compose_volatile_tail_parts(ctx)["todos"]
+    assert section.startswith(TODO_LIST_HEADING)
+    return section[len(TODO_LIST_HEADING) :]
+
+
+def _store_with(tmp_path: Path, items: list[TodoItem]) -> TodoListStore:
+    store = TodoListStore("todos", workspace_root=tmp_path, mirror_to_disk=False)
+    store._items = items
+    return store
+
+
+def test_todo_section_matches_the_store_when_under_the_cap(tmp_path: Path) -> None:
+    store = _store_with(
+        tmp_path,
+        [
+            TodoItem(id="t1", text="Write the failing test", status="pending"),
+            TodoItem(id="t2", text="Make it pass", status="in_progress"),
+        ],
+    )
+    body = _todo_body(replace(_minimal_ctx(), todo_store=store))
+    assert body == store.format_lines()
+
+
+def test_todo_section_keeps_every_open_id_inside_the_cap(tmp_path: Path) -> None:
+    text = "x" * 500
+    items = [TodoItem(id="t1", text=text, status="in_progress")]
+    items.extend(TodoItem(id=f"t{i}", text=text, status="pending") for i in range(2, 51))
+    store = _store_with(tmp_path, items)
+    body = _todo_body(replace(_minimal_ctx(), todo_store=store))
+    assert len(body) <= SECTION_CHAR_CAPS["todos"]
+    for item in items:
+        assert f"- {item.id} [" in body
+    assert f"- t1 [in_progress] {text}" in body
+    assert "Long items are clipped. Start an item to see its full text." in body
+
+
+def test_todo_section_collapses_done_items(tmp_path: Path) -> None:
+    items = [TodoItem(id=f"t{i}", text="y" * 500, status="done") for i in range(1, 41)]
+    items.append(TodoItem(id="t41", text="keep me", status="pending"))
+    store = _store_with(tmp_path, items)
+    body = _todo_body(replace(_minimal_ctx(), todo_store=store))
+    assert len(body) <= SECTION_CHAR_CAPS["todos"]
+    assert "- done (40): t1, t2," in body
+    assert "t40" in body
+    assert "keep me" in body
+    assert "y" * 500 not in body
+    assert "Long items are clipped" not in body
+
+
+def test_todo_section_three_hundred_items_stay_inside_the_cap(tmp_path: Path) -> None:
+    items = [TodoItem(id=f"t{i}", text="z" * 500, status="pending") for i in range(1, 301)]
+    store = _store_with(tmp_path, items)
+    body = _todo_body(replace(_minimal_ctx(), todo_store=store))
+    assert len(body) <= SECTION_CHAR_CAPS["todos"]
+    assert "Long items are clipped" in body
+
+
+def test_background_tasks_section_is_capped() -> None:
+    huge = "x" * 5_000
+    ctx = replace(_minimal_ctx(), background_runs_view=lambda: huge)
+    section = compose_volatile_tail_parts(ctx)["background_tasks"]
+    assert section.startswith(BACKGROUND_TASKS_HEADING)
+    body = section[len(BACKGROUND_TASKS_HEADING) :]
+    assert body.endswith("\n")
+    assert len(body.strip()) <= SECTION_CHAR_CAPS["background_tasks"]
+    assert "… [truncated]" in body
+
+    short = replace(_minimal_ctx(), background_runs_view=lambda: "one line")
+    assert compose_volatile_tail_parts(short)["background_tasks"] == (
+        f"{BACKGROUND_TASKS_HEADING}one line\n"
+    )
+
+
+def test_harness_mentions_enable_loops_only_when_the_tool_is_advertised() -> None:
+    with_tool = _minimal_ctx(
+        tools=[ToolDef("enable_loops", "Advertise scheduled loops.", {"type": "object"})]
+    )
+    without = _minimal_ctx(tools=[ToolDef("run_command", "Run a command.", {"type": "object"})])
+    assert "Call `enable_loops` before scheduled-loop tools appear." in compose_system_prompt(
+        with_tool
+    )
+    assert "enable_loops" not in compose_system_prompt(without)
+
+
+def test_stable_parts_join_equals_the_baseline() -> None:
+    ctx = replace(
+        _minimal_ctx(),
+        project_instructions="Be careful.",
+        repo_overview="Layout (workspace root):\n  src/",
+    )
+    record = AttachmentRecord(
+        attachment_id="att1",
+        filename="report.pdf",
+        mime_type="application/pdf",
+        description="Q1 report",
+        storage_path=".monkeybot/attachments/t1/att1",
+    )
+    parts = compose_stable_baseline_parts(ctx, attachment_catalog=[record])
+    assert "".join(parts.values()) == compose_stable_baseline(ctx, attachment_catalog=[record])
+    assert list(parts) == [
+        "agent_md",
+        "harness",
+        "project_instructions",
+        "repo_overview",
+        "attachments",
+    ]
 
 
 def test_coding_protocol_is_always_in_stable_prefix() -> None:

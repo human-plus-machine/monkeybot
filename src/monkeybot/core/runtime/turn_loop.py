@@ -132,6 +132,7 @@ from .loop_messages import (
     _system_message_from_text,
     _system_prompt_snapshot_text,
     _user_text_from_content,
+    build_prompt_sections,
 )
 from .loop_ports import ToolExecutorPort
 from .loop_usage import (
@@ -519,10 +520,12 @@ def _admit_steer_to_ledger(
         )
 
 
-def _tools_schema_hash(tools: Sequence[ToolDef]) -> str:
+def _tools_schema_digest(tools: Sequence[ToolDef]) -> tuple[str, int]:
+    """Hash and character length of the compact tool schema, from one serialization."""
     payload = [t.to_model_schema() for t in tools]
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+    return digest, len(blob)
 
 
 def _mcp_known_servers(tool_executor: ToolExecutorPort) -> list[str]:
@@ -553,7 +556,7 @@ def _note_mcp_idle_turn(state: _TurnState, tool_executor: ToolExecutorPort) -> N
 
 
 def _mark_tools_dirty(state: _TurnState, reason: str, tools: Sequence[ToolDef]) -> None:
-    digest = _tools_schema_hash(tools)
+    digest, chars = _tools_schema_digest(tools)
     if digest != state.tools_schema_hash:
         state.tools_dirty = True
         # First cause wins: a BEFORE_PROVIDER hook re-marking tools that MCP already
@@ -561,6 +564,7 @@ def _mark_tools_dirty(state: _TurnState, reason: str, tools: Sequence[ToolDef]) 
         if state.tools_dirty_reason is None:
             state.tools_dirty_reason = reason
     state.tools_schema_hash = digest
+    state.tools_schema_chars = chars
 
 
 @dataclasses.dataclass
@@ -630,6 +634,7 @@ class _TurnState:
     overflow_recovered: bool = False
     tools_dirty_reason: str | None = None
     tools_schema_hash: str = ""
+    tools_schema_chars: int = 0
 
 
 async def _reload_project_instructions(ctx: TurnContext) -> TurnContext:
@@ -733,7 +738,7 @@ async def _prepare_turn_context(
             ),
         )
     elif not state.tools_schema_hash:
-        state.tools_schema_hash = _tools_schema_hash(state.turn_tools)
+        state.tools_schema_hash, state.tools_schema_chars = _tools_schema_digest(state.turn_tools)
     # Preflight uses unshaped history; pressure shaping applied after token count.
     state.resolved_messages = convert_to_provider(
         state.chat_messages,
@@ -1113,13 +1118,33 @@ async def _apply_pressure_and_before_provider(
     # Prefer the tail on the messages. A before-provider hook may have extended
     # it, and a recomputed tail would miss that text.
     _, attached_tail = _split_context_tail(state.provider_messages)
+    tail = attached_tail or _send_tail(admit.context_tail, state.turn_one_shot_notes)
+    snapshot_text = _system_prompt_snapshot_text(
+        _snapshot_system_message(state.provider_messages, system_msg),
+        tail,
+    )
+    sections = build_prompt_sections(
+        stable_parts=admit.stable_parts,
+        volatile_parts=admit.leading_volatile_parts,
+        runtime_notes=state.pre_turn_extra,
+        context_tail=tail,
+        tools_chars=state.tools_schema_chars,
+        snapshot_text=snapshot_text,
+    )
+    logger.debug(
+        "prompt sections %s",
+        kv(
+            request_id=state.ctx.request_id,
+            thread_id=state.ctx.thread_id,
+            turn=state.turn_index,
+            sections=",".join(f"{section.name}:{section.chars}" for section in sections),
+        ),
+    )
     yield SystemPromptSnapshot(
         request_id=state.ctx.request_id,
         inner_turn=state.turn_index,
-        text=_system_prompt_snapshot_text(
-            _snapshot_system_message(state.provider_messages, system_msg),
-            attached_tail or _send_tail(admit.context_tail, state.turn_one_shot_notes),
-        ),
+        text=snapshot_text,
+        sections=sections,
     )
 
 

@@ -103,6 +103,9 @@ class _Run:
 
 WakeCallback = Callable[[list[tuple[str, str]]], Awaitable[bool]]
 
+# Finished-but-not-awaited rows are never pruned. The prompt lists a few and counts the rest.
+_MAX_FINISHED_LINES = 8
+
 
 class SubagentSupervisor:
     """One per session. Outlives the turn that spawned a child."""
@@ -146,12 +149,22 @@ class SubagentSupervisor:
             run.awaited = True
 
     def snapshot_lines(self) -> list[str]:
-        """Lines for the volatile prompt note. Empty when nothing is outstanding."""
+        """Lines for the volatile prompt note. Empty when nothing is outstanding.
+
+        Finished children that were never awaited stay in ``_runs``, so only the
+        first ``_MAX_FINISHED_LINES`` are listed. The rest are one count.
+        """
         lines: list[str] = []
+        finished_shown = 0
+        finished_hidden = 0
         for run in self._runs.values():
             if run.finished.is_set():
                 if run.awaited or run.payload is None:
                     continue
+                if finished_shown >= _MAX_FINISHED_LINES:
+                    finished_hidden += 1
+                    continue
+                finished_shown += 1
                 status = status_of_payload(run.payload)
                 lines.append(
                     f"- {run.spawn.run_id} finished ({status}). Call await_task before reporting."
@@ -161,6 +174,10 @@ class SubagentSupervisor:
                     f"- {run.spawn.run_id} running ({run.spawn.subagent_type or 'subagent'}). "
                     "Do not edit files it owns (expect_files)."
                 )
+        if finished_hidden:
+            lines.append(
+                f"- (+{finished_hidden} more finished; listed once those above are awaited)"
+            )
         return lines
 
     def snapshot_text(self) -> str:

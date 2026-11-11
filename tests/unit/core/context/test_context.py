@@ -437,6 +437,26 @@ async def test_build_context_omits_attachment_tools_when_disabled(
     assert "load_file" not in names
 
 
+def test_parent_core_tools_keep_ask_user_and_enable_loops() -> None:
+    parent = [tool.name for tool in _core_tool_defs(catalog_mcp_servers=["browser"])]
+    child = [
+        tool.name
+        for tool in _core_tool_defs(
+            include_task_tool=False,
+            include_ask_user=False,
+            include_enable_loops=False,
+            catalog_mcp_servers=["browser"],
+        )
+    ]
+    assert "ask_user" in parent
+    assert "enable_loops" in parent
+    assert "enable_mcp" in parent
+    assert "ask_user" not in child
+    assert "enable_loops" not in child
+    assert "task" not in child
+    assert "enable_mcp" in child
+
+
 @pytest.mark.asyncio
 async def test_build_context_include_task_tool_false(tmp_path: Path) -> None:
     agent_path = tmp_path / "AGENT.md"
