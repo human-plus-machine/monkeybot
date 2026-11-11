@@ -1,0 +1,52 @@
+id: regression/t2/loop/scenarios/ctx/stable_system_across_messages
+case: T2-CTX-23
+description: A todo added and a file written during the first user message show
+  up in the next message's tail, and the system text is unchanged.
+mode: scripted
+driver: loop
+executor: real
+hooks:
+  - git_context
+config:
+  env:
+    MB_LOOP_GIT_FIXTURE: dirty
+messages:
+  - Add a todo and write a file.
+  - What changed?
+script:
+  - - type: tool_call
+      call_id: add1
+      name: todo_list
+      args:
+        action: add
+        text: Draft the notes
+    - type: tool_call
+      call_id: w1
+      name: write_file
+      args:
+        path: extra.txt
+        content: "x\n"
+    - type: done
+  - - type: text
+      text: Noted.
+    - type: done
+  - - type: text
+      text: Both are in the messages.
+    - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 3
+  provider_request:
+    - n: 1
+      messages_contain: "git: branch main, 1 modified (dirty.txt)"
+      messages_not_contain: "1 untracked"
+      messages_not_contain: Draft the notes
+      system_not_contains: "## Runtime notes"
+    - n: 3
+      messages_contain: Draft the notes
+      messages_contain: "git: branch main, 1 modified (dirty.txt), 2 untracked"
+      system_not_contains: Draft the notes
+      system_not_contains: "2 untracked"
+      system_same_as: 1
+  response_contains: Both are in the messages.

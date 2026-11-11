@@ -21,7 +21,7 @@ Existing: T1 `tests/core/memory/*`, `test_migrate_embedding.py`, `test_memory_la
 | T2-MEM-07 | `subagent_no_ingest` | Child turn creates no outbox rows. |
 | T2-MEM-08 | `memory_write_inject` (migrate) | As today, with content checks. |
 | T2-MEM-09 | `ephemeral_palace_shared_outbox_rejected` | Postgres/Firestore shared outbox + ephemeral palace: `MemoryConfigurationError` at boot. |
-| T2-MEM-10 | `recall_not_in_wake_up` | Turn 2's system text carries the turn-1 fact once and has no recall heading. |
+| T2-MEM-10 | `recall_not_in_wake_up` | Turn 2's messages carry the turn-1 fact once and have no recall heading. |
 | T3-MEM-01 | `replay_wake_up` | Recorded `load_index()` lines for a palace snapshot match byte for byte. |
 | T4-MEM-01..02 | `memory/recall_*` (migrate) | Plus a sidecar check that the drawer was filed under session 1's thread. |
 | T4-MEM-03 | `search_past_session` | Session 2 calls `mempalace search` and answers with the session-1 fact. |

@@ -1,6 +1,6 @@
 id: regression/t2/loop/scenarios/ctx/slash_skill_turn_scoped
 case: T2-CTX-15
-description: A /diagnostics message adds the invoked-skill section for that turn.
+description: A /diagnostics message adds the invoked-skill section to that turn's messages.
 mode: scripted
 driver: loop
 messages:
@@ -14,4 +14,5 @@ assertions:
   no_errors: true
   provider_request:
   - n: 1
-    system_contains: '## Invoked skill'
+    messages_contain: '## Invoked skill'
+    system_not_contains: '## Invoked skill'

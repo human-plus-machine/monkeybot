@@ -14,6 +14,7 @@ from monkeybot.core.prompts.section_budget import SECTION_CHAR_CAPS
 from monkeybot.core.runtime.context_budget import estimate_tokens_from_char_count
 from monkeybot.core.runtime.loop_messages import (
     _append_extra_system_text,
+    _send_tail,
     _system_message_from_text,
     _system_prompt_snapshot_text,
     build_prompt_sections,
@@ -64,13 +65,14 @@ def test_sections_are_present_and_sum_to_the_snapshot(tmp_path: Path) -> None:
     _tracker, admit = _admit(ctx)
     assert isinstance(admit, EpochAdmit)
     notes = "Remember the failing test."
-    system = _append_extra_system_text(_system_message_from_text(admit.leading_system_text), notes)
-    snapshot = _system_prompt_snapshot_text(system, admit.context_tail)
+    system = _system_message_from_text(admit.leading_system_text)
+    tail = _send_tail(admit.context_tail, notes)
+    snapshot = _system_prompt_snapshot_text(system, tail)
     sections = build_prompt_sections(
         stable_parts=admit.stable_parts,
-        volatile_parts=admit.leading_volatile_parts,
-        runtime_notes=notes,
-        context_tail=admit.context_tail,
+        volatile_parts={},
+        runtime_notes=None,
+        context_tail=tail,
         tools_chars=120,
         snapshot_text=snapshot,
     )
@@ -79,13 +81,23 @@ def test_sections_are_present_and_sum_to_the_snapshot(tmp_path: Path) -> None:
         "agent_md",
         "harness",
         "project_instructions",
-        "todos",
-        "runtime_notes",
+        "context_tail",
         "tools",
     } <= names
     assert "unattributed" not in names
+    assert "ship it" in snapshot
+    assert notes in snapshot
     assert sum(section.chars for section in sections if section.name != "tools") == len(snapshot)
-    todos = next(section for section in sections if section.name == "todos")
+    todo_text = admit.leading_volatile_parts["todos"]
+    todo_sections = build_prompt_sections(
+        stable_parts={},
+        volatile_parts={"todos": todo_text},
+        runtime_notes=None,
+        context_tail="",
+        tools_chars=0,
+        snapshot_text=todo_text,
+    )
+    todos = next(section for section in todo_sections if section.name == "todos")
     assert todos.cap_chars == SECTION_CHAR_CAPS["todos"]
     assert todos.est_tokens == estimate_tokens_from_char_count(todos.chars)
     tools = next(section for section in sections if section.name == "tools")
@@ -116,8 +128,9 @@ def test_report_keeps_the_baseline_todo_list(tmp_path: Path) -> None:
     _tracker, second = _admit(ctx, tracker)
     assert isinstance(second, EpochAdmit)
     assert second.kind == "volatile_updated"
-    assert "first" in second.leading_volatile_parts["todos"]
-    assert "x" * 500 not in second.leading_volatile_parts["todos"]
+    assert "first" not in second.leading_system_text
+    assert "x" * 500 not in second.leading_system_text
+    assert "x" * 500 in second.leading_volatile_parts["todos"]
     assert "x" * 500 in second.context_tail
 
 
@@ -131,7 +144,7 @@ def test_a_rewritten_system_message_is_unattributed() -> None:
     rewritten = composed + "\nEXTRA"
     sections = build_prompt_sections(
         stable_parts=admit.stable_parts,
-        volatile_parts=admit.leading_volatile_parts,
+        volatile_parts={},
         runtime_notes=None,
         context_tail="",
         tools_chars=2,
@@ -143,7 +156,7 @@ def test_a_rewritten_system_message_is_unattributed() -> None:
 
     replaced = build_prompt_sections(
         stable_parts=admit.stable_parts,
-        volatile_parts=admit.leading_volatile_parts,
+        volatile_parts={},
         runtime_notes=None,
         context_tail="",
         tools_chars=2,

@@ -34,6 +34,8 @@ Gaps: `compaction_fallback` untested; epochs never asserted through `run`; nothi
 | T2-CTX-19 | `memory_wake_up_large` (migrate) | Large wake-up index injected; turn completes. |
 | T2-CTX-20 | `context_tail_persists` | The current-request anchor is absent on call 1 and is in the provider messages, not the system prompt, on calls 2, 3, and 4. |
 | T2-CTX-21 | `one_shot_note_keeps_system` | An evidence correction is in the messages on call 2 only, and the system text matches call 1 on calls 2 and 3. |
+| T2-CTX-22 | `todo_list_capped` | Fifteen 500-character items are clipped in the next request, with every id kept. Starting the first item shows that item in full. |
+| T2-CTX-23 | `stable_system_across_messages` | A todo and a git note that change between user messages are in the next message's tail, and the system text matches the first call. |
 | T3-CTX-01 | `replay_live_compaction` | Recorded long-session cassette compacts at the same call index. |
 | T4-CTX-01 | `summarization_trigger` (migrate, retuned) | `config: model.context_window` small enough that the scenario must compact; `min_summarizations: 1`. Fails if it would have passed without compacting. |
 | T4-CTX-02 | `post_compaction_continuity` | Multi-step task spanning a forced compaction still completes (workspace grader). |

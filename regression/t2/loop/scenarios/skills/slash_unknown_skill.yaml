@@ -20,4 +20,5 @@ assertions:
         ## Skills
         - diagnostics — Inspect a failing run and report the first error.
         - plain — Print the workspace layout before changing files.
+      messages_not_contain: "## Invoked skill"
       system_not_contains: "## Invoked skill"

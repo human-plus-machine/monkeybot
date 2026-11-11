@@ -326,6 +326,16 @@ def _row_texts(messages: Sequence[Message]) -> list[str]:
     return [_texts([message]) for message in messages if message.role != "system"]
 
 
+def _without_live_tail(rows: list[str]) -> list[str]:
+    """Drop the send-time context tail, which is not part of stored history."""
+    marker = "\n## System context update\n"
+    out: list[str] = []
+    for row in rows:
+        index = row.find(marker)
+        out.append(row if index < 0 else row[:index].rstrip("\n"))
+    return out
+
+
 class _WideProvider:
     """Scripted main turns. Counts stay at 76% through two tool turns, then hit 85%.
 
@@ -440,7 +450,10 @@ async def test_tool_batch_in_the_band_compacts_at_85(tmp_path) -> None:
     assert isinstance(events[-1], TurnComplete), provider.counts
     assert not any(isinstance(event, Error) for event in events), provider.counts
     assert provider.main_calls == 3, provider.counts
-    assert provider.rows[1][: len(provider.rows[0])] == provider.rows[0]
+    # The live tail is attached to the last message and is not stored, so the
+    # next call's copy of that message does not carry it.
+    durable = [_without_live_tail(rows) for rows in provider.rows]
+    assert durable[1][: len(durable[0])] == durable[0]
     kept = [row for row in provider.rows[0] if KEEP in row]
     assert kept and kept[0].count(KEEP) == 40
     assert kept[0] in provider.rows[1]

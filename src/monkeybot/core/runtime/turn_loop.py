@@ -123,7 +123,6 @@ from .loop_hooks import (
 )
 from .loop_messages import (
     _admit_system_context,
-    _append_extra_system_text,
     _combine_extras,
     _epoch_events,
     _load_agent_chat_history,
@@ -709,6 +708,17 @@ async def _reload_project_instructions(ctx: TurnContext) -> TurnContext:
     return dataclasses.replace(ctx, project_instructions=instructions)
 
 
+def _call_tail(state: _TurnState, admit: EpochAdmit) -> str:
+    """Live sections plus this call's notes, for the send-time tail.
+
+    PRE_TURN notes (git status, recall) and one-shot notes both used to reach
+    the system text. A change there rewrites the cache from that point on, which
+    is the whole conversation. The tail is outside that prefix.
+    """
+    notes = _combine_extras(state.pre_turn_extra, state.turn_one_shot_notes)
+    return _send_tail(admit.context_tail, notes)
+
+
 async def _prepare_turn_context(
     state: _TurnState,
     *,
@@ -766,10 +776,8 @@ async def _prepare_turn_context(
         )
     force_no_tools, doom_loop_note = state.doom_tracker.consume_recovery()
     state.tools_suppressed = force_no_tools
-    # PRE_TURN stays in the system text for the whole request. One-shot notes
-    # would change that text for a single call and invalidate the message cache.
     state.turn_one_shot_notes = _combine_extras(state.pre_tool_extra_next, doom_loop_note)
-    state.system = _append_extra_system_text(system, state.pre_turn_extra)
+    state.system = system
     state.pre_tool_extra_next = None
     state.turn_tools = () if force_no_tools else state.ctx.tools
     tool_def_payload = await _fire_hook(
@@ -804,7 +812,7 @@ async def _prepare_turn_context(
     state.provider_messages = _messages_for_provider(
         system_msg,
         state.resolved_messages,
-        context_tail=_send_tail(admit.context_tail, state.turn_one_shot_notes),
+        context_tail=_call_tail(state, admit),
     )
 
 
@@ -839,10 +847,7 @@ async def _refresh_prompt_after_history_change(
         state.admit, request_id=state.ctx.request_id, thread_id=state.ctx.thread_id
     ):
         yield epoch_evt
-    state.system = _append_extra_system_text(
-        _system_message_from_text(state.admit.leading_system_text),
-        state.pre_turn_extra,
-    )
+    state.system = _system_message_from_text(state.admit.leading_system_text)
     state.resolved_messages = convert_to_provider(
         state.chat_messages,
         attachment_store=attachment_store,
@@ -852,7 +857,7 @@ async def _refresh_prompt_after_history_change(
     state.provider_messages = _messages_for_provider(
         system_msg,
         state.resolved_messages,
-        context_tail=_send_tail(admit.context_tail, state.turn_one_shot_notes),
+        context_tail=_call_tail(state, admit),
     )
 
 
@@ -1149,7 +1154,7 @@ async def _apply_pressure_and_before_provider(
         state.provider_messages = _messages_for_provider(
             system_msg,
             state.resolved_messages,
-            context_tail=_send_tail(admit.context_tail, state.turn_one_shot_notes),
+            context_tail=_call_tail(state, admit),
         )
 
     before_payload = await _fire_hook(
@@ -1186,15 +1191,15 @@ async def _apply_pressure_and_before_provider(
     # Prefer the tail on the messages. A before-provider hook may have extended
     # it, and a recomputed tail would miss that text.
     _, attached_tail = _split_context_tail(state.provider_messages)
-    tail = attached_tail or _send_tail(admit.context_tail, state.turn_one_shot_notes)
+    tail = attached_tail or _call_tail(state, admit)
     snapshot_text = _system_prompt_snapshot_text(
         _snapshot_system_message(state.provider_messages, system_msg),
         tail,
     )
     sections = build_prompt_sections(
         stable_parts=admit.stable_parts,
-        volatile_parts=admit.leading_volatile_parts,
-        runtime_notes=state.pre_turn_extra,
+        volatile_parts={},
+        runtime_notes=None,
         context_tail=tail,
         tools_chars=state.tools_schema_chars,
         snapshot_text=snapshot_text,

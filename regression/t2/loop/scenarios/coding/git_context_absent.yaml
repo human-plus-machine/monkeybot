@@ -16,6 +16,7 @@ assertions:
   provider_calls: 1
   provider_request:
     - n: 1
+      messages_not_contain: "git: branch"
       system_not_contains: "git: branch"
   response_contains: No repository here.
   events_absent:

@@ -1,6 +1,6 @@
 id: regression/t2/loop/scenarios/coding/git_context_note
 case: T2-CODE-14
-description: A dirty repo adds a git branch line under Runtime notes
+description: A dirty repo adds a git branch line under Runtime notes in the messages
 mode: scripted
 driver: loop
 executor: real
@@ -19,9 +19,11 @@ assertions:
   provider_calls: 1
   provider_request:
     - n: 1
-      system_contains: "## Runtime notes"
+      messages_contain: "## Runtime notes"
+      system_not_contains: "## Runtime notes"
     - n: 1
-      system_contains: "git: branch main, 1 modified (dirty.txt)"
+      messages_contain: "git: branch main, 1 modified (dirty.txt)"
+      system_not_contains: "git: branch"
   response_contains: Noted the branch.
   turn_completed: true
   no_errors: true

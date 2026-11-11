@@ -68,6 +68,29 @@ def _system_message_from_text(body: str) -> Message:
     return Message(role="system", content=[Text(text=body)])
 
 
+def _stable_text_and_live_parts(
+    ctx: TurnContext,
+    chat_messages: Sequence[Message],
+    *,
+    attachment_catalog: SessionAttachmentCatalog | None = None,
+) -> tuple[str, dict[str, str], dict[str, str]]:
+    """System prefix, the sections that ride the tail, and the prefix split by name.
+
+    The prefix is the cacheable baseline plus ``## Skills``. Skills are large and
+    change rarely; a change still keeps the cache checkpoint that sits before
+    that heading. Date, memory, the todo list, and the current request change
+    between user messages, so they stay out of the system text.
+    """
+    records = attachment_catalog.list_records() if attachment_catalog is not None else None
+    stable_parts = compose_stable_baseline_parts(ctx, attachment_catalog=records)
+    parts = compose_volatile_tail_parts(ctx, chat_messages=chat_messages)
+    skills = parts.get("skills", "")
+    if skills:
+        stable_parts = {**stable_parts, "skills": skills}
+    live = {name: text for name, text in parts.items() if name != "skills"}
+    return "".join(stable_parts.values()), live, stable_parts
+
+
 def _admit_system_context(
     epoch: ContextEpochTracker,
     ctx: TurnContext,
@@ -75,18 +98,17 @@ def _admit_system_context(
     *,
     attachment_catalog: SessionAttachmentCatalog | None = None,
 ) -> EpochAdmit:
-    """Compose stable/volatile tails and reconcile against the current context epoch."""
-    catalog = attachment_catalog.list_records() if attachment_catalog is not None else None
-    stable_parts = compose_stable_baseline_parts(ctx, attachment_catalog=catalog)
-    stable = "".join(stable_parts.values())
-    volatile_parts = compose_volatile_tail_parts(ctx, chat_messages=chat_messages)
-    volatile = "".join(volatile_parts.values())
+    """Reconcile the system prefix and the live sections against the context epoch."""
+    stable, live_parts, stable_parts = _stable_text_and_live_parts(
+        ctx, chat_messages, attachment_catalog=attachment_catalog
+    )
+    live = "".join(live_parts.values())
     return epoch.reconcile(
         stable_baseline=stable,
-        volatile_text=volatile,
+        volatile_text=live,
         stable_fingerprint=fingerprint_text(stable),
-        volatile_fingerprint=fingerprint_text(volatile),
-        volatile_parts=volatile_parts,
+        volatile_fingerprint=fingerprint_text(live),
+        volatile_parts=live_parts,
         stable_parts=stable_parts,
     )
 
@@ -148,15 +170,15 @@ def _messages_for_provider(
     *,
     context_tail: str = "",
 ) -> list[Message]:
-    """Leading system + history + the live volatile tail, when any section moved.
+    """Leading system + history + the live tail, whenever that tail has text.
 
     The tail is user-role so all providers accept it (system is leading-only for
     Anthropic/Gemini/OpenAI adapters). When history already ends in a ``user``
     row (e.g. a tool-response turn), the tail is folded into that same message
     instead of appended as a new one — Anthropic and Gemini both reject (or, for
     Anthropic, only sometimes silently coalesce) two consecutive same-role messages.
-    The same tail is attached on every later call of the epoch, not only the call
-    that first observed the change.
+    It is attached on every call, including the first of a user message, and it
+    is not stored, so the system text and the history stay a stable prefix.
     """
     out: list[Message] = [system, *list(history)]
     update = context_tail.strip()

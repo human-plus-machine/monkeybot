@@ -17,8 +17,8 @@ def _scenario() -> Scenario:
         id="regression/t2/python/recall_dedupe",
         case="T2-MEM-10",
         description=(
-            "Turn 2's system text carries the turn-1 fact once, from wake-up, "
-            "and has no recall heading."
+            "Turn 2's messages carry the turn-1 fact once, from wake-up, "
+            "and have no recall heading."
         ),
         mode="scripted",
         hooks=["memory"],
@@ -35,8 +35,14 @@ def _scenario() -> Scenario:
 
 
 @pytest.mark.case("T2-MEM-10")
-async def test_turn_two_system_shows_the_fact_once() -> None:
+async def test_turn_two_messages_show_the_fact_once() -> None:
     run = await run_scenario(_scenario())
-    system = run.view.provider_requests[1].system
-    assert system.count(_FACT) == 1
-    assert _RECALL_HEADING not in system
+    request = run.view.provider_requests[1]
+    seen = "\n".join(request.messages)
+    assert _FACT not in request.system
+    assert _RECALL_HEADING not in seen
+    assert _RECALL_HEADING not in request.system
+    # The original user row also contains the fact. The tail is the copy
+    # wake-up adds, and recall must not add another.
+    tail = seen.split("## System context update", 1)[1]
+    assert tail.count(_FACT) == 1

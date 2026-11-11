@@ -514,8 +514,8 @@ def _anthropic_assistant_block(block: ContentBlock) -> dict[str, Any]:
 
 
 # Volatile section headings emitted by ``compose_system_prompt``
-# (``core.prompts.prompt``), ``_append_extra_system_text`` (``core.runtime.loop``),
-# and ``_format_system_context_update`` (``core.context.epoch``). Shared from the
+# (``core.prompts.prompt``), the live tail (``core.context.epoch``), and the
+# send-time notes (``_send_tail``). Shared from the
 # import-free ``core.prompts.headings`` leaf: importing the composing modules
 # here would cycle (``core.context`` -> ``core.config.settings`` -> provider
 # classes in this package), which is why these literals were once duplicated by
