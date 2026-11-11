@@ -79,6 +79,9 @@ class JobRegistry:
         self.max_jobs = max(1, max_jobs)
         self._jobs: dict[str, BackgroundJob] = {}
 
+    def all(self) -> list[BackgroundJob]:
+        return list(self._jobs.values())
+
     def running(self) -> list[BackgroundJob]:
         return [job for job in self._jobs.values() if job.status is JobStatus.RUNNING]
 

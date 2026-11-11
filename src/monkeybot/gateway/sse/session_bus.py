@@ -126,6 +126,12 @@ class SessionBus:
         """Scheduled drain retry after a failed durable turn-lock acquire."""
         self.subagent_supervisor: Any | None = None
         """Background subagents for this session. Outlives individual turns."""
+        self.session_jobs: Any | None = None
+        """Local background commands for this session. Outlives individual turns."""
+        self.wake_budget: Any | None = None
+        """Shared cap on harness wakes from subagents and background commands."""
+        self.background_jobs_survive_turn: bool | None = None
+        """Fixed for the session: local background commands outlive the turn."""
         self.active_turn_task: asyncio.Task[None] | None = None
         """Background turn task scheduled by ``_schedule_turn``; awaited on DELETE."""
 
@@ -394,6 +400,16 @@ class SessionRegistry:
             # the transcript writer.
             await bus.quiesce_active_turn()
         finally:
+            session_jobs = getattr(bus, "session_jobs", None)
+            if session_jobs is not None:
+                try:
+                    await session_jobs.aclose("session closed")
+                except Exception:
+                    logger.warning(
+                        "session jobs close failed %s",
+                        kv(session_id=session_id),
+                        exc_info=True,
+                    )
             await self._cleanup_spill(session_id)
         writer = bus.transcript_writer
         if writer is None:

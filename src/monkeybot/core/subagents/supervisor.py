@@ -23,6 +23,7 @@ from monkeybot.core.llm.provider import ToolCall
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.persistence.backends import RunStore
 from monkeybot.core.persistence.durable_runs import SubagentRunRow
+from monkeybot.core.runtime.wake_budget import WakeBudget
 from monkeybot.core.subagents.subagent_proto import SubagentEnvelope
 from monkeybot.core.subprocess_groups import kill_recorded_subagent
 
@@ -30,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 _PROCESS_OWNER = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 _WAKE_DEBOUNCE_S = 2.0
-_MAX_CONSECUTIVE_WAKES = 3
 _KILL_MESSAGE = "task: killed"
 _ORPHAN_MESSAGE = "orphaned: gateway exited"
 
@@ -120,6 +120,8 @@ class SubagentSupervisor:
         owner_id: str | None = None,
         run_inline: Callable[..., Awaitable[dict[str, Any]]],
         on_wake: WakeCallback | None = None,
+        wake_budget: WakeBudget | None = None,
+        wake_debounce_s: float = _WAKE_DEBOUNCE_S,
     ) -> None:
         self.session_id = session_id
         self._store = run_store
@@ -128,8 +130,9 @@ class SubagentSupervisor:
         self._owner = owner_id or process_owner_id()
         self._run_inline = run_inline
         self._on_wake = on_wake
+        self._wake_budget = wake_budget if wake_budget is not None else WakeBudget()
+        self._wake_debounce_s = wake_debounce_s
         self._runs: dict[str, _Run] = {}
-        self._consecutive_wakes = 0
         self._wake_task: asyncio.Task[None] | None = None
         self._closed = False
 
@@ -141,7 +144,7 @@ class SubagentSupervisor:
         return sum(1 for run in self._runs.values() if not run.finished.is_set())
 
     def note_human_turn(self) -> None:
-        self._consecutive_wakes = 0
+        self._wake_budget.note_human_turn()
 
     def mark_awaited(self, run_id: str) -> None:
         run = self._runs.get(run_id)
@@ -476,7 +479,7 @@ class SubagentSupervisor:
 
         async def _flush() -> None:
             try:
-                await asyncio.sleep(_WAKE_DEBOUNCE_S)
+                await asyncio.sleep(self._wake_debounce_s)
                 await self._emit_wake()
             except asyncio.CancelledError:
                 raise
@@ -503,7 +506,7 @@ class SubagentSupervisor:
 
     async def _emit_wake(self) -> None:
         batch = self.pending_wake()
-        if not batch or self._on_wake is None or self._consecutive_wakes >= _MAX_CONSECUTIVE_WAKES:
+        if not batch or self._on_wake is None or not self._wake_budget.allow():
             return
         enqueued = await self._on_wake(batch)
         if not enqueued:
@@ -512,7 +515,7 @@ class SubagentSupervisor:
             run = self._runs.get(run_id)
             if run is not None:
                 run.woken = True
-        self._consecutive_wakes += 1
+        self._wake_budget.record()
 
 
 def _running_snapshot(run: _Run) -> dict[str, Any]:

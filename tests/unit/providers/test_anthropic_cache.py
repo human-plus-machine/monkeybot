@@ -12,6 +12,7 @@ import pytest
 from monkeybot.core.context.epoch import SYSTEM_CONTEXT_UPDATE_HEADING
 from monkeybot.core.llm.provider import Message, ProviderCallHints, UsageEvent
 from monkeybot.core.prompts.headings import (
+    BACKGROUND_COMMANDS_HEADING,
     CURRENT_DATE_HEADING,
     CURRENT_REQUEST_HEADING,
     INVOKED_SKILL_HEADING,
@@ -135,6 +136,7 @@ def test_volatile_markers_cover_every_heading_constant() -> None:
         MEMORY_NUDGE_HEADING,
         SKILLS_HEADING,
         TODO_LIST_HEADING,
+        BACKGROUND_COMMANDS_HEADING,
         INVOKED_SKILL_HEADING,
         CURRENT_REQUEST_HEADING,
         RUNTIME_NOTES_HEADING,

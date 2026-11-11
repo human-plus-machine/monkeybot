@@ -174,6 +174,7 @@ async def test_compose_volatile_tail_parts_matches_golden(
         "invoked_skill",
         "todos",
         "background_tasks",
+        "background_commands",
         "current_request",
     }
     assert "2026-10-26" in parts["current_date"]
