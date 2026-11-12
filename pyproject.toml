@@ -34,12 +34,12 @@ vertex = [
 claude = ["anthropic>=0.40.0"]
 vertex-claude = ["anthropic[vertex]>=0.40.0"]
 bedrock = ["anthropic[bedrock]>=0.40.0", "boto3>=1.34.0"]
-openai = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.2"]
-huggingface = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.2"]
-ollama = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.2"]
-nvidia = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.2"]
-openrouter = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.2"]
-fireworks = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.2"]
+openai = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.4,<7"]
+huggingface = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.4,<7"]
+ollama = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.4,<7"]
+nvidia = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.4,<7"]
+openrouter = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.4,<7"]
+fireworks = ["openai>=1.0", "tiktoken>=0.7.0", "pypdf>=6.21.4,<7"]
 sandbox = ["opensandbox>=0.1.7"]
 scheduler = ["croniter>=2.0"]
 postgres = ["asyncpg>=0.29.0"]
@@ -81,7 +81,7 @@ dev = [
     "tiktoken>=0.7.0",
     # PDF extraction tests import pypdf directly. It used to arrive through the
     # knowledge-media extra; the openai-family extras still ship it at runtime.
-    "pypdf>=6.21.2",
+    "pypdf>=6.21.4,<7",
     "types-pyyaml>=6.0.12",
     "asgi-lifespan>=2.1.0",
     "anthropic[vertex,bedrock]>=0.40.0",
