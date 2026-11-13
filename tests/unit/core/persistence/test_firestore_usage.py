@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -17,7 +18,7 @@ def _ms(year: int, month: int, day: int, hour: int = 0) -> int:
 
 @pytest.mark.asyncio
 async def test_firestore_breakdown_hour_and_week_buckets(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = FirestoreUsageStore(None, "prefix")  # type: ignore[arg-type]
+    store = FirestoreUsageStore(MagicMock(), "prefix")
     rows = [
         {
             "model": "gemini-2.5-flash",

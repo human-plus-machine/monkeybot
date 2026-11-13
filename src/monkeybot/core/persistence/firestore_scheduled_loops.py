@@ -13,6 +13,11 @@ from google.cloud import firestore
 from google.cloud.firestore import AsyncClient
 from google.cloud.firestore_v1.base_query import FieldFilter
 
+from monkeybot.core.persistence.firestore_layout import (
+    FirestoreLayout,
+    firestore_monkeybot_collection,
+    firestore_scheduled_loops_goal_sessions,
+)
 from monkeybot.core.persistence.scheduled_loops import (
     GOAL_MAX_CONSECUTIVE_ERRORS,
     KIND_GOAL,
@@ -84,16 +89,27 @@ def _create_payload(values: PlannedScheduledLoop) -> dict[str, object]:
 class FirestoreScheduledLoopStore:
     """Firestore-backed scheduled-loop store."""
 
-    def __init__(self, client: AsyncClient, prefix: str) -> None:
+    def __init__(
+        self,
+        client: AsyncClient,
+        prefix: str,
+        *,
+        layout: FirestoreLayout = "flat",
+    ) -> None:
         self._client = client
-        self._collection = _collection_name(prefix, "scheduled_loops")
+        self._col = firestore_monkeybot_collection(
+            client, prefix=prefix, layout=layout, base="scheduled_loops"
+        )
+        self._goal_sessions_col = firestore_scheduled_loops_goal_sessions(
+            client, prefix=prefix, layout=layout
+        )
 
     def _doc(self, loop_id: str) -> firestore.AsyncDocumentReference:
-        return self._client.collection(self._collection).document(loop_id)
+        return cast(firestore.AsyncDocumentReference, self._col.document(loop_id))
 
     def _goal_lock_doc(self, session_id: str) -> firestore.AsyncDocumentReference:
         digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
-        return self._client.collection(f"{self._collection}_goal_sessions").document(digest)
+        return cast(firestore.AsyncDocumentReference, self._goal_sessions_col.document(digest))
 
     @staticmethod
     def _try_doc_to_row(doc_id: str, data: dict[str, object]) -> ScheduledLoopRow | None:
@@ -204,9 +220,7 @@ class FirestoreScheduledLoopStore:
 
     async def list_all(self) -> list[ScheduledLoopRow]:
         rows: list[ScheduledLoopRow] = []
-        query = self._client.collection(self._collection).order_by(
-            "started_at_ms", direction=firestore.Query.DESCENDING
-        )
+        query = self._col.order_by("started_at_ms", direction=firestore.Query.DESCENDING)
         async for doc in query.stream():
             row = self._try_doc_to_row(doc.id, doc.to_dict() or {})
             if row is not None:
@@ -219,9 +233,7 @@ class FirestoreScheduledLoopStore:
             # so scan and let the row mapper default them to KIND_LOOP.
             return [row for row in await self.list_all() if row.kind == KIND_LOOP]
         rows: list[ScheduledLoopRow] = []
-        query = self._client.collection(self._collection).where(
-            filter=FieldFilter("kind", "==", kind)
-        )
+        query = self._col.where(filter=FieldFilter("kind", "==", kind))
         async for doc in query.stream():
             row = self._try_doc_to_row(doc.id, doc.to_dict() or {})
             if row is not None:
@@ -243,10 +255,8 @@ class FirestoreScheduledLoopStore:
                 (row for row in rows if row.session_id == session_id and row.status in wanted),
                 None,
             )
-        query = (
-            self._client.collection(self._collection)
-            .where(filter=FieldFilter("kind", "==", kind))
-            .where(filter=FieldFilter("session_id", "==", session_id))
+        query = self._col.where(filter=FieldFilter("kind", "==", kind)).where(
+            filter=FieldFilter("session_id", "==", session_id)
         )
         async for doc in query.stream():
             row = self._try_doc_to_row(doc.id, doc.to_dict() or {})
@@ -257,8 +267,7 @@ class FirestoreScheduledLoopStore:
     async def list_due(self, now_ms: int) -> list[ScheduledLoopRow]:
         rows: list[ScheduledLoopRow] = []
         query = (
-            self._client.collection(self._collection)
-            .where(filter=FieldFilter("status", "==", "active"))
+            self._col.where(filter=FieldFilter("status", "==", "active"))
             .where(filter=FieldFilter("tick_in_flight", "==", 0))
             .where(filter=FieldFilter("next_tick_at_ms", "<=", now_ms))
             .order_by("next_tick_at_ms")
@@ -341,10 +350,8 @@ class FirestoreScheduledLoopStore:
 
     async def release_stale_claims(self, stale_after_ms: int, now_ms: int | None = None) -> int:
         cutoff = resolve_now_ms(now_ms) - stale_after_ms
-        query = (
-            self._client.collection(self._collection)
-            .where(filter=FieldFilter("tick_in_flight", "==", 1))
-            .where(filter=FieldFilter("claimed_at_ms", "<", cutoff))
+        query = self._col.where(filter=FieldFilter("tick_in_flight", "==", 1)).where(
+            filter=FieldFilter("claimed_at_ms", "<", cutoff)
         )
         stale_loop_ids: list[str] = []
         async for doc in query.stream():
@@ -622,9 +629,7 @@ class FirestoreScheduledLoopStore:
 
     async def release_due_waits(self, now_ms: int | None = None) -> int:
         now_ms = resolve_now_ms(now_ms)
-        query = self._client.collection(self._collection).where(
-            filter=FieldFilter("status", "==", "waiting")
-        )
+        query = self._col.where(filter=FieldFilter("status", "==", "waiting"))
         due_ids: list[str] = []
         async for doc in query.stream():
             data = doc.to_dict() or {}

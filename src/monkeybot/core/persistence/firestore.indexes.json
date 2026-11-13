@@ -27,6 +27,32 @@
       ]
     },
     {
+      "collectionGroup": "conversation_history",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "thread_id", "order": "ASCENDING" },
+        { "fieldPath": "agent_scope", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "conversation_history",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "thread_id", "order": "ASCENDING" },
+        { "fieldPath": "agent_scope", "order": "ASCENDING" },
+        { "fieldPath": "created_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "threads",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "agent_scope", "order": "ASCENDING" },
+        { "fieldPath": "last_message_at", "order": "DESCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "turn_usage",
       "queryScope": "COLLECTION",
       "fields": [
@@ -35,10 +61,44 @@
       ]
     },
     {
+      "collectionGroup": "subagent_runs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "claimed_at", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "subagent_runs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "started_at", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "scheduled_loops",
       "queryScope": "COLLECTION",
       "fields": [
-        { "fieldPath": "kind", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "tick_in_flight", "order": "ASCENDING" },
+        { "fieldPath": "next_tick_at_ms", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "session_branches",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "agent_scope", "order": "ASCENDING" },
+        { "fieldPath": "session_id", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "session_branches",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "agent_scope", "order": "ASCENDING" },
+        { "fieldPath": "is_active", "order": "ASCENDING" },
         { "fieldPath": "session_id", "order": "ASCENDING" }
       ]
     }

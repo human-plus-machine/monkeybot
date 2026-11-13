@@ -55,12 +55,14 @@ from monkeybot.core.config.settings import (
     CodingConfig,
     ConfigError,
     GoalsConfig,
+    PromptConfig,
     SubagentConfig,
     SubagentSettings,
     VerifierConfig,
     _coding_section,
     _goals_section,
     _parse_subagent_entries,
+    _prompt_section,
     _persona_registry,
     _subagents_section,
     _verifier_section,
@@ -70,6 +72,9 @@ from monkeybot.core.config.settings import (
 )
 from monkeybot.core.config.settings import (
     goals_config_from_section as _goals_config_from_section,
+)
+from monkeybot.core.config.settings import (
+    prompt_config_from_section as _prompt_config_from_section,
 )
 from monkeybot.core.config.settings import (
     subagent_settings_from_section as _subagent_settings_from_section,
@@ -245,6 +250,7 @@ class RuntimeConfig:
     env_values: Mapping[str, str]
     coding: CodingConfig = field(default_factory=CodingConfig)
     goals: GoalsConfig = field(default_factory=GoalsConfig)
+    prompt: PromptConfig = field(default_factory=PromptConfig)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "env_values", MappingProxyType(dict(self.env_values)))
@@ -620,6 +626,7 @@ def build_runtime_config(
     verifier = _parse_verifier(merged)
     coding = _parse_coding(merged)
     goals = _parse_goals(merged)
+    prompt = _parse_prompt(merged)
     return RuntimeConfig(
         revision=revision,
         digest=digest,
@@ -637,6 +644,7 @@ def build_runtime_config(
         env_values=env_values,
         coding=coding,
         goals=goals,
+        prompt=prompt,
     )
 
 
@@ -1058,6 +1066,14 @@ def _parse_goals(doc: Mapping[str, Any]) -> GoalsConfig:
     except ConfigError as exc:
         logger.error("Ignoring invalid goals section during snapshot load: %s", exc)
         return GoalsConfig()
+
+
+def _parse_prompt(doc: Mapping[str, Any]) -> PromptConfig:
+    try:
+        return _prompt_config_from_section(_prompt_section(dict(doc)))
+    except ConfigError as exc:
+        logger.error("Ignoring invalid prompt section during snapshot load: %s", exc)
+        return PromptConfig()
 
 
 def _parse_coding(doc: Mapping[str, Any]) -> CodingConfig:

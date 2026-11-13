@@ -211,6 +211,23 @@ class GoalsConfig:
 _DEFAULT_GOALS_CONFIG = GoalsConfig()
 
 
+@dataclass(frozen=True)
+class PromptSectionCapsConfig:
+    """Per-section character caps under ``prompt.section_caps``."""
+
+    runtime_notes: int = 8_000
+
+
+@dataclass(frozen=True)
+class PromptConfig:
+    """YAML ``prompt:`` harness tuning."""
+
+    section_caps: PromptSectionCapsConfig = field(default_factory=PromptSectionCapsConfig)
+
+
+_DEFAULT_PROMPT_CONFIG = PromptConfig()
+
+
 # ``run_command`` lines that count as "ran the project's tests/lint" for the verification gate.
 DEFAULT_VERIFY_COMMANDS: tuple[str, ...] = (
     r"\bpytest\b",
@@ -982,6 +999,47 @@ def get_goals_config(
         return config.goals
     _, doc = load_monkeybot_yaml_dict(config_path)
     return goals_config_from_section(_goals_section(doc))
+
+
+def _prompt_section(doc: dict[str, Any]) -> dict[str, Any]:
+    section = doc.get("prompt")
+    if section is None:
+        return {}
+    if not isinstance(section, dict):
+        raise ConfigError(f"prompt must be a mapping, got {type(section).__name__}")
+    return section
+
+
+def prompt_config_from_section(section: dict[str, Any]) -> PromptConfig:
+    """Parse ``prompt:``; unknown keys are ignored."""
+    if not section:
+        return _DEFAULT_PROMPT_CONFIG
+    caps_raw = section.get("section_caps")
+    if caps_raw is None:
+        caps_raw = {}
+    if not isinstance(caps_raw, dict):
+        raise ConfigError(f"prompt.section_caps must be a mapping, got {type(caps_raw).__name__}")
+    raw_runtime = caps_raw.get("runtime_notes")
+    runtime_notes = _DEFAULT_PROMPT_CONFIG.section_caps.runtime_notes
+    if raw_runtime is not None:
+        runtime_notes = _verifier_int(
+            raw_runtime,
+            "prompt.section_caps.runtime_notes",
+            runtime_notes,
+            min_value=1,
+        )
+    return PromptConfig(section_caps=PromptSectionCapsConfig(runtime_notes=runtime_notes))
+
+
+def get_prompt_config(
+    config_path: str | None = None,
+    *,
+    config: RuntimeConfig | None = None,
+) -> PromptConfig:
+    if config is not None:
+        return config.prompt
+    _, doc = load_monkeybot_yaml_dict(config_path)
+    return prompt_config_from_section(_prompt_section(doc))
 
 
 def get_verifier_config(

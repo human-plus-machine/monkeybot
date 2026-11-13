@@ -965,3 +965,4 @@ def test_parse_firestore_config_from_url() -> None:
     assert cfg.project == "aurigaos"
     assert cfg.database == "production"
     assert cfg.prefix == "mb"
+    assert cfg.layout == "flat"

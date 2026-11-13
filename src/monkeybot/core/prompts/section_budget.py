@@ -7,6 +7,11 @@ round trip, and the same text must stay byte-identical for an unchanged input.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from monkeybot.core.config.snapshot import RuntimeConfig
+
 SECTION_CHAR_CAPS: dict[str, int] = {
     "todos": 6_000,
     "background_tasks": 2_000,
@@ -16,6 +21,18 @@ SECTION_CHAR_CAPS: dict[str, int] = {
 }
 
 _RUNTIME_NOTES_MARKER = "… [runtime notes truncated]"
+
+
+def effective_section_char_caps(config: RuntimeConfig | None = None) -> dict[str, int]:
+    """Section caps for the active runtime config (defaults when none is loaded)."""
+    caps = dict(SECTION_CHAR_CAPS)
+    if config is not None:
+        caps["runtime_notes"] = config.prompt.section_caps.runtime_notes
+    return caps
+
+
+def runtime_notes_char_cap(config: RuntimeConfig | None = None) -> int:
+    return effective_section_char_caps(config)["runtime_notes"]
 
 
 def clip_lines(body: str, cap: int, *, note: str) -> str:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 import pytest_asyncio
@@ -45,15 +46,15 @@ def test_summary_doc_id_is_deterministic_and_slash_safe() -> None:
     is never validated against that. Hashing scope+thread_id together
     produces a fixed-length hex id that can never contain '/'.
     """
-    store = FirestoreHistoryStore(None, "prefix", "agent-a")  # type: ignore[arg-type]
+    store = FirestoreHistoryStore(MagicMock(), "prefix", "agent-a")
     doc_id = store._summary_doc_id("weird/thread/id")
     assert "/" not in doc_id
     assert doc_id == store._summary_doc_id("weird/thread/id")
 
 
 def test_summary_doc_id_differs_by_scope_and_thread_id() -> None:
-    a = FirestoreHistoryStore(None, "prefix", "agent-a")  # type: ignore[arg-type]
-    b = FirestoreHistoryStore(None, "prefix", "agent-b")  # type: ignore[arg-type]
+    a = FirestoreHistoryStore(MagicMock(), "prefix", "agent-a")
+    b = FirestoreHistoryStore(MagicMock(), "prefix", "agent-b")
     assert a._summary_doc_id("t1") != b._summary_doc_id("t1")
     assert a._summary_doc_id("t1") != a._summary_doc_id("t2")
 
@@ -77,7 +78,7 @@ def test_summary_doc_id_matches_public_function() -> None:
     public, importable firestore_summary_doc_id() operators actually call
     (see the doc), so the two can never drift again.
     """
-    store = FirestoreHistoryStore(None, "prefix", "agent-a")  # type: ignore[arg-type]
+    store = FirestoreHistoryStore(MagicMock(), "prefix", "agent-a")
     assert store._summary_doc_id("thread-x") == firestore_summary_doc_id("agent-a", "thread-x")
 
 

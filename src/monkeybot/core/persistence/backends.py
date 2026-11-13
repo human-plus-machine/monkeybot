@@ -300,6 +300,7 @@ class FirestoreConfig:
     project: str
     database: str
     prefix: str = ""
+    layout: str = "flat"  # ``flat`` or ``nested``; see :mod:`firestore_layout`
 
 
 def _normalize_postgres_db_url(db_url: str) -> str | None:
@@ -326,8 +327,12 @@ def _parse_firestore_config(db_url: str) -> FirestoreConfig | None:
     if not project:
         raise ValueError(f"Firestore URL missing project id: {db_url!r}")
     database = unquote(parsed.path.lstrip("/")) or "(default)"
-    prefix = parse_qs(parsed.query).get("prefix", [""])[0]
-    return FirestoreConfig(project=project, database=database, prefix=prefix)
+    query = parse_qs(parsed.query)
+    prefix = query.get("prefix", [""])[0]
+    from monkeybot.core.persistence.firestore_layout import parse_firestore_layout
+
+    layout = parse_firestore_layout(query.get("layout", ["flat"])[0])
+    return FirestoreConfig(project=project, database=database, prefix=prefix, layout=layout)
 
 
 def create_storage_backend(

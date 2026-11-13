@@ -24,7 +24,12 @@ from monkeybot.core.prompts.prompt import (
     compose_stable_baseline_parts,
     compose_volatile_tail_parts,
 )
-from monkeybot.core.prompts.section_budget import SECTION_CHAR_CAPS, clip_head_and_tail
+from monkeybot.core.config.snapshot import get_config_store
+from monkeybot.core.prompts.section_budget import (
+    clip_head_and_tail,
+    effective_section_char_caps,
+    runtime_notes_char_cap,
+)
 from monkeybot.core.types.content_blocks import (
     ContentBlock,
     File,
@@ -127,7 +132,7 @@ def _send_tail(context_tail: str, notes: str | None) -> str:
         return context_tail
     raw = notes.strip()
     body = _clipped_runtime_notes(notes)
-    cap = SECTION_CHAR_CAPS["runtime_notes"]
+    cap = runtime_notes_char_cap(get_config_store().current_or_none())
     if len(raw) > cap:
         logger.warning(
             "runtime notes truncated %s",
@@ -283,7 +288,7 @@ def _clipped_runtime_notes(extra: str | None) -> str:
     body = extra.strip()
     if not body:
         return ""
-    cap = SECTION_CHAR_CAPS["runtime_notes"]
+    cap = runtime_notes_char_cap(get_config_store().current_or_none())
     if len(body) <= cap:
         return body
     return clip_head_and_tail(body, cap)
@@ -310,7 +315,7 @@ def _append_extra_system_text(system: Message, extra: str | None) -> Message:
     piece = _runtime_notes_piece(extra)
     if not piece:
         return system
-    cap = SECTION_CHAR_CAPS["runtime_notes"]
+    cap = runtime_notes_char_cap(get_config_store().current_or_none())
     if len(raw) > cap:
         logger.warning(
             "runtime notes truncated %s",
@@ -376,7 +381,7 @@ def _prompt_section(name: str, chars: int) -> PromptSection:
         name=name,
         chars=chars,
         est_tokens=estimate_tokens_from_char_count(chars),
-        cap_chars=SECTION_CHAR_CAPS.get(name),
+        cap_chars=effective_section_char_caps(get_config_store().current_or_none()).get(name),
     )
 
 
