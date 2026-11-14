@@ -20,6 +20,7 @@ import re
 # Default for an unlisted prefix: supports everything (matches every Claude
 # model before Sonnet 5 / Opus 4.7).
 UNSUPPORTED_SAMPLING_PARAMS: dict[str, frozenset[str]] = {
+    "claude-haiku-5": frozenset({"temperature", "thinking"}),
     "claude-sonnet-5": frozenset({"temperature", "thinking"}),
     "claude-opus-4-7": frozenset({"temperature", "thinking"}),
     "claude-opus-4-8": frozenset({"temperature", "thinking"}),

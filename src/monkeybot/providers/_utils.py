@@ -36,7 +36,7 @@ from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.pricing import estimate_cost
 from monkeybot.providers.rejected_sampling import (
-    blames_field_path,
+    blames_sampling_param,
     is_status_400,
     omit_known_rejected,
     remember_rejected_sampling,
@@ -223,8 +223,8 @@ def _strip_rejected_params(kwargs: dict[str, Any], exc: Exception) -> list[str]:
             return []
     if not is_status_400(exc):
         return []
-    msg = str(exc).lower()
-    dropped = [p for p in _STRIPPABLE_PARAMS if p in kwargs and blames_field_path(msg, p)]
+    msg = str(exc)
+    dropped = [p for p in _STRIPPABLE_PARAMS if p in kwargs and blames_sampling_param(msg, p)]
     for p in dropped:
         del kwargs[p]
     return dropped

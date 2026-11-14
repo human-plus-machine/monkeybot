@@ -13,6 +13,7 @@ def test_unknown_model_supports_everything() -> None:
 def test_known_blocked_model_rejects_temperature() -> None:
     assert supports_param("claude-sonnet-5", "temperature") is False
     assert supports_param("claude-sonnet-5-20260101", "temperature") is False
+    assert supports_param("claude-haiku-5-5", "temperature") is False
 
 
 def test_known_blocked_model_rejects_manual_thinking() -> None:

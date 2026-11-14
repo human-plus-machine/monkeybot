@@ -62,7 +62,13 @@ def blames_sampling_param(msg: str, param: str) -> bool:
         return True
     lowered = msg.lower()
     name = re.escape(param)
-    if re.search(rf"['\"]{name}['\"]|argument supplied:\s*{name}\b", lowered) is None:
+    if (
+        re.search(
+            rf"['\"`]{name}['\"`]|argument supplied:\s*{name}\b",
+            lowered,
+        )
+        is None
+    ):
         return False
     lowered = lowered.replace("invalid_request_error", "")
     return any(
@@ -74,6 +80,7 @@ def blames_sampling_param(msg: str, param: str) -> bool:
             "unknown",
             "unrecognized",
             "invalid",
+            "deprecated",
         )
     )
 
