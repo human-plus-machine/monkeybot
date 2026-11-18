@@ -152,7 +152,7 @@ One successful turn confirms Tier 1.
 
 ## Tier 2 — Customize (on demand)
 
-Only reach for these when the interview surfaces a need. Each maps to a `monkeybot.yaml` section. **For purpose, defaults, examples, and the `validate`/`doctor` check id of every option, read [`references/config-sections.md`](references/config-sections.md).** Don't inline that reference here.
+Only reach for these when the interview surfaces a need. Each maps to a `monkeybot.yaml` section. **For every option, its allowed values, default, and `validate`/`doctor` check id, read [docs/config.md](https://github.com/human-plus-machine/monkeybot/blob/develop/docs/config.md).** Don't inline that reference here. Offline, the scaffolded `monkeybot_config/monkeybot.example.yaml` lists the same keys with shorter comments.
 
 Decision → config map:
 

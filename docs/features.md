@@ -519,6 +519,7 @@ pricing:
 **Purpose:** Declarative agent config; secrets in `.env`.
 
 **Key files:**
+- Option reference: `docs/config.md` (every YAML key, allowed value, and default)
 - Packaged defaults: `cli/src/monkeybot_cli/scaffold_defaults/monkeybot.example.yaml` (scaffolded to `monkeybot_config/monkeybot.example.yaml`)
 - `core/config/runtime_env.py` — `ENV_MAP`, `apply_monkeybot_runtime_env()`
 - `core/config/yaml_loader.py` — includes/deep-merge
@@ -855,6 +856,6 @@ Doubles live in `testkit/` (`FakeHistory`, `ScriptedProvider`, `RecordingExecuto
 2. **Check invariants** — especially loop, history, prompt ordering, tool dispatch.
 3. **Identify extension point** — prefer hooks, `CustomTool`, inspectors, or ports over direct loop edits.
 4. **Update harness prompt** if the feature adds tools or changes protocol (`harness_prompt.py`).
-5. **Update `monkeybot.example.yaml`** if new config is needed (never secrets).
+5. **Update `monkeybot.example.yaml` and `docs/config.md`** if new config is needed (never secrets).
 6. **Add tests** — unit test with doubles; eval scenario if behavior is cross-cutting.
 7. **Update this doc** — add a feature section and any new invariants.

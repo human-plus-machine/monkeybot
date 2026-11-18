@@ -60,7 +60,7 @@ cp .env.example .env
 # Edit monkeybot_config/AGENT.md with the bot system prompt
 ```
 
-Important knobs (see **`monkeybot_config/monkeybot.example.yaml`** for all sections and comments):
+Important knobs (every option, allowed value, and default is in [config.md](config.md); `monkeybot_config/monkeybot.example.yaml` is the commented template):
 
 | YAML section | Purpose |
 |---|---|
