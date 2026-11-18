@@ -6,6 +6,12 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [core v3.15.2] - 2026-11-18
+
+### Fixed
+
+- Opening a new SQLite database from several processes at once no longer fails with `database is locked`. Switching the file to write-ahead logging takes a lock that does not wait, so that step is retried.
+
 ## [core v3.15.1] - 2026-11-11
 
 ### Added

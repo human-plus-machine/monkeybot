@@ -36,7 +36,7 @@ from monkeybot.core.types.types_tools import ToolDef
 from monkeybot.providers.model_capabilities import supports_param
 from monkeybot.providers.pricing import estimate_cost
 from monkeybot.providers.rejected_sampling import (
-    blames_field_path,
+    blames_sampling_param,
     is_status_400,
     omit_known_rejected,
     remember_rejected_sampling,
@@ -156,19 +156,25 @@ def anthropic_sampling_kwargs(
     when the model is known to accept them. When ``provider`` already rejected
     the effort fields for this model, the temperature path is used instead so
     the configured temperature is not lost too.
+
+    Claude 5 and later think by default and return an empty thinking block unless
+    ``display`` is ``summarized``. That summary is what the chat can show.
     """
     effort = normalize_reasoning_effort(reasoning_effort) or ""
-    if effort == REASONING_EFFORT_NONE:
+    explicitly_off = effort == REASONING_EFFORT_NONE
+    visible_thinking = {"type": "adaptive", "display": "summarized"}
+    if explicitly_off:
         effort = ""
         thinking_budget = None
     if effort and (
         was_rejected(provider, model, "output_config", {"effort": effort})
+        or was_rejected(provider, model, "thinking", visible_thinking)
         or was_rejected(provider, model, "thinking", {"type": "adaptive"})
     ):
         effort = ""
     if effort:
         return {
-            "thinking": {"type": "adaptive"},
+            "thinking": visible_thinking,
             "output_config": {"effort": effort},
         }
     kwargs: dict[str, Any] = {}
@@ -183,6 +189,15 @@ def anthropic_sampling_kwargs(
         # but only send it to models that accept a temperature at all.
         if supports_param(model, "temperature"):
             kwargs["temperature"] = 1
+    elif (
+        not explicitly_off
+        and not supports_param(model, "thinking")
+        and not (
+            was_rejected(provider, model, "thinking", visible_thinking)
+            or was_rejected(provider, model, "thinking", {"type": "adaptive"})
+        )
+    ):
+        kwargs["thinking"] = visible_thinking
     return kwargs
 
 
@@ -223,8 +238,8 @@ def _strip_rejected_params(kwargs: dict[str, Any], exc: Exception) -> list[str]:
             return []
     if not is_status_400(exc):
         return []
-    msg = str(exc).lower()
-    dropped = [p for p in _STRIPPABLE_PARAMS if p in kwargs and blames_field_path(msg, p)]
+    msg = str(exc)
+    dropped = [p for p in _STRIPPABLE_PARAMS if p in kwargs and blames_sampling_param(msg, p)]
     for p in dropped:
         del kwargs[p]
     return dropped

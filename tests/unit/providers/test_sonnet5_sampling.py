@@ -69,7 +69,7 @@ async def test_older_model_still_sends_temperature(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.asyncio
-async def test_sonnet5_drops_manual_thinking_and_does_not_force_temperature_1(
+async def test_sonnet5_requests_summarized_thinking_instead_of_a_manual_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
@@ -78,7 +78,7 @@ async def test_sonnet5_drops_manual_thinking_and_does_not_force_temperature_1(
     with patch("anthropic.AsyncAnthropic", return_value=client):
         await _drain(provider, model=_SONNET_5, thinking_budget=4000)
     kwargs = client.messages.stream.call_args.kwargs
-    assert "thinking" not in kwargs
+    assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert "temperature" not in kwargs
 
 
@@ -93,7 +93,7 @@ async def test_reasoning_effort_sends_adaptive_and_omits_temperature(
     with patch("anthropic.AsyncAnthropic", return_value=client):
         await _drain(provider, model=_OLDER, thinking_budget=4000)
     kwargs = client.messages.stream.call_args.kwargs
-    assert kwargs["thinking"] == {"type": "adaptive"}
+    assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert kwargs["output_config"] == {"effort": "high"}
     assert "temperature" not in kwargs
 
@@ -143,7 +143,7 @@ async def test_vertex_claude_sends_effort(monkeypatch: pytest.MonkeyPatch) -> No
         async for _ in provider.stream(_messages(), [], model=_OLDER):
             pass
     kwargs = client.messages.stream.call_args.kwargs
-    assert kwargs["thinking"] == {"type": "adaptive"}
+    assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert kwargs["output_config"] == {"effort": "high"}
     assert "temperature" not in kwargs
 

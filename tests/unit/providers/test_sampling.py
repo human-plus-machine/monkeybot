@@ -218,7 +218,7 @@ async def test_bedrock_claude_sends_reasoning_effort() -> None:
         pass
 
     kwargs = client.messages.stream.call_args.kwargs
-    assert kwargs["thinking"] == {"type": "adaptive"}
+    assert kwargs["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert kwargs["output_config"] == {"effort": "high"}
     assert "temperature" not in kwargs
 

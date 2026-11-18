@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_DB_URL: Final[str] = "sqlite:///data/monkeybot.db"
 
+# journal_mode=WAL takes a brief exclusive lock that bypasses busy_timeout;
+# retry a few times so concurrent first-openers do not fail the connection.
+_WAL_RETRY_DELAYS_MS: Final[tuple[int, ...]] = (0, 5, 10, 25, 50, 100)
+
 OUTBOX_DDL: Final[str] = """CREATE TABLE IF NOT EXISTS memory_outbox (
     id TEXT PRIMARY KEY,
     agent_id TEXT NOT NULL DEFAULT '',
@@ -311,12 +315,32 @@ def db_owned_by_agent_root(db_url: str, agent_root: Path | None) -> bool:
         return False
 
 
+async def _set_wal_mode(conn: aiosqlite.Connection) -> None:
+    """Set WAL journal mode with a bounded retry.
+
+    The exclusive lock this pragma takes does not honor ``busy_timeout``.
+    A successful execute is enough: ``:memory:`` stays in ``memory`` mode and
+    must not be rejected for not returning ``wal``.
+    """
+    last_err: aiosqlite.OperationalError | None = None
+    for delay_ms in _WAL_RETRY_DELAYS_MS:
+        if delay_ms:
+            await asyncio.sleep(delay_ms / 1000)
+        try:
+            await conn.execute("PRAGMA journal_mode=WAL")
+            return
+        except aiosqlite.OperationalError as exc:
+            last_err = exc
+    if last_err is not None:
+        raise last_err
+
+
 async def configure_connection(conn: aiosqlite.Connection) -> None:
-    """PRAGMA journal_mode=WAL; foreign_keys=ON; synchronous=NORMAL; busy_timeout=5000."""
-    await conn.execute("PRAGMA journal_mode=WAL")
+    """PRAGMA busy_timeout=5000; journal_mode=WAL (retried); foreign_keys=ON; synchronous=NORMAL."""
+    await conn.execute("PRAGMA busy_timeout=5000")
+    await _set_wal_mode(conn)
     await conn.execute("PRAGMA foreign_keys=ON")
     await conn.execute("PRAGMA synchronous=NORMAL")
-    await conn.execute("PRAGMA busy_timeout=5000")
 
 
 async def _connection_db_path(conn: aiosqlite.Connection) -> str:

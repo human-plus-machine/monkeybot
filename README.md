@@ -79,6 +79,7 @@ Walks through install, scaffold, config, and first chat. Source: [`cli/skills/mo
 | Guide | Description |
 |---|---|
 | [Getting Started](docs/getting-started.md) | Install, configure, sessions + SSE from the CLI |
+| [Configuration](docs/config.md) | Every YAML option, allowed value, and default |
 | [Features](docs/features.md) | Architecture, capabilities, CLI, task queue |
 | [SSE gateway and custom UI](docs/sse-gateway-ui.md) | HTTP + SSE endpoints, event types, CORS |
 | [Skills](docs/skills.md) | Skill directory layout and `SKILL.md` discovery |
