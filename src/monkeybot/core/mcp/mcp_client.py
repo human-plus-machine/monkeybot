@@ -45,6 +45,72 @@ def _exception_group_leaves(exc: BaseException) -> list[BaseException]:
     return [exc]
 
 
+def _is_scope_cancellation(exc: BaseException) -> bool:
+    """True when ``exc`` is AnyIO's cancel-scope :class:`asyncio.CancelledError`.
+
+    A caller cancelling the connect task raises :class:`asyncio.CancelledError`
+    with no scope message. The streamable HTTP client uses a scope message when
+    a background POST fails and the scope cancels the session owner.
+    """
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while isinstance(current, asyncio.CancelledError) and id(current) not in seen:
+        seen.add(id(current))
+        if (
+            current.args
+            and isinstance(current.args[0], str)
+            and current.args[0].startswith("Cancelled via cancel scope ")
+        ):
+            return True
+        nxt = current.__context__
+        current = nxt if isinstance(nxt, BaseException) else None
+    return False
+
+
+def _http_status_connection_error(name: str, exc: BaseException) -> MCPConnectionError | None:
+    """Return a connect error naming the HTTP status inside ``exc``, if there is one."""
+    import httpx
+
+    for leaf in _exception_group_leaves(exc):
+        if not isinstance(leaf, httpx.HTTPStatusError):
+            continue
+        code = leaf.response.status_code
+        target = str(leaf.request.url)
+        error = MCPConnectionError(
+            name,
+            f"HTTP {code} from {target}. Check the URL and credentials.",
+        )
+        error.__cause__ = exc
+        return error
+    return None
+
+
+async def _error_from_failed_connect_close(name: str, stack: AsyncExitStack) -> Exception:
+    """Close ``stack`` and return the failure that should fail the handshake.
+
+    A 401/403/5xx on initialize cancels the session owner. The HTTP status is
+    raised later, when this stack exits the SDK task group. That exit error is
+    the connect result. A caller cancellation is left to propagate.
+    """
+    try:
+        await stack.aclose()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except asyncio.CancelledError as exc:
+        if not _is_scope_cancellation(exc):
+            raise
+        found = _http_status_connection_error(name, exc)
+        if found is not None:
+            return found
+    except BaseException as exc:
+        found = _http_status_connection_error(name, exc)
+        if found is not None:
+            return found
+        if isinstance(exc, Exception):
+            return exc
+    return MCPConnectionError(name, "MCP connect was cancelled before the session was ready")
+
+
 def _mcp_runtime_teardown_noise(exc: BaseException) -> bool:
     """True for known AnyIO/MCP streamable-HTTP races during forced shutdown (e.g. Ctrl+C)."""
     if isinstance(exc, RuntimeError):
@@ -795,12 +861,23 @@ class MCPClient:
 
         The stack is always closed in this task. A failed handshake resolves
         ``ready`` with the opener's exception and does not publish a record.
+
+        A streamable HTTP 401/403/5xx does not raise from ``initialize``. The
+        SDK cancels this task from its request task group, and the status
+        surfaces when the stack closes. That cancellation must still resolve
+        ``ready``; otherwise the caller waits forever.
         """
         stack = AsyncExitStack()
         published = False
         try:
             try:
                 session, defs, capabilities = await opener(stack)
+            except asyncio.CancelledError as exc:
+                if not _is_scope_cancellation(exc):
+                    raise
+                if not ready.done():
+                    ready.set_exception(await _error_from_failed_connect_close(name, stack))
+                return
             except Exception as exc:
                 if not ready.done():
                     ready.set_exception(exc)
