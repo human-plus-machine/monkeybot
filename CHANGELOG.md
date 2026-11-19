@@ -8,6 +8,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### CLI
 
+### Changed
+
+- `memory.enabled` is read only from `monkeybot.yaml`. `MONKEYBOT_MEMORY_HOOK_ENABLED` is ignored.
+
 ### Fixed
 
 - `monkeybot chat` and `monkeybot talk` release the gateway port on /bye, Ctrl-C, and a failed start. A shim such as `uv run` no longer leaves a child listening.

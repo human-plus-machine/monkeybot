@@ -115,22 +115,18 @@ def _scenario_memory_disabled(scenario: Scenario) -> bool:
 
     ``agent.base.yaml`` also says ``memory.enabled: false``. Scenarios that
     do not set the flag still receive a subsystem, so a memory-on case stays
-    on. An explicit false (``memory.enabled`` or ``MONKEYBOT_MEMORY_HOOK_ENABLED``
-    on the scenario) passes ``memory=None`` and mempalace is not spawned.
+    on. An explicit ``memory.enabled: false`` passes ``memory=None`` and
+    mempalace is not spawned.
     """
     if scenario.config is None:
         return False
     dumped = scenario.config.model_dump()
     raw: object = None
-    env = dumped.get("env")
-    if isinstance(env, dict) and "MONKEYBOT_MEMORY_HOOK_ENABLED" in env:
-        raw = env["MONKEYBOT_MEMORY_HOOK_ENABLED"]
-    if raw is None:
-        memory = dumped.get("memory")
-        if isinstance(memory, dict) and "enabled" in memory:
-            raw = memory["enabled"]
-        elif "memory.enabled" in dumped:
-            raw = dumped["memory.enabled"]
+    memory = dumped.get("memory")
+    if isinstance(memory, dict) and "enabled" in memory:
+        raw = memory["enabled"]
+    elif "memory.enabled" in dumped:
+        raw = dumped["memory.enabled"]
     if raw is None:
         return False
     return str(raw).strip().lower() in _OFF_VALUES

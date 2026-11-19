@@ -33,6 +33,7 @@ from monkeybot.core.config.runtime_env import (
     ENV_SPEC,
     RETIRED_TOOLS_KEYS,
     YAML_ONLY_ENV_KEYS,
+    ConfigTier,
     warn_retired_sections,
     warn_retired_tools_keys,
 )
@@ -60,8 +61,9 @@ class TestEnvMap:
         """Config-file only (like paths.auto_schema) — no env var override."""
         assert ("web_search", "vertex_google_search") not in ENV_MAP
 
-    def test_memory_enabled_kill_switch_in_env_map(self) -> None:
-        assert ENV_MAP[("memory", "enabled")] == "MONKEYBOT_MEMORY_HOOK_ENABLED"
+    def test_memory_enabled_is_yaml_only(self) -> None:
+        assert ("memory", "enabled") not in ENV_MAP
+        assert "MONKEYBOT_MEMORY_HOOK_ENABLED" not in ENV_SPEC
         assert ("memory", "engine") not in ENV_MAP
 
 
@@ -69,7 +71,7 @@ class TestMemoryEnabledConfig:
     def test_yaml_string_false(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from monkeybot.core.memory.config import memory_enabled_from_config
 
-        monkeypatch.delenv("MONKEYBOT_MEMORY_HOOK_ENABLED", raising=False)
+        monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "1")
         cfg = tmp_path / "monkeybot.yaml"
         cfg.write_text('memory:\n  enabled: "false"\n', encoding="utf-8")
         assert memory_enabled_from_config(str(cfg)) is False
@@ -77,10 +79,42 @@ class TestMemoryEnabledConfig:
     def test_yaml_string_true(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from monkeybot.core.memory.config import memory_enabled_from_config
 
-        monkeypatch.delenv("MONKEYBOT_MEMORY_HOOK_ENABLED", raising=False)
+        monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "0")
         cfg = tmp_path / "monkeybot.yaml"
         cfg.write_text('memory:\n  enabled: "true"\n', encoding="utf-8")
         assert memory_enabled_from_config(str(cfg)) is True
+
+    def test_reload_tracks_yaml_not_env(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from monkeybot.core.config.runtime_env import MEMORY_ENABLED_DIFF_KEY
+        from monkeybot.core.config.snapshot import get_config_store
+
+        monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "0")
+        cfg_dir = tmp_path / "monkeybot_config"
+        cfg_dir.mkdir()
+        yaml_path = cfg_dir / "monkeybot.yaml"
+        yaml_path.write_text(
+            "model:\n  provider: fake\nmemory:\n  enabled: true\n",
+            encoding="utf-8",
+        )
+        reset_runtime_env_state_for_tests()
+        try:
+            with caplog.at_level("WARNING", logger="monkeybot.core.config.runtime_env"):
+                apply_monkeybot_runtime_env(config_path=yaml_path, agent_root=tmp_path)
+            assert get_config_store().current().memory.enabled == "true"
+            assert "MONKEYBOT_MEMORY_HOOK_ENABLED is ignored" in caplog.text
+            yaml_path.write_text(
+                "model:\n  provider: fake\nmemory:\n  enabled: false\n",
+                encoding="utf-8",
+            )
+            prepared, diff = get_config_store().prepare_reload()
+            assert prepared.memory.enabled == "false"
+            assert MEMORY_ENABLED_DIFF_KEY in diff.changed_env_keys
+            assert ConfigTier.REBUILD in diff.tiers
+            assert "MONKEYBOT_MEMORY_HOOK_ENABLED" not in diff.changed_env_keys
+        finally:
+            reset_runtime_env_state_for_tests()
 
 
 class TestVertexGoogleSearchConfig:

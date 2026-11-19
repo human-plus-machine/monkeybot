@@ -18,9 +18,8 @@ Optional:
                         create_harness_deps() also picks this up automatically from the
                         environment when agent_scope isn't passed explicitly; it's passed
                         explicitly below anyway so the requirement is obvious here.
-  MONKEYBOT_MEMORY_HOOK_ENABLED — set to 0 to skip capture/wake-up (or omit monkeybot[memory])
 
-Model/provider: set `model.provider` and `model.name` in `monkeybot.yaml`; keep provider secrets in the environment as in container deploys.
+Model/provider: set `model.provider` and `model.name` in `monkeybot.yaml`; keep provider secrets in the environment as in container deploys. Set `memory.enabled: false` in that file to skip capture and wake-up, or omit the `monkeybot[memory]` extra.
 
 Memory capture uses a durable SQLite outbox. ``run_pattern_bc_turn`` drains pending
 rows at the end of each invocation; ``HarnessDeps.close()`` drains again before
