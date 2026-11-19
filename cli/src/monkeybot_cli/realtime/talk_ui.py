@@ -29,6 +29,7 @@ from monkeybot_cli.config_resolve import (
     resolve_config,
 )
 from monkeybot_cli.gateway_health import health_ok, wait_for_health
+from monkeybot_cli.process_tree import popen_kwargs_for_platform, stop_process_group
 from monkeybot_cli.realtime.session_controller import RealtimeSessionController
 from monkeybot_cli.runtime_python import (
     COMBINED_GATEWAY_MODULE,
@@ -95,6 +96,7 @@ def _spawn_combined_gateway(
         cwd=agent_root,
         stdout=subprocess.DEVNULL,
         stderr=log_file,
+        **popen_kwargs_for_platform(),
     )
     return _SpawnedGateway(proc=proc, log_path=Path(log_file.name), log_file=log_file)
 
@@ -102,10 +104,7 @@ def _spawn_combined_gateway(
 def _cleanup_gateway(spawned: _SpawnedGateway | None) -> None:
     if spawned is None:
         return
-    if spawned.proc.poll() is None:
-        spawned.proc.kill()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            spawned.proc.wait(timeout=1)
+    stop_process_group(spawned.proc)
     with contextlib.suppress(OSError):
         if not spawned.log_file.closed:
             spawned.log_file.close()
