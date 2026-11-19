@@ -33,6 +33,7 @@ from monkeybot.core.llm.provider import (
     ToolCall,
     UsageEvent,
     provider_stream,
+    supports_output_cap_override,
 )
 from monkeybot.core.llm.usage import Usage
 from monkeybot.core.logging_utils import kv
@@ -191,6 +192,18 @@ _POST_TOOL_EMPTY_COMPLETION_NOTE = (
 )
 _EMPTY_COMPLETION_EXHAUSTED_ERROR = (
     "Empty model completion after recovery: ending turn with no reply"
+)
+# A reply that hit the output limit while still thinking. Each retry doubles
+# the cap. Three retries from 8,192 reach 65,536, still under a 128K limit.
+_TRUNCATED_THINKING_RETRIES = 3
+_TRUNCATED_THINKING_NOTE = (
+    "[Harness] Output limit reached while reasoning: the previous response "
+    "spent its whole output budget on reasoning and produced no answer or tool "
+    "call. Keep reasoning short, then call the next tool or answer."
+)
+_TRUNCATED_THINKING_EXHAUSTED_ERROR = (
+    "Model spent its whole output budget on reasoning after raising the cap: "
+    "ending turn with no reply"
 )
 _BACKGROUND_JOB_NUDGES = 3
 # Upper bound on PRE_FINAL_ANSWER refusals per user message; hooks apply their own, lower cap.
@@ -694,6 +707,11 @@ class _TurnState:
     # already shown; the next call continues it, up to the budget above.
     truncated_text_continues_left: int = _TRUNCATED_TEXT_CONTINUES
     truncated_reply_prefix: str = ""
+    # Thinking that hit the output limit. The override lasts for this user
+    # message; a later message starts again from the configured cap.
+    truncated_thinking_retries_left: int = _TRUNCATED_THINKING_RETRIES
+    output_cap_override: int | None = None
+    truncated_thinking_escalated: bool = False
     # One size rejection per send is answered by compacting and sending again.
     overflow_recovered: bool = False
     tools_dirty_reason: str | None = None
@@ -1656,7 +1674,10 @@ async def _consume_provider_stream_body(
     from monkeybot.observability.spans import set_llm_io, set_llm_usage, span_llm
 
     stats = _StreamStats()
-    hints = _provider_call_hints(state.ctx)
+    hints = dataclasses.replace(
+        _provider_call_hints(state.ctx),
+        max_tokens=state.output_cap_override,
+    )
     policy = policy_for(state.ctx.config)
     idle = idle_timeout_s(state.ctx.config)
     stream_mapper = ProviderStreamMapper(state.ctx.request_id)
@@ -2400,9 +2421,55 @@ async def _continue_truncated_answer(
     state.action = "continue"
 
 
+def _refill_empty_budgets(state: _TurnState) -> None:
+    """Restore empty and cutoff retry counts after a real reply.
+
+    The raised output cap stays. Progress ends the cutoff streak, so a later
+    cutoff that cannot be raised falls through to the empty path again.
+    """
+    state.empty_completion_retries_left = _EMPTY_COMPLETION_RETRIES
+    state.post_tool_empty_retries_left = _POST_TOOL_EMPTY_RETRIES
+    state.truncated_thinking_retries_left = _TRUNCATED_THINKING_RETRIES
+    state.truncated_thinking_escalated = False
+
+
+def _configured_output_cap(state: _TurnState) -> int:
+    if state.output_cap_override is not None:
+        return state.output_cap_override
+    from monkeybot.providers.sampling import resolve_model_sampling
+
+    return resolve_model_sampling(config=state.ctx.config).max_tokens
+
+
+def _next_output_cap(state: _TurnState, provider: Provider) -> int | None:
+    """Double the output cap, or None when this call cannot be raised.
+
+    The new cap never exceeds the model's published limit or the room left in
+    the context window. Unknown models and providers that ignore the override
+    return None.
+    """
+    if not supports_output_cap_override(provider):
+        return None
+    from monkeybot.providers.model_capabilities import max_output_tokens
+
+    limit = max_output_tokens(state.ctx.model)
+    if limit is None:
+        return None
+    current = _configured_output_cap(state)
+    raised = min(current * 2, limit)
+    preflight = state.last_preflight_tokens
+    window = state.ctx.context_window_tokens
+    if preflight > 0 and window > 0:
+        raised = min(raised, window - preflight)
+    if raised <= current:
+        return None
+    return raised
+
+
 async def _handle_empty_or_final_text(
     state: _TurnState,
     *,
+    provider: Provider,
     history: HistoryStore,
     last_assistant: list[str],
     tool_executor: object | None = None,
@@ -2516,6 +2583,68 @@ async def _handle_empty_or_final_text(
         and rows[-1].role == "user"
         and any(isinstance(b, ToolResponse) for b in rows[-1].content)
     )
+    if state.stream_truncated:
+        can_continue = state.turn_index < state.effective_max
+        nxt = (
+            _next_output_cap(state, provider)
+            if can_continue and state.truncated_thinking_retries_left > 0
+            else None
+        )
+        if nxt is not None:
+            old_cap = _configured_output_cap(state)
+            state.output_cap_override = nxt
+            state.truncated_thinking_escalated = True
+            state.truncated_thinking_retries_left -= 1
+            state.pre_tool_extra_next = _combine_extras(
+                state.pre_tool_extra_next,
+                _TRUNCATED_THINKING_NOTE,
+            )
+            yield HarnessIntervention(
+                request_id=state.ctx.request_id,
+                intervention="truncated_thinking",
+                inner_turn=state.turn_index,
+                detail="escalate",
+            )
+            logger.warning(
+                "thinking cut off at output limit; retrying %s",
+                kv(
+                    request_id=state.ctx.request_id,
+                    thread_id=state.ctx.thread_id,
+                    turn=state.turn_index,
+                    had_thinking=bool((state.thinking_text or "").strip()),
+                    old_cap=old_cap,
+                    new_cap=nxt,
+                    retries_left=state.truncated_thinking_retries_left,
+                    owes_tool_followup=owes_tool_followup,
+                ),
+            )
+            state.action = "continue"
+            return
+        if state.truncated_thinking_escalated:
+            logger.warning(
+                "thinking cut off at output limit; ending turn %s",
+                kv(
+                    request_id=state.ctx.request_id,
+                    thread_id=state.ctx.thread_id,
+                    turn=state.turn_index,
+                    had_thinking=bool((state.thinking_text or "").strip()),
+                    cap=_configured_output_cap(state),
+                    owes_tool_followup=owes_tool_followup,
+                ),
+            )
+            yield HarnessIntervention(
+                request_id=state.ctx.request_id,
+                intervention="truncated_thinking",
+                inner_turn=state.turn_index,
+                detail="exhausted",
+            )
+            yield Error(
+                request_id=state.ctx.request_id,
+                error=_TRUNCATED_THINKING_EXHAUSTED_ERROR,
+            )
+            state.needs_followup_after_tools = False
+            state.action = "break"
+            return
     retry_empty = False
     recovery_note = _EMPTY_COMPLETION_RECOVERY_NOTE
     log_msg = "empty model completion; retrying %s"
@@ -2939,9 +3068,15 @@ async def _run_inner_core(
 
             _note_mcp_idle_turn(state, tool_executor)
 
+            if not state.stream_truncated and (
+                state.pending or (state.assistant_text or "").strip()
+            ):
+                _refill_empty_budgets(state)
+
             if not state.pending:
                 async for evt in _handle_empty_or_final_text(
                     state,
+                    provider=provider,
                     history=history,
                     last_assistant=last_assistant,
                     tool_executor=tool_executor,

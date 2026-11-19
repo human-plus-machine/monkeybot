@@ -10,6 +10,7 @@ from pathlib import Path
 
 import httpx
 
+from monkeybot_cli.process_tree import popen_kwargs_for_platform, stop_process_group_async
 from monkeybot_cli.runtime_python import (
     COMBINED_GATEWAY_MODULE,
     gateway_argv,
@@ -118,15 +119,11 @@ async def start_gateway_if_needed(
         env=env,
         stdout=None,
         stderr=None,
+        **popen_kwargs_for_platform(),
     )
 
     if not await _wait_for_gateway(url):
-        proc.terminate()
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
+        await stop_process_group_async(proc)
         raise RuntimeError(f"Gateway failed to become reachable at {url}")
 
     logger.info("Gateway ready at %s", url)
@@ -134,12 +131,12 @@ async def start_gateway_if_needed(
 
 
 async def stop_gateway(proc: asyncio.subprocess.Process | None) -> None:
-    """Terminate a gateway subprocess started by :func:`start_gateway_if_needed`."""
-    if proc is None or proc.returncode is not None:
+    """Terminate a gateway subprocess started by :func:`start_gateway_if_needed`.
+
+    The leader's exit is not enough: a shim can die on SIGTERM while a
+    grandchild is still listening. ``stop_process_group_async`` signals the
+    group and escalates if anything remains.
+    """
+    if proc is None:
         return
-    proc.terminate()
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=5.0)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+    await stop_process_group_async(proc)

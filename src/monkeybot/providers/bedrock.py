@@ -172,6 +172,11 @@ class BedrockProvider:
         messages = trim_message_media_for_byte_budget(
             messages, tools, provider=self.name, known_bytes=size
         )
+        output_tokens = (
+            hints.max_tokens
+            if hints is not None and hints.max_tokens is not None
+            else self._max_tokens
+        )
         if not uses_anthropic_bedrock(model):
             if self._reasoning_effort and model not in _CONVERSE_EFFORT_WARNED:
                 _CONVERSE_EFFORT_WARNED.add(model)
@@ -192,7 +197,7 @@ class BedrockProvider:
                 model=model,
                 messages=messages,
                 tools=tools,
-                max_tokens=self._max_tokens,
+                max_tokens=output_tokens,
                 temperature=self._temperature,
                 cache_retention=retention,
             )
@@ -230,7 +235,7 @@ class BedrockProvider:
             "system": system_param,
             "messages": converted_messages,
             "tools": tools_param,
-            "max_tokens": self._max_tokens,
+            "max_tokens": output_tokens,
             **anthropic_sampling_kwargs(
                 model=model,
                 temperature=self._temperature,

@@ -159,6 +159,7 @@ _REQUEST_KEYS = frozenset(
         "no_vertex_google_search",
         "thinking_budget",
         "model",
+        "max_tokens",
     }
 )
 _FRAME_ID_SKIP = frozenset({"ActiveRequests", "ping"})
@@ -174,6 +175,7 @@ class ProviderRequest:
     vertex_google_search: bool = False
     thinking_budget: int | None = None
     model: str = ""
+    max_tokens: int | None = None
 
 
 @dataclass
@@ -1140,6 +1142,14 @@ def _match_provider_request(
             failures.append(
                 f"{label}: thinking_budget {request.thinking_budget} != {expected_budget}"
             )
+    if "max_tokens" in matcher:
+        expected_cap = matcher["max_tokens"]
+        if expected_cap is not None and (
+            isinstance(expected_cap, bool) or not isinstance(expected_cap, int)
+        ):
+            failures.append(f"{label}: max_tokens must be an integer or null")
+        elif request.max_tokens != expected_cap:
+            failures.append(f"{label}: max_tokens {request.max_tokens} != {expected_cap}")
     return failures
 
 

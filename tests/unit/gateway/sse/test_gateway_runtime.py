@@ -695,7 +695,7 @@ async def test_memory_hook_reload_does_not_take_verifier_path(
         assert live_ledger is not None and live_judge is not None
         diff = ConfigDiff(
             noop=False,
-            changed_env_keys=frozenset({"MONKEYBOT_MEMORY_HOOK_ENABLED"}),
+            changed_env_keys=frozenset({"memory.enabled"}),
             changed_content=frozenset(),
             tiers=frozenset({ConfigTier.REBUILD}),
         )

@@ -1,0 +1,32 @@
+id: regression/t2/loop/scenarios/loop/truncated_thinking_no_escalation
+case: T2-LOOP-57
+description: >
+  A provider that cannot raise the output cap treats a thinking cutoff as an
+  empty completion, and every request keeps the configured cap.
+mode: scripted
+driver: loop
+messages:
+- think then answer
+script:
+- - type: thinking
+    text: still reasoning
+  - type: done
+    truncated: true
+- - type: text
+    text: visible answer
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  provider_request:
+  - n: 1
+    max_tokens: null
+  - n: 2
+    max_tokens: null
+  interventions:
+  - intervention: empty_completion
+    detail: retry
+  response_contains: visible answer
+  events_absent:
+  - Error

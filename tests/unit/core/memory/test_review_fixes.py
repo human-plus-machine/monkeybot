@@ -351,19 +351,16 @@ def test_cloud_memory_uri_is_rejected() -> None:
         palace_path_from_uri("gs://bucket/prefix")
 
 
-def test_memory_enabled_switch_honors_yaml_and_env(
+def test_memory_enabled_switch_reads_yaml_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("MONKEYBOT_MEMORY_HOOK_ENABLED", raising=False)
+    monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "1")
     cfg = tmp_path / "monkeybot.yaml"
     cfg.write_text("memory:\n  enabled: false\n", encoding="utf-8")
     assert memory_enabled_from_config(str(cfg)) is False
-    monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "1")
-    assert memory_enabled_from_config(str(cfg)) is True
     monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "0")
     cfg.write_text("memory:\n  enabled: true\n", encoding="utf-8")
-    assert memory_enabled_from_config(str(cfg)) is False
-    monkeypatch.delenv("MONKEYBOT_MEMORY_HOOK_ENABLED", raising=False)
+    assert memory_enabled_from_config(str(cfg)) is True
     cfg.write_text("memory_hook:\n  enabled: false\n", encoding="utf-8")
     assert memory_enabled_from_config(str(cfg)) is False
     cfg.write_text("memory:\n  enabled: true\nmemory_hook:\n  enabled: false\n", encoding="utf-8")

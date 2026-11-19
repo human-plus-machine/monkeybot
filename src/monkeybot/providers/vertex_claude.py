@@ -150,7 +150,11 @@ class VertexClaudeProvider:
             "system": system_param,
             "messages": cast(Any, converted_messages),
             "tools": tools_param,
-            "max_tokens": self._max_tokens,
+            "max_tokens": (
+                hints.max_tokens
+                if hints is not None and hints.max_tokens is not None
+                else self._max_tokens
+            ),
             **anthropic_sampling_kwargs(
                 model=model,
                 temperature=self._temperature,

@@ -165,6 +165,34 @@ def test_event_fields_descends_into_usage_totals() -> None:
     )
 
 
+def test_provider_request_max_tokens() -> None:
+    run = RunView(
+        provider_requests=[
+            ProviderRequest(max_tokens=None),
+            ProviderRequest(max_tokens=16384),
+        ]
+    )
+    _ok(
+        {
+            "provider_request": [
+                {"n": 1, "max_tokens": None},
+                {"n": 2, "max_tokens": 16384},
+            ]
+        },
+        run,
+    )
+    _bad(
+        {"provider_request": [{"n": 2, "max_tokens": 8192}]},
+        run,
+        "max_tokens",
+    )
+    _bad(
+        {"provider_request": [{"n": 1, "max_tokens": "16384"}]},
+        run,
+        "max_tokens",
+    )
+
+
 def test_provider_request_thinking_budget() -> None:
     run = RunView(
         provider_requests=[

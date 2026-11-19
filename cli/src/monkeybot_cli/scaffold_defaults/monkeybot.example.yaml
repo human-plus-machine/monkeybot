@@ -137,7 +137,6 @@ gateway:
 
 memory:
   # Capture, wake-up, and `mempalace search` teaching. Set false to turn memory off.
-  # Env override: MONKEYBOT_MEMORY_HOOK_ENABLED=0
   enabled: true
   backend: chroma
   embedding_model: minilm

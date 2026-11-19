@@ -1,0 +1,38 @@
+id: regression/t2/loop/scenarios/loop/truncated_thinking_escalates
+case: T2-LOOP-53
+description: >
+  Thinking that hits the output limit is retried with a doubled cap and a
+  cutoff note, not the empty-completion note.
+mode: scripted
+driver: loop
+config:
+  scripted_provider: bedrock
+  model:
+    name: us.zai.glm-5.3
+    max_tokens: 8192
+messages:
+- think then answer
+script:
+- - type: thinking
+    text: still reasoning
+  - type: done
+    truncated: true
+- - type: text
+    text: visible answer
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 2
+  provider_request:
+  - n: 1
+    max_tokens: null
+  - n: 2
+    max_tokens: 16384
+    messages_contain: Output limit reached while reasoning
+  interventions:
+  - intervention: truncated_thinking
+    detail: escalate
+  response_contains: visible answer
+  events_absent:
+  - Error

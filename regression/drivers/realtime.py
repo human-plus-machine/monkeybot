@@ -58,7 +58,6 @@ _ISOLATION: dict[str, str] = {
     "ATTACHMENTS_ENABLED": "false",
     "MONKEYBOT_SCHEDULER_ENABLED": "false",
     "MONKEYBOT_COMPUTER_TOOLS": "false",
-    "MONKEYBOT_MEMORY_HOOK_ENABLED": "false",
     "WEB_SEARCH_BACKEND": "none",
     "SANDBOX_ENABLED": "false",
     "MONKEYBOT_WORKER_POOL": "false",

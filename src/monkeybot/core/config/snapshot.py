@@ -39,6 +39,7 @@ from monkeybot.core.config.runtime_env import (
     ENV_FIELD_PATHS,
     ENV_MAP,
     ENV_TIERS,
+    MEMORY_ENABLED_DIFF_KEY,
     SUBAGENTS_DIFF_KEY,
     VERIFIER_DIFF_KEY,
     YAML_ONLY_ENV_KEYS,
@@ -48,6 +49,7 @@ from monkeybot.core.config.runtime_env import (
     _merge_with_includes,
     _resolve_config_path,
     check_yaml_only_model_env,
+    warn_ignored_memory_hook_env,
     warn_retired_sections,
     warn_retired_tools_keys,
 )
@@ -612,6 +614,7 @@ def build_runtime_config(
     warn_retired_tools_keys(merged)
     warn_retired_sections(merged)
     check_yaml_only_model_env(merged)
+    warn_ignored_memory_hook_env()
     anchor = agent_root or resolve_agent_root(config_path=source_path)
     env_values = _effective_env(_flatten_config(merged), pinned, anchor)
     content = _content_digests(env_values, anchor)
@@ -629,7 +632,10 @@ def build_runtime_config(
         paths=_paths_from_env(env_values, content),
         gateway=_gateway_from_env(env_values),
         tools=_tools_from_env(env_values),
-        memory=_memory_from_env(env_values),
+        memory=_memory_from_env(
+            env_values,
+            enabled="true" if _memory_enabled(merged) else "false",
+        ),
         realtime=realtime_config_from_doc(merged, env_values),
         subagents=subagents,
         subagent_settings=subagent_settings,
@@ -696,12 +702,17 @@ def diff_runtime_configs(old: RuntimeConfig, new: RuntimeConfig) -> ConfigDiff:
     if old.coding != new.coding:
         changed_content.add("coding")
         changed_env.add(CODING_DIFF_KEY)
+    if old.memory.enabled != new.memory.enabled:
+        changed_content.add("memory")
+        changed_env.add(MEMORY_ENABLED_DIFF_KEY)
     tiers = {ENV_TIERS[k] for k in changed_env if k in ENV_TIERS}
     if SUBAGENTS_DIFF_KEY in changed_env:
         tiers.add(ConfigTier.REBUILD)
     if VERIFIER_DIFF_KEY in changed_env:
         tiers.add(ConfigTier.REBUILD)
     if CODING_DIFF_KEY in changed_env:
+        tiers.add(ConfigTier.REBUILD)
+    if MEMORY_ENABLED_DIFF_KEY in changed_env:
         tiers.add(ConfigTier.REBUILD)
     return ConfigDiff(
         noop=False,
@@ -902,7 +913,7 @@ def _snapshot_with_env(
         paths=_paths_from_env(merged, _paths_content(cfg.paths)),
         gateway=_gateway_from_env(merged),
         tools=_tools_from_env(merged),
-        memory=_memory_from_env(merged),
+        memory=_memory_from_env(merged, enabled=cfg.memory.enabled),
     )
 
 
@@ -1005,9 +1016,15 @@ def _tools_from_env(env: Mapping[str, str]) -> ToolsConfig:
     )
 
 
-def _memory_from_env(env: Mapping[str, str]) -> MemoryConfig:
+def _memory_enabled(doc: Mapping[str, Any]) -> bool:
+    from monkeybot.core.memory.config import resolve_memory_enabled
+
+    return resolve_memory_enabled(doc)
+
+
+def _memory_from_env(env: Mapping[str, str], *, enabled: str | None) -> MemoryConfig:
     return MemoryConfig(
-        enabled=env.get("MONKEYBOT_MEMORY_HOOK_ENABLED"),
+        enabled=enabled,
         backend=env.get("MEMPALACE_BACKEND"),
         embedding_model=env.get("MEMPALACE_EMBEDDING_MODEL"),
     )

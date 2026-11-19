@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from monkeybot.providers.model_capabilities import supports_param
+from types import SimpleNamespace
+
+from monkeybot.core.llm.provider import supports_output_cap_override
+from monkeybot.providers.model_capabilities import max_output_tokens, supports_param
 
 
 def test_unknown_model_supports_everything() -> None:
@@ -39,6 +42,22 @@ def test_bedrock_namespaced_ids_match() -> None:
 
 def test_vertex_suffixed_ids_match() -> None:
     assert supports_param("claude-sonnet-5@20260101", "temperature") is False
+
+
+def test_max_output_tokens_known_prefixes() -> None:
+    assert max_output_tokens("us.zai.glm-5.3") == 128_000
+    assert max_output_tokens("global.anthropic.claude-opus-5-5") == 128_000
+    assert max_output_tokens("claude-haiku-4-5@20251001") == 64_000
+    assert max_output_tokens("us.meta.llama4-maverick") is None
+
+
+def test_output_cap_override_is_limited_to_three_providers() -> None:
+    assert supports_output_cap_override(SimpleNamespace(name="bedrock")) is True
+    assert supports_output_cap_override(SimpleNamespace(name="claude")) is True
+    assert supports_output_cap_override(SimpleNamespace(name="vertex-claude")) is True
+    assert supports_output_cap_override(SimpleNamespace(name="fake")) is False
+    assert supports_output_cap_override(SimpleNamespace(name="gemini")) is False
+    assert supports_output_cap_override(SimpleNamespace(name="openai")) is False
 
 
 def test_xai_grok_rejects_temperature() -> None:

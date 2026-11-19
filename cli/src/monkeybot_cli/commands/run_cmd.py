@@ -24,11 +24,16 @@ from monkeybot_cli.opensandbox_lifecycle import (
     is_sandbox_enabled,
     server_url_from_config,
 )
-from monkeybot_cli.process_tree import IS_WINDOWS, kill_process_tree, popen_kwargs_for_platform
+from monkeybot_cli.process_tree import (
+    IS_WINDOWS,
+    KILL_TIMEOUT_SECS,
+    SHUTDOWN_TIMEOUT_SECS,
+    kill_process_tree,
+    popen_kwargs_for_platform,
+    signal_process_group,
+)
 from monkeybot_cli.runtime_python import gateway_argv, prepare_runtime_python
 
-_SHUTDOWN_TIMEOUT_SECS = 5.0
-_KILL_TIMEOUT_SECS = 1.0
 _Handler = Callable[[int, FrameType | None], Any] | int | None
 
 
@@ -54,22 +59,7 @@ def _cli_exit_status(rc: int | None, received: int | None) -> int:
 def _signal_process_group(proc: subprocess.Popen[bytes], signum: int) -> None:
     if proc.poll() is not None:
         return
-    if IS_WINDOWS:
-        try:
-            proc.send_signal(signum)
-        except OSError as exc:
-            print(f"failed to signal gateway: {exc}", file=sys.stderr)
-        return
-    try:
-        os.killpg(proc.pid, signum)
-        return
-    except ProcessLookupError:
-        return
-    except OSError as exc:
-        try:
-            proc.send_signal(signum)
-        except OSError:
-            print(f"failed to signal gateway: {exc}", file=sys.stderr)
+    signal_process_group(proc, signum)
 
 
 def run_gateway_process(
@@ -77,8 +67,8 @@ def run_gateway_process(
     *,
     env: dict[str, str],
     cwd: Path,
-    shutdown_timeout: float = _SHUTDOWN_TIMEOUT_SECS,
-    kill_timeout: float = _KILL_TIMEOUT_SECS,
+    shutdown_timeout: float = SHUTDOWN_TIMEOUT_SECS,
+    kill_timeout: float = KILL_TIMEOUT_SECS,
 ) -> int:
     """Start the gateway and forward stop signals to its process group.
 
