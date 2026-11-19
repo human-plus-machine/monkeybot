@@ -42,6 +42,8 @@ from monkeybot_cli.config_resolve import (
 )
 from monkeybot_cli.gateway_health import (
     occupied_gateway_message as _occupied_gateway_message,
+)
+from monkeybot_cli.gateway_health import (
     wait_for_health as _wait_for_health,
 )
 from monkeybot_cli.opensandbox_lifecycle import (
@@ -49,6 +51,7 @@ from monkeybot_cli.opensandbox_lifecycle import (
     is_sandbox_enabled,
     server_url_from_config,
 )
+from monkeybot_cli.process_tree import popen_kwargs_for_platform, stop_process_group
 from monkeybot_cli.runtime_python import DEFAULT_PORT, gateway_argv, prepare_runtime_python
 from monkeybot_cli.terminal_markdown import MarkdownPlainStream
 
@@ -691,6 +694,7 @@ def _spawn_gateway(config_path: Path | None, agent_root: Path, port: int) -> _Sp
         cwd=agent_root,
         stdout=subprocess.DEVNULL,
         stderr=log_file,
+        **popen_kwargs_for_platform(),
     )
     return _SpawnedGateway(proc=proc, log_path=Path(log_file.name), log_file=log_file)
 
@@ -768,10 +772,7 @@ def run_chat(args: argparse.Namespace) -> int:
                 print(f"{_DIM}--- end log ---{_RESET}", file=sys.stderr)
             else:
                 print("Run `monkeybot run` to see logs.", file=sys.stderr)
-            if proc.poll() is None:
-                proc.terminate()
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    proc.wait(timeout=5)
+            stop_process_group(proc)
             _cleanup_gateway_log(spawned)
             return 1
 
@@ -819,17 +820,10 @@ def run_chat(args: argparse.Namespace) -> int:
             print(f"{_DIM}Shutting down gateway…{_RESET}", file=sys.stderr)
         return 130
     finally:
-        if proc and proc.poll() is None:
-            # Prefer graceful shutdown so gateway lifespan can analyze open sessions.
-            with contextlib.suppress(ProcessLookupError):
-                proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-                with contextlib.suppress(subprocess.TimeoutExpired):
-                    proc.wait(timeout=1)
+        if proc is not None:
+            # Graceful group signal so the gateway can finish open sessions,
+            # then SIGKILL the tree if a shim exited and left the port held.
+            stop_process_group(proc)
         if spawned is not None:
             _cleanup_gateway_log(spawned)
 

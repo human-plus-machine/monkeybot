@@ -6,6 +6,12 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### CLI
+
+### Fixed
+
+- `monkeybot chat` and `monkeybot talk` release the gateway port on /bye, Ctrl-C, and a failed start. A shim such as `uv run` no longer leaves a child listening.
+
 ## [core v3.15.2] - 2026-11-18
 
 ### Fixed

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -256,14 +257,20 @@ def test_killed_writer_is_marked_incomplete(tmp_path: Path) -> None:
     assert '"kind": "failure"' in marked
 
 
+def _ledger_stamp(age: timedelta) -> str:
+    """UTC run stamp ``age`` before now. The format sorts oldest first."""
+    return (datetime.now(UTC) - age).strftime("%Y%m%dT%H%M%SZ")
+
+
 def test_prune_keeps_recent_runs_and_ignores_subfolders(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("MONKEYBOT_TEST_LEDGER_KEEP", "1")
     monkeypatch.setenv("MONKEYBOT_TEST_LEDGER_DAYS", "30")
     old = tmp_path / "20200101T000000Z-abcdef0-1.jsonl"
-    recent = tmp_path / "20261020T000000Z-abcdef0-2.jsonl"
-    newest = tmp_path / "20261025T000000Z-abcdef0-3.jsonl"
+    # Inside the 30-day window, but not the newest file, so keep=1 does not protect it.
+    recent = tmp_path / f"{_ledger_stamp(timedelta(days=10))}-abcdef0-2.jsonl"
+    newest = tmp_path / f"{_ledger_stamp(timedelta(days=1))}-abcdef0-3.jsonl"
     for path in (old, recent, newest):
         path.write_text("{}\n", encoding="utf-8")
         path.with_name(path.name.replace(".jsonl", ".outcomes.tsv.gz")).write_bytes(b"")
@@ -295,9 +302,10 @@ def test_prune_removes_an_empty_timestamp_folder(
     old = old_dir / "20200101T000000Z-abcdef0-1.jsonl"
     old.write_text("{}\n", encoding="utf-8")
     old.with_name(old.name.replace(".jsonl", ".outcomes.tsv.gz")).write_bytes(b"")
-    kept_dir = tmp_path / "20261025T000000Z"
+    kept_stamp = _ledger_stamp(timedelta(days=1))
+    kept_dir = tmp_path / kept_stamp
     kept_dir.mkdir()
-    kept = kept_dir / "20261025T000000Z-abcdef0-2.jsonl"
+    kept = kept_dir / f"{kept_stamp}-abcdef0-2.jsonl"
     kept.write_text("{}\n", encoding="utf-8")
     kept.with_name(kept.name.replace(".jsonl", ".outcomes.tsv.gz")).write_bytes(b"")
 
