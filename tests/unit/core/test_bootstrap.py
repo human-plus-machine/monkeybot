@@ -78,7 +78,10 @@ async def test_create_harness_deps_memory_set_when_uri_given(tmp_path: Path) -> 
 async def test_create_harness_deps_skips_memory_when_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "0")
+    cfg = tmp_path / "monkeybot.yaml"
+    cfg.write_text("memory:\n  enabled: false\n", encoding="utf-8")
+    monkeypatch.setenv("MONKEYBOT_CONFIG", str(cfg))
+    monkeypatch.setenv("MONKEYBOT_MEMORY_HOOK_ENABLED", "1")
     mem_root = tmp_path / "mem"
     mem_root.mkdir()
     uri = "local://" + str(mem_root.resolve())

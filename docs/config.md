@@ -22,7 +22,7 @@ Reload tier is what a running gateway does when that key changes on disk:
 | reconnect_mcp | MCP clients reconnect. |
 | restart | Not applied in process. Restart the gateway. |
 
-YAML-only sections that are not in `ENV_MAP` (`subagents`, `verifier`, `coding`) are rebuild. `goals`, `pricing`, `includes`, and the direct-read keys (`runtime.transcript_enabled`, `paths.auto_schema`, `model.keep_alive`, `model.num_ctx`, `tools.read_max_lines`, `web_search.vertex_google_search`) have no tier: they are read from the file when the snapshot or that feature loads.
+YAML-only sections that are not in `ENV_MAP` (`subagents`, `verifier`, `coding`, and `memory.enabled`) are rebuild. `goals`, `pricing`, `includes`, and the direct-read keys (`runtime.transcript_enabled`, `paths.auto_schema`, `model.keep_alive`, `model.num_ctx`, `tools.read_max_lines`, `web_search.vertex_google_search`) have no tier: they are read from the file when the snapshot or that feature loads.
 
 A YAML boolean is stored as the string `true` or `false` when it is copied to an environment variable. Readers that want a specific token are called out below.
 
@@ -158,7 +158,7 @@ MemPalace capture, wake-up, and search teaching. The vector stack is the `monkey
 
 | Key | Type / choices | Default | Env | Tier | Purpose |
 |---|---|---|---|---|---|
-| `memory.enabled` | bool, or `1`/`true`/`yes`/`on`/`0`/`false`/`no`/`off` | `true` | `MONKEYBOT_MEMORY_HOOK_ENABLED` (wins over YAML) | rebuild | Turn capture, wake-up, and prompt teaching off. Allowlisted shell commands can still read a palace on disk. |
+| `memory.enabled` | bool, or `1`/`true`/`yes`/`on`/`0`/`false`/`no`/`off` | `true` | YAML only. `MONKEYBOT_MEMORY_HOOK_ENABLED` is ignored | rebuild | Turn capture, wake-up, and prompt teaching off. Allowlisted shell commands can still read a palace on disk. |
 | `memory.backend` | `chroma` only | `chroma` | `MEMPALACE_BACKEND` | restart | Local vector engine. Any other value fails validation. This is not the storage URI. |
 | `memory.embedding_model` | string | `minilm` | `MEMPALACE_EMBEDDING_MODEL` | restart | Embedder. `embeddinggemma-300m` and `embeddinggemma_300m` are rewritten to `minilm` at startup. `embeddinggemma`, `embeddinggemma2`, and `openai-compat` are left as written. |
 

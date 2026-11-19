@@ -30,6 +30,7 @@ from monkeybot.core.coding.read_ledger_hook import ReadLedgerCompactionHook
 from monkeybot.core.coding.verification_gate import VerificationGate
 from monkeybot.core.config.runtime_env import (
     CODING_DIFF_KEY,
+    MEMORY_ENABLED_DIFF_KEY,
     SUBAGENTS_DIFF_KEY,
     VERIFIER_DIFF_KEY,
     ConfigTier,
@@ -74,7 +75,7 @@ from monkeybot.core.llm.usage import UsageGranularity
 from monkeybot.core.logging_utils import kv
 from monkeybot.core.mcp.mcp_client import MCPClient, mcp_file_env_refs, run_cleanup
 from monkeybot.core.mcp.ports_mcp import MCPCatalogApplyResult
-from monkeybot.core.memory.config import memory_enabled_from_config
+from monkeybot.core.memory.config import memory_enabled_flag, memory_enabled_from_config
 from monkeybot.core.memory.ingest import persist_message
 from monkeybot.core.memory.subsystem import MemoryConfigurationError, MemorySubsystem
 from monkeybot.core.persistence.backends import (
@@ -504,7 +505,7 @@ class GatewayRuntime:
 
     def rebuild_hooks(self, cfg: RuntimeConfig | None, fastapi_app: FastAPI | None) -> None:
         """Re-bind memory, evidence, and verifier hooks without reopening storage."""
-        enabled = env_flag(cfg, "MONKEYBOT_MEMORY_HOOK_ENABLED", default=True)
+        enabled = memory_enabled_flag(None if cfg is None else cfg.memory.enabled)
         mgr = HookManager()
         if enabled and self.memory is not None:
             self.memory.register_hooks(mgr)
@@ -607,9 +608,9 @@ class GatewayRuntime:
                     kv(revision=cfg.revision, error=error),
                 )
                 return applied, error
-        if "MONKEYBOT_MEMORY_HOOK_ENABLED" in diff.changed_env_keys:
+        if MEMORY_ENABLED_DIFF_KEY in diff.changed_env_keys:
             self.rebuild_hooks(cfg, fastapi_app)
-            applied.append("MONKEYBOT_MEMORY_HOOK_ENABLED")
+            applied.append(MEMORY_ENABLED_DIFF_KEY)
             logger.info(
                 "config slice rebuilt %s",
                 kv(slice="memory_hooks", revision=cfg.revision),

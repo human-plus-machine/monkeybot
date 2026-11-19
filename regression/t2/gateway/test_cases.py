@@ -1319,11 +1319,11 @@ async def test_ordinary_memory_setup_failure_leaves_gateway_ready() -> None:
     descriptor, palace_file = tempfile.mkstemp(prefix="mb-palace-file-")
     os.close(descriptor)
     try:
-        env = {
-            "MONKEYBOT_MEMORY_HOOK_ENABLED": "true",
-            "MEMORY_STORAGE_URI": palace_file,
-        }
-        async with open_gateway(script=_HELLO, env=env) as gateway:
+        async with open_gateway(
+            script=_HELLO,
+            config={"memory": {"enabled": True}},
+            env={"MEMORY_STORAGE_URI": palace_file},
+        ) as gateway:
             health = await gateway.client.get("/health")
             assert health.status_code == 200
             body = health.json()
@@ -1342,7 +1342,6 @@ async def test_memory_configuration_error_aborts_startup() -> None:
         async with open_gateway(
             script=_HELLO,
             config={"paths": {"auto_schema": False}, "memory": {"enabled": True}},
-            env={"MONKEYBOT_MEMORY_HOOK_ENABLED": "true"},
         ):
             raise AssertionError("gateway started after a memory configuration error")
     except AssertionError:

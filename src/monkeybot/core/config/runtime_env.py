@@ -64,7 +64,7 @@ ENV_MAP: dict[tuple[str, str], str] = {
     ("gateway", "sse_nested_replay_max"): "SSE_NESTED_REPLAY_MAX",
     ("gateway", "graceful_shutdown_timeout_sec"): "GRACEFUL_SHUTDOWN_TIMEOUT_SEC",
     ("gateway", "cors_allow_origins"): "MONKEYBOT_CORS_ALLOW_ORIGINS",
-    ("memory", "enabled"): "MONKEYBOT_MEMORY_HOOK_ENABLED",
+    # memory.enabled is YAML-only (see MEMORY_ENABLED_DIFF_KEY). No env override.
     ("memory", "backend"): "MEMPALACE_BACKEND",
     ("memory", "embedding_model"): "MEMPALACE_EMBEDDING_MODEL",
     ("tools", "denied_patterns"): "MONKEYBOT_TOOL_DENIED_PATTERNS",
@@ -119,6 +119,7 @@ YAML_ONLY_ENV_KEYS: frozenset[str] = frozenset(
     env for (section, _), env in ENV_MAP.items() if section == "model"
 )
 _yaml_only_model_env_warned = False
+_memory_hook_env_warned = False
 _retired_sections_warned: set[str] = set()
 
 # Backward-compatible alias for internal/tests.
@@ -162,7 +163,6 @@ ENV_SPEC: dict[str, tuple[ConfigTier, str]] = {
     "PERMISSION_CONFIG": (ConfigTier.REBUILD, "paths.permission_config"),
     "WEB_SEARCH_BACKEND": (ConfigTier.REBUILD, "tools.web_search_backend"),
     "WEB_SEARCH_MAX_RESULTS": (ConfigTier.REBUILD, "tools.web_search_max_results"),
-    "MONKEYBOT_MEMORY_HOOK_ENABLED": (ConfigTier.REBUILD, "memory.enabled"),
     "VERTEX_AI_PROJECT_ID": (ConfigTier.REBUILD, "model.vertex_project_id"),
     "VERTEX_AI_LOCATION": (ConfigTier.REBUILD, "model.vertex_location"),
     "ANTHROPIC_VERTEX_PROJECT_ID": (ConfigTier.REBUILD, "model.anthropic_vertex_project_id"),
@@ -254,6 +254,8 @@ SUBAGENTS_DIFF_KEY = "subagents.*"
 VERIFIER_DIFF_KEY = "verifier.*"
 # Synthetic diff key for ``coding:`` (not in ENV_MAP). Always REBUILD.
 CODING_DIFF_KEY = "coding.*"
+# Synthetic diff key for YAML ``memory.enabled`` (not in ENV_MAP). Always REBUILD.
+MEMORY_ENABLED_DIFF_KEY = "memory.enabled"
 
 # YAML keys that used to map to env but are retired. Still accepted in the file
 # (no unknown-key rejection), but warn so configs are not silently ignored.
@@ -365,13 +367,29 @@ def check_yaml_only_model_env(merged: Mapping[str, Any] | None = None) -> list[s
     return found
 
 
+def warn_ignored_memory_hook_env() -> None:
+    """Warn once when a leftover memory-hook env var is set.
+
+    ``memory.enabled`` is YAML-only. The old ``MONKEYBOT_MEMORY_HOOK_ENABLED``
+    override is not read.
+    """
+    global _memory_hook_env_warned
+    if _memory_hook_env_warned or "MONKEYBOT_MEMORY_HOOK_ENABLED" not in os.environ:
+        return
+    _memory_hook_env_warned = True
+    logger.warning(
+        "MONKEYBOT_MEMORY_HOOK_ENABLED is ignored — set memory.enabled in monkeybot.yaml"
+    )
+
+
 def reset_runtime_env_state_for_tests() -> None:
     """Clear the process ConfigStore and pin capture (tests only)."""
-    global _yaml_only_model_env_warned
+    global _yaml_only_model_env_warned, _memory_hook_env_warned
     from monkeybot.core.config.settings import reset_transcript_enabled_cache_for_tests
     from monkeybot.core.config.snapshot import reset_snapshot_state_for_tests
 
     _yaml_only_model_env_warned = False
+    _memory_hook_env_warned = False
     _retired_sections_warned.clear()
     reset_snapshot_state_for_tests()
     reset_transcript_enabled_cache_for_tests()

@@ -1,20 +1,22 @@
 """Memory capture/recall kill switch.
 
-Precedence (first match wins):
+Read from YAML only (first match wins):
 
-1. ``MONKEYBOT_MEMORY_HOOK_ENABLED`` in the process environment
-2. YAML ``memory.enabled``
-3. YAML ``memory_hook.enabled`` (legacy alias)
-4. Default ``true``
+1. ``memory.enabled``
+2. ``memory_hook.enabled`` (legacy alias, only when ``memory.enabled`` is absent)
+3. Default ``true``
 
-This switch disables capture, wake-up injection, and prompt teaching. It is
-not a sandbox: allowlisted shell commands can still reach a palace on disk.
+``MONKEYBOT_MEMORY_HOOK_ENABLED`` is ignored. This switch disables capture,
+wake-up, and prompt teaching. It is not a sandbox: allowlisted shell commands
+can still reach a palace on disk.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
+
 from monkeybot.core.config.settings import ConfigError
-from monkeybot.core.config.snapshot import current_env_or_none
 from monkeybot.core.config.yaml_loader import load_monkeybot_yaml_dict
 
 _FALSE = frozenset({"0", "false", "no", "off"})
@@ -33,18 +35,25 @@ def _parse_bool(raw: object, *, field: str) -> bool:
     raise ConfigError(f"{field} must be true or false, got {raw!r}")
 
 
-def memory_enabled_from_config(config_path: str | None = None) -> bool:
-    """Whether MemPalace capture, recall, and search teaching are enabled."""
-    env = (current_env_or_none("MONKEYBOT_MEMORY_HOOK_ENABLED") or "").strip().lower()
-    if env in _FALSE:
-        return False
-    if env in _TRUE:
-        return True
-    _, doc = load_monkeybot_yaml_dict(config_path)
-    memory = doc.get("memory") if isinstance(doc, dict) else None
+def resolve_memory_enabled(doc: Mapping[str, Any] | None) -> bool:
+    """Effective capture switch from a merged YAML document."""
+    memory = doc.get("memory") if isinstance(doc, Mapping) else None
     if isinstance(memory, dict) and "enabled" in memory:
         return _parse_bool(memory.get("enabled"), field="memory.enabled")
-    hook = doc.get("memory_hook") if isinstance(doc, dict) else None
+    hook = doc.get("memory_hook") if isinstance(doc, Mapping) else None
     if isinstance(hook, dict) and "enabled" in hook:
         return _parse_bool(hook.get("enabled"), field="memory_hook.enabled")
     return True
+
+
+def memory_enabled_flag(raw: str | None) -> bool:
+    """Parse a snapshot ``memory.enabled`` token. Missing means on."""
+    if raw is None:
+        return True
+    return _parse_bool(raw, field="memory.enabled")
+
+
+def memory_enabled_from_config(config_path: str | None = None) -> bool:
+    """Whether MemPalace capture, recall, and search teaching are enabled."""
+    _, doc = load_monkeybot_yaml_dict(config_path)
+    return resolve_memory_enabled(doc)
