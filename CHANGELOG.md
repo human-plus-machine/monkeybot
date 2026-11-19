@@ -14,6 +14,9 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A silent reply after the model has already made progress is retried again. The empty-completion budget refills when a response has text or tool calls, and consecutive silent replies stay capped.
+- A reply that hits the output limit while still thinking is retried with a doubled output cap, up to the model's limit, instead of the same request. After three raises the turn ends with its own error. Providers that cannot take a per-call cap, and models with no published limit, keep the empty-completion retry.
+
 - `monkeybot chat` and `monkeybot talk` release the gateway port on /bye, Ctrl-C, and a failed start. A shim such as `uv run` no longer leaves a child listening.
 
 ## [core v3.15.2] - 2026-11-18

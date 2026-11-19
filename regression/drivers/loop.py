@@ -609,15 +609,22 @@ def _provider_requests(provider: ScriptedProvider) -> list[ProviderRequest]:
         if isinstance(recorded_search, list) and len(recorded_search) == count
         else [False] * count
     )
+    recorded_hints = getattr(provider, "stream_hints", None)
+    hints = (
+        recorded_hints
+        if isinstance(recorded_hints, list) and len(recorded_hints) == count
+        else [None] * count
+    )
     pairs = zip(
         provider.stream_messages,
         provider.stream_tools,
         budgets,
         models,
         searches,
+        hints,
         strict=True,
     )
-    for messages, tools, budget, model, search in pairs:
+    for messages, tools, budget, model, search, hint in pairs:
         system: list[str] = []
         body: list[str] = []
         for message in messages:
@@ -634,6 +641,7 @@ def _provider_requests(provider: ScriptedProvider) -> list[ProviderRequest]:
                 thinking_budget=budget if isinstance(budget, int) else None,
                 model=model if isinstance(model, str) else "",
                 vertex_google_search=bool(search),
+                max_tokens=getattr(hint, "max_tokens", None),
             )
         )
     return requests

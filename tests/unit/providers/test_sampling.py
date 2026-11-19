@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from monkeybot.core.config.settings import get_provider_config
-from monkeybot.core.llm.provider import Message
+from monkeybot.core.llm.provider import Message, ProviderCallHints
 from monkeybot.providers._openai_compat import drop_rejected_sampling
 from monkeybot.providers.bedrock import BedrockProvider
 from monkeybot.providers.claude import ClaudeProvider
@@ -192,6 +192,122 @@ async def test_bedrock_stream_passes_sampling_to_api() -> None:
     kwargs = client.messages.stream.call_args.kwargs
     assert kwargs["temperature"] == 0.2
     assert kwargs["max_tokens"] == 8192
+
+
+def _anthropic_events() -> list[SimpleNamespace]:
+    return [
+        SimpleNamespace(
+            type="message_start",
+            message=SimpleNamespace(usage=SimpleNamespace(input_tokens=1)),
+        ),
+        SimpleNamespace(type="message_delta", usage=SimpleNamespace(output_tokens=1)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_bedrock_claude_honors_hints_max_tokens() -> None:
+    provider = BedrockProvider(temperature=0.2, max_tokens=8192, aws_region="us-east-1")
+    client = make_anthropic_stream_mock(_anthropic_events())
+    provider._client = lambda: client  # type: ignore[method-assign]
+
+    async for _ in provider.stream(
+        [Message.text("user", "hi")],
+        [],
+        model="claude-3-5-sonnet-20241022",
+        hints=ProviderCallHints(max_tokens=16_384),
+    ):
+        pass
+
+    assert client.messages.stream.call_args.kwargs["max_tokens"] == 16_384
+
+
+@pytest.mark.asyncio
+async def test_bedrock_claude_keeps_configured_cap_when_hint_is_unset() -> None:
+    provider = BedrockProvider(temperature=0.2, max_tokens=8192, aws_region="us-east-1")
+    client = make_anthropic_stream_mock(_anthropic_events())
+    provider._client = lambda: client  # type: ignore[method-assign]
+
+    async for _ in provider.stream(
+        [Message.text("user", "hi")],
+        [],
+        model="claude-3-5-sonnet-20241022",
+        hints=ProviderCallHints(),
+    ):
+        pass
+
+    assert client.messages.stream.call_args.kwargs["max_tokens"] == 8192
+
+
+@pytest.mark.asyncio
+async def test_claude_honors_hints_max_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    provider = ClaudeProvider(temperature=0.2, max_tokens=8192)
+    client = make_anthropic_stream_mock(_anthropic_events())
+
+    with patch("monkeybot.providers.claude._anthropic_client", return_value=client):
+        async for _ in provider.stream(
+            [Message.text("user", "hi")],
+            [],
+            model="claude-3-5-sonnet-20241022",
+            hints=ProviderCallHints(max_tokens=16_384),
+        ):
+            pass
+
+    assert client.messages.stream.call_args.kwargs["max_tokens"] == 16_384
+
+
+@pytest.mark.asyncio
+async def test_claude_keeps_configured_cap_when_hint_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    provider = ClaudeProvider(temperature=0.2, max_tokens=8192)
+    client = make_anthropic_stream_mock(_anthropic_events())
+
+    with patch("monkeybot.providers.claude._anthropic_client", return_value=client):
+        async for _ in provider.stream(
+            [Message.text("user", "hi")],
+            [],
+            model="claude-3-5-sonnet-20241022",
+            hints=ProviderCallHints(),
+        ):
+            pass
+
+    assert client.messages.stream.call_args.kwargs["max_tokens"] == 8192
+
+
+@pytest.mark.asyncio
+async def test_vertex_claude_honors_hints_max_tokens() -> None:
+    provider = VertexClaudeProvider(project_id="p", temperature=0.2, max_tokens=8192)
+    client = make_anthropic_stream_mock(_anthropic_events())
+    provider._sdk_client = lambda: client  # type: ignore[method-assign]
+
+    async for _ in provider.stream(
+        [Message.text("user", "hi")],
+        [],
+        model="claude-sonnet-4-6",
+        hints=ProviderCallHints(max_tokens=32_768),
+    ):
+        pass
+
+    assert client.messages.stream.call_args.kwargs["max_tokens"] == 32_768
+
+
+@pytest.mark.asyncio
+async def test_vertex_claude_keeps_configured_cap_when_hint_is_unset() -> None:
+    provider = VertexClaudeProvider(project_id="p", temperature=0.2, max_tokens=8192)
+    client = make_anthropic_stream_mock(_anthropic_events())
+    provider._sdk_client = lambda: client  # type: ignore[method-assign]
+
+    async for _ in provider.stream(
+        [Message.text("user", "hi")],
+        [],
+        model="claude-sonnet-4-6",
+        hints=ProviderCallHints(),
+    ):
+        pass
+
+    assert client.messages.stream.call_args.kwargs["max_tokens"] == 8192
 
 
 @pytest.mark.asyncio

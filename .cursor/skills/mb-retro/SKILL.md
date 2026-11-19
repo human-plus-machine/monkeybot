@@ -44,7 +44,7 @@ Every candidate must cite one or more `@seq` lines from this digest. Discard any
 Look for:
 
 - Tool errors, especially the same `error_kind` more than once
-- `HarnessIntervention` (`doom_loop`, `truncated_batch`, `empty_completion`, `post_tool_empty`, `background_jobs_nudge`, `compaction_fallback`, `max_turns`, `verifier_replan`)
+- `HarnessIntervention` (`doom_loop`, `truncated_batch`, `truncated_thinking`, `empty_completion`, `post_tool_empty`, `background_jobs_nudge`, `compaction_fallback`, `max_turns`, `verifier_replan`)
 - Steers, verifier verdicts, empty assistant replies, context summaries
 - Slow tools and repeated identical calls
 - A long search before a fact that a pointer would have named
