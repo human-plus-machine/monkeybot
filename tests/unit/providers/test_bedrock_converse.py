@@ -10,6 +10,7 @@ import pytest
 from monkeybot.core.llm.provider import (
     Done,
     Message,
+    ProviderCallHints,
     TextDelta,
     ThinkingDelta,
     ToolCall,
@@ -674,6 +675,44 @@ async def test_grok_stream_calls_converse_not_anthropic() -> None:
     assert "temperature" not in kwargs["inferenceConfig"]
     assert kwargs["inferenceConfig"]["maxTokens"] == 2048
     assert any(isinstance(e, TextDelta) and e.text == "ok" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_grok_stream_honors_hints_max_tokens() -> None:
+    provider = BedrockProvider(temperature=0.2, max_tokens=2048, aws_region="us-east-1")
+    runtime = MagicMock()
+    runtime.converse_stream.return_value = {"stream": iter(_text_stream())}
+    provider._runtime = runtime
+
+    async for _ in provider.stream(
+        [Message.text("user", "hi")],
+        [],
+        model=_GROK,
+        hints=ProviderCallHints(max_tokens=16_384),
+    ):
+        pass
+
+    kwargs = runtime.converse_stream.call_args.kwargs
+    assert kwargs["inferenceConfig"]["maxTokens"] == 16_384
+
+
+@pytest.mark.asyncio
+async def test_grok_stream_keeps_configured_cap_when_hint_is_unset() -> None:
+    provider = BedrockProvider(temperature=0.2, max_tokens=2048, aws_region="us-east-1")
+    runtime = MagicMock()
+    runtime.converse_stream.return_value = {"stream": iter(_text_stream())}
+    provider._runtime = runtime
+
+    async for _ in provider.stream(
+        [Message.text("user", "hi")],
+        [],
+        model=_GROK,
+        hints=ProviderCallHints(),
+    ):
+        pass
+
+    kwargs = runtime.converse_stream.call_args.kwargs
+    assert kwargs["inferenceConfig"]["maxTokens"] == 2048
 
 
 @pytest.mark.asyncio

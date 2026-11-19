@@ -134,6 +134,8 @@ class ProviderCallHints:
     """Workspace for spill files. OpenAI-compat PDF extraction writes here."""
     context_window_tokens: int | None = None
     """Model context window. OpenAI-compat PDF extraction sizes spill budgets from this."""
+    max_tokens: int | None = None
+    """Per-call output cap. ``None`` keeps the provider's configured cap."""
 
 
 def cache_retention_from_env(cfg: Any | None = None) -> Literal["none", "short", "long"]:
@@ -169,6 +171,14 @@ _HINT_PROVIDERS = frozenset(
         "fireworks",
     }
 )
+
+# These already accept hints. A per-call output cap is sent only for them.
+_OUTPUT_CAP_PROVIDERS = frozenset({"bedrock", "claude", "vertex-claude"})
+
+
+def supports_output_cap_override(provider: Provider) -> bool:
+    """True when a per-call ``hints.max_tokens`` replaces the configured cap."""
+    return provider.name in _OUTPUT_CAP_PROVIDERS
 
 
 def provider_call_hints_kwargs(

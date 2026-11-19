@@ -1,0 +1,45 @@
+id: regression/t2/loop/scenarios/loop/truncated_thinking_after_tools
+case: T2-LOOP-56
+description: >
+  A thinking cutoff after a tool call does not spend the post-tool empty
+  retry, so a later silent reply is still recovered.
+mode: scripted
+driver: loop
+config:
+  scripted_provider: bedrock
+  model:
+    name: us.zai.glm-5.3
+    max_tokens: 8192
+messages:
+- read then answer
+script:
+- - type: tool_call
+    call_id: r1
+    name: read_file
+    args:
+      path: a.txt
+  - type: done
+- - type: thinking
+    text: still reasoning
+  - type: done
+    truncated: true
+- - type: done
+- - type: text
+    text: after the tool
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 4
+  tool_calls:
+    read_file: 1
+  interventions:
+  - intervention: truncated_thinking
+    detail: escalate
+  - intervention: post_tool_empty
+    detail: retry
+  history:
+    tool_pairs_intact: true
+  response_contains: after the tool
+  events_absent:
+  - Error

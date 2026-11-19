@@ -1,0 +1,53 @@
+id: regression/t2/loop/scenarios/loop/truncated_thinking_exhausted
+case: T2-LOOP-54
+description: >
+  Three doubled caps, then a fourth thinking cutoff ends the turn with the
+  cutoff error. The caps are 16384, 32768, and 65536.
+mode: scripted
+driver: loop
+config:
+  scripted_provider: bedrock
+  model:
+    name: us.zai.glm-5.3
+    max_tokens: 8192
+messages:
+- keep thinking
+script:
+- - type: thinking
+    text: first
+  - type: done
+    truncated: true
+- - type: thinking
+    text: second
+  - type: done
+    truncated: true
+- - type: thinking
+    text: third
+  - type: done
+    truncated: true
+- - type: thinking
+    text: fourth
+  - type: done
+    truncated: true
+assertions:
+  turn_completed: true
+  provider_calls: 4
+  provider_request:
+  - n: 1
+    max_tokens: null
+  - n: 2
+    max_tokens: 16384
+  - n: 3
+    max_tokens: 32768
+  - n: 4
+    max_tokens: 65536
+  interventions:
+  - intervention: truncated_thinking
+    detail: escalate
+  - intervention: truncated_thinking
+    detail: escalate
+  - intervention: truncated_thinking
+    detail: escalate
+  - intervention: truncated_thinking
+    detail: exhausted
+  error_contains: after raising the cap

@@ -1,0 +1,35 @@
+id: regression/t2/loop/scenarios/loop/truncated_thinking_model_limit
+case: T2-LOOP-55
+description: >
+  A thinking cutoff raises the cap to the model limit, and the next cutoff
+  ends the turn because the cap cannot go higher.
+mode: scripted
+driver: loop
+config:
+  scripted_provider: bedrock
+  model:
+    name: us.zai.glm-5.3
+    max_tokens: 100000
+messages:
+- think then stop
+script:
+- - type: thinking
+    text: first
+  - type: done
+    truncated: true
+- - type: thinking
+    text: second
+  - type: done
+    truncated: true
+assertions:
+  turn_completed: true
+  provider_calls: 2
+  provider_request:
+  - n: 2
+    max_tokens: 128000
+  interventions:
+  - intervention: truncated_thinking
+    detail: escalate
+  - intervention: truncated_thinking
+    detail: exhausted
+  error_contains: after raising the cap

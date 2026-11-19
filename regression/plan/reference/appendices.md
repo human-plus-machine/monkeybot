@@ -21,7 +21,7 @@ Realtime WS client → server: `connect`, `text`, `interrupt`, `audio_stream_end
 
 ## Appendix C — Harness interventions
 
-`doom_loop`, `truncated_batch` (`stream_truncated` | `all_parse_error`), `empty_completion` (`retry` | `exhausted`), `post_tool_empty` (`retry` | `exhausted`), `background_jobs_nudge`, `compaction_fallback`, `max_turns`, `verifier_replan`, `final_answer_gate`.
+`doom_loop`, `truncated_batch` (`stream_truncated` | `all_parse_error`), `truncated_thinking` (`escalate` | `exhausted`), `empty_completion` (`retry` | `exhausted`), `post_tool_empty` (`retry` | `exhausted`), `background_jobs_nudge`, `compaction_fallback`, `max_turns`, `verifier_replan`, `final_answer_gate`.
 
 
 ## Appendix D — HTTP routes (snapshot source for T1-GW-05)

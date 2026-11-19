@@ -1,0 +1,43 @@
+id: regression/t2/loop/scenarios/loop/post_tool_empty_refills
+case: T2-LOOP-52
+description: >
+  A tool call refills the post-tool empty budget, so a second empty reply
+  after a later tool call is retried instead of ending the turn.
+mode: scripted
+driver: loop
+messages:
+- read then answer
+script:
+- - type: tool_call
+    call_id: r1
+    name: read_file
+    args:
+      path: a.txt
+  - type: done
+- - type: done
+- - type: tool_call
+    call_id: r2
+    name: read_file
+    args:
+      path: b.txt
+  - type: done
+- - type: done
+- - type: text
+    text: after both tools
+  - type: done
+assertions:
+  turn_completed: true
+  no_errors: true
+  provider_calls: 5
+  tool_calls:
+    read_file: 2
+  interventions:
+  - intervention: post_tool_empty
+    detail: retry
+  - intervention: post_tool_empty
+    detail: retry
+  history:
+    tool_pairs_intact: true
+  response_contains: after both tools
+  events_absent:
+  - Error

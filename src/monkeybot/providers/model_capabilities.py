@@ -48,6 +48,34 @@ def normalize_model(model: str) -> str:
     return _ANTHROPIC_NS.sub("", name)
 
 
+# Published maximum output tokens. Longest prefix wins, same as supports_param.
+# An unlisted model returns None: the harness does not raise that model's cap.
+MAX_OUTPUT_TOKENS: dict[str, int] = {
+    "claude-fable-5": 128_000,
+    "claude-opus-5": 128_000,
+    "claude-sonnet-5": 128_000,
+    "claude-haiku-5": 128_000,
+    "claude-opus-4-8": 128_000,
+    "claude-opus-4-7": 128_000,
+    "claude-opus-4-6": 128_000,
+    "claude-sonnet-4-6": 128_000,
+    "claude-haiku-4-5": 64_000,
+    "zai.glm-5.3": 128_000,
+}
+
+
+def max_output_tokens(model: str) -> int | None:
+    """Published output-token limit for ``model``, or None when it is unknown."""
+    name = normalize_model(model)
+    best_key: str | None = None
+    best: int | None = None
+    for key, limit in MAX_OUTPUT_TOKENS.items():
+        if name.startswith(key) and (best_key is None or len(key) > len(best_key)):
+            best_key = key
+            best = limit
+    return best
+
+
 def supports_param(model: str, param: str) -> bool:
     """True unless ``model`` is a known prefix match that rejects ``param``.
 
